@@ -770,14 +770,17 @@ def _board(
         blocker_references = pool.submit(client.list_board_blockers, blockers)
         pull_requests = (open_pull_requests.result(), merged_pull_requests.result())
     return board.build_board(
-        issues,
-        *pull_requests,
-        claims,
-        board.load_config(toplevel / ".agent-claim" / "board.toml"),
-        repository=client.repository.path,
-        blocker_references=blocker_references.result(),
-        now=now,
-        trunk_landings=checkout.trunk_landing_times(),
+        board.BoardBuildInputs(
+            issues=issues,
+            open_pull_requests=pull_requests[0],
+            recent_merged_pull_requests=pull_requests[1],
+            claims=claims,
+            config=board.load_config(toplevel / ".agent-claim" / "board.toml"),
+            repository=client.repository.path,
+            blocker_references=blocker_references.result(),
+            now=now,
+            trunk_landings=checkout.trunk_landing_times(),
+        )
     )
 
 
@@ -1446,18 +1449,7 @@ class _WriteSession:
     release_branch: str | None
 
 
-@dataclass(frozen=True)
-class _RescopeCommand:
-    identity: protocol.ClaimIdentity
-    agent: str
-    add: tuple[str, ...]
-    drop: tuple[str, ...]
-    claim_id: str | None
-    branch: str
-    whole_reason: str | None
-
-
-def _rescope_command(parsed: argparse.Namespace) -> _RescopeCommand:
+def _rescope_command(parsed: argparse.Namespace) -> protocol.RescopeRequest:
     branch = checkout._git_output(["branch", "--show-current"])
     if not branch:
         raise protocol.ClaimUnavailableError(
@@ -1466,7 +1458,7 @@ def _rescope_command(parsed: argparse.Namespace) -> _RescopeCommand:
         )
     checkout._validate_worktree_branch(branch)
     identity = _resolved_identity(_optional_issue_number(parsed.issue), branch)
-    return _RescopeCommand(
+    return protocol.RescopeRequest(
         identity=identity,
         agent=parsed.agent,
         add=protocol._valid_scope(parsed.add) if parsed.add else (),
@@ -1546,16 +1538,7 @@ def _cmd_rescope(parsed: argparse.Namespace, session: _WriteSession) -> None:
         )
         combined = protocol._combined_scope(selected.scope, requested.add, requested.drop)
         _reject_wide_scope(combined, versioned, requested.whole_reason)
-    rescoped = protocol.rescope_claim(
-        client,
-        requested.identity,
-        requested.agent,
-        requested.add,
-        requested.drop,
-        requested.claim_id,
-        branch=requested.branch,
-        whole_reason=requested.whole_reason,
-    )
+    rescoped = protocol.rescope_claim(client, requested)
     if parsed.json:
         _rescope_json(rescoped)
         return
@@ -1636,13 +1619,15 @@ def _cmd_release(parsed: argparse.Namespace, session: _WriteSession) -> None:
         _verify_merged_release(client, client.repository.path, identity, outcome)
     released = protocol.release_claim(
         client,
-        identity,
-        parsed.agent,
-        parsed.role,
-        outcome,
-        parsed.claim_id,
-        branch=session.release_branch,
-        coordinator_override=parsed.coordinator_override,
+        protocol.ReleaseContext(
+            identity=identity,
+            agent=parsed.agent,
+            role=parsed.role,
+            outcome=outcome,
+            claim_id=parsed.claim_id,
+            branch=session.release_branch,
+            coordinator_override=parsed.coordinator_override,
+        ),
     )
     if released.quarantined_by is not None:
         # The coordinator-override exception just released a quarantined claim
@@ -1663,11 +1648,13 @@ def _cmd_supersede(parsed: argparse.Namespace, session: _WriteSession) -> None:
     successor_issue = int(parsed.successor_issue)
     frozen = protocol.supersede_ledger(
         session.forge,
-        successor_issue,
-        parsed.agent,
-        parsed.role,
-        parsed.reason,
-        parsed.claim_id,
+        protocol.SupersedeRequest(
+            successor_issue=successor_issue,
+            agent=parsed.agent,
+            role=parsed.role,
+            reason=parsed.reason,
+            claim_id=parsed.claim_id,
+        ),
     )
     print(
         f"SUPERSEDED ledger #{protocol.LEDGER_ISSUE} successor "

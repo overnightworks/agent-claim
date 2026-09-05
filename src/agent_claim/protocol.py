@@ -2301,40 +2301,45 @@ def _resolve_unreadable_rescope_race(
     )
 
 
-def rescope_claim(  # noqa: PLR0913, PLR0917  # protocol/board slice, #103
-    client: ClaimWriter,
-    identity: ClaimIdentity,
-    agent: str,
-    add: tuple[str, ...],
-    drop: tuple[str, ...],
-    claim_id: str | None,
-    *,
-    branch: str | None = None,
-    whole_reason: str | None = None,
-) -> ActiveClaim:
-    if not add and not drop:
+@dataclass(frozen=True)
+class RescopeRequest:
+    """A live claim's identity plus the scope change and whole-reason to apply to it."""
+
+    identity: ClaimIdentity
+    agent: str
+    add: tuple[str, ...]
+    drop: tuple[str, ...]
+    claim_id: str | None
+    branch: str | None = None
+    whole_reason: str | None = None
+
+
+def rescope_claim(client: ClaimWriter, request: RescopeRequest) -> ActiveClaim:
+    if not request.add and not request.drop:
         raise ClaimUnavailableError("rescope requires --add or --drop")
-    add_scope = _valid_scope(list(add)) if add else ()
-    drop_scope = _valid_scope(list(drop)) if drop else ()
+    add_scope = _valid_scope(list(request.add)) if request.add else ()
+    drop_scope = _valid_scope(list(request.drop)) if request.drop else ()
     aggregate = _aggregate_claim_events(client.list_protocol_candidates(LEDGER_ISSUE))
     _reject_duplicate_claim_ids(aggregate)
     _reject_unreadable_claims(aggregate, action="rescope")
-    selected = _select_rescope_claim(aggregate.active, identity, agent, claim_id, branch=branch)
+    selected = _select_rescope_claim(
+        aggregate.active, request.identity, request.agent, request.claim_id, branch=request.branch
+    )
     new_scope = _combined_scope(selected.scope, add_scope, drop_scope)
     client.post_comment(
         LEDGER_ISSUE,
         rescope_comment(
             selected,
             new_scope,
-            agent,
+            request.agent,
             selected.role,
-            whole_reason=whole_reason,
+            whole_reason=request.whole_reason,
         ),
     )
-    post_aggregate, own = _observe_rescoped_claim(client, identity, selected, new_scope)
+    post_aggregate, own = _observe_rescoped_claim(client, request.identity, selected, new_scope)
     _resolve_unreadable_rescope_race(client, selected, own, post_aggregate)
 
-    _reconcile_identity(client, identity)
+    _reconcile_identity(client, request.identity)
     return own
 
 
@@ -2371,17 +2376,20 @@ def _claims_for_identity(
     )
 
 
-def release_claim(  # noqa: PLR0913, PLR0917  # protocol/board slice, #103
-    client: ClaimWriter,
-    identity: ClaimIdentity,
-    agent: str,
-    role: str | None,
-    outcome: ReleaseOutcome,
-    claim_id: str | None,
-    *,
-    branch: str | None = None,
-    coordinator_override: bool = False,
-) -> ActiveClaim:
+@dataclass(frozen=True)
+class ReleaseContext:
+    """A live claim's identity plus who is releasing it, its outcome, and how."""
+
+    identity: ClaimIdentity
+    agent: str
+    role: str | None
+    outcome: ReleaseOutcome
+    claim_id: str | None
+    branch: str | None = None
+    coordinator_override: bool = False
+
+
+def release_claim(client: ClaimWriter, context: ReleaseContext) -> ActiveClaim:
     """Release a live claim.
 
     A quarantined claim (issue #136) ordinarily refuses release, since this
@@ -2392,24 +2400,27 @@ def release_claim(  # noqa: PLR0913, PLR0917  # protocol/board slice, #103
     can print the refusal it bypassed as a warning rather than losing it
     silently.
     """
-    if coordinator_override:
+    identity, agent, role = context.identity, context.agent, context.role
+    if context.coordinator_override:
         _require_coordinator_override(role)
-    standing = _claims_for_identity(_ledger_claims(client), identity, branch)
+    standing = _claims_for_identity(_ledger_claims(client), identity, context.branch)
     if not standing:
         raise ClaimUnavailableError(
-            f"{_identity_summary(identity, branch or '')} has no active build claim"
+            f"{_identity_summary(identity, context.branch or '')} has no active build claim"
         )
     selected = _selected_claim(
-        standing, _ClaimLookup(identity, agent, claim_id, branch), action="release"
+        standing,
+        _ClaimLookup(identity, agent, context.claim_id, context.branch),
+        action="release",
     )
-    if selected.quarantined_by is not None and not coordinator_override:
+    if selected.quarantined_by is not None and not context.coordinator_override:
         raise ClaimUnavailableError(
             f"release refused: {_unreadable_claim_reason(selected.quarantined_by)}; "
             "upgrade the installed tool"
         )
     if role is None:
         role = selected.role
-    if not coordinator_override and (agent, role) != (selected.agent, selected.role):
+    if not context.coordinator_override and (agent, role) != (selected.agent, selected.role):
         raise ClaimUnavailableError(
             "only the original claimant may release; use an explicit coordinator override"
         )
@@ -2419,38 +2430,45 @@ def release_claim(  # noqa: PLR0913, PLR0917  # protocol/board slice, #103
             selected,
             agent,
             role,
-            outcome.reason,
-            coordinator_override=coordinator_override,
+            context.outcome.reason,
+            coordinator_override=context.coordinator_override,
         ),
     )
     _reconcile_identity(
         client,
         identity,
-        unclaimed_body=_unclaimed_projection(ledger_url, outcome.reason),
+        unclaimed_body=_unclaimed_projection(ledger_url, context.outcome.reason),
     )
     return selected
 
 
-def supersede_ledger(  # noqa: PLR0913, PLR0917  # protocol/board slice, #103
-    client: ClaimWriter,
-    successor_issue: int,
-    agent: str,
-    role: str,
-    reason: str,
-    claim_id: str,
-) -> ActiveClaim:
-    if role != "coordinator":
+@dataclass(frozen=True)
+class SupersedeRequest:
+    """Who is freezing the ledger for `successor_issue`, and why."""
+
+    successor_issue: int
+    agent: str
+    role: str
+    reason: str
+    claim_id: str
+
+
+def supersede_ledger(client: ClaimWriter, request: SupersedeRequest) -> ActiveClaim:
+    if request.role != "coordinator":
         raise ClaimUnavailableError("ledger supersede requires --role coordinator")
-    if successor_issue <= LEDGER_ISSUE:
+    if request.successor_issue <= LEDGER_ISSUE:
         raise ClaimUnavailableError("successor issue must be greater than the current ledger")
     try:
         standing = _ledger_claims(client)
     except LedgerSupersededError as error:
-        if error.successor_issue != successor_issue or error.claim.claim_id != claim_id:
+        if (
+            error.successor_issue != request.successor_issue
+            or error.claim.claim_id != request.claim_id
+        ):
             raise
         client.remove_label(LEDGER_ISSUE, claim_label())
         return error.claim
-    selected = next((claim for claim in standing if claim.claim_id == claim_id), None)
+    selected = next((claim for claim in standing if claim.claim_id == request.claim_id), None)
     if (
         selected is None
         or not isinstance(selected.identity, IssueIdentity)
@@ -2461,15 +2479,17 @@ def supersede_ledger(  # noqa: PLR0913, PLR0917  # protocol/board slice, #103
             "ledger supersede requires the named claim to be the only active claim "
             "and to own the ledger issue"
         )
-    client.validate_successor(successor_issue)
+    client.validate_successor(request.successor_issue)
     client.post_comment(
         LEDGER_ISSUE,
-        supersede_comment(selected, successor_issue, agent, role, reason),
+        supersede_comment(
+            selected, request.successor_issue, request.agent, request.role, request.reason
+        ),
     )
     try:
         _ledger_claims(client)
     except LedgerSupersededError as error:
-        if error.successor_issue == successor_issue and error.claim == selected:
+        if error.successor_issue == request.successor_issue and error.claim == selected:
             client.remove_label(LEDGER_ISSUE, claim_label())
             return selected
         raise
