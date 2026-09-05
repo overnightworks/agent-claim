@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import PurePosixPath, PureWindowsPath
@@ -112,6 +113,15 @@ class ResourceHold:
 
 @dataclass(frozen=True)
 class ActiveClaim:
+    """One claim id's current standing, derived from the whole ledger walk.
+
+    `quarantined_by` is set when a later comment for this same claim id carried
+    a field this reader's schema does not know (issue #136): the claim still
+    reads and still shows in `board`/`status`, but `release` and this claim's
+    own-branch `pr-check` refuse it, naming the quarantining comment, until the
+    ledger reads clean again.
+    """
+
     identity: ClaimIdentity
     claim_id: str
     agent: str
@@ -123,6 +133,43 @@ class ActiveClaim:
     resource: ResourceHold | None = None
     requested_resource: str | None = None
     whole_reason: str | None = None
+    quarantined_by: UnreadableClaim | None = None
+
+
+@dataclass(frozen=True)
+class UnreadableClaim:
+    """A trusted claim comment carrying a field this reader's schema does not know.
+
+    A newer `agent-claim` wrote it; this reader fences the record itself and, when
+    its `claim_id` matches a claim already active on the ledger, quarantines that
+    claim too (issue #136) by setting `ActiveClaim.quarantined_by` -- see there for
+    what quarantine refuses. `claim_id` is `None` when the field that would
+    normally identify it is itself missing or malformed -- the comment is still
+    named by `comment_url` in that case, and it quarantines nothing. Missing a
+    field this reader requires is a different, harder failure (a corrupt record,
+    not a newer writer): `_strict_keys` still raises `InvalidClaimMarkerError` for
+    that and never produces an `UnreadableClaim`.
+    """
+
+    claim_id: str | None
+    comment_url: str
+    unknown_fields: tuple[str, ...]
+
+
+class UnreadableClaimError(ClaimError):
+    """Internal signal that one trusted comment is an `UnreadableClaim`.
+
+    Raised only by `_strict_keys` and caught only by `_aggregate_claim_events`,
+    which turns it into an `UnreadableClaim` record on `ClaimLedgerAggregate`
+    instead of letting it fail the whole ledger read. It must never escape past
+    that one catch site uncaught.
+    """
+
+    def __init__(self, claim: UnreadableClaim) -> None:
+        self.claim = claim
+        super().__init__(
+            f"trusted comment {claim.comment_url} unreadable, upgrade the installed tool"
+        )
 
 
 @dataclass(frozen=True)
@@ -152,6 +199,16 @@ class ClaimRescope:
 
     Keeps claim id, identity, agent, role, base, and branch. Old helpers that
     do not know this action fail loud on the whole ledger.
+
+    `whole_reason=None` means "leave the claim's current whole-reason alone" --
+    the wire marker simply omits the `whole` field, so an old reader that has
+    never heard of clearing a reason still parses this event exactly as before.
+    Explicitly dropping a reason back to unset is a third, distinct state a bare
+    `None` cannot express (the marker already uses absence for "unchanged"), so
+    `clear_whole_reason=True` carries it instead, wire-encoded as a small,
+    separate `whole_clear` marker field that is present only for that one
+    purpose (issue #136 finding: never both `whole_reason` and
+    `clear_whole_reason=True` at once).
     """
 
     identity: ClaimIdentity
@@ -161,6 +218,7 @@ class ClaimRescope:
     scope: tuple[str, ...]
     comment: IssueComment
     whole_reason: str | None = None
+    clear_whole_reason: bool = False
 
 
 @dataclass(frozen=True)
@@ -479,22 +537,53 @@ def _optional_whole_reason(payload: dict[str, object]) -> str | None:
     return _required_text(payload, "whole", maximum=512)
 
 
+WHOLE_CLEAR_MARKER_KEY = "whole_clear"
+
+
+def _rescope_clears_whole_reason(payload: dict[str, object], comment: IssueComment) -> bool:
+    """Whether a rescope marker explicitly drops its claim's whole-reason back to
+    unset -- a third state a bare `whole_reason=None` cannot carry, since absence
+    of `whole` already means "leave it alone" (see `ClaimRescope`)."""
+    if WHOLE_CLEAR_MARKER_KEY not in payload:
+        return False
+    if payload[WHOLE_CLEAR_MARKER_KEY] is not True:
+        raise InvalidClaimMarkerError(
+            f"trusted comment {comment.url} {WHOLE_CLEAR_MARKER_KEY} field must be true"
+        )
+    return True
+
+
+def _claim_id_if_parseable(payload: dict[str, object]) -> str | None:
+    """Best-effort `claim_id` for an `UnreadableClaim`: only when it is itself
+    well-formed, never validated any further than that."""
+    raw = payload.get("claim_id")
+    if isinstance(raw, str) and raw.strip() == raw and CLAIM_ID_PATTERN.fullmatch(raw):
+        return raw
+    return None
+
+
 def _strict_keys(
     payload: dict[str, object], expected: frozenset[str], comment: IssueComment
 ) -> None:
     observed = frozenset(payload)
     if observed == expected:
         return
-    message = (
-        f"trusted comment {comment.url} claim fields differ: "
-        f"expected {sorted(expected)}, got {sorted(observed)}"
-    )
-    if observed > expected:
-        message += (
-            "; unknown fields in a trusted comment usually mean a newer "
-            "agent-claim wrote this ledger - upgrade the installed tool"
+    missing = expected - observed
+    if missing:
+        raise InvalidClaimMarkerError(
+            f"trusted comment {comment.url} claim fields differ: "
+            f"expected {sorted(expected)}, got {sorted(observed)}"
         )
-    raise InvalidClaimMarkerError(message)
+    # Every expected field is present; the mismatch is only fields this reader's
+    # schema does not know. That is a newer writer, not a corrupt record: fence
+    # this one claim instead of failing the whole ledger read (issue #136).
+    raise UnreadableClaimError(
+        UnreadableClaim(
+            claim_id=_claim_id_if_parseable(payload),
+            comment_url=comment.url,
+            unknown_fields=tuple(sorted(observed - expected)),
+        )
+    )
 
 
 def is_protocol_candidate(comment: IssueComment) -> bool:
@@ -724,8 +813,14 @@ def _parse_claim_rescope(
         "role",
         "scope",
     }
+    if "whole" in payload and WHOLE_CLEAR_MARKER_KEY in payload:
+        raise InvalidClaimMarkerError(
+            f"trusted comment {comment.url} rescope cannot both set and clear the whole reason"
+        )
     if "whole" in payload:
         expected.add("whole")
+    if WHOLE_CLEAR_MARKER_KEY in payload:
+        expected.add(WHOLE_CLEAR_MARKER_KEY)
     _strict_keys(payload, frozenset(expected), comment)
     claim_id, agent, role = _event_identity(payload, comment)
     return ClaimRescope(
@@ -736,6 +831,7 @@ def _parse_claim_rescope(
         scope=_valid_scope(payload.get("scope")),
         comment=comment,
         whole_reason=_optional_whole_reason(payload),
+        clear_whole_reason=_rescope_clears_whole_reason(payload, comment),
     )
 
 
@@ -839,6 +935,13 @@ class ClaimLedgerAggregate:
     occurrence, every honored termination belongs to `occurrences[claim_id][0]`;
     later occurrences of a duplicated id are never tracked as "acquired" and so can
     never absorb a terminal event themselves.
+
+    `unreadable` holds one `UnreadableClaim` per trusted comment the walk could not
+    parse because of an unknown field (issue #136); such a comment contributes no
+    event of its own, so it never appears in `occurrences` or `terminated_by`. It
+    can still reach `active` indirectly: when its `claim_id` names a claim that is
+    already active, that claim is carried into `active` with `quarantined_by` set
+    to this record instead of `None`.
     """
 
     active: tuple[ActiveClaim, ...]
@@ -846,6 +949,7 @@ class ClaimLedgerAggregate:
     duplicate_claim_ids: tuple[str, ...]
     occurrences: Mapping[str, tuple[ActiveClaim, ...]]
     terminated_by: Mapping[str, tuple[IssueComment, ...]]
+    unreadable: tuple[UnreadableClaim, ...]
 
 
 def _record_claim_occurrence(
@@ -884,11 +988,38 @@ def _apply_claim_rescope_event(
         raise InvalidClaimMarkerError(
             f"claim id {event.claim_id!r} can only be rescoped by its claimant"
         )
-    active[event.claim_id] = replace(
-        current,
-        scope=event.scope,
-        whole_reason=(current.whole_reason if event.whole_reason is None else event.whole_reason),
-    )
+    if event.clear_whole_reason:
+        new_whole_reason = None
+    elif event.whole_reason is not None:
+        new_whole_reason = event.whole_reason
+    else:
+        new_whole_reason = current.whole_reason
+    active[event.claim_id] = replace(current, scope=event.scope, whole_reason=new_whole_reason)
+
+
+def _quarantine_active_claims(
+    active: dict[str, ActiveClaim], unreadable: list[UnreadableClaim]
+) -> dict[str, ActiveClaim]:
+    """Attach the earliest matching `UnreadableClaim` to the active claim it names.
+
+    A quarantined claim id has no live `ActiveClaim` to attach to when the
+    unreadable comment is itself the newer writer's `claim` (there was never a
+    readable claim under that id); it only matters, and only changes anything
+    here, when the id already names a claim this reader did parse -- e.g. a
+    newer writer's `rescope` of an existing claim (issue #136 finding 1).
+    """
+    reasons: dict[str, UnreadableClaim] = {}
+    for record in unreadable:
+        if record.claim_id is not None:
+            reasons.setdefault(record.claim_id, record)
+    if not reasons:
+        return active
+    return {
+        claim_id: (
+            replace(claim, quarantined_by=reasons[claim_id]) if claim_id in reasons else claim
+        )
+        for claim_id, claim in active.items()
+    }
 
 
 def _aggregate_claim_events(comments: tuple[IssueComment, ...]) -> ClaimLedgerAggregate:
@@ -903,9 +1034,14 @@ def _aggregate_claim_events(comments: tuple[IssueComment, ...]) -> ClaimLedgerAg
     occurrences: dict[str, list[ActiveClaim]] = {}
     terminated_by: dict[str, list[IssueComment]] = {}
     duplicate_claim_ids: list[str] = []
+    unreadable: list[UnreadableClaim] = []
     ordered = sorted(comments, key=lambda comment: (comment.created_at, comment.identifier))
     for comment in ordered:
-        event = parse_claim_event(comment)
+        try:
+            event = parse_claim_event(comment)
+        except UnreadableClaimError as error:
+            unreadable.append(error.claim)
+            continue
         if event is None:
             continue
         if isinstance(event, ActiveClaim):
@@ -919,10 +1055,11 @@ def _aggregate_claim_events(comments: tuple[IssueComment, ...]) -> ClaimLedgerAg
 
     occurrence_map = {claim_id: tuple(events) for claim_id, events in occurrences.items()}
     derived_active = _apply_derived_resource_holds(active, occurrence_map)
+    quarantined_active = _quarantine_active_claims(derived_active, unreadable)
     return ClaimLedgerAggregate(
         active=tuple(
             sorted(
-                derived_active.values(),
+                quarantined_active.values(),
                 key=lambda event: (event.comment.created_at, event.comment.identifier),
             )
         ),
@@ -935,6 +1072,7 @@ def _aggregate_claim_events(comments: tuple[IssueComment, ...]) -> ClaimLedgerAg
                 for claim_id, terminal_comments in terminated_by.items()
             }
         ),
+        unreadable=tuple(unreadable),
     )
 
 
@@ -1026,6 +1164,40 @@ def active_claims(comments: tuple[IssueComment, ...]) -> tuple[ActiveClaim, ...]
     aggregate = _aggregate_claim_events(comments)
     _reject_duplicate_claim_ids(aggregate)
     return aggregate.active
+
+
+def unreadable_claims(comments: tuple[IssueComment, ...]) -> tuple[UnreadableClaim, ...]:
+    """Every trusted claim comment this reader's schema could not parse (issue #136).
+
+    Read-only alongside `active_claims`; unlike `active_claims`, it does not also
+    refuse a reused claim id -- any other ledger corruption `_aggregate_claim_events`
+    itself detects still raises here too. A caller displaying both (`status`) sees
+    the unreadable claims even when duplicate-id repair still owes a `reconcile`.
+    Each record whose `claim_id` names a currently active claim is the same object
+    as that claim's `quarantined_by`.
+    """
+    return _aggregate_claim_events(comments).unreadable
+
+
+def _unreadable_claim_reason(record: UnreadableClaim) -> str:
+    """Shared refusal core naming one `UnreadableClaim`'s comment and unknown field
+    names -- every fail-closed refusal this reader raises for it quotes this text
+    verbatim (issue #136)."""
+    subject = f"claim {record.claim_id!r}" if record.claim_id else "an unreadable claim"
+    fields = ", ".join(sorted(record.unknown_fields))
+    return f"{subject} at {record.comment_url} is unreadable (unknown fields: {fields})"
+
+
+def _reject_unreadable_claims(aggregate: ClaimLedgerAggregate, *, action: str) -> None:
+    """Fail closed (issue #136): an unreadable claim's true scope is unknowable to
+    this reader, so no new `claim` or `rescope` can be proven not to overlap it."""
+    blocker = next(iter(aggregate.unreadable), None)
+    if blocker is None:
+        return
+    raise ClaimUnavailableError(
+        f"{action} refused: {_unreadable_claim_reason(blocker)}; upgrade the installed "
+        "tool before claiming a scope that could overlap it"
+    )
 
 
 def _scope_prefixes(paths: tuple[str, ...]) -> set[tuple[str, ...]]:
@@ -1285,6 +1457,48 @@ def claim_comment(request: ClaimRequest) -> str:
     )
 
 
+def _rescope_base_payload(
+    claim: ActiveClaim, scope: tuple[str, ...], validated_agent: str, validated_role: str
+) -> dict[str, object]:
+    return {
+        "action": "rescope",
+        "agent": validated_agent,
+        "claim_id": claim.claim_id,
+        _identity_marker_key(claim.identity): _identity_marker_value(claim.identity),
+        "role": validated_role,
+        "scope": list(scope),
+    }
+
+
+def _rescope_whole_line(payload: dict[str, object]) -> str:
+    if WHOLE_CLEAR_MARKER_KEY in payload:
+        return "- Whole: (cleared)\n"
+    if "whole" in payload:
+        return f"- Whole: {payload['whole']}\n"
+    return ""
+
+
+def _rescope_comment_body(
+    claim: ActiveClaim, validated_agent: str, validated_role: str, payload: dict[str, object]
+) -> str:
+    scope_lines = "\n".join(f"- `{path}`" for path in payload["scope"])
+    return _validated_comment(
+        f"{_marker(payload)}\n"
+        "## RESCOPE — build lane\n\n"
+        f"- {_identity_label(claim.identity, claim.branch)}\n"
+        f"- Owner: {validated_agent} ({validated_role})\n"
+        f"- Base: `{claim.base}`\n"
+        f"- Branch: `{claim.branch}`\n"
+        f"- Claim ID: `{claim.claim_id}`\n"
+        f"{_rescope_whole_line(payload)}"
+        "- Write scope:\n"
+        f"{scope_lines}\n\n"
+        "Repository-wide ledger event. Claim id and base are unchanged. "
+        "No Auto-Runner.\n\n"
+        f"Agent: {validated_agent} ({validated_role})"
+    )
+
+
 def rescope_comment(
     claim: ActiveClaim,
     scope: tuple[str, ...],
@@ -1295,35 +1509,26 @@ def rescope_comment(
 ) -> str:
     validated_agent = _outbound_text(agent, "agent", maximum=128)
     validated_role = _outbound_text(role, "role", maximum=64)
-    payload: dict[str, object] = {
-        "action": "rescope",
-        "agent": validated_agent,
-        "claim_id": claim.claim_id,
-        _identity_marker_key(claim.identity): _identity_marker_value(claim.identity),
-        "role": validated_role,
-        "scope": list(scope),
-    }
-    scope_lines = "\n".join(f"- `{path}`" for path in scope)
-    whole = ""
+    payload = _rescope_base_payload(claim, scope, validated_agent, validated_role)
     if whole_reason is not None:
-        reason = _outbound_text(whole_reason, "whole reason", maximum=512)
-        payload["whole"] = reason
-        whole = f"- Whole: {reason}\n"
-    return _validated_comment(
-        f"{_marker(payload)}\n"
-        "## RESCOPE — build lane\n\n"
-        f"- {_identity_label(claim.identity, claim.branch)}\n"
-        f"- Owner: {validated_agent} ({validated_role})\n"
-        f"- Base: `{claim.base}`\n"
-        f"- Branch: `{claim.branch}`\n"
-        f"- Claim ID: `{claim.claim_id}`\n"
-        f"{whole}"
-        "- Write scope:\n"
-        f"{scope_lines}\n\n"
-        "Repository-wide ledger event. Claim id and base are unchanged. "
-        "No Auto-Runner.\n\n"
-        f"Agent: {validated_agent} ({validated_role})"
-    )
+        payload["whole"] = _outbound_text(whole_reason, "whole reason", maximum=512)
+    return _rescope_comment_body(claim, validated_agent, validated_role, payload)
+
+
+def rescope_clear_whole_reason_comment(
+    claim: ActiveClaim, scope: tuple[str, ...], agent: str, role: str
+) -> str:
+    """A rescope that also explicitly drops the claim's whole-reason back to
+    unset -- the only way back, since an ordinary rescope's omitted `whole`
+    field means "leave it alone" (issue #136). A distinct function, not a
+    `clear_whole_reason` flag on `rescope_comment`, makes setting and clearing
+    at once structurally impossible instead of a runtime check.
+    """
+    validated_agent = _outbound_text(agent, "agent", maximum=128)
+    validated_role = _outbound_text(role, "role", maximum=64)
+    payload = _rescope_base_payload(claim, scope, validated_agent, validated_role)
+    payload[WHOLE_CLEAR_MARKER_KEY] = True
+    return _rescope_comment_body(claim, validated_agent, validated_role, payload)
 
 
 def release_comment(
@@ -1668,6 +1873,41 @@ class ClaimPostedReconcileFailedError(ClaimError):
         super().__init__(str(error))
 
 
+class CompensationFailedError(ClaimError):
+    """A post-mutation race's own compensating repair failed to post (issue #136
+    finding 2): `live_claim` is still exactly as it was before the repair was
+    attempted -- the race that should have been undone is instead now the
+    caller's problem, so this is never rendered as a plain refusal. `cause` is
+    the underlying failure from posting the repair; `attempted_repair` is a
+    ready-to-run `agent-claim` command that finishes the repair -- always a
+    release, since a manual `claim`/`rescope` retry would itself be refused by
+    the very unreadable-claim fence that caused this race in the first place,
+    while a release of this reader's own live claim is not (a same-id race that
+    quarantined `live_claim` itself uses the documented coordinator-override
+    exception instead of a plain release). `hints` are additional,
+    non-executable notes a release alone cannot finish -- e.g. re-claiming a
+    rescope's pre-race scope afterwards, or that a lane claim's release must
+    run from its own checkout.
+    """
+
+    def __init__(
+        self,
+        live_claim: ActiveClaim,
+        attempted_repair: str,
+        cause: Exception,
+        *,
+        hints: tuple[str, ...] = (),
+    ):
+        self.live_claim = live_claim
+        self.attempted_repair = attempted_repair
+        self.cause = cause
+        self.hints = hints
+        super().__init__(
+            f"claim id {live_claim.claim_id!r} is still live; its automatic repair "
+            f"failed to post: {cause}"
+        )
+
+
 def _reject_unavailable_claim(aggregate: ClaimLedgerAggregate, request: ClaimRequest) -> None:
     """Raise if `request` cannot be posted against the ledger's current standing."""
     if request.claim_id in aggregate.seen_claim_ids:
@@ -1769,6 +2009,84 @@ def _resolve_resource_race(
     raise ClaimUnavailableError(f"{expected.name} {expected.value} is held by another claim")
 
 
+def _claim_race_lost_repair_command(claim: ActiveClaim) -> str:
+    """The one manual repair that always works after a lost race (issue #136):
+    a `claim`/`rescope` retry would itself be refused by the very unreadable
+    comment that caused the race, but releasing this reader's own live claim is
+    not -- it is not the quarantined one, just stuck because the automatic
+    repair could not post.
+
+    Names the issue explicitly for an `IssueIdentity` claim so the repair works
+    from any checkout, not only one on its branch (a lane claim's `--claim-id`
+    cannot do the same -- see `_claim_race_lost_repair_hints`), and pins
+    `--agent`/`--role` to the original claimant so the repair does not depend
+    on whatever identity the recovering shell happens to have.
+
+    When the same unreadable comment that caused the race also names this
+    claim's own id, `claim.quarantined_by` is set: a plain release now refuses
+    a quarantined claim too, so this is the one case where the repair is the
+    documented coordinator-override exception instead.
+    """
+    issue_argument = f" {claim.identity.issue}" if isinstance(claim.identity, IssueIdentity) else ""
+    if claim.quarantined_by is not None:
+        return (
+            f"agent-claim release{issue_argument} --claim-id {claim.claim_id} "
+            f"--agent {shlex.quote(claim.agent)} --role coordinator --coordinator-override "
+            "--abandoned 'claim race lost'"
+        )
+    return (
+        f"agent-claim release{issue_argument} --claim-id {claim.claim_id} "
+        f"--agent {shlex.quote(claim.agent)} --role {shlex.quote(claim.role)} "
+        "--abandoned 'claim race lost'"
+    )
+
+
+def _claim_race_lost_repair_hints(claim: ActiveClaim) -> tuple[str, ...]:
+    """Non-executable notes `_claim_race_lost_repair_command` alone cannot cover.
+
+    `release` has no `--branch` selector (issue #136): for an `IssueIdentity`
+    claim the printed command already names the issue and needs no checkout at
+    all, but a lane claim has no such number -- `release` derives the lane
+    from the current checkout regardless of `--claim-id`, so the repair only
+    works run from that lane's own checkout.
+    """
+    if isinstance(claim.identity, LaneIdentity):
+        return (f"run from the lane's checkout (branch {claim.branch})",)
+    return ()
+
+
+def _resolve_unreadable_claim_race(
+    client: ClaimWriter,
+    request: ClaimRequest,
+    own: ActiveClaim,
+    post_aggregate: ClaimLedgerAggregate,
+) -> None:
+    """Post-mutation race (issue #136 finding 2): the pre-post check already
+    proved the ledger clean, so an unreadable comment in `post_aggregate` can only
+    be a concurrent post that landed during ours. Compensate exactly like an
+    identity/resource race -- release the just-posted claim -- so a `claim` that
+    reports failure never leaves a live claim behind."""
+    blocker = next(iter(post_aggregate.unreadable), None)
+    if blocker is None:
+        return
+    try:
+        client.post_comment(
+            LEDGER_ISSUE, release_comment(own, request.agent, request.role, "claim race lost")
+        )
+    except Exception as error:
+        raise CompensationFailedError(
+            own,
+            _claim_race_lost_repair_command(own),
+            error,
+            hints=_claim_race_lost_repair_hints(own),
+        ) from error
+    _reconcile_identity(client, request.identity)
+    raise ClaimUnavailableError(
+        f"claim refused: {_unreadable_claim_reason(blocker)} appeared while posting; "
+        "upgrade the installed tool before claiming a scope that could overlap it"
+    )
+
+
 def _acquire_claim_with_observed(
     client: ClaimWriter, request: ClaimRequest
 ) -> tuple[ActiveClaim, tuple[ActiveClaim, ...]]:
@@ -1786,6 +2104,7 @@ def _acquire_claim_with_observed(
     replayed = matching_claim_retry(aggregate.active, request)
     if replayed is not None:
         return replayed, aggregate.active
+    _reject_unreadable_claims(aggregate, action="claim")
     _reject_unavailable_claim(aggregate, request)
 
     post_aggregate = _post_claim_and_observe(client, request)
@@ -1796,6 +2115,7 @@ def _acquire_claim_with_observed(
             f"{_identity_summary(request.identity, request.branch)} did not expose "
             "the posted claim id"
         )
+    _resolve_unreadable_claim_race(client, request, own, post_aggregate)
     _resolve_identity_race(client, request, own, observed)
     _resolve_resource_race(client, request, own, observed)
 
@@ -1832,11 +2152,10 @@ def _observe_rescoped_claim(
     identity: ClaimIdentity,
     selected: ActiveClaim,
     expected_scope: tuple[str, ...],
-) -> tuple[tuple[ActiveClaim, ...], ActiveClaim]:
+) -> tuple[ClaimLedgerAggregate, ActiveClaim]:
     aggregate = _aggregate_claim_events(client.list_protocol_candidates(LEDGER_ISSUE))
     _reject_duplicate_claim_ids(aggregate)
-    observed = aggregate.active
-    own = next((claim for claim in observed if claim.claim_id == selected.claim_id), None)
+    own = next((claim for claim in aggregate.active if claim.claim_id == selected.claim_id), None)
     if own is None:
         raise ClaimError(
             f"{_identity_summary(identity, selected.branch)} did not expose the rescoped claim id"
@@ -1845,7 +2164,7 @@ def _observe_rescoped_claim(
         raise ClaimError(
             f"{_identity_summary(identity, selected.branch)} did not observe the posted rescope"
         )
-    return observed, own
+    return aggregate, own
 
 
 @dataclass(frozen=True)
@@ -1912,6 +2231,76 @@ def _select_rescope_claim(
     return selected
 
 
+def _rescope_reclaim_hint(selected: ActiveClaim) -> str:
+    """Non-executable note for `CompensationFailedError`'s rescope race: the
+    repair is a release, which drops the claim entirely, so re-claiming
+    `selected`'s pre-race scope -- and whole reason, if it had one -- is a
+    separate, manual second step (issue #136 delta review)."""
+    scope = " ".join(shlex.quote(path) for path in selected.scope)
+    whole = (
+        f" --whole {shlex.quote(selected.whole_reason)}"
+        if selected.whole_reason is not None
+        else ""
+    )
+    return f"then re-claim its pre-race scope: {scope}{whole}"
+
+
+def _resolve_unreadable_rescope_race(
+    client: ClaimWriter,
+    selected: ActiveClaim,
+    own: ActiveClaim,
+    post_aggregate: ClaimLedgerAggregate,
+) -> None:
+    """Post-mutation race (issue #136 finding 2): the pre-post check already
+    proved the ledger clean, so an unreadable comment in `post_aggregate` can only
+    be a concurrent post that landed during ours. Compensate by reverting the
+    scope change -- and, when this rescope just gave the claim its first-ever
+    `--whole` reason, that reason too -- with another rescope back to `selected`'s
+    pre-rescope state, so a `rescope` that reports failure never leaves either
+    live.
+
+    If that revert itself cannot post, no manual rescope retry can stand in for
+    it: the unreadable comment that caused the race would refuse it exactly as
+    it refused the automatic one. The repair is therefore the one command that
+    always works -- release -- plus a hint naming the pre-race scope to
+    re-claim afterwards.
+    """
+    blocker = next(iter(post_aggregate.unreadable), None)
+    if blocker is None:
+        return
+    try:
+        if selected.whole_reason is None:
+            client.post_comment(
+                LEDGER_ISSUE,
+                rescope_clear_whole_reason_comment(
+                    own, selected.scope, selected.agent, selected.role
+                ),
+            )
+        else:
+            client.post_comment(
+                LEDGER_ISSUE,
+                rescope_comment(
+                    own,
+                    selected.scope,
+                    selected.agent,
+                    selected.role,
+                    whole_reason=selected.whole_reason,
+                ),
+            )
+    except Exception as error:
+        raise CompensationFailedError(
+            own,
+            _claim_race_lost_repair_command(own),
+            error,
+            hints=(*_claim_race_lost_repair_hints(own), _rescope_reclaim_hint(selected)),
+        ) from error
+    _reconcile_identity(client, selected.identity)
+    raise ClaimUnavailableError(
+        f"rescope refused: {_unreadable_claim_reason(blocker)} appeared while posting; "
+        "upgrade the installed tool before claiming a scope that could overlap it"
+    )
+
+
 def rescope_claim(  # noqa: PLR0913, PLR0917  # protocol/board slice, #103
     client: ClaimWriter,
     identity: ClaimIdentity,
@@ -1927,8 +2316,10 @@ def rescope_claim(  # noqa: PLR0913, PLR0917  # protocol/board slice, #103
         raise ClaimUnavailableError("rescope requires --add or --drop")
     add_scope = _valid_scope(list(add)) if add else ()
     drop_scope = _valid_scope(list(drop)) if drop else ()
-    observed = _ledger_claims(client)
-    selected = _select_rescope_claim(observed, identity, agent, claim_id, branch=branch)
+    aggregate = _aggregate_claim_events(client.list_protocol_candidates(LEDGER_ISSUE))
+    _reject_duplicate_claim_ids(aggregate)
+    _reject_unreadable_claims(aggregate, action="rescope")
+    selected = _select_rescope_claim(aggregate.active, identity, agent, claim_id, branch=branch)
     new_scope = _combined_scope(selected.scope, add_scope, drop_scope)
     client.post_comment(
         LEDGER_ISSUE,
@@ -1940,7 +2331,8 @@ def rescope_claim(  # noqa: PLR0913, PLR0917  # protocol/board slice, #103
             whole_reason=whole_reason,
         ),
     )
-    _, own = _observe_rescoped_claim(client, identity, selected, new_scope)
+    post_aggregate, own = _observe_rescoped_claim(client, identity, selected, new_scope)
+    _resolve_unreadable_rescope_race(client, selected, own, post_aggregate)
 
     _reconcile_identity(client, identity)
     return own
@@ -1990,6 +2382,16 @@ def release_claim(  # noqa: PLR0913, PLR0917  # protocol/board slice, #103
     branch: str | None = None,
     coordinator_override: bool = False,
 ) -> ActiveClaim:
+    """Release a live claim.
+
+    A quarantined claim (issue #136) ordinarily refuses release, since this
+    reader cannot trust what it thinks it knows about a claim a later unknown
+    field also touched. A `coordinator_override` is the one documented
+    exception: it may release a quarantined claim too -- the returned
+    `ActiveClaim` still carries `quarantined_by`, so a caller (`_cmd_release`)
+    can print the refusal it bypassed as a warning rather than losing it
+    silently.
+    """
     if coordinator_override:
         _require_coordinator_override(role)
     standing = _claims_for_identity(_ledger_claims(client), identity, branch)
@@ -2000,6 +2402,11 @@ def release_claim(  # noqa: PLR0913, PLR0917  # protocol/board slice, #103
     selected = _selected_claim(
         standing, _ClaimLookup(identity, agent, claim_id, branch), action="release"
     )
+    if selected.quarantined_by is not None and not coordinator_override:
+        raise ClaimUnavailableError(
+            f"release refused: {_unreadable_claim_reason(selected.quarantined_by)}; "
+            "upgrade the installed tool"
+        )
     if role is None:
         role = selected.role
     if not coordinator_override and (agent, role) != (selected.agent, selected.role):

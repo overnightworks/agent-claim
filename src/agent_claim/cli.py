@@ -441,35 +441,57 @@ def _overlap_note(claims_by_id: dict[str, protocol.ActiveClaim], peer_ids: set[s
     return "overlaps " + ", ".join(f"{_claim_subject(claim)} ({claim.claim_id})" for claim in peers)
 
 
+def _print_unreadable_claim(record: protocol.UnreadableClaim) -> None:
+    subject = f"claim {record.claim_id}" if record.claim_id else "claim"
+    print(f"UNREADABLE {subject}: unreadable, upgrade the installed tool")
+    print(f"  fields: {', '.join(record.unknown_fields)}")
+    print(f"  {record.comment_url}")
+
+
 def _status(
     claims: tuple[protocol.ActiveClaim, ...],
     issue: int | None,
     now: datetime | None = None,
+    *,
+    unreadable: tuple[protocol.UnreadableClaim, ...] = (),
 ) -> int:
     observed_at = (now or datetime.now(UTC)).astimezone(UTC)
     related, index = _status_claims(claims, issue)
+    exit_code = 0
     if not related:
         subject = "repository" if issue is None else f"issue #{issue}"
         print(f"UNCLAIMED {subject}")
-        return 0
-    claims_by_id = {claim.claim_id: claim for claim in claims}
-    for claim in related:
-        state = "CONFLICT" if claim.claim_id in index.conflict_ids else "CLAIMED"
-        print(
-            f"{state} {_claim_subject(claim)}: {claim.agent} ({claim.role}) "
-            f"base={claim.base} branch={claim.branch} claim={claim.claim_id}"
-            f"{_claim_age_suffix(claim, observed_at)}"
-        )
-        for path in claim.scope:
-            print(f"  {path}")
-        if claim.resource is not None:
-            print(f"  resource {claim.resource.name}={claim.resource.value}")
-        if claim.whole_reason is not None:
-            print(f"  whole: {claim.whole_reason}")
-        note = _overlap_note(claims_by_id, protocol._overlap_peer_ids(index, claim))
-        if note is not None:
-            print(f"  {note}")
-    return 2 if any(claim.claim_id in index.conflict_ids for claim in related) else 0
+    else:
+        claims_by_id = {claim.claim_id: claim for claim in claims}
+        for claim in related:
+            state = "CONFLICT" if claim.claim_id in index.conflict_ids else "CLAIMED"
+            print(
+                f"{state} {_claim_subject(claim)}: {claim.agent} ({claim.role}) "
+                f"base={claim.base} branch={claim.branch} claim={claim.claim_id}"
+                f"{_claim_age_suffix(claim, observed_at)}"
+            )
+            for path in claim.scope:
+                print(f"  {path}")
+            if claim.resource is not None:
+                print(f"  resource {claim.resource.name}={claim.resource.value}")
+            if claim.whole_reason is not None:
+                print(f"  whole: {claim.whole_reason}")
+            note = _overlap_note(claims_by_id, protocol._overlap_peer_ids(index, claim))
+            if note is not None:
+                print(f"  {note}")
+        exit_code = 2 if any(claim.claim_id in index.conflict_ids for claim in related) else 0
+    for record in unreadable:
+        _print_unreadable_claim(record)
+    return exit_code
+
+
+def _unreadable_json(record: protocol.UnreadableClaim) -> dict[str, object]:
+    return {
+        "claim_id": record.claim_id,
+        "comment_url": record.comment_url,
+        "fields": list(record.unknown_fields),
+        "note": "unreadable, upgrade the installed tool",
+    }
 
 
 def _status_json(
@@ -477,6 +499,8 @@ def _status_json(
     issue: int | None,
     ledger: int,
     now: datetime | None = None,
+    *,
+    unreadable: tuple[protocol.UnreadableClaim, ...] = (),
 ) -> int:
     observed_at = (now or datetime.now(UTC)).astimezone(UTC)
     related, index = _status_claims(claims, issue)
@@ -511,6 +535,7 @@ def _status_json(
             }
             for claim in related
         ],
+        "unreadable": [_unreadable_json(record) for record in unreadable],
     }
     print(json.dumps(payload))
     return 2 if state == "CONFLICT" else 0
@@ -982,18 +1007,33 @@ def _claim_defect(
     detail: forge.Landing,
     identity: protocol.ClaimIdentity,
 ) -> board.ClassificationDefect | None:
-    """A landing declares only what its own head branch holds a live claim on."""
-    if any(
-        claim.identity == identity and claim.branch == detail.source_branch
-        for claim in protocol._ledger_claims(client)
-    ):
-        return None
-    subject = (
-        f"claim for #{identity.issue}"
-        if isinstance(identity, protocol.IssueIdentity)
-        else "issue-less lane claim"
+    """A landing declares only what its own head branch holds a live, unquarantined claim on."""
+    matching = next(
+        (
+            claim
+            for claim in protocol._ledger_claims(client)
+            if claim.identity == identity and claim.branch == detail.source_branch
+        ),
+        None,
     )
-    return board.ClassificationDefect(f"has no active {subject} on branch {detail.source_branch!r}")
+    if matching is None:
+        subject = (
+            f"claim for #{identity.issue}"
+            if isinstance(identity, protocol.IssueIdentity)
+            else "issue-less lane claim"
+        )
+        return board.ClassificationDefect(
+            f"has no active {subject} on branch {detail.source_branch!r}"
+        )
+    if matching.quarantined_by is not None:
+        # Issue #136 finding 1: a claim a later unreadable comment quarantined
+        # cannot be trusted to still mean what this reader parsed it as.
+        return board.ClassificationDefect(
+            f"has a quarantined claim on branch {detail.source_branch!r}: "
+            f"{protocol._unreadable_claim_reason(matching.quarantined_by)}; "
+            "upgrade the installed tool"
+        )
+    return None
 
 
 def _no_item_defect(
@@ -1359,11 +1399,12 @@ def _cmd_status(parsed: argparse.Namespace, session: _ReadSession) -> int:
     issue = _optional_issue_number(parsed.issue)
     comments = session.forge.list_protocol_candidates(protocol.LEDGER_ISSUE)
     claims = protocol.active_claims(comments)
+    unreadable = protocol.unreadable_claims(comments)
     now = datetime.now(UTC)
     if parsed.json:
-        return _status_json(claims, issue, session.ledger, now=now)
+        return _status_json(claims, issue, session.ledger, now=now, unreadable=unreadable)
     print(f"LEDGER #{session.ledger}")
-    return _status(claims, issue, now=now)
+    return _status(claims, issue, now=now, unreadable=unreadable)
 
 
 def _cmd_board(parsed: argparse.Namespace, session: _ReadSession) -> None:
@@ -1516,6 +1557,15 @@ def _cmd_release(parsed: argparse.Namespace, session: _WriteSession) -> None:
         branch=session.release_branch,
         coordinator_override=parsed.coordinator_override,
     )
+    if released.quarantined_by is not None:
+        # The coordinator-override exception just released a quarantined claim
+        # (issue #136): the refusal it bypassed must still reach the operator,
+        # not vanish because the override skipped raising it.
+        print(
+            f"WARNING: this claim was quarantined: "
+            f"{protocol._unreadable_claim_reason(released.quarantined_by)}",
+            file=sys.stderr,
+        )
     if parsed.json:
         _release_json(released, parsed.agent, parsed.role, outcome)
         return
@@ -1637,6 +1687,20 @@ def main(arguments: list[str] | None = None) -> int:
         return _protect(parsed.repo)
     try:
         return _dispatch(parsed)
+    except protocol.CompensationFailedError as error:
+        # A post-mutation race's own repair could not be posted (issue #136
+        # finding 2): the original mutation is still live and untracked by this
+        # refusal, so print a recovery warning naming it and how to finish the
+        # repair by hand, instead of the generic ERROR line a plain refusal gets.
+        print(
+            f"ERROR: claim {error.live_claim.claim_id!r} is still live; its "
+            f"automatic repair failed to post: {error.cause}",
+            file=sys.stderr,
+        )
+        print(f"RECOVERY: run `{error.attempted_repair}` to finish the repair", file=sys.stderr)
+        for hint in error.hints:
+            print(f"RECOVERY: {hint}", file=sys.stderr)
+        return 2
     except protocol.ClaimError as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 2

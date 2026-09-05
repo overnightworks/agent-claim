@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import re
+import shlex
 import subprocess
 import sys
 from collections.abc import Callable
@@ -299,6 +300,10 @@ class FakeForge:
     inject_during_next_remove: IssueComment | None = None
     fail_add_label: bool = False
     fail_remove_label: bool = False
+    # 1-indexed: the Nth post_comment(LEDGER_ISSUE, ...) call raises instead of
+    # posting -- simulates a compensating repair write itself failing (#136).
+    fail_ledger_post_at_call: int | None = None
+    ledger_post_call_count: int = field(default=0, init=False)
     board_issues: tuple[board.Issue, ...] = ()
     board_open_pull_requests: tuple[board.PullRequest, ...] = ()
     board_merged_pull_requests: tuple[board.PullRequest, ...] = ()
@@ -369,6 +374,10 @@ class FakeForge:
         )
 
     def post_comment(self, issue: int, body: str) -> str:
+        if issue == protocol.LEDGER_ISSUE:
+            self.ledger_post_call_count += 1
+            if self.ledger_post_call_count == self.fail_ledger_post_at_call:
+                raise ClaimError("ledger post failed (simulated)")
         if issue == protocol.LEDGER_ISSUE and self.inject_before_next_ledger_post is not None:
             self.comments.setdefault(protocol.LEDGER_ISSUE, []).append(
                 self.inject_before_next_ledger_post
@@ -3832,7 +3841,9 @@ def test_invalid_branch_and_private_or_noncanonical_scope_fail_loud(
         parse_claim_event(raised_argument_1)
 
 
-def test_unknown_or_missing_marker_fields_fail_loud() -> None:
+def test_missing_marker_fields_fail_loud() -> None:
+    """A field this reader requires being absent is a corrupt record, not a newer
+    writer (issue #136): it still fails the whole comment, verbatim as before."""
     unknown = {
         "action": "claim",
         "agent": "Codex Sol",
@@ -3845,9 +3856,6 @@ def test_unknown_or_missing_marker_fields_fail_loud() -> None:
         "surprise": True,
     }
 
-    raised_argument_1 = comment(1, marker(unknown))
-    with pytest.raises(InvalidClaimMarkerError, match="upgrade the installed tool"):
-        parse_claim_event(raised_argument_1)
     raised_argument_1 = comment(2, marker({"action": "claim"}))
     with pytest.raises(
         InvalidClaimMarkerError, match="claim marker issue must be a positive integer"
@@ -3857,6 +3865,95 @@ def test_unknown_or_missing_marker_fields_fail_loud() -> None:
     raised_argument_1 = comment(3, marker(missing))
     with pytest.raises(InvalidClaimMarkerError, match=r"fields differ(?!.*upgrade)"):
         parse_claim_event(raised_argument_1)
+
+
+def test_unknown_marker_field_becomes_an_unreadable_claim_not_a_ledger_failure() -> None:
+    """A trusted comment with every required field present, plus one this reader's
+    schema does not know, is a newer `agent-claim` writer (issue #136): `parse_claim_event`
+    signals it as an `UnreadableClaim`, distinct from the hard `InvalidClaimMarkerError`
+    a corrupt (missing-field) record still raises. `surprise` stands in for a field a
+    future minor release adds -- `whole` (#113) is already a known optional field."""
+    payload = {
+        "action": "claim",
+        "agent": "Codex Sol",
+        "base": BASE,
+        "branch": "topic",
+        "claim_id": "claim-a",
+        "issue": 71,
+        "role": "builder",
+        "scope": ["src"],
+        "surprise": True,
+    }
+
+    raised_argument_1 = comment(1, marker(payload))
+    with pytest.raises(
+        protocol.UnreadableClaimError, match="unreadable, upgrade the installed tool"
+    ) as excinfo:
+        parse_claim_event(raised_argument_1)
+    unreadable = excinfo.value.claim
+    assert unreadable.claim_id == "claim-a"
+    assert unreadable.comment_url == raised_argument_1.url
+    assert unreadable.unknown_fields == ("surprise",)
+
+
+def test_aggregation_fences_an_unknown_field_comment_instead_of_failing_the_ledger() -> None:
+    """The bug this issue fixes: one v0.11-shaped comment among v0.10 comments used to
+    fail `active_claims` outright (`trusted comment ... claim fields differ`), which
+    broke `board`/`next`/`pr-check` for every other lane too. It now becomes one
+    `UnreadableClaim`, and every other comment still reads normally."""
+    readable = claim_comment(request(issue=72, scope=("src",)))
+    newer_writer = marker(
+        {
+            "action": "claim",
+            "agent": "Grok 4.6",
+            "base": BASE,
+            "branch": "codex/issue-73-claims",
+            "claim_id": "claim-b",
+            "issue": 73,
+            "role": "builder",
+            "scope": ["docs"],
+            "surprise": True,
+        }
+    )
+    ledger = (comment(1, readable), comment(2, newer_writer))
+
+    assert [claim.claim_id for claim in active_claims(ledger)] == ["claim-a"]
+    unreadable = protocol.unreadable_claims(ledger)
+    assert len(unreadable) == 1
+    assert unreadable[0].claim_id == "claim-b"
+    assert unreadable[0].unknown_fields == ("surprise",)
+
+
+def test_an_unreadable_rescope_quarantines_its_still_readable_claim() -> None:
+    """Finding 1 (issue #136): a claim posted normally, then rescoped by a newer
+    writer whose rescope this reader cannot parse, stays active and readable --
+    but `ActiveClaim.quarantined_by` now names the rescope comment that fences it.
+    This internal attachment is what `release`/`pr-check` key their refusal off of
+    (exercised through the CLI below); a raw dataclass field is not something the
+    CLI surfaces directly, so it is pinned here instead."""
+    claimed = claim_comment(request(issue=72, scope=("src",)))
+    newer_rescope = marker(
+        {
+            "action": "rescope",
+            "agent": "Codex Sol",
+            "claim_id": "claim-a",
+            "issue": 72,
+            "role": "builder",
+            "scope": ["src", "docs"],
+            "surprise": True,
+        }
+    )
+    ledger = (comment(1, claimed), comment(2, newer_rescope))
+
+    standing = active_claims(ledger)
+
+    assert [claim.claim_id for claim in standing] == ["claim-a"]
+    quarantine = standing[0].quarantined_by
+    assert quarantine is not None
+    assert quarantine.claim_id == "claim-a"
+    assert quarantine.unknown_fields == ("surprise",)
+    # The claim's own scope is untouched: the unreadable rescope never applied.
+    assert standing[0].scope == ("src",)
 
 
 def test_release_must_come_from_original_claimant() -> None:
@@ -4711,6 +4808,40 @@ def test_acquire_claim_translates_a_same_claim_id_post_race_into_a_clear_error()
     raised_argument_1 = request("claim-a", "Codex Sol", issue=72, scope=("mine",))
     with pytest.raises(ClaimUnavailableError, match="claim race detected"):
         acquire_claim(client, raised_argument_1)
+
+
+def unreadable_ledger_comment(identifier: int, claim_id: str = "claim-b") -> IssueComment:
+    """A claim comment shaped like a newer writer's -- every required field present,
+    plus one (`surprise`) this reader's schema does not know (issue #136)."""
+    return comment(
+        identifier,
+        marker(
+            {
+                "action": "claim",
+                "agent": "Grok 4.6",
+                "base": BASE,
+                "branch": "codex/issue-73-claims",
+                "claim_id": claim_id,
+                "issue": 73,
+                "role": "builder",
+                "scope": ["docs"],
+                "surprise": True,
+            }
+        ),
+    )
+
+
+def test_release_of_the_unreadable_claim_itself_is_refused() -> None:
+    """Fail closed (issue #136): a claim comment this reader cannot parse never
+    becomes an `ActiveClaim`, so releasing its claim id hits the ordinary
+    no-active-claim refusal instead of trusting an unverified identity/agent/role.
+    (`claim`/`rescope`'s own fail-closed refusal, and a quarantined claim's
+    `release`/`pr-check` refusal, are exercised through the public CLI entry
+    points below -- the CLI can show the same refusal text these raise.)"""
+    client = FakeForge({LEDGER_ISSUE: [unreadable_ledger_comment(1)]})
+
+    with pytest.raises(ClaimUnavailableError, match="no active build claim"):
+        release_claim(client, IssueIdentity(73), "Grok 4.6", "builder", LANDED, "claim-b")
 
 
 def test_cross_issue_scope_race_keeps_both_overlapping_claims() -> None:
@@ -7864,6 +7995,662 @@ def test_cli_status_overlapping_protocol_comments_print_ledger_then_notes(
     )
 
 
+def test_cli_status_shows_an_unreadable_claim_alongside_readable_ones(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Issue #136: a v0.11-shaped comment among v0.10 comments no longer fails
+    `status` outright; it is named as unreadable, with its unknown fields, next to
+    every claim this reader still understands."""
+    client = FakeForge(
+        {
+            LEDGER_ISSUE: [
+                comment(1, claim_comment(request(issue=72, scope=("shared",)))),
+                unreadable_ledger_comment(2),
+            ]
+        }
+    )
+    _patch_status_cli(monkeypatch, client)
+
+    status = issue_claim.main(["--repo", "example/agent-claim", "status"])
+    assert status == 0
+    assert capsys.readouterr().out == (
+        f"LEDGER #{LEDGER_ISSUE}\n"
+        f"CLAIMED issue #72: Codex Sol (builder) base={BASE} "
+        "branch=codex/issue-72-claims claim=claim-a 0h 0m\n"
+        "  shared\n"
+        "UNREADABLE claim claim-b: unreadable, upgrade the installed tool\n"
+        "  fields: surprise\n"
+        f"  {unreadable_ledger_comment(2).url}\n"
+    )
+
+
+def test_cli_status_json_lists_an_unreadable_claim(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    client = FakeForge({LEDGER_ISSUE: [unreadable_ledger_comment(1)]})
+    _patch_status_cli(monkeypatch, client)
+
+    status = issue_claim.main(["--repo", "example/agent-claim", "status", "--json"])
+    assert status == 0
+    assert capsys.readouterr().out == (
+        json.dumps(
+            {
+                "ledger": LEDGER_ISSUE,
+                "issue": None,
+                "state": "UNCLAIMED",
+                "claims": [],
+                "unreadable": [
+                    {
+                        "claim_id": "claim-b",
+                        "comment_url": unreadable_ledger_comment(1).url,
+                        "fields": ["surprise"],
+                        "note": "unreadable, upgrade the installed tool",
+                    }
+                ],
+            }
+        )
+        + "\n"
+    )
+
+
+def test_cli_board_and_next_succeed_with_an_unreadable_claim_on_the_ledger(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Read-only commands answer normally even though one comment is unreadable
+    (issue #136); only a `claim`/`rescope` fails closed on it."""
+    client = FakeForge({LEDGER_ISSUE: [unreadable_ledger_comment(1)]})
+    _patch_status_cli(monkeypatch, client)
+
+    assert issue_claim.main(["--repo", "example/agent-claim", "board"]) == 0
+    capsys.readouterr()
+    assert issue_claim.main(["--repo", "example/agent-claim", "next"]) == 3
+
+
+def test_cli_who_succeeds_with_an_unreadable_claim_on_the_ledger(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`who` is read-only (issue #136): it still finds the readable holder of a
+    path even while an unrelated comment on the ledger is unreadable."""
+    client = FakeForge(
+        {
+            LEDGER_ISSUE: [
+                comment(1, claim_comment(request(issue=72, scope=("shared",)))),
+                unreadable_ledger_comment(2),
+            ]
+        }
+    )
+    _patch_status_cli(monkeypatch, client)
+
+    assert issue_claim.main(["--repo", "example/agent-claim", "who", "shared/file.py"]) == 0
+    assert (
+        "CLAIMED shared/file.py issue #72: Codex Sol (builder) claim=claim-a"
+        in capsys.readouterr().out
+    )
+
+
+def test_cli_claim_refuses_while_an_unreadable_claim_stands(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Fail closed through the public entry point (issue #136): this reader cannot
+    tell whether the unreadable claim's true scope overlaps the request, so
+    `claim` refuses and names it -- even for an unrelated issue and scope."""
+    client = FakeForge({LEDGER_ISSUE: [unreadable_ledger_comment(1)]})
+    _patch_status_cli(monkeypatch, client)
+    monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
+    monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+
+    status = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "claim",
+            "72",
+            "--agent",
+            "Codex Sol",
+            "--role",
+            "builder",
+            "--base",
+            BASE,
+            "--branch",
+            "codex/issue-72",
+            "--scope",
+            "src",
+            "--claim-id",
+            "cli-claim",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 2
+    assert "ERROR: claim refused: claim 'claim-b'" in captured.err
+    assert "unknown fields: surprise" in captured.err
+    assert active_claims(tuple(client.comments[LEDGER_ISSUE])) == ()
+
+
+def test_cli_rescope_refuses_while_an_unreadable_claim_stands(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    client = FakeForge()
+    acquire_claim(client, request(issue=72, branch="codex/issue-72", scope=("src/widget.py",)))
+    client.comments[LEDGER_ISSUE].append(unreadable_ledger_comment(2))
+    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
+    monkeypatch.setattr(discovery, "discover_ledger", lambda _client: LEDGER_ISSUE)
+    git_values = _git_checkout()
+    monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
+    monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+    _set_agent_identity_env(monkeypatch, {issue_claim.AGENT_CLAIM_AGENT_ENV: "Codex Sol"})
+
+    status = issue_claim.main(
+        ["--repo", "example/agent-claim", "rescope", "72", "--add", "src/new.py"]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 2
+    assert "ERROR: rescope refused: claim 'claim-b'" in captured.err
+    assert "unknown fields: surprise" in captured.err
+    standing = active_claims(client.list_protocol_candidates(LEDGER_ISSUE))
+    assert standing[0].scope == ("src/widget.py",)
+
+
+def test_cli_readable_then_unreadable_rescope_quarantines_release_and_pr_check(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The lifecycle finding 1 fixes: a claim posted normally is later rescoped by
+    a newer writer whose rescope this reader cannot parse. `status`/`board`/`next`
+    still see the claim, but it is quarantined: its own-branch `pr-check` and its
+    `release` both refuse it, naming the rescope comment, leaving the ledger
+    untouched."""
+    claimed_request = request(
+        "landing", "Codex Sol", issue=72, branch="codex/issue-72-claims", scope=("src",)
+    )
+    client = _claims_client(claimed_request)
+    client.comments[LEDGER_ISSUE].append(
+        comment(
+            2,
+            marker(
+                {
+                    "action": "rescope",
+                    "agent": "Codex Sol",
+                    "claim_id": "landing",
+                    "issue": 72,
+                    "role": "builder",
+                    "scope": ["src", "docs"],
+                    "surprise": True,
+                }
+            ),
+        )
+    )
+    _patch_status_cli(monkeypatch, client)
+    _set_agent_identity_env(monkeypatch, {issue_claim.AGENT_CLAIM_AGENT_ENV: "Codex Sol"})
+
+    status = issue_claim.main(["--repo", "example/agent-claim", "status", "72"])
+    assert status == 0
+    status_out = capsys.readouterr().out
+    assert "CLAIMED issue #72: Codex Sol (builder)" in status_out
+    assert "UNREADABLE claim landing: unreadable, upgrade the installed tool" in status_out
+
+    assert issue_claim.main(["--repo", "example/agent-claim", "board"]) == 0
+    capsys.readouterr()
+    assert issue_claim.main(["--repo", "example/agent-claim", "next"]) == 3
+
+    client.landings[12] = landing_pull_request(body=f"Work-Item: {REPOSITORY}#72\n\nCloses #72")
+    refused = run_pr_check()
+    captured = capsys.readouterr()
+    assert refused == 1
+    assert (
+        "REFUSED: pull request #12 has a quarantined claim on branch "
+        "'codex/issue-72-claims': claim 'landing'" in captured.err
+    )
+    assert "unknown fields: surprise" in captured.err
+
+    released = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "release",
+            "72",
+            "--claim-id",
+            "landing",
+            "--abandoned",
+            "stopped",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert released == 2
+    assert "ERROR: release refused: claim 'landing'" in captured.err
+    assert "unknown fields: surprise" in captured.err
+    standing = active_claims(tuple(client.comments[LEDGER_ISSUE]))
+    assert [claim.claim_id for claim in standing] == ["landing"]
+
+
+def test_cli_claim_race_releases_the_claim_when_an_unreadable_comment_appears_while_posting(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Finding 2 (issue #136): the pre-post check cannot see a comment that lands
+    concurrently. When one appears right after this claim's own post, `claim`
+    compensates like any other post-mutation race -- it releases its own new
+    claim -- so a command reporting failure never leaves a live claim behind."""
+    client = FakeForge()
+    client.inject_after_next_ledger_post = unreadable_ledger_comment(2, claim_id="claim-c")
+    _patch_status_cli(monkeypatch, client)
+    monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
+    monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+
+    status = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "claim",
+            "72",
+            "--agent",
+            "Codex Sol",
+            "--role",
+            "builder",
+            "--base",
+            BASE,
+            "--branch",
+            "codex/issue-72",
+            "--scope",
+            "src",
+            "--claim-id",
+            "cli-claim",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 2
+    assert "ERROR: claim refused: claim 'claim-c'" in captured.err
+    assert "appeared while posting" in captured.err
+    assert active_claims(tuple(client.comments[LEDGER_ISSUE])) == ()
+
+
+def test_cli_rescope_race_reverts_the_scope_when_an_unreadable_comment_appears_while_posting(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Finding 2 (issue #136): the same post-mutation race for `rescope`. It
+    cannot release the claim (that would undo more than this mutation), so it
+    compensates with another rescope back to the pre-rescope scope, so the new
+    scope from a failing `rescope` never stays live."""
+    client = FakeForge()
+    acquire_claim(client, request(issue=72, branch="codex/issue-72", scope=("src/widget.py",)))
+    client.inject_after_next_ledger_post = unreadable_ledger_comment(99, claim_id="claim-c")
+    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
+    monkeypatch.setattr(discovery, "discover_ledger", lambda _client: LEDGER_ISSUE)
+    git_values = _git_checkout()
+    monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
+    monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+    _set_agent_identity_env(monkeypatch, {issue_claim.AGENT_CLAIM_AGENT_ENV: "Codex Sol"})
+
+    status = issue_claim.main(
+        ["--repo", "example/agent-claim", "rescope", "72", "--add", "src/new.py"]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 2
+    assert "ERROR: rescope refused: claim 'claim-c'" in captured.err
+    assert "appeared while posting" in captured.err
+    standing = active_claims(client.list_protocol_candidates(LEDGER_ISSUE))
+    assert standing[0].scope == ("src/widget.py",)
+
+
+def test_cli_rescope_race_clears_the_whole_reason_it_just_set(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Finding 1 (delta review): None -> reason -> race -> None. A rescope that
+    gives a claim its first-ever whole reason races an unreadable comment; the
+    automatic revert must clear the reason back to unset. A plain
+    `whole_reason=None` on the revert would not do that -- absence already means
+    "leave the current reason alone" (the sticky contract every ordinary rescope
+    relies on), so clearing needs its own explicit signal."""
+    client = FakeForge()
+    acquire_claim(client, request(issue=72, branch="codex/issue-72", scope=("src/widget.py",)))
+    assert active_claims(client.list_protocol_candidates(LEDGER_ISSUE))[0].whole_reason is None
+    client.inject_after_next_ledger_post = unreadable_ledger_comment(99, claim_id="claim-c")
+    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
+    monkeypatch.setattr(discovery, "discover_ledger", lambda _client: LEDGER_ISSUE)
+    git_values = _git_checkout()
+    monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
+    monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+    _set_agent_identity_env(monkeypatch, {issue_claim.AGENT_CLAIM_AGENT_ENV: "Codex Sol"})
+
+    status = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "rescope",
+            "72",
+            "--add",
+            "src/new.py",
+            "--whole",
+            "widening for a spike",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 2
+    assert "ERROR: rescope refused: claim 'claim-c'" in captured.err
+    standing = active_claims(client.list_protocol_candidates(LEDGER_ISSUE))
+    assert standing[0].scope == ("src/widget.py",)
+    assert standing[0].whole_reason is None
+
+
+def _executed_recovery_command(captured_err: str) -> list[str]:
+    """Pull the exact repair command a `CompensationFailedError` printed and
+    turn it into the argv `issue_claim.main` expects (issue #136 delta review:
+    the test proves the printed text is actually runnable, not merely present).
+    """
+    match = re.search(r"RECOVERY: run `([^`]+)` to finish the repair", captured_err)
+    assert match is not None, captured_err
+    argv = shlex.split(match.group(1))
+    assert argv[0] == "agent-claim"
+    return argv[1:]
+
+
+def test_cli_claim_race_reports_a_recovery_warning_when_the_compensating_release_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Finding 2 (delta review): when the race-compensating release itself fails
+    to post, the just-claimed id stays live and untracked by any refusal message
+    -- the CLI must say so explicitly, naming the live claim and a ready repair
+    command, rather than printing the compensating write's own generic error.
+    The printed command is then actually run, proving it is not merely refused
+    text -- it releases the stuck claim for real."""
+    client = FakeForge()
+    client.inject_after_next_ledger_post = unreadable_ledger_comment(2, claim_id="claim-c")
+    client.fail_ledger_post_at_call = 2
+    _patch_status_cli(monkeypatch, client)
+    monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
+    monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+
+    status = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "claim",
+            "72",
+            "--agent",
+            "Codex Sol",
+            "--role",
+            "builder",
+            "--base",
+            BASE,
+            "--branch",
+            "codex/issue-72",
+            "--scope",
+            "src",
+            "--claim-id",
+            "cli-claim",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 2
+    assert (
+        "ERROR: claim 'cli-claim' is still live; its automatic repair failed to "
+        "post: ledger post failed (simulated)" in captured.err
+    )
+    assert (
+        "RECOVERY: run `agent-claim release 72 --claim-id cli-claim --agent "
+        "'Codex Sol' --role builder --abandoned 'claim race lost'` to finish "
+        "the repair" in captured.err
+    )
+    standing = active_claims(client.list_protocol_candidates(LEDGER_ISSUE))
+    assert [claim.claim_id for claim in standing] == ["cli-claim"]
+
+    repair_argv = _executed_recovery_command(captured.err)
+    client.fail_ledger_post_at_call = None
+    repaired = issue_claim.main(["--repo", "example/agent-claim", *repair_argv])
+
+    assert repaired == 0
+    assert active_claims(client.list_protocol_candidates(LEDGER_ISSUE)) == ()
+
+
+def test_cli_rescope_race_reports_a_recovery_warning_when_the_reverting_rescope_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Finding 2 (delta review): the same recovery warning for `rescope`, when
+    the compensating revert itself cannot be posted -- the widened scope stays
+    live, and the CLI names the one repair that always works (a release, since
+    a manual rescope retry would itself be refused by the same unreadable
+    comment) plus a hint to re-claim the pre-race scope. The printed command is
+    then actually run against the same ledger, proving it truly releases the
+    claim the failed automatic revert left stuck."""
+    client = FakeForge()
+    acquire_claim(client, request(issue=72, branch="codex/issue-72", scope=("src/widget.py",)))
+    client.inject_after_next_ledger_post = unreadable_ledger_comment(99, claim_id="claim-c")
+    client.ledger_post_call_count = 0
+    client.fail_ledger_post_at_call = 2
+    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
+    monkeypatch.setattr(discovery, "discover_ledger", lambda _client: LEDGER_ISSUE)
+    git_values = _git_checkout()
+    monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
+    monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+    _set_agent_identity_env(monkeypatch, {issue_claim.AGENT_CLAIM_AGENT_ENV: "Codex Sol"})
+
+    status = issue_claim.main(
+        ["--repo", "example/agent-claim", "rescope", "72", "--add", "src/new.py"]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 2
+    assert (
+        "ERROR: claim 'claim-a' is still live; its automatic repair failed to "
+        "post: ledger post failed (simulated)" in captured.err
+    )
+    assert (
+        "RECOVERY: run `agent-claim release 72 --claim-id claim-a --agent "
+        "'Codex Sol' --role builder --abandoned 'claim race lost'` to finish "
+        "the repair" in captured.err
+    )
+    assert "RECOVERY: then re-claim its pre-race scope: src/widget.py" in captured.err
+    standing = active_claims(client.list_protocol_candidates(LEDGER_ISSUE))
+    assert standing[0].scope == ("src/widget.py", "src/new.py")
+
+    repair_argv = _executed_recovery_command(captured.err)
+    client.fail_ledger_post_at_call = None
+    repaired = issue_claim.main(["--repo", "example/agent-claim", *repair_argv])
+
+    assert repaired == 0
+    assert active_claims(client.list_protocol_candidates(LEDGER_ISSUE)) == ()
+
+
+def test_cli_claim_race_same_id_repair_uses_coordinator_override_for_the_quarantined_claim(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Finding 1 (third delta review): when the racing unreadable comment names
+    this reader's own just-claimed id, that claim is quarantined -- a plain
+    release now refuses it too, so the printed repair must use the documented
+    coordinator-override exception instead. The command is then actually run,
+    and the bypassed quarantine refusal is printed as a warning, not lost."""
+    client = FakeForge()
+    client.inject_after_next_ledger_post = unreadable_ledger_comment(2, claim_id="cli-claim")
+    client.fail_ledger_post_at_call = 2
+    _patch_status_cli(monkeypatch, client)
+    monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
+    monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+
+    status = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "claim",
+            "72",
+            "--agent",
+            "Codex Sol",
+            "--role",
+            "builder",
+            "--base",
+            BASE,
+            "--branch",
+            "codex/issue-72",
+            "--scope",
+            "src",
+            "--claim-id",
+            "cli-claim",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 2
+    assert (
+        "RECOVERY: run `agent-claim release 72 --claim-id cli-claim --agent "
+        "'Codex Sol' --role coordinator --coordinator-override --abandoned "
+        "'claim race lost'` to finish the repair" in captured.err
+    )
+    standing = active_claims(client.list_protocol_candidates(LEDGER_ISSUE))
+    assert [claim.claim_id for claim in standing] == ["cli-claim"]
+    assert standing[0].quarantined_by is not None
+
+    repair_argv = _executed_recovery_command(captured.err)
+    client.fail_ledger_post_at_call = None
+    repaired = issue_claim.main(["--repo", "example/agent-claim", *repair_argv])
+    repaired_captured = capsys.readouterr()
+
+    assert repaired == 0
+    assert "WARNING: this claim was quarantined:" in repaired_captured.err
+    assert active_claims(client.list_protocol_candidates(LEDGER_ISSUE)) == ()
+
+
+def test_cli_claim_race_repair_for_a_lane_claim_names_its_checkout_branch(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Finding 2 (third delta review): `release` has no `--branch` selector and
+    always derives a lane claim from the current checkout, regardless of
+    `--claim-id` -- unlike an issue claim, a lane claim's repair command cannot
+    be made checkout-independent, so it also names the branch to run it from.
+    Executed with that branch resolvable in the fake, it releases the claim."""
+    client = FakeForge()
+    client.inject_after_next_ledger_post = unreadable_ledger_comment(2, claim_id="claim-c")
+    client.fail_ledger_post_at_call = 2
+    _set_agent_identity_env(monkeypatch, {issue_claim.AGENT_CLAIM_AGENT_ENV: "Codex Sol"})
+    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
+    monkeypatch.setattr(discovery, "discover_ledger", lambda _client: LEDGER_ISSUE)
+    git_values = {("branch", "--show-current"): "docs/lane-cleanup"}
+    monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
+    monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
+    monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+
+    status = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "claim",
+            "--role",
+            "builder",
+            "--base",
+            BASE,
+            "--branch",
+            "docs/lane-cleanup",
+            "--scope",
+            "docs",
+            "--claim-id",
+            "cli-lane-claim",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 2
+    assert (
+        "RECOVERY: run `agent-claim release --claim-id cli-lane-claim --agent "
+        "'Codex Sol' --role builder --abandoned 'claim race lost'` to finish "
+        "the repair" in captured.err
+    )
+    assert "RECOVERY: run from the lane's checkout (branch docs/lane-cleanup)" in captured.err
+
+    repair_argv = _executed_recovery_command(captured.err)
+    client.fail_ledger_post_at_call = None
+    repaired = issue_claim.main(["--repo", "example/agent-claim", *repair_argv])
+
+    assert repaired == 0
+    assert active_claims(client.list_protocol_candidates(LEDGER_ISSUE)) == ()
+
+
+def test_cli_rescope_race_repair_hint_includes_the_pre_race_whole_reason(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Finding 3 (third delta review): the rescope race's re-claim hint restores
+    scope only; when the pre-race claim already had a whole reason, dropping it
+    from the hint would silently lose it after the suggested repair."""
+    client = FakeForge()
+    acquire_claim(
+        client,
+        request(
+            issue=72,
+            branch="codex/issue-72",
+            scope=("src/widget.py",),
+            whole_reason="widen for launch",
+        ),
+    )
+    client.inject_after_next_ledger_post = unreadable_ledger_comment(99, claim_id="claim-c")
+    client.ledger_post_call_count = 0
+    client.fail_ledger_post_at_call = 2
+    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
+    monkeypatch.setattr(discovery, "discover_ledger", lambda _client: LEDGER_ISSUE)
+    git_values = _git_checkout()
+    monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
+    monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+    _set_agent_identity_env(monkeypatch, {issue_claim.AGENT_CLAIM_AGENT_ENV: "Codex Sol"})
+
+    status = issue_claim.main(
+        ["--repo", "example/agent-claim", "rescope", "72", "--add", "src/new.py"]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 2
+    assert (
+        "RECOVERY: then re-claim its pre-race scope: src/widget.py --whole "
+        "'widen for launch'" in captured.err
+    )
+
+
+def test_cli_status_hard_fails_on_a_comment_missing_a_required_field_plus_an_extra_one(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Missing a required field is a corrupt record, not a newer writer, even when
+    an unrecognized field is also present (issue #136): the CLI still hard-fails
+    the whole ledger read with the old message, never treating it as unreadable."""
+    corrupt = comment(
+        1,
+        marker(
+            {
+                "action": "claim",
+                "agent": "Codex Sol",
+                "branch": "topic",
+                "claim_id": "claim-a",
+                "issue": 71,
+                "role": "builder",
+                "scope": ["src"],
+                "surprise": True,
+            }
+        ),
+    )
+    client = FakeForge({LEDGER_ISSUE: [corrupt]})
+    _patch_status_cli(monkeypatch, client)
+
+    status = issue_claim.main(["--repo", "example/agent-claim", "status"])
+    captured = capsys.readouterr()
+
+    assert status == 2
+    assert "fields differ" in captured.err
+    assert "upgrade" not in captured.err
+
+
 def test_cli_status_without_ledger_errors_and_prints_no_ledger_line(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -7900,6 +8687,7 @@ def test_cli_status_json_empty_ledger_prints_unclaimed_object(
                 "issue": None,
                 "state": "UNCLAIMED",
                 "claims": [],
+                "unreadable": [],
             }
         )
         + "\n"
@@ -7921,6 +8709,7 @@ def test_cli_status_json_issue_with_no_claim_prints_unclaimed_object(
                 "issue": 72,
                 "state": "UNCLAIMED",
                 "claims": [],
+                "unreadable": [],
             }
         )
         + "\n"
@@ -7987,6 +8776,7 @@ def test_cli_status_json_after_claim_prints_claimed_object(
                         "old": False,
                     }
                 ],
+                "unreadable": [],
             }
         )
         + "\n"
@@ -8069,6 +8859,7 @@ def test_cli_status_json_overlapping_protocol_comments_print_claimed_object(
                         "old": False,
                     },
                 ],
+                "unreadable": [],
             }
         )
         + "\n"
@@ -8151,6 +8942,7 @@ def test_cli_status_json_issue_on_overlap_prints_related_claimed_object(
                         "old": False,
                     },
                 ],
+                "unreadable": [],
             }
         )
         + "\n"
@@ -9177,6 +9969,63 @@ def test_claim_age_uses_the_claim_comment_not_a_later_rescope(
     out = capsys.readouterr().out
     assert " 0h 30m\n" in out
     assert " old" not in out.split("CLAIMED", 1)[1]
+
+
+def test_rescope_whole_reason_lifecycle_none_reason_kept_then_cleared() -> None:
+    """The full None -> reason -> (kept across an unrelated later rescope) ->
+    cleared lifecycle for `whole_reason`, proven through `active_claims` -- the
+    ledger's real reader (issue #136 delta review). Omitting `whole` on an
+    ordinary rescope leaves an existing reason alone; only the dedicated
+    `rescope_clear_whole_reason_comment` clears it back to unset."""
+    claim_event = comment(1, claim_comment(request(issue=72, scope=("src",))))
+    claimed = parse_claim_event(claim_event)
+    assert isinstance(claimed, ActiveClaim)
+    assert claimed.whole_reason is None
+
+    set_reason_event = comment(
+        2,
+        protocol.rescope_comment(
+            claimed, ("src",), "Codex Sol", "builder", whole_reason="a reason"
+        ),
+    )
+    with_reason = active_claims((claim_event, set_reason_event))
+    assert with_reason[0].whole_reason == "a reason"
+
+    unrelated_rescope_event = comment(
+        3, protocol.rescope_comment(with_reason[0], ("src", "docs"), "Codex Sol", "builder")
+    )
+    kept = active_claims((claim_event, set_reason_event, unrelated_rescope_event))
+    assert kept[0].whole_reason == "a reason"
+    assert kept[0].scope == ("src", "docs")
+
+    cleared_event = comment(
+        4,
+        protocol.rescope_clear_whole_reason_comment(kept[0], ("src",), "Codex Sol", "builder"),
+    )
+    cleared = active_claims((claim_event, set_reason_event, unrelated_rescope_event, cleared_event))
+    assert cleared[0].whole_reason is None
+    assert cleared[0].scope == ("src",)
+
+
+def test_parse_claim_rescope_rejects_a_marker_with_both_whole_and_whole_clear() -> None:
+    """The parser still refuses this wire-level combination even though this
+    reader's own writer can no longer construct it (issue #136 delta review):
+    `rescope_comment` and `rescope_clear_whole_reason_comment` are now separate
+    functions, so setting and clearing at once is structurally impossible from
+    this writer, but a marker from another writer -- or a hand-crafted one --
+    could still carry both keys."""
+    payload = {
+        "action": "rescope",
+        "agent": "Codex Sol",
+        "claim_id": "claim-a",
+        "issue": 72,
+        "role": "builder",
+        "scope": ["src"],
+        "whole": "a reason",
+        "whole_clear": True,
+    }
+    with pytest.raises(InvalidClaimMarkerError, match="cannot both set and clear"):
+        parse_claim_event(comment(1, marker(payload)))
 
 
 def test_cli_claim_cut_does_not_exempt_a_directory_scope(
@@ -11874,6 +12723,25 @@ def test_pr_check_accepts_a_claimed_work_item_that_the_pull_request_closes(
             body=f"Work-Item: {REPOSITORY}#{WORK_ITEM_ISSUE}\n\nCloses #{WORK_ITEM_ISSUE}"
         ),
     )
+
+    assert run_pr_check() == 0
+    assert capsys.readouterr().out == (
+        f"PR #12 by ada declares Work-Item: {REPOSITORY}#{WORK_ITEM_ISSUE}\n"
+    )
+
+
+def test_pr_check_succeeds_for_another_branch_with_an_unreadable_claim_on_the_ledger(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #136: a comment this reader cannot parse fences only its own claim;
+    `pr-check` for a different branch's pull request still succeeds."""
+    client = pr_check_client(
+        monkeypatch,
+        landing_pull_request(
+            body=f"Work-Item: {REPOSITORY}#{WORK_ITEM_ISSUE}\n\nCloses #{WORK_ITEM_ISSUE}"
+        ),
+    )
+    client.comments[LEDGER_ISSUE].append(unreadable_ledger_comment(99))
 
     assert run_pr_check() == 0
     assert capsys.readouterr().out == (
