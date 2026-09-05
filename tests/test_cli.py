@@ -4261,13 +4261,11 @@ def test_supersede_race_loses_cleanly_without_poisoning_the_ledger() -> None:
     )
     client.inject_before_next_ledger_post = competitor
 
+    race_supersede_request = supersede_request(
+        170, "Fleet Coordinator", "coordinator", "race should reject", acquired.claim_id
+    )
     with pytest.raises(ClaimError, match="not observed"):
-        supersede_ledger(
-            client,
-            supersede_request(
-                170, "Fleet Coordinator", "coordinator", "race should reject", acquired.claim_id
-            ),
-        )
+        supersede_ledger(client, race_supersede_request)
 
     observed = active_claims(client.list_protocol_candidates(LEDGER_ISSUE))
     assert {claim.claim_id for claim in observed} == {acquired.claim_id, "other"}
@@ -4277,17 +4275,15 @@ def test_supersede_label_failure_can_be_retried_without_reposting_event() -> Non
     client = FakeForge(valid_successors={170}, fail_remove_label=True)
     acquired = acquire_claim(client, request(issue=LEDGER_ISSUE))
 
+    label_failure_supersede_request = supersede_request(
+        170,
+        "Fleet Coordinator",
+        "coordinator",
+        "reviewed successor ready",
+        acquired.claim_id,
+    )
     with pytest.raises(ClaimError, match="label remove failed"):
-        supersede_ledger(
-            client,
-            supersede_request(
-                170,
-                "Fleet Coordinator",
-                "coordinator",
-                "reviewed successor ready",
-                acquired.claim_id,
-            ),
-        )
+        supersede_ledger(client, label_failure_supersede_request)
     protocol_count = len(client.list_protocol_candidates(LEDGER_ISSUE))
     assert LEDGER_ISSUE in client.labels
 
@@ -4309,13 +4305,11 @@ def test_supersede_refuses_an_unverified_successor_before_posting() -> None:
     acquired = acquire_claim(client, request(issue=LEDGER_ISSUE))
     protocol_count = len(client.list_protocol_candidates(LEDGER_ISSUE))
 
+    unverified_successor_request = supersede_request(
+        999999, "Fleet Coordinator", "coordinator", "invalid successor", acquired.claim_id
+    )
     with pytest.raises(ClaimUnavailableError, match="open, empty, collaborator-locked"):
-        supersede_ledger(
-            client,
-            supersede_request(
-                999999, "Fleet Coordinator", "coordinator", "invalid successor", acquired.claim_id
-            ),
-        )
+        supersede_ledger(client, unverified_successor_request)
 
     assert len(client.list_protocol_candidates(LEDGER_ISSUE)) == protocol_count
 
@@ -4333,13 +4327,11 @@ def test_supersede_requires_a_higher_numbered_successor() -> None:
             "coordinator",
             "invalid rollover",
         )
+    rollover_supersede_request = supersede_request(
+        70, "Fleet Coordinator", "coordinator", "invalid rollover", acquired.claim_id
+    )
     with pytest.raises(ClaimUnavailableError, match="greater than the current ledger"):
-        supersede_ledger(
-            client,
-            supersede_request(
-                70, "Fleet Coordinator", "coordinator", "invalid rollover", acquired.claim_id
-            ),
-        )
+        supersede_ledger(client, rollover_supersede_request)
 
     raised_argument_1 = comment(
         2,
@@ -4658,10 +4650,11 @@ def test_rescope_refuses_dropping_a_path_it_does_not_hold() -> None:
     acquire_claim(client, request(issue=72, scope=("src/widget.py",)))
 
     identity = IssueIdentity(72)
+    drop_unheld_path_request = rescope_request(
+        identity, "Codex Sol", (), ("docs/PRODUCT.md",), "claim-a"
+    )
     with pytest.raises(ClaimUnavailableError, match=re.escape("cannot drop 'docs/PRODUCT.md'")):
-        rescope_claim(
-            client, rescope_request(identity, "Codex Sol", (), ("docs/PRODUCT.md",), "claim-a")
-        )
+        rescope_claim(client, drop_unheld_path_request)
 
 
 def test_rescope_refuses_an_empty_or_unchanged_scope() -> None:
@@ -4669,15 +4662,15 @@ def test_rescope_refuses_an_empty_or_unchanged_scope() -> None:
     acquire_claim(client, request(issue=72, scope=("src/widget.py",)))
 
     identity = IssueIdentity(72)
+    empty_scope_request = rescope_request(identity, "Codex Sol", (), ("src/widget.py",), "claim-a")
     with pytest.raises(ClaimUnavailableError, match="non-empty scope"):
-        rescope_claim(
-            client, rescope_request(identity, "Codex Sol", (), ("src/widget.py",), "claim-a")
-        )
+        rescope_claim(client, empty_scope_request)
     identity = IssueIdentity(72)
+    unchanged_scope_request = rescope_request(
+        identity, "Codex Sol", ("src/widget.py",), (), "claim-a"
+    )
     with pytest.raises(ClaimUnavailableError, match="does not change"):
-        rescope_claim(
-            client, rescope_request(identity, "Codex Sol", ("src/widget.py",), (), "claim-a")
-        )
+        rescope_claim(client, unchanged_scope_request)
 
 
 def test_rescope_refuses_a_foreign_agent() -> None:
@@ -4685,8 +4678,9 @@ def test_rescope_refuses_a_foreign_agent() -> None:
     acquire_claim(client, request(issue=72, scope=("src/widget.py",)))
 
     identity = IssueIdentity(72)
+    foreign_agent_request = rescope_request(identity, "Grok 4.6", ("src/new.py",), (), "claim-a")
     with pytest.raises(ClaimUnavailableError, match="only the original claimant"):
-        rescope_claim(client, rescope_request(identity, "Grok 4.6", ("src/new.py",), (), "claim-a"))
+        rescope_claim(client, foreign_agent_request)
 
 
 @pytest.mark.parametrize(
@@ -4897,10 +4891,11 @@ def test_release_of_the_unreadable_claim_itself_is_refused() -> None:
     points below -- the CLI can show the same refusal text these raise.)"""
     client = FakeForge({LEDGER_ISSUE: [unreadable_ledger_comment(1)]})
 
+    unreadable_release_context = release_context(
+        IssueIdentity(73), "Grok 4.6", "builder", LANDED, "claim-b"
+    )
     with pytest.raises(ClaimUnavailableError, match="no active build claim"):
-        release_claim(
-            client, release_context(IssueIdentity(73), "Grok 4.6", "builder", LANDED, "claim-b")
-        )
+        release_claim(client, unreadable_release_context)
 
 
 def test_cross_issue_scope_race_keeps_both_overlapping_claims() -> None:
@@ -5034,11 +5029,11 @@ def test_release_refuses_foreign_actor_without_explicit_override() -> None:
 
     identity = IssueIdentity(72)
     takeover_release = protocol.AbandonedRelease("takeover")
+    foreign_actor_release_context = release_context(
+        identity, "Other", "builder", takeover_release, acquired.claim_id
+    )
     with pytest.raises(ClaimUnavailableError, match="original claimant"):
-        release_claim(
-            client,
-            release_context(identity, "Other", "builder", takeover_release, acquired.claim_id),
-        )
+        release_claim(client, foreign_actor_release_context)
 
 
 @pytest.mark.parametrize("role", ["builder", "reviewer"])
@@ -5149,8 +5144,9 @@ def test_release_claim_omitted_id_fails_closed_for_wrong_agent_branch_or_two_mat
     protocol_count = len(client.list_protocol_candidates(LEDGER_ISSUE))
 
     identity = IssueIdentity(72)
+    ambiguous_release_context = release_context(identity, agent, None, LANDED, None, branch=branch)
     with pytest.raises(ClaimUnavailableError, match="pass --claim-id") as raised:
-        release_claim(client, release_context(identity, agent, None, LANDED, None, branch=branch))
+        release_claim(client, ambiguous_release_context)
 
     assert "conflicting claims" not in str(raised.value)
     assert len(client.list_protocol_candidates(LEDGER_ISSUE)) == protocol_count
@@ -5185,8 +5181,9 @@ def test_release_claim_omitted_id_requires_branch_and_does_not_call_git(
     )
 
     identity = IssueIdentity(72)
+    branchless_release_context = release_context(identity, "Ada", None, LANDED, None)
     with pytest.raises(ClaimUnavailableError, match="current branch"):
-        release_claim(client, release_context(identity, "Ada", None, LANDED, None))
+        release_claim(client, branchless_release_context)
     assert len(client.list_protocol_candidates(LEDGER_ISSUE)) == 1
 
     released = release_claim(
@@ -5202,11 +5199,11 @@ def test_release_claim_override_fails_before_ledger_without_the_coordinator_role
     client = FakeForge()
 
     identity = IssueIdentity(72)
+    early_override_release_context = release_context(
+        identity, "Ada", role, LANDED, "mine", coordinator_override=True
+    )
     with pytest.raises(ClaimUnavailableError, match="--role coordinator"):
-        release_claim(
-            client,
-            release_context(identity, "Ada", role, LANDED, "mine", coordinator_override=True),
-        )
+        release_claim(client, early_override_release_context)
 
     assert client.comments == {}
 
@@ -10121,8 +10118,9 @@ def test_parse_claim_rescope_rejects_a_marker_with_both_whole_and_whole_clear() 
         "whole": "a reason",
         "whole_clear": True,
     }
+    both_set_and_clear_comment = comment(1, marker(payload))
     with pytest.raises(InvalidClaimMarkerError, match="cannot both set and clear"):
-        parse_claim_event(comment(1, marker(payload)))
+        parse_claim_event(both_set_and_clear_comment)
 
 
 def test_cli_claim_cut_does_not_exempt_a_directory_scope(

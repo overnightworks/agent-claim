@@ -1952,6 +1952,12 @@ def _post_claim_and_observe(client: ClaimWriter, request: ClaimRequest) -> Claim
     return post_aggregate
 
 
+# The release reason posted by every compensating release below (identity,
+# resource, and post-mutation unreadable-comment races): one literal owner so
+# the three call sites and the repair command they point at cannot drift.
+CLAIM_RACE_LOST_REASON = "claim race lost"
+
+
 def _resolve_identity_race(
     client: ClaimWriter,
     request: ClaimRequest,
@@ -1968,7 +1974,7 @@ def _resolve_identity_race(
     if winner.claim_id == request.claim_id:
         return
     client.post_comment(
-        LEDGER_ISSUE, release_comment(own, request.agent, request.role, "claim race lost")
+        LEDGER_ISSUE, release_comment(own, request.agent, request.role, CLAIM_RACE_LOST_REASON)
     )
     _reconcile_identity(client, request.identity)
     _reconcile_identity(client, winner.identity)
@@ -2000,7 +2006,7 @@ def _resolve_resource_race(
         return
     holder = next((claim for claim in observed if claim.resource == expected), None)
     client.post_comment(
-        LEDGER_ISSUE, release_comment(own, request.agent, request.role, "claim race lost")
+        LEDGER_ISSUE, release_comment(own, request.agent, request.role, CLAIM_RACE_LOST_REASON)
     )
     _reconcile_identity(client, request.identity)
     if holder is not None:
@@ -2022,7 +2028,7 @@ def _claim_race_lost_repair_command(claim: ActiveClaim) -> str:
 
     Names the issue explicitly for an `IssueIdentity` claim so the repair works
     from any checkout, not only one on its branch (a lane claim's `--claim-id`
-    cannot do the same -- see `_claim_race_lost_repair_hints`), and pins
+    cannot do the same -- see `_claim_race_lost_repair_hint`), and pins
     `--agent`/`--role` to the original claimant so the repair does not depend
     on whatever identity the recovering shell happens to have.
 
@@ -2032,21 +2038,23 @@ def _claim_race_lost_repair_command(claim: ActiveClaim) -> str:
     documented coordinator-override exception instead.
     """
     issue_argument = f" {claim.identity.issue}" if isinstance(claim.identity, IssueIdentity) else ""
+    abandoned_argument = f"--abandoned {shlex.quote(CLAIM_RACE_LOST_REASON)}"
     if claim.quarantined_by is not None:
         return (
             f"agent-claim release{issue_argument} --claim-id {claim.claim_id} "
             f"--agent {shlex.quote(claim.agent)} --role coordinator --coordinator-override "
-            "--abandoned 'claim race lost'"
+            f"{abandoned_argument}"
         )
     return (
         f"agent-claim release{issue_argument} --claim-id {claim.claim_id} "
         f"--agent {shlex.quote(claim.agent)} --role {shlex.quote(claim.role)} "
-        "--abandoned 'claim race lost'"
+        f"{abandoned_argument}"
     )
 
 
-def _claim_race_lost_repair_hints(claim: ActiveClaim) -> tuple[str, ...]:
-    """Non-executable notes `_claim_race_lost_repair_command` alone cannot cover.
+def _claim_race_lost_repair_hint(claim: ActiveClaim) -> str | None:
+    """Non-executable note `_claim_race_lost_repair_command` alone cannot cover,
+    or `None` when the command needs none.
 
     `release` has no `--branch` selector (issue #136): for an `IssueIdentity`
     claim the printed command already names the issue and needs no checkout at
@@ -2055,8 +2063,12 @@ def _claim_race_lost_repair_hints(claim: ActiveClaim) -> tuple[str, ...]:
     works run from that lane's own checkout.
     """
     if isinstance(claim.identity, LaneIdentity):
-        return (f"run from the lane's checkout (branch {claim.branch})",)
-    return ()
+        return f"run from the lane's checkout (branch {claim.branch})"
+    return None
+
+
+def _as_hints(*hints: str | None) -> tuple[str, ...]:
+    return tuple(hint for hint in hints if hint is not None)
 
 
 def _resolve_unreadable_claim_race(
@@ -2075,14 +2087,14 @@ def _resolve_unreadable_claim_race(
         return
     try:
         client.post_comment(
-            LEDGER_ISSUE, release_comment(own, request.agent, request.role, "claim race lost")
+            LEDGER_ISSUE, release_comment(own, request.agent, request.role, CLAIM_RACE_LOST_REASON)
         )
     except Exception as error:
         raise CompensationFailedError(
             own,
             _claim_race_lost_repair_command(own),
             error,
-            hints=_claim_race_lost_repair_hints(own),
+            hints=_as_hints(_claim_race_lost_repair_hint(own)),
         ) from error
     _reconcile_identity(client, request.identity)
     raise ClaimUnavailableError(
@@ -2296,7 +2308,7 @@ def _resolve_unreadable_rescope_race(
             own,
             _claim_race_lost_repair_command(own),
             error,
-            hints=(*_claim_race_lost_repair_hints(own), _rescope_reclaim_hint(selected)),
+            hints=_as_hints(_claim_race_lost_repair_hint(own), _rescope_reclaim_hint(selected)),
         ) from error
     _reconcile_identity(client, selected.identity)
     raise ClaimUnavailableError(
