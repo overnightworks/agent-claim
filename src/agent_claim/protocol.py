@@ -126,6 +126,40 @@ class ActiveClaim:
 
 
 @dataclass(frozen=True)
+class UnreadableClaim:
+    """A trusted claim comment carrying a field this reader's schema does not know.
+
+    A newer `agent-claim` wrote it; this reader fences the one claim instead of
+    failing the whole ledger read. `claim_id` is `None` when the field that
+    would normally identify it is itself missing or malformed -- the comment is
+    still named by `comment_url` in that case. Missing a field this reader
+    requires is a different, harder failure (a corrupt record, not a newer
+    writer): `_strict_keys` still raises `InvalidClaimMarkerError` for that and
+    never produces an `UnreadableClaim`.
+    """
+
+    claim_id: str | None
+    comment_url: str
+    unknown_fields: tuple[str, ...]
+
+
+class UnreadableClaimError(ClaimError):
+    """Internal signal that one trusted comment is an `UnreadableClaim`.
+
+    Raised only by `_strict_keys` and caught only by `_aggregate_claim_events`,
+    which turns it into an `UnreadableClaim` record on `ClaimLedgerAggregate`
+    instead of letting it fail the whole ledger read. It must never escape past
+    that one catch site uncaught.
+    """
+
+    def __init__(self, claim: UnreadableClaim) -> None:
+        self.claim = claim
+        super().__init__(
+            f"trusted comment {claim.comment_url} unreadable, upgrade the installed tool"
+        )
+
+
+@dataclass(frozen=True)
 class ClaimantRelease:
     identity: ClaimIdentity
     claim_id: str
@@ -479,22 +513,37 @@ def _optional_whole_reason(payload: dict[str, object]) -> str | None:
     return _required_text(payload, "whole", maximum=512)
 
 
+def _claim_id_if_parseable(payload: dict[str, object]) -> str | None:
+    """Best-effort `claim_id` for an `UnreadableClaim`: only when it is itself
+    well-formed, never validated any further than that."""
+    raw = payload.get("claim_id")
+    if isinstance(raw, str) and raw.strip() == raw and CLAIM_ID_PATTERN.fullmatch(raw):
+        return raw
+    return None
+
+
 def _strict_keys(
     payload: dict[str, object], expected: frozenset[str], comment: IssueComment
 ) -> None:
     observed = frozenset(payload)
     if observed == expected:
         return
-    message = (
-        f"trusted comment {comment.url} claim fields differ: "
-        f"expected {sorted(expected)}, got {sorted(observed)}"
-    )
-    if observed > expected:
-        message += (
-            "; unknown fields in a trusted comment usually mean a newer "
-            "agent-claim wrote this ledger - upgrade the installed tool"
+    missing = expected - observed
+    if missing:
+        raise InvalidClaimMarkerError(
+            f"trusted comment {comment.url} claim fields differ: "
+            f"expected {sorted(expected)}, got {sorted(observed)}"
         )
-    raise InvalidClaimMarkerError(message)
+    # Every expected field is present; the mismatch is only fields this reader's
+    # schema does not know. That is a newer writer, not a corrupt record: fence
+    # this one claim instead of failing the whole ledger read (issue #136).
+    raise UnreadableClaimError(
+        UnreadableClaim(
+            claim_id=_claim_id_if_parseable(payload),
+            comment_url=comment.url,
+            unknown_fields=tuple(sorted(observed - expected)),
+        )
+    )
 
 
 def is_protocol_candidate(comment: IssueComment) -> bool:
@@ -839,6 +888,10 @@ class ClaimLedgerAggregate:
     occurrence, every honored termination belongs to `occurrences[claim_id][0]`;
     later occurrences of a duplicated id are never tracked as "acquired" and so can
     never absorb a terminal event themselves.
+
+    `unreadable` holds one `UnreadableClaim` per trusted comment the walk could not
+    parse because of an unknown field (issue #136); such a comment contributes no
+    event at all, so it never appears in `active`, `occurrences`, or `terminated_by`.
     """
 
     active: tuple[ActiveClaim, ...]
@@ -846,6 +899,7 @@ class ClaimLedgerAggregate:
     duplicate_claim_ids: tuple[str, ...]
     occurrences: Mapping[str, tuple[ActiveClaim, ...]]
     terminated_by: Mapping[str, tuple[IssueComment, ...]]
+    unreadable: tuple[UnreadableClaim, ...]
 
 
 def _record_claim_occurrence(
@@ -903,9 +957,14 @@ def _aggregate_claim_events(comments: tuple[IssueComment, ...]) -> ClaimLedgerAg
     occurrences: dict[str, list[ActiveClaim]] = {}
     terminated_by: dict[str, list[IssueComment]] = {}
     duplicate_claim_ids: list[str] = []
+    unreadable: list[UnreadableClaim] = []
     ordered = sorted(comments, key=lambda comment: (comment.created_at, comment.identifier))
     for comment in ordered:
-        event = parse_claim_event(comment)
+        try:
+            event = parse_claim_event(comment)
+        except UnreadableClaimError as error:
+            unreadable.append(error.claim)
+            continue
         if event is None:
             continue
         if isinstance(event, ActiveClaim):
@@ -935,6 +994,7 @@ def _aggregate_claim_events(comments: tuple[IssueComment, ...]) -> ClaimLedgerAg
                 for claim_id, terminal_comments in terminated_by.items()
             }
         ),
+        unreadable=tuple(unreadable),
     )
 
 
@@ -1026,6 +1086,29 @@ def active_claims(comments: tuple[IssueComment, ...]) -> tuple[ActiveClaim, ...]
     aggregate = _aggregate_claim_events(comments)
     _reject_duplicate_claim_ids(aggregate)
     return aggregate.active
+
+
+def unreadable_claims(comments: tuple[IssueComment, ...]) -> tuple[UnreadableClaim, ...]:
+    """Every trusted claim comment this reader's schema could not parse (issue #136).
+
+    Read-only alongside `active_claims`: it never raises for the reused-claim-id
+    corruption `active_claims` refuses, so a caller displaying both (`status`) sees
+    the unreadable claims even when duplicate-id repair still owes a `reconcile`.
+    """
+    return _aggregate_claim_events(comments).unreadable
+
+
+def _reject_unreadable_claims(aggregate: ClaimLedgerAggregate, *, action: str) -> None:
+    """Fail closed (issue #136): an unreadable claim's true scope is unknowable to
+    this reader, so no new `claim` or `rescope` can be proven not to overlap it."""
+    blocker = next(iter(aggregate.unreadable), None)
+    if blocker is None:
+        return
+    subject = f"claim {blocker.claim_id!r}" if blocker.claim_id else "an unreadable claim"
+    raise ClaimUnavailableError(
+        f"{action} refused: {subject} at {blocker.comment_url} is unreadable, upgrade "
+        "the installed tool before claiming a scope that could overlap it"
+    )
 
 
 def _scope_prefixes(paths: tuple[str, ...]) -> set[tuple[str, ...]]:
@@ -1786,6 +1869,7 @@ def _acquire_claim_with_observed(
     replayed = matching_claim_retry(aggregate.active, request)
     if replayed is not None:
         return replayed, aggregate.active
+    _reject_unreadable_claims(aggregate, action="claim")
     _reject_unavailable_claim(aggregate, request)
 
     post_aggregate = _post_claim_and_observe(client, request)
@@ -1927,8 +2011,10 @@ def rescope_claim(  # noqa: PLR0913, PLR0917  # protocol/board slice, #103
         raise ClaimUnavailableError("rescope requires --add or --drop")
     add_scope = _valid_scope(list(add)) if add else ()
     drop_scope = _valid_scope(list(drop)) if drop else ()
-    observed = _ledger_claims(client)
-    selected = _select_rescope_claim(observed, identity, agent, claim_id, branch=branch)
+    aggregate = _aggregate_claim_events(client.list_protocol_candidates(LEDGER_ISSUE))
+    _reject_duplicate_claim_ids(aggregate)
+    _reject_unreadable_claims(aggregate, action="rescope")
+    selected = _select_rescope_claim(aggregate.active, identity, agent, claim_id, branch=branch)
     new_scope = _combined_scope(selected.scope, add_scope, drop_scope)
     client.post_comment(
         LEDGER_ISSUE,

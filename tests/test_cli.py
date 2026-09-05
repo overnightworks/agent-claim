@@ -3832,7 +3832,9 @@ def test_invalid_branch_and_private_or_noncanonical_scope_fail_loud(
         parse_claim_event(raised_argument_1)
 
 
-def test_unknown_or_missing_marker_fields_fail_loud() -> None:
+def test_missing_marker_fields_fail_loud() -> None:
+    """A field this reader requires being absent is a corrupt record, not a newer
+    writer (issue #136): it still fails the whole comment, verbatim as before."""
     unknown = {
         "action": "claim",
         "agent": "Codex Sol",
@@ -3845,9 +3847,6 @@ def test_unknown_or_missing_marker_fields_fail_loud() -> None:
         "surprise": True,
     }
 
-    raised_argument_1 = comment(1, marker(unknown))
-    with pytest.raises(InvalidClaimMarkerError, match="upgrade the installed tool"):
-        parse_claim_event(raised_argument_1)
     raised_argument_1 = comment(2, marker({"action": "claim"}))
     with pytest.raises(
         InvalidClaimMarkerError, match="claim marker issue must be a positive integer"
@@ -3857,6 +3856,63 @@ def test_unknown_or_missing_marker_fields_fail_loud() -> None:
     raised_argument_1 = comment(3, marker(missing))
     with pytest.raises(InvalidClaimMarkerError, match=r"fields differ(?!.*upgrade)"):
         parse_claim_event(raised_argument_1)
+
+
+def test_unknown_marker_field_becomes_an_unreadable_claim_not_a_ledger_failure() -> None:
+    """A trusted comment with every required field present, plus one this reader's
+    schema does not know, is a newer `agent-claim` writer (issue #136): `parse_claim_event`
+    signals it as an `UnreadableClaim`, distinct from the hard `InvalidClaimMarkerError`
+    a corrupt (missing-field) record still raises. `surprise` stands in for a field a
+    future minor release adds -- `whole` (#113) is already a known optional field."""
+    payload = {
+        "action": "claim",
+        "agent": "Codex Sol",
+        "base": BASE,
+        "branch": "topic",
+        "claim_id": "claim-a",
+        "issue": 71,
+        "role": "builder",
+        "scope": ["src"],
+        "surprise": True,
+    }
+
+    raised_argument_1 = comment(1, marker(payload))
+    with pytest.raises(
+        protocol.UnreadableClaimError, match="unreadable, upgrade the installed tool"
+    ) as excinfo:
+        parse_claim_event(raised_argument_1)
+    unreadable = excinfo.value.claim
+    assert unreadable.claim_id == "claim-a"
+    assert unreadable.comment_url == raised_argument_1.url
+    assert unreadable.unknown_fields == ("surprise",)
+
+
+def test_aggregation_fences_an_unknown_field_comment_instead_of_failing_the_ledger() -> None:
+    """The bug this issue fixes: one v0.11-shaped comment among v0.10 comments used to
+    fail `active_claims` outright (`trusted comment ... claim fields differ`), which
+    broke `board`/`next`/`pr-check` for every other lane too. It now becomes one
+    `UnreadableClaim`, and every other comment still reads normally."""
+    readable = claim_comment(request(issue=72, scope=("src",)))
+    newer_writer = marker(
+        {
+            "action": "claim",
+            "agent": "Grok 4.6",
+            "base": BASE,
+            "branch": "codex/issue-73-claims",
+            "claim_id": "claim-b",
+            "issue": 73,
+            "role": "builder",
+            "scope": ["docs"],
+            "surprise": True,
+        }
+    )
+    ledger = (comment(1, readable), comment(2, newer_writer))
+
+    assert [claim.claim_id for claim in active_claims(ledger)] == ["claim-a"]
+    unreadable = protocol.unreadable_claims(ledger)
+    assert len(unreadable) == 1
+    assert unreadable[0].claim_id == "claim-b"
+    assert unreadable[0].unknown_fields == ("surprise",)
 
 
 def test_release_must_come_from_original_claimant() -> None:
@@ -4711,6 +4767,60 @@ def test_acquire_claim_translates_a_same_claim_id_post_race_into_a_clear_error()
     raised_argument_1 = request("claim-a", "Codex Sol", issue=72, scope=("mine",))
     with pytest.raises(ClaimUnavailableError, match="claim race detected"):
         acquire_claim(client, raised_argument_1)
+
+
+def unreadable_ledger_comment(identifier: int, claim_id: str = "claim-b") -> IssueComment:
+    """A claim comment shaped like a newer writer's -- every required field present,
+    plus one (`surprise`) this reader's schema does not know (issue #136)."""
+    return comment(
+        identifier,
+        marker(
+            {
+                "action": "claim",
+                "agent": "Grok 4.6",
+                "base": BASE,
+                "branch": "codex/issue-73-claims",
+                "claim_id": claim_id,
+                "issue": 73,
+                "role": "builder",
+                "scope": ["docs"],
+                "surprise": True,
+            }
+        ),
+    )
+
+
+def test_acquire_claim_refuses_any_scope_while_an_unreadable_claim_stands() -> None:
+    """Issue #136: this reader cannot tell whether an unreadable claim's true scope
+    overlaps a new request, so a `claim` fails closed rather than risk a silent
+    double claim -- even though the new request's own scope does not literally
+    share a path with anything this reader can see."""
+    client = FakeForge({LEDGER_ISSUE: [unreadable_ledger_comment(1)]})
+
+    with pytest.raises(ClaimUnavailableError, match=r"claim refused: claim 'claim-b'.*unreadable"):
+        acquire_claim(client, request(issue=72, scope=("src",)))
+
+    assert client.comments[LEDGER_ISSUE] == [unreadable_ledger_comment(1)]
+
+
+def test_rescope_refuses_while_an_unreadable_claim_stands() -> None:
+    claimed = comment(1, claim_comment(request(issue=72, scope=("src",))))
+    client = FakeForge({LEDGER_ISSUE: [claimed, unreadable_ledger_comment(2)]})
+
+    with pytest.raises(
+        ClaimUnavailableError, match=r"rescope refused: claim 'claim-b'.*unreadable"
+    ):
+        rescope_claim(client, IssueIdentity(72), "Codex Sol", ("more",), (), None)
+
+
+def test_release_of_the_unreadable_claim_itself_is_refused() -> None:
+    """Fail closed (issue #136): a claim comment this reader cannot parse never
+    becomes an `ActiveClaim`, so releasing its claim id hits the ordinary
+    no-active-claim refusal instead of trusting an unverified identity/agent/role."""
+    client = FakeForge({LEDGER_ISSUE: [unreadable_ledger_comment(1)]})
+
+    with pytest.raises(ClaimUnavailableError, match="no active build claim"):
+        release_claim(client, IssueIdentity(73), "Grok 4.6", "builder", LANDED, "claim-b")
 
 
 def test_cross_issue_scope_race_keeps_both_overlapping_claims() -> None:
@@ -7864,6 +7974,80 @@ def test_cli_status_overlapping_protocol_comments_print_ledger_then_notes(
     )
 
 
+def test_cli_status_shows_an_unreadable_claim_alongside_readable_ones(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Issue #136: a v0.11-shaped comment among v0.10 comments no longer fails
+    `status` outright; it is named as unreadable, with its unknown fields, next to
+    every claim this reader still understands."""
+    client = FakeForge(
+        {
+            LEDGER_ISSUE: [
+                comment(1, claim_comment(request(issue=72, scope=("shared",)))),
+                unreadable_ledger_comment(2),
+            ]
+        }
+    )
+    _patch_status_cli(monkeypatch, client)
+
+    status = issue_claim.main(["--repo", "example/agent-claim", "status"])
+    assert status == 0
+    assert capsys.readouterr().out == (
+        f"LEDGER #{LEDGER_ISSUE}\n"
+        f"CLAIMED issue #72: Codex Sol (builder) base={BASE} "
+        "branch=codex/issue-72-claims claim=claim-a 0h 0m\n"
+        "  shared\n"
+        "UNREADABLE claim claim-b: unreadable, upgrade the installed tool\n"
+        "  fields: surprise\n"
+        f"  {unreadable_ledger_comment(2).url}\n"
+    )
+
+
+def test_cli_status_json_lists_an_unreadable_claim(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    client = FakeForge({LEDGER_ISSUE: [unreadable_ledger_comment(1)]})
+    _patch_status_cli(monkeypatch, client)
+
+    status = issue_claim.main(["--repo", "example/agent-claim", "status", "--json"])
+    assert status == 0
+    assert capsys.readouterr().out == (
+        json.dumps(
+            {
+                "ledger": LEDGER_ISSUE,
+                "issue": None,
+                "state": "UNCLAIMED",
+                "claims": [],
+                "unreadable": [
+                    {
+                        "claim_id": "claim-b",
+                        "comment_url": unreadable_ledger_comment(1).url,
+                        "fields": ["surprise"],
+                        "note": "unreadable, upgrade the installed tool",
+                    }
+                ],
+            }
+        )
+        + "\n"
+    )
+
+
+def test_cli_board_and_next_succeed_with_an_unreadable_claim_on_the_ledger(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Read-only commands answer normally even though one comment is unreadable
+    (issue #136); only a `claim`/`rescope` fails closed on it."""
+    client = FakeForge({LEDGER_ISSUE: [unreadable_ledger_comment(1)]})
+    _patch_status_cli(monkeypatch, client)
+
+    assert issue_claim.main(["--repo", "example/agent-claim", "board"]) == 0
+    capsys.readouterr()
+    assert issue_claim.main(["--repo", "example/agent-claim", "next"]) == 3
+
+
 def test_cli_status_without_ledger_errors_and_prints_no_ledger_line(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -7900,6 +8084,7 @@ def test_cli_status_json_empty_ledger_prints_unclaimed_object(
                 "issue": None,
                 "state": "UNCLAIMED",
                 "claims": [],
+                "unreadable": [],
             }
         )
         + "\n"
@@ -7921,6 +8106,7 @@ def test_cli_status_json_issue_with_no_claim_prints_unclaimed_object(
                 "issue": 72,
                 "state": "UNCLAIMED",
                 "claims": [],
+                "unreadable": [],
             }
         )
         + "\n"
@@ -7987,6 +8173,7 @@ def test_cli_status_json_after_claim_prints_claimed_object(
                         "old": False,
                     }
                 ],
+                "unreadable": [],
             }
         )
         + "\n"
@@ -8069,6 +8256,7 @@ def test_cli_status_json_overlapping_protocol_comments_print_claimed_object(
                         "old": False,
                     },
                 ],
+                "unreadable": [],
             }
         )
         + "\n"
@@ -8151,6 +8339,7 @@ def test_cli_status_json_issue_on_overlap_prints_related_claimed_object(
                         "old": False,
                     },
                 ],
+                "unreadable": [],
             }
         )
         + "\n"
@@ -11874,6 +12063,25 @@ def test_pr_check_accepts_a_claimed_work_item_that_the_pull_request_closes(
             body=f"Work-Item: {REPOSITORY}#{WORK_ITEM_ISSUE}\n\nCloses #{WORK_ITEM_ISSUE}"
         ),
     )
+
+    assert run_pr_check() == 0
+    assert capsys.readouterr().out == (
+        f"PR #12 by ada declares Work-Item: {REPOSITORY}#{WORK_ITEM_ISSUE}\n"
+    )
+
+
+def test_pr_check_succeeds_for_another_branch_with_an_unreadable_claim_on_the_ledger(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #136: a comment this reader cannot parse fences only its own claim;
+    `pr-check` for a different branch's pull request still succeeds."""
+    client = pr_check_client(
+        monkeypatch,
+        landing_pull_request(
+            body=f"Work-Item: {REPOSITORY}#{WORK_ITEM_ISSUE}\n\nCloses #{WORK_ITEM_ISSUE}"
+        ),
+    )
+    client.comments[LEDGER_ISSUE].append(unreadable_ledger_comment(99))
 
     assert run_pr_check() == 0
     assert capsys.readouterr().out == (

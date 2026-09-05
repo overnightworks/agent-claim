@@ -35,6 +35,7 @@ LEDGER_LABEL = protocol.LEDGER_LABEL
 LedgerSupersede = protocol.LedgerSupersede
 LedgerSupersededError = protocol.LedgerSupersededError
 PROJECTION_MARKER_PATTERN = protocol.PROJECTION_MARKER_PATTERN
+UnreadableClaim = protocol.UnreadableClaim
 _active_projection = protocol._active_projection
 _git_output = checkout._git_output
 _projection_ledger = protocol._projection_ledger
@@ -45,6 +46,7 @@ _unclaimed_projection = protocol._unclaimed_projection
 _validate_checkout = checkout._validate_checkout
 acquire_claim = protocol.acquire_claim
 active_claims = protocol.active_claims
+unreadable_claims = protocol.unreadable_claims
 bootstrap_ledger = discovery.bootstrap_ledger
 claim_comment = protocol.claim_comment
 claim_label = protocol.claim_label
@@ -441,35 +443,57 @@ def _overlap_note(claims_by_id: dict[str, protocol.ActiveClaim], peer_ids: set[s
     return "overlaps " + ", ".join(f"{_claim_subject(claim)} ({claim.claim_id})" for claim in peers)
 
 
+def _print_unreadable_claim(record: protocol.UnreadableClaim) -> None:
+    subject = f"claim {record.claim_id}" if record.claim_id else "claim"
+    print(f"UNREADABLE {subject}: unreadable, upgrade the installed tool")
+    print(f"  fields: {', '.join(record.unknown_fields)}")
+    print(f"  {record.comment_url}")
+
+
 def _status(
     claims: tuple[protocol.ActiveClaim, ...],
     issue: int | None,
     now: datetime | None = None,
+    *,
+    unreadable: tuple[protocol.UnreadableClaim, ...] = (),
 ) -> int:
     observed_at = (now or datetime.now(UTC)).astimezone(UTC)
     related, index = _status_claims(claims, issue)
+    exit_code = 0
     if not related:
         subject = "repository" if issue is None else f"issue #{issue}"
         print(f"UNCLAIMED {subject}")
-        return 0
-    claims_by_id = {claim.claim_id: claim for claim in claims}
-    for claim in related:
-        state = "CONFLICT" if claim.claim_id in index.conflict_ids else "CLAIMED"
-        print(
-            f"{state} {_claim_subject(claim)}: {claim.agent} ({claim.role}) "
-            f"base={claim.base} branch={claim.branch} claim={claim.claim_id}"
-            f"{_claim_age_suffix(claim, observed_at)}"
-        )
-        for path in claim.scope:
-            print(f"  {path}")
-        if claim.resource is not None:
-            print(f"  resource {claim.resource.name}={claim.resource.value}")
-        if claim.whole_reason is not None:
-            print(f"  whole: {claim.whole_reason}")
-        note = _overlap_note(claims_by_id, protocol._overlap_peer_ids(index, claim))
-        if note is not None:
-            print(f"  {note}")
-    return 2 if any(claim.claim_id in index.conflict_ids for claim in related) else 0
+    else:
+        claims_by_id = {claim.claim_id: claim for claim in claims}
+        for claim in related:
+            state = "CONFLICT" if claim.claim_id in index.conflict_ids else "CLAIMED"
+            print(
+                f"{state} {_claim_subject(claim)}: {claim.agent} ({claim.role}) "
+                f"base={claim.base} branch={claim.branch} claim={claim.claim_id}"
+                f"{_claim_age_suffix(claim, observed_at)}"
+            )
+            for path in claim.scope:
+                print(f"  {path}")
+            if claim.resource is not None:
+                print(f"  resource {claim.resource.name}={claim.resource.value}")
+            if claim.whole_reason is not None:
+                print(f"  whole: {claim.whole_reason}")
+            note = _overlap_note(claims_by_id, protocol._overlap_peer_ids(index, claim))
+            if note is not None:
+                print(f"  {note}")
+        exit_code = 2 if any(claim.claim_id in index.conflict_ids for claim in related) else 0
+    for record in unreadable:
+        _print_unreadable_claim(record)
+    return exit_code
+
+
+def _unreadable_json(record: protocol.UnreadableClaim) -> dict[str, object]:
+    return {
+        "claim_id": record.claim_id,
+        "comment_url": record.comment_url,
+        "fields": list(record.unknown_fields),
+        "note": "unreadable, upgrade the installed tool",
+    }
 
 
 def _status_json(
@@ -477,6 +501,8 @@ def _status_json(
     issue: int | None,
     ledger: int,
     now: datetime | None = None,
+    *,
+    unreadable: tuple[protocol.UnreadableClaim, ...] = (),
 ) -> int:
     observed_at = (now or datetime.now(UTC)).astimezone(UTC)
     related, index = _status_claims(claims, issue)
@@ -511,6 +537,7 @@ def _status_json(
             }
             for claim in related
         ],
+        "unreadable": [_unreadable_json(record) for record in unreadable],
     }
     print(json.dumps(payload))
     return 2 if state == "CONFLICT" else 0
@@ -1359,11 +1386,12 @@ def _cmd_status(parsed: argparse.Namespace, session: _ReadSession) -> int:
     issue = _optional_issue_number(parsed.issue)
     comments = session.forge.list_protocol_candidates(protocol.LEDGER_ISSUE)
     claims = protocol.active_claims(comments)
+    unreadable = protocol.unreadable_claims(comments)
     now = datetime.now(UTC)
     if parsed.json:
-        return _status_json(claims, issue, session.ledger, now=now)
+        return _status_json(claims, issue, session.ledger, now=now, unreadable=unreadable)
     print(f"LEDGER #{session.ledger}")
-    return _status(claims, issue, now=now)
+    return _status(claims, issue, now=now, unreadable=unreadable)
 
 
 def _cmd_board(parsed: argparse.Namespace, session: _ReadSession) -> None:

@@ -16,6 +16,19 @@ uv tool uninstall agent-claim
 To roll back, force-install the previous tag with `uv tool install --force
 git+https://github.com/FlexOr2/agent-claim.git@v0.8.0`.
 
+### Reader/writer compatibility
+
+A claim comment's field set is part of the append-only ledger contract, not just
+one release's schema. A reader refuses a comment outright only when a field it
+requires is missing -- that is a corrupt record. A comment carrying a field an
+older reader's schema does not know is not a corrupt ledger: the reader fences
+that one claim as unreadable (`status` names it, with its unknown field names)
+and still answers `board`, `next`, `who`, and `pr-check` for every other claim; a
+`claim` or `rescope` that could overlap the unreadable claim is refused, since the
+reader cannot tell. A new field therefore ships only in a release whose notes
+name it and the consumers pinned to an older tag, so each can bump its pin in its
+own lane instead of discovering the mismatch as a broken ledger read.
+
 ## Five-command quick start
 
 ```bash
