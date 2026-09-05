@@ -92,6 +92,9 @@ ignore_imports = [
     "agent_claim.checkout -> agent_claim.process",
 ]
 
+[tool.pyright]
+extraPaths = ["src"]
+
 [dependency-groups]
 dev = [
     "pytest>=8",
@@ -100,4 +103,5 @@ dev = [
     "ruff==0.16.2",
     "vulture==2.16",
     "import-linter==2.13",
+    "pyright==1.1.411",
 ]
