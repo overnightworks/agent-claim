@@ -126,3 +126,41 @@ jobs:
       - uses: SonarSource/sonarqube-scan-action@22918119ff8e1ca75a623e15c8296b6ea4fbe28f  # v8.2.1
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      # The scan step above blocks on the analysis (sonar.qualitygate.wait=true
+      # in sonar-project.properties), so the report this reads is already
+      # final. The quality gate itself passes on ratings (A/B/C), not on "0
+      # findings on new code" (issue #143); this queries the public API
+      # directly for that stronger bar and fails loud, with the list, when it
+      # is not met. No token: the project is public.
+      - name: SonarCloud open findings
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          component_key="$(sed -n 's/^sonar\.projectKey=//p' sonar-project.properties)"
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+            scope_query="pullRequest=${PULL_REQUEST_NUMBER}"
+          else
+            scope_query="branch=main"
+          fi
+          report_path="${RUNNER_TEMP}/sonar-open-findings.json"
+          curl -s "https://sonarcloud.io/api/issues/search?componentKeys=${component_key}&${scope_query}&statuses=OPEN&ps=100" \
+            -o "${report_path}"
+          python3 - "${report_path}" <<'PYTHON'
+          import json
+          import sys
+
+          with open(sys.argv[1]) as handle:
+              report = json.load(handle)
+
+          total = report["total"]
+          for issue in report["issues"]:
+              file_path = issue["component"].split(":", 1)[1]
+              line = issue.get("line", "?")
+              print(f'{issue["rule"]} {file_path}:{line} {issue["message"]}')
+
+          if total > 0:
+              print(f"{total} open SonarCloud finding(s) on new code", file=sys.stderr)
+              sys.exit(1)
+          PYTHON
