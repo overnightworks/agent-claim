@@ -112,6 +112,15 @@ class ResourceHold:
 
 @dataclass(frozen=True)
 class ActiveClaim:
+    """One claim id's current standing, derived from the whole ledger walk.
+
+    `quarantined_by` is set when a later comment for this same claim id carried
+    a field this reader's schema does not know (issue #136): the claim still
+    reads and still shows in `board`/`status`, but `release` and this claim's
+    own-branch `pr-check` refuse it, naming the quarantining comment, until the
+    ledger reads clean again.
+    """
+
     identity: ClaimIdentity
     claim_id: str
     agent: str
@@ -123,19 +132,22 @@ class ActiveClaim:
     resource: ResourceHold | None = None
     requested_resource: str | None = None
     whole_reason: str | None = None
+    quarantined_by: UnreadableClaim | None = None
 
 
 @dataclass(frozen=True)
 class UnreadableClaim:
     """A trusted claim comment carrying a field this reader's schema does not know.
 
-    A newer `agent-claim` wrote it; this reader fences the one claim instead of
-    failing the whole ledger read. `claim_id` is `None` when the field that
-    would normally identify it is itself missing or malformed -- the comment is
-    still named by `comment_url` in that case. Missing a field this reader
-    requires is a different, harder failure (a corrupt record, not a newer
-    writer): `_strict_keys` still raises `InvalidClaimMarkerError` for that and
-    never produces an `UnreadableClaim`.
+    A newer `agent-claim` wrote it; this reader fences the record itself and, when
+    its `claim_id` matches a claim already active on the ledger, quarantines that
+    claim too (issue #136) by setting `ActiveClaim.quarantined_by` -- see there for
+    what quarantine refuses. `claim_id` is `None` when the field that would
+    normally identify it is itself missing or malformed -- the comment is still
+    named by `comment_url` in that case, and it quarantines nothing. Missing a
+    field this reader requires is a different, harder failure (a corrupt record,
+    not a newer writer): `_strict_keys` still raises `InvalidClaimMarkerError` for
+    that and never produces an `UnreadableClaim`.
     """
 
     claim_id: str | None
@@ -891,7 +903,10 @@ class ClaimLedgerAggregate:
 
     `unreadable` holds one `UnreadableClaim` per trusted comment the walk could not
     parse because of an unknown field (issue #136); such a comment contributes no
-    event at all, so it never appears in `active`, `occurrences`, or `terminated_by`.
+    event of its own, so it never appears in `occurrences` or `terminated_by`. It
+    can still reach `active` indirectly: when its `claim_id` names a claim that is
+    already active, that claim is carried into `active` with `quarantined_by` set
+    to this record instead of `None`.
     """
 
     active: tuple[ActiveClaim, ...]
@@ -945,6 +960,31 @@ def _apply_claim_rescope_event(
     )
 
 
+def _quarantine_active_claims(
+    active: dict[str, ActiveClaim], unreadable: list[UnreadableClaim]
+) -> dict[str, ActiveClaim]:
+    """Attach the earliest matching `UnreadableClaim` to the active claim it names.
+
+    A quarantined claim id has no live `ActiveClaim` to attach to when the
+    unreadable comment is itself the newer writer's `claim` (there was never a
+    readable claim under that id); it only matters, and only changes anything
+    here, when the id already names a claim this reader did parse -- e.g. a
+    newer writer's `rescope` of an existing claim (issue #136 finding 1).
+    """
+    reasons: dict[str, UnreadableClaim] = {}
+    for record in unreadable:
+        if record.claim_id is not None:
+            reasons.setdefault(record.claim_id, record)
+    if not reasons:
+        return active
+    return {
+        claim_id: (
+            replace(claim, quarantined_by=reasons[claim_id]) if claim_id in reasons else claim
+        )
+        for claim_id, claim in active.items()
+    }
+
+
 def _aggregate_claim_events(comments: tuple[IssueComment, ...]) -> ClaimLedgerAggregate:
     """Walk the ledger once, tolerating a reused claim id instead of raising on sight.
 
@@ -978,10 +1018,11 @@ def _aggregate_claim_events(comments: tuple[IssueComment, ...]) -> ClaimLedgerAg
 
     occurrence_map = {claim_id: tuple(events) for claim_id, events in occurrences.items()}
     derived_active = _apply_derived_resource_holds(active, occurrence_map)
+    quarantined_active = _quarantine_active_claims(derived_active, unreadable)
     return ClaimLedgerAggregate(
         active=tuple(
             sorted(
-                derived_active.values(),
+                quarantined_active.values(),
                 key=lambda event: (event.comment.created_at, event.comment.identifier),
             )
         ),
@@ -1091,11 +1132,23 @@ def active_claims(comments: tuple[IssueComment, ...]) -> tuple[ActiveClaim, ...]
 def unreadable_claims(comments: tuple[IssueComment, ...]) -> tuple[UnreadableClaim, ...]:
     """Every trusted claim comment this reader's schema could not parse (issue #136).
 
-    Read-only alongside `active_claims`: it never raises for the reused-claim-id
-    corruption `active_claims` refuses, so a caller displaying both (`status`) sees
+    Read-only alongside `active_claims`; unlike `active_claims`, it does not also
+    refuse a reused claim id -- any other ledger corruption `_aggregate_claim_events`
+    itself detects still raises here too. A caller displaying both (`status`) sees
     the unreadable claims even when duplicate-id repair still owes a `reconcile`.
+    Each record whose `claim_id` names a currently active claim is the same object
+    as that claim's `quarantined_by`.
     """
     return _aggregate_claim_events(comments).unreadable
+
+
+def _unreadable_claim_reason(record: UnreadableClaim) -> str:
+    """Shared refusal core naming one `UnreadableClaim`'s comment and unknown field
+    names -- every fail-closed refusal this reader raises for it quotes this text
+    verbatim (issue #136)."""
+    subject = f"claim {record.claim_id!r}" if record.claim_id else "an unreadable claim"
+    fields = ", ".join(sorted(record.unknown_fields))
+    return f"{subject} at {record.comment_url} is unreadable (unknown fields: {fields})"
 
 
 def _reject_unreadable_claims(aggregate: ClaimLedgerAggregate, *, action: str) -> None:
@@ -1104,10 +1157,9 @@ def _reject_unreadable_claims(aggregate: ClaimLedgerAggregate, *, action: str) -
     blocker = next(iter(aggregate.unreadable), None)
     if blocker is None:
         return
-    subject = f"claim {blocker.claim_id!r}" if blocker.claim_id else "an unreadable claim"
     raise ClaimUnavailableError(
-        f"{action} refused: {subject} at {blocker.comment_url} is unreadable, upgrade "
-        "the installed tool before claiming a scope that could overlap it"
+        f"{action} refused: {_unreadable_claim_reason(blocker)}; upgrade the installed "
+        "tool before claiming a scope that could overlap it"
     )
 
 
@@ -1852,6 +1904,30 @@ def _resolve_resource_race(
     raise ClaimUnavailableError(f"{expected.name} {expected.value} is held by another claim")
 
 
+def _resolve_unreadable_claim_race(
+    client: ClaimWriter,
+    request: ClaimRequest,
+    own: ActiveClaim,
+    post_aggregate: ClaimLedgerAggregate,
+) -> None:
+    """Post-mutation race (issue #136 finding 2): the pre-post check already
+    proved the ledger clean, so an unreadable comment in `post_aggregate` can only
+    be a concurrent post that landed during ours. Compensate exactly like an
+    identity/resource race -- release the just-posted claim -- so a `claim` that
+    reports failure never leaves a live claim behind."""
+    blocker = next(iter(post_aggregate.unreadable), None)
+    if blocker is None:
+        return
+    client.post_comment(
+        LEDGER_ISSUE, release_comment(own, request.agent, request.role, "claim race lost")
+    )
+    _reconcile_identity(client, request.identity)
+    raise ClaimUnavailableError(
+        f"claim refused: {_unreadable_claim_reason(blocker)} appeared while posting; "
+        "upgrade the installed tool before claiming a scope that could overlap it"
+    )
+
+
 def _acquire_claim_with_observed(
     client: ClaimWriter, request: ClaimRequest
 ) -> tuple[ActiveClaim, tuple[ActiveClaim, ...]]:
@@ -1880,6 +1956,7 @@ def _acquire_claim_with_observed(
             f"{_identity_summary(request.identity, request.branch)} did not expose "
             "the posted claim id"
         )
+    _resolve_unreadable_claim_race(client, request, own, post_aggregate)
     _resolve_identity_race(client, request, own, observed)
     _resolve_resource_race(client, request, own, observed)
 
@@ -1916,11 +1993,10 @@ def _observe_rescoped_claim(
     identity: ClaimIdentity,
     selected: ActiveClaim,
     expected_scope: tuple[str, ...],
-) -> tuple[tuple[ActiveClaim, ...], ActiveClaim]:
+) -> tuple[ClaimLedgerAggregate, ActiveClaim]:
     aggregate = _aggregate_claim_events(client.list_protocol_candidates(LEDGER_ISSUE))
     _reject_duplicate_claim_ids(aggregate)
-    observed = aggregate.active
-    own = next((claim for claim in observed if claim.claim_id == selected.claim_id), None)
+    own = next((claim for claim in aggregate.active if claim.claim_id == selected.claim_id), None)
     if own is None:
         raise ClaimError(
             f"{_identity_summary(identity, selected.branch)} did not expose the rescoped claim id"
@@ -1929,7 +2005,7 @@ def _observe_rescoped_claim(
         raise ClaimError(
             f"{_identity_summary(identity, selected.branch)} did not observe the posted rescope"
         )
-    return observed, own
+    return aggregate, own
 
 
 @dataclass(frozen=True)
@@ -1996,6 +2072,36 @@ def _select_rescope_claim(
     return selected
 
 
+def _resolve_unreadable_rescope_race(
+    client: ClaimWriter,
+    selected: ActiveClaim,
+    own: ActiveClaim,
+    post_aggregate: ClaimLedgerAggregate,
+) -> None:
+    """Post-mutation race (issue #136 finding 2): the pre-post check already
+    proved the ledger clean, so an unreadable comment in `post_aggregate` can only
+    be a concurrent post that landed during ours. Compensate by reverting the
+    scope change with another rescope back to `selected`'s pre-rescope scope, so a
+    `rescope` that reports failure never leaves its new scope live. (A concurrent
+    rescope that also just gave this claim its first-ever `--whole` reason is a
+    narrower case this revert does not undo, since a rescope event cannot force a
+    reason back to unset -- only replace it.)"""
+    blocker = next(iter(post_aggregate.unreadable), None)
+    if blocker is None:
+        return
+    client.post_comment(
+        LEDGER_ISSUE,
+        rescope_comment(
+            own, selected.scope, selected.agent, selected.role, whole_reason=selected.whole_reason
+        ),
+    )
+    _reconcile_identity(client, selected.identity)
+    raise ClaimUnavailableError(
+        f"rescope refused: {_unreadable_claim_reason(blocker)} appeared while posting; "
+        "upgrade the installed tool before claiming a scope that could overlap it"
+    )
+
+
 def rescope_claim(  # noqa: PLR0913, PLR0917  # protocol/board slice, #103
     client: ClaimWriter,
     identity: ClaimIdentity,
@@ -2026,7 +2132,8 @@ def rescope_claim(  # noqa: PLR0913, PLR0917  # protocol/board slice, #103
             whole_reason=whole_reason,
         ),
     )
-    _, own = _observe_rescoped_claim(client, identity, selected, new_scope)
+    post_aggregate, own = _observe_rescoped_claim(client, identity, selected, new_scope)
+    _resolve_unreadable_rescope_race(client, selected, own, post_aggregate)
 
     _reconcile_identity(client, identity)
     return own
@@ -2086,6 +2193,11 @@ def release_claim(  # noqa: PLR0913, PLR0917  # protocol/board slice, #103
     selected = _selected_claim(
         standing, _ClaimLookup(identity, agent, claim_id, branch), action="release"
     )
+    if selected.quarantined_by is not None:
+        raise ClaimUnavailableError(
+            f"release refused: {_unreadable_claim_reason(selected.quarantined_by)}; "
+            "upgrade the installed tool"
+        )
     if role is None:
         role = selected.role
     if not coordinator_override and (agent, role) != (selected.agent, selected.role):

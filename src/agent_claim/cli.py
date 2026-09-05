@@ -35,7 +35,6 @@ LEDGER_LABEL = protocol.LEDGER_LABEL
 LedgerSupersede = protocol.LedgerSupersede
 LedgerSupersededError = protocol.LedgerSupersededError
 PROJECTION_MARKER_PATTERN = protocol.PROJECTION_MARKER_PATTERN
-UnreadableClaim = protocol.UnreadableClaim
 _active_projection = protocol._active_projection
 _git_output = checkout._git_output
 _projection_ledger = protocol._projection_ledger
@@ -46,7 +45,6 @@ _unclaimed_projection = protocol._unclaimed_projection
 _validate_checkout = checkout._validate_checkout
 acquire_claim = protocol.acquire_claim
 active_claims = protocol.active_claims
-unreadable_claims = protocol.unreadable_claims
 bootstrap_ledger = discovery.bootstrap_ledger
 claim_comment = protocol.claim_comment
 claim_label = protocol.claim_label
@@ -1009,18 +1007,33 @@ def _claim_defect(
     detail: forge.Landing,
     identity: protocol.ClaimIdentity,
 ) -> board.ClassificationDefect | None:
-    """A landing declares only what its own head branch holds a live claim on."""
-    if any(
-        claim.identity == identity and claim.branch == detail.source_branch
-        for claim in protocol._ledger_claims(client)
-    ):
-        return None
-    subject = (
-        f"claim for #{identity.issue}"
-        if isinstance(identity, protocol.IssueIdentity)
-        else "issue-less lane claim"
+    """A landing declares only what its own head branch holds a live, unquarantined claim on."""
+    matching = next(
+        (
+            claim
+            for claim in protocol._ledger_claims(client)
+            if claim.identity == identity and claim.branch == detail.source_branch
+        ),
+        None,
     )
-    return board.ClassificationDefect(f"has no active {subject} on branch {detail.source_branch!r}")
+    if matching is None:
+        subject = (
+            f"claim for #{identity.issue}"
+            if isinstance(identity, protocol.IssueIdentity)
+            else "issue-less lane claim"
+        )
+        return board.ClassificationDefect(
+            f"has no active {subject} on branch {detail.source_branch!r}"
+        )
+    if matching.quarantined_by is not None:
+        # Issue #136 finding 1: a claim a later unreadable comment quarantined
+        # cannot be trusted to still mean what this reader parsed it as.
+        return board.ClassificationDefect(
+            f"has a quarantined claim on branch {detail.source_branch!r}: "
+            f"{protocol._unreadable_claim_reason(matching.quarantined_by)}; "
+            "upgrade the installed tool"
+        )
+    return None
 
 
 def _no_item_defect(
