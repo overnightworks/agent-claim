@@ -236,26 +236,29 @@ def _request(arguments: argparse.Namespace) -> protocol.ClaimRequest:
 LANE_ISSUE_HELP = "omit for lane mode, derived from a docs/ or fix/ checkout branch"
 
 
-def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="agent-claim", description=__doc__)
-    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
-    parser.add_argument("--repo", help="GitHub repository as OWNER/REPO")
-    commands = parser.add_subparsers(dest="command", required=True)
-
+def _add_bootstrap_parser(commands: argparse._SubParsersAction) -> None:
     commands.add_parser("bootstrap", help="create or adopt this repository's locked ledger")
 
+
+def _add_status_parser(commands: argparse._SubParsersAction) -> None:
     status = commands.add_parser("status", help="show repository-wide build claims")
     status.add_argument("issue", type=int, nargs="?")
     status.add_argument("--json", action="store_true")
 
+
+def _add_board_parser(commands: argparse._SubParsersAction) -> None:
     board_command = commands.add_parser("board", help="project the open work board without writes")
     board_command.add_argument("--json", action="store_true")
 
+
+def _add_rulings_parser(commands: argparse._SubParsersAction) -> None:
     rulings_command = commands.add_parser(
         "rulings", help="list open expectation lines without writes"
     )
     rulings_command.add_argument("--json", action="store_true")
 
+
+def _add_next_parser(commands: argparse._SubParsersAction) -> None:
     next_command = commands.add_parser(
         "next",
         help="name the board's top-priority item to pull",
@@ -263,6 +266,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     next_command.add_argument("--json", action="store_true")
 
+
+def _add_claim_parser(commands: argparse._SubParsersAction) -> None:
     claim = commands.add_parser("claim", help="claim an issue and scope before editing")
     claim.add_argument(
         "issue",
@@ -301,6 +306,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     claim.add_argument("--json", action="store_true")
 
+
+def _add_release_parser(commands: argparse._SubParsersAction) -> None:
     release = commands.add_parser("release", help="release a landed or abandoned claim")
     release.add_argument(
         "issue",
@@ -326,6 +333,8 @@ def _parser() -> argparse.ArgumentParser:
     release.add_argument("--coordinator-override", action="store_true")
     release.add_argument("--json", action="store_true")
 
+
+def _add_rescope_parser(commands: argparse._SubParsersAction) -> None:
     rescope = commands.add_parser(
         "rescope", help="add or drop paths on a live claim without releasing"
     )
@@ -354,13 +363,19 @@ def _parser() -> argparse.ArgumentParser:
     )
     rescope.add_argument("--json", action="store_true")
 
+
+def _add_who_parser(commands: argparse._SubParsersAction) -> None:
     who = commands.add_parser("who", help="show which live claim holds a path")
     who.add_argument("path")
     who.add_argument("--json", action="store_true")
 
+
+def _add_reconcile_parser(commands: argparse._SubParsersAction) -> None:
     reconcile = commands.add_parser("reconcile", help="repair claimed-label projections")
     reconcile.add_argument("issue", type=int, nargs="?")
 
+
+def _add_supersede_parser(commands: argparse._SubParsersAction) -> None:
     supersede = commands.add_parser(
         "supersede", help="atomically freeze a drained ledger for its successor"
     )
@@ -370,15 +385,49 @@ def _parser() -> argparse.ArgumentParser:
     supersede.add_argument("--reason", required=True)
     supersede.add_argument("--claim-id", required=True)
 
+
+def _add_pull_request_check_parser(commands: argparse._SubParsersAction) -> None:
     pull_request_check = commands.add_parser(
         "pr-check",
         help="check a pull request's typed work-item classification before it merges",
     )
     pull_request_check.add_argument("--pr", type=int, required=True, metavar="NUMBER")
 
+
+def _add_policy_parser(commands: argparse._SubParsersAction) -> None:
     policy = commands.add_parser("policy", help="print the provider-neutral loader block")
     policy.add_argument("--print", action="store_true", required=True, dest="print_loader")
+
+
+def _add_protect_parser(commands: argparse._SubParsersAction) -> None:
     commands.add_parser("protect", help="deny PreToolUse writes without this session's live claim")
+
+
+_SUBPARSER_BUILDERS: tuple[Callable[[argparse._SubParsersAction], None], ...] = (
+    _add_bootstrap_parser,
+    _add_status_parser,
+    _add_board_parser,
+    _add_rulings_parser,
+    _add_next_parser,
+    _add_claim_parser,
+    _add_release_parser,
+    _add_rescope_parser,
+    _add_who_parser,
+    _add_reconcile_parser,
+    _add_supersede_parser,
+    _add_pull_request_check_parser,
+    _add_policy_parser,
+    _add_protect_parser,
+)
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="agent-claim", description=__doc__)
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument("--repo", help="GitHub repository as OWNER/REPO")
+    commands = parser.add_subparsers(dest="command", required=True)
+    for add_subparser in _SUBPARSER_BUILDERS:
+        add_subparser(commands)
     return parser
 
 
@@ -1305,27 +1354,29 @@ def _protect_relative_path(raw_path: str) -> str | None:
 PATH_REQUIRED = "path required"
 
 
-def _protect_write(repository: str | None, payload: dict[str, object]) -> int:
+def _protect_hook_path(payload: dict[str, object]) -> str | None:
+    """The raw path a mutating hook call targets, or `None` when the payload
+    carries no `toolInput`/`tool_input` mapping naming one."""
     tool_input = _hook_field(payload, "toolInput", "tool_input")
     if not isinstance(tool_input, dict):
-        return _hook_deny(PATH_REQUIRED)
-    raw_path = _hook_path(tool_input)
-    if raw_path is None:
-        return _hook_deny(PATH_REQUIRED)
-    agent = checkout._resolved_agent(None)
-    branch = checkout._git_output(["branch", "--show-current"])
+        return None
+    return _hook_path(tool_input)
+
+
+def _protect_checkout_refusal(branch: str) -> str | None:
+    """Why this checkout may never hold a live claim, or `None` when it can."""
     if branch in {"main", "master"}:
-        return _hook_deny("not main")
+        return "not main"
     git_directory = Path(checkout._git_output(["rev-parse", "--git-dir"])).resolve()
     common_directory = Path(checkout._git_output(["rev-parse", "--git-common-dir"])).resolve()
     if git_directory == common_directory:
-        return _hook_deny("worktree")
-    relative = _protect_relative_path(raw_path)
-    if relative is None:
-        return _hook_deny(PATH_REQUIRED)
-    forge_handle = github.GitHubForge(
-        github.discover_repository(repository, remote_url=checkout.origin_remote_url)
-    )
+        return "worktree"
+    return None
+
+
+def _protect_ledger_verdict(
+    forge_handle: forge.ForgeReader, agent: str, branch: str, relative: str
+) -> int:
     ledger = discovery.discover_ledger(forge_handle)
     if ledger is None:
         return _hook_deny("claim first")
@@ -1338,6 +1389,24 @@ def _protect_write(repository: str | None, payload: dict[str, object]) -> int:
         ):
             return _hook_allow()
     return _hook_deny("claim first")
+
+
+def _protect_write(repository: str | None, payload: dict[str, object]) -> int:
+    raw_path = _protect_hook_path(payload)
+    if raw_path is None:
+        return _hook_deny(PATH_REQUIRED)
+    agent = checkout._resolved_agent(None)
+    branch = checkout._git_output(["branch", "--show-current"])
+    refusal = _protect_checkout_refusal(branch)
+    if refusal is not None:
+        return _hook_deny(refusal)
+    relative = _protect_relative_path(raw_path)
+    if relative is None:
+        return _hook_deny(PATH_REQUIRED)
+    forge_handle = github.GitHubForge(
+        github.discover_repository(repository, remote_url=checkout.origin_remote_url)
+    )
+    return _protect_ledger_verdict(forge_handle, agent, branch, relative)
 
 
 def _protect(repository: str | None) -> int:

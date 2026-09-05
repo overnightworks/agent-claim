@@ -815,9 +815,11 @@ def test_read_only_commands_never_write_through_a_reader_only_forge(
         capsys.readouterr()
 
 
-def test_board_projects_fixture_json_without_github_writes(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
+def _board_fixture_environment(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    """The fixed-clock GitHub board scenario shared by the text and `--json`
+    board projections: five issues across stages, three open and two merged
+    pull requests, and one live claim. Returns the client's captured `gh`
+    invocations, for the read-only assertion both projections share."""
     issues_json = [
         {
             "number": 10,
@@ -954,6 +956,13 @@ def test_board_projects_fixture_json_without_github_writes(
     monkeypatch.setattr(discovery, "discover_ledger", lambda _client: LEDGER_ISSUE)
     monkeypatch.setattr(issue_claim, "datetime", FixedDateTime)
     monkeypatch.setattr(github, "datetime", FixedDateTime)
+    return observed
+
+
+def test_board_renders_fixture_as_text_without_github_writes(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    observed = _board_fixture_environment(monkeypatch)
 
     assert issue_claim.main(["--repo", "example/agent-claim", "board"]) == 0
     rendered = capsys.readouterr().out
@@ -976,6 +985,12 @@ def test_board_projects_fixture_json_without_github_writes(
     assert merged_days == {
         day.isoformat() for day in github._query_days(date(2026, 8, 1), date(2026, 8, 21))
     }
+
+
+def test_board_projects_fixture_json_without_github_writes(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _board_fixture_environment(monkeypatch)
 
     assert issue_claim.main(["--repo", "example/agent-claim", "board", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
