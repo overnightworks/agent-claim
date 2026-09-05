@@ -448,6 +448,41 @@ def _print_unreadable_claim(record: protocol.UnreadableClaim) -> None:
     print(f"  {record.comment_url}")
 
 
+def _print_claim_status_lines(
+    claim: protocol.ActiveClaim,
+    claims_by_id: dict[str, protocol.ActiveClaim],
+    index: protocol.ClaimConflictIndex,
+    observed_at: datetime,
+) -> None:
+    state = "CONFLICT" if claim.claim_id in index.conflict_ids else "CLAIMED"
+    print(
+        f"{state} {_claim_subject(claim)}: {claim.agent} ({claim.role}) "
+        f"base={claim.base} branch={claim.branch} claim={claim.claim_id}"
+        f"{_claim_age_suffix(claim, observed_at)}"
+    )
+    for path in claim.scope:
+        print(f"  {path}")
+    if claim.resource is not None:
+        print(f"  resource {claim.resource.name}={claim.resource.value}")
+    if claim.whole_reason is not None:
+        print(f"  whole: {claim.whole_reason}")
+    note = _overlap_note(claims_by_id, protocol._overlap_peer_ids(index, claim))
+    if note is not None:
+        print(f"  {note}")
+
+
+def _print_related_claims(
+    claims: tuple[protocol.ActiveClaim, ...],
+    related: tuple[protocol.ActiveClaim, ...],
+    index: protocol.ClaimConflictIndex,
+    observed_at: datetime,
+) -> int:
+    claims_by_id = {claim.claim_id: claim for claim in claims}
+    for claim in related:
+        _print_claim_status_lines(claim, claims_by_id, index, observed_at)
+    return 2 if any(claim.claim_id in index.conflict_ids for claim in related) else 0
+
+
 def _status(
     claims: tuple[protocol.ActiveClaim, ...],
     issue: int | None,
@@ -457,29 +492,12 @@ def _status(
 ) -> int:
     observed_at = (now or datetime.now(UTC)).astimezone(UTC)
     related, index = _status_claims(claims, issue)
-    exit_code = 0
-    if not related:
+    if related:
+        exit_code = _print_related_claims(claims, related, index, observed_at)
+    else:
         subject = "repository" if issue is None else f"issue #{issue}"
         print(f"UNCLAIMED {subject}")
-    else:
-        claims_by_id = {claim.claim_id: claim for claim in claims}
-        for claim in related:
-            state = "CONFLICT" if claim.claim_id in index.conflict_ids else "CLAIMED"
-            print(
-                f"{state} {_claim_subject(claim)}: {claim.agent} ({claim.role}) "
-                f"base={claim.base} branch={claim.branch} claim={claim.claim_id}"
-                f"{_claim_age_suffix(claim, observed_at)}"
-            )
-            for path in claim.scope:
-                print(f"  {path}")
-            if claim.resource is not None:
-                print(f"  resource {claim.resource.name}={claim.resource.value}")
-            if claim.whole_reason is not None:
-                print(f"  whole: {claim.whole_reason}")
-            note = _overlap_note(claims_by_id, protocol._overlap_peer_ids(index, claim))
-            if note is not None:
-                print(f"  {note}")
-        exit_code = 2 if any(claim.claim_id in index.conflict_ids for claim in related) else 0
+        exit_code = 0
     for record in unreadable:
         _print_unreadable_claim(record)
     return exit_code
