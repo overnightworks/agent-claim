@@ -2303,8 +2303,6 @@ def _resolve_unreadable_rescope_race(
 
 @dataclass(frozen=True)
 class RescopeRequest:
-    """A live claim's identity plus the scope change and whole-reason to apply to it."""
-
     identity: ClaimIdentity
     agent: str
     add: tuple[str, ...]
@@ -2378,8 +2376,6 @@ def _claims_for_identity(
 
 @dataclass(frozen=True)
 class ReleaseContext:
-    """A live claim's identity plus who is releasing it, its outcome, and how."""
-
     identity: ClaimIdentity
     agent: str
     role: str | None
@@ -2444,8 +2440,6 @@ def release_claim(client: ClaimWriter, context: ReleaseContext) -> ActiveClaim:
 
 @dataclass(frozen=True)
 class SupersedeRequest:
-    """Who is freezing the ledger for `successor_issue`, and why."""
-
     successor_issue: int
     agent: str
     role: str

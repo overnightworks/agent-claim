@@ -1242,10 +1242,6 @@ def _board_item(
 
 @dataclass(frozen=True)
 class BoardBuildInputs:
-    """Everything one board projection needs: the open issues and pull requests
-    read from the forge, the live claims layered onto them, and the repository
-    identity and configuration to score and place each item by."""
-
     issues: tuple[Issue, ...]
     open_pull_requests: tuple[PullRequest, ...]
     recent_merged_pull_requests: tuple[PullRequest, ...]

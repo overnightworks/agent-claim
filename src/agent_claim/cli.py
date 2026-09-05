@@ -1358,8 +1358,6 @@ PATH_REQUIRED = "path required"
 
 
 def _protect_hook_path(payload: dict[str, object]) -> str | None:
-    """The raw path a mutating hook call targets, or `None` when the payload
-    carries no `toolInput`/`tool_input` mapping naming one."""
     tool_input = _hook_field(payload, "toolInput", "tool_input")
     if not isinstance(tool_input, dict):
         return None
@@ -1367,7 +1365,6 @@ def _protect_hook_path(payload: dict[str, object]) -> str | None:
 
 
 def _protect_checkout_refusal(branch: str) -> str | None:
-    """Why this checkout may never hold a live claim, or `None` when it can."""
     if branch in {"main", "master"}:
         return "not main"
     git_directory = Path(checkout._git_output(["rev-parse", "--git-dir"])).resolve()

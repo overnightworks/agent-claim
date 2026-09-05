@@ -897,10 +897,6 @@ def test_read_only_commands_never_write_through_a_reader_only_forge(
 
 
 def _board_fixture_environment(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
-    """The fixed-clock GitHub board scenario shared by the text and `--json`
-    board projections: five issues across stages, three open and two merged
-    pull requests, and one live claim. Returns the client's captured `gh`
-    invocations, for the read-only assertion both projections share."""
     issues_json = [
         {
             "number": 10,
@@ -11099,6 +11095,65 @@ def _assert_protect_decision(
         assert payload == {"decision": "allow"}
         return
     assert payload == {"decision": "deny", "reason": reason}
+
+
+def test_protect_allowed_write_resolves_identity_then_git_then_github(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _isolate_protect_home(monkeypatch, tmp_path)
+    work = tmp_path / "work"
+    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    calls: list[str] = []
+
+    resolve_agent = checkout._resolved_agent
+
+    def resolved_agent(explicit: str | None) -> str:
+        calls.append("identity")
+        return resolve_agent(explicit)
+
+    monkeypatch.setattr(checkout, "_resolved_agent", resolved_agent)
+
+    git_values = _protect_git_values(work)
+
+    def git(arguments: list[str]) -> str:
+        calls.append("git")
+        return git_values[tuple(arguments)]
+
+    monkeypatch.setattr(checkout, "_git_output", git)
+
+    claimed = comment(
+        1,
+        claim_comment(
+            replace(
+                request("cli-claim", "Grok sess-1", issue=72, scope=("src",)),
+                branch="codex/issue-72-claims",
+            )
+        ),
+    )
+    client = ReaderOnlyForge({LEDGER_ISSUE: [claimed]}, {72})
+
+    def github_forge(repository: object) -> ReaderOnlyForge:
+        calls.append("github")
+        return client
+
+    def discover_ledger(_client: object) -> int:
+        calls.append("github")
+        return LEDGER_ISSUE
+
+    monkeypatch.setattr(github, "GitHubForge", github_forge)
+    monkeypatch.setattr(discovery, "discover_ledger", discover_ledger)
+
+    assert (
+        _protect_main(
+            monkeypatch,
+            {"toolName": "write", "toolInput": {"path": "src/widget.py"}},
+        )
+        == 0
+    )
+    _assert_protect_decision(capsys, decision="allow")
+    assert calls == ["identity", "git", "git", "git", "git", "github", "github"]
 
 
 @pytest.mark.parametrize(
