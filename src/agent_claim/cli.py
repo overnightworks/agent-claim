@@ -1678,6 +1678,18 @@ def main(arguments: list[str] | None = None) -> int:
         return _protect(parsed.repo)
     try:
         return _dispatch(parsed)
+    except protocol.CompensationFailedError as error:
+        # A post-mutation race's own repair could not be posted (issue #136
+        # finding 2): the original mutation is still live and untracked by this
+        # refusal, so print a recovery warning naming it and how to finish the
+        # repair by hand, instead of the generic ERROR line a plain refusal gets.
+        print(
+            f"ERROR: claim {error.live_claim.claim_id!r} is still live; its "
+            f"automatic repair failed to post: {error.cause}",
+            file=sys.stderr,
+        )
+        print(f"RECOVERY: run `{error.attempted_repair}` to finish the repair", file=sys.stderr)
+        return 2
     except protocol.ClaimError as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 2

@@ -299,6 +299,10 @@ class FakeForge:
     inject_during_next_remove: IssueComment | None = None
     fail_add_label: bool = False
     fail_remove_label: bool = False
+    # 1-indexed: the Nth post_comment(LEDGER_ISSUE, ...) call raises instead of
+    # posting -- simulates a compensating repair write itself failing (#136).
+    fail_ledger_post_at_call: int | None = None
+    ledger_post_call_count: int = field(default=0, init=False)
     board_issues: tuple[board.Issue, ...] = ()
     board_open_pull_requests: tuple[board.PullRequest, ...] = ()
     board_merged_pull_requests: tuple[board.PullRequest, ...] = ()
@@ -369,6 +373,10 @@ class FakeForge:
         )
 
     def post_comment(self, issue: int, body: str) -> str:
+        if issue == protocol.LEDGER_ISSUE:
+            self.ledger_post_call_count += 1
+            if self.ledger_post_call_count == self.fail_ledger_post_at_call:
+                raise ClaimError("ledger post failed (simulated)")
         if issue == protocol.LEDGER_ISSUE and self.inject_before_next_ledger_post is not None:
             self.comments.setdefault(protocol.LEDGER_ISSUE, []).append(
                 self.inject_before_next_ledger_post
@@ -8293,6 +8301,135 @@ def test_cli_rescope_race_reverts_the_scope_when_an_unreadable_comment_appears_w
     assert standing[0].scope == ("src/widget.py",)
 
 
+def test_cli_rescope_race_clears_the_whole_reason_it_just_set(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Finding 1 (delta review): None -> reason -> race -> None. A rescope that
+    gives a claim its first-ever whole reason races an unreadable comment; the
+    automatic revert must clear the reason back to unset. A plain
+    `whole_reason=None` on the revert would not do that -- absence already means
+    "leave the current reason alone" (the sticky contract every ordinary rescope
+    relies on), so clearing needs its own explicit signal."""
+    client = FakeForge()
+    acquire_claim(client, request(issue=72, branch="codex/issue-72", scope=("src/widget.py",)))
+    assert active_claims(client.list_protocol_candidates(LEDGER_ISSUE))[0].whole_reason is None
+    client.inject_after_next_ledger_post = unreadable_ledger_comment(99, claim_id="claim-c")
+    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
+    monkeypatch.setattr(discovery, "discover_ledger", lambda _client: LEDGER_ISSUE)
+    git_values = _git_checkout()
+    monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
+    monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+    _set_agent_identity_env(monkeypatch, {issue_claim.AGENT_CLAIM_AGENT_ENV: "Codex Sol"})
+
+    status = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "rescope",
+            "72",
+            "--add",
+            "src/new.py",
+            "--whole",
+            "widening for a spike",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 2
+    assert "ERROR: rescope refused: claim 'claim-c'" in captured.err
+    standing = active_claims(client.list_protocol_candidates(LEDGER_ISSUE))
+    assert standing[0].scope == ("src/widget.py",)
+    assert standing[0].whole_reason is None
+
+
+def test_cli_claim_race_reports_a_recovery_warning_when_the_compensating_release_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Finding 2 (delta review): when the race-compensating release itself fails
+    to post, the just-claimed id stays live and untracked by any refusal message
+    -- the CLI must say so explicitly, naming the live claim and a ready repair
+    command, rather than printing the compensating write's own generic error."""
+    client = FakeForge()
+    client.inject_after_next_ledger_post = unreadable_ledger_comment(2, claim_id="claim-c")
+    client.fail_ledger_post_at_call = 2
+    _patch_status_cli(monkeypatch, client)
+    monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
+    monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+
+    status = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "claim",
+            "72",
+            "--agent",
+            "Codex Sol",
+            "--role",
+            "builder",
+            "--base",
+            BASE,
+            "--branch",
+            "codex/issue-72",
+            "--scope",
+            "src",
+            "--claim-id",
+            "cli-claim",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 2
+    assert (
+        "ERROR: claim 'cli-claim' is still live; its automatic repair failed to "
+        "post: ledger post failed (simulated)" in captured.err
+    )
+    assert (
+        "RECOVERY: run `agent-claim release --claim-id cli-claim "
+        "--abandoned 'claim race lost'` to finish the repair" in captured.err
+    )
+    standing = active_claims(client.list_protocol_candidates(LEDGER_ISSUE))
+    assert [claim.claim_id for claim in standing] == ["cli-claim"]
+
+
+def test_cli_rescope_race_reports_a_recovery_warning_when_the_reverting_rescope_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Finding 2 (delta review): the same recovery warning for `rescope`, when
+    the compensating revert itself cannot be posted -- the widened scope stays
+    live, and the CLI names it plus the exact `--drop`/`--add` to run by hand."""
+    client = FakeForge()
+    acquire_claim(client, request(issue=72, branch="codex/issue-72", scope=("src/widget.py",)))
+    client.inject_after_next_ledger_post = unreadable_ledger_comment(99, claim_id="claim-c")
+    client.ledger_post_call_count = 0
+    client.fail_ledger_post_at_call = 2
+    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
+    monkeypatch.setattr(discovery, "discover_ledger", lambda _client: LEDGER_ISSUE)
+    git_values = _git_checkout()
+    monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
+    monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+    _set_agent_identity_env(monkeypatch, {issue_claim.AGENT_CLAIM_AGENT_ENV: "Codex Sol"})
+
+    status = issue_claim.main(
+        ["--repo", "example/agent-claim", "rescope", "72", "--add", "src/new.py"]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 2
+    assert (
+        "ERROR: claim 'claim-a' is still live; its automatic repair failed to "
+        "post: ledger post failed (simulated)" in captured.err
+    )
+    assert (
+        "RECOVERY: run `agent-claim rescope --claim-id claim-a --drop src/new.py` "
+        "to finish the repair" in captured.err
+    )
+    standing = active_claims(client.list_protocol_candidates(LEDGER_ISSUE))
+    assert standing[0].scope == ("src/widget.py", "src/new.py")
+
+
 def test_cli_status_hard_fails_on_a_comment_missing_a_required_field_plus_an_extra_one(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -9644,6 +9781,55 @@ def test_claim_age_uses_the_claim_comment_not_a_later_rescope(
     out = capsys.readouterr().out
     assert " 0h 30m\n" in out
     assert " old" not in out.split("CLAIMED", 1)[1]
+
+
+def test_rescope_whole_reason_lifecycle_none_reason_kept_then_cleared() -> None:
+    """The full None -> reason -> (kept across an unrelated later rescope) ->
+    cleared lifecycle for `whole_reason`, proven through `active_claims` -- the
+    ledger's real reader (issue #136 delta review). Omitting `whole` on an
+    ordinary rescope leaves an existing reason alone; only an explicit
+    `clear_whole_reason=True` clears it back to unset."""
+    claim_event = comment(1, claim_comment(request(issue=72, scope=("src",))))
+    claimed = parse_claim_event(claim_event)
+    assert isinstance(claimed, ActiveClaim)
+    assert claimed.whole_reason is None
+
+    set_reason_event = comment(
+        2,
+        protocol.rescope_comment(
+            claimed, ("src",), "Codex Sol", "builder", whole_reason="a reason"
+        ),
+    )
+    with_reason = active_claims((claim_event, set_reason_event))
+    assert with_reason[0].whole_reason == "a reason"
+
+    unrelated_rescope_event = comment(
+        3, protocol.rescope_comment(with_reason[0], ("src", "docs"), "Codex Sol", "builder")
+    )
+    kept = active_claims((claim_event, set_reason_event, unrelated_rescope_event))
+    assert kept[0].whole_reason == "a reason"
+    assert kept[0].scope == ("src", "docs")
+
+    cleared_event = comment(
+        4,
+        protocol.rescope_comment(
+            kept[0], ("src",), "Codex Sol", "builder", clear_whole_reason=True
+        ),
+    )
+    cleared = active_claims((claim_event, set_reason_event, unrelated_rescope_event, cleared_event))
+    assert cleared[0].whole_reason is None
+    assert cleared[0].scope == ("src",)
+
+
+def test_rescope_comment_rejects_setting_and_clearing_the_whole_reason_at_once() -> None:
+    claim_event = comment(1, claim_comment(request(issue=72, scope=("src",))))
+    claimed = parse_claim_event(claim_event)
+    assert isinstance(claimed, ActiveClaim)
+
+    with pytest.raises(ClaimError, match="cannot both set and clear"):
+        protocol.rescope_comment(
+            claimed, ("src",), "Codex Sol", "builder", whole_reason="x", clear_whole_reason=True
+        )
 
 
 def test_cli_claim_cut_does_not_exempt_a_directory_scope(

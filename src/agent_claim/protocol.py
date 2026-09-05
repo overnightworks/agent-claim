@@ -198,6 +198,16 @@ class ClaimRescope:
 
     Keeps claim id, identity, agent, role, base, and branch. Old helpers that
     do not know this action fail loud on the whole ledger.
+
+    `whole_reason=None` means "leave the claim's current whole-reason alone" --
+    the wire marker simply omits the `whole` field, so an old reader that has
+    never heard of clearing a reason still parses this event exactly as before.
+    Explicitly dropping a reason back to unset is a third, distinct state a bare
+    `None` cannot express (the marker already uses absence for "unchanged"), so
+    `clear_whole_reason=True` carries it instead, wire-encoded as a small,
+    separate `whole_clear` marker field that is present only for that one
+    purpose (issue #136 finding: never both `whole_reason` and
+    `clear_whole_reason=True` at once).
     """
 
     identity: ClaimIdentity
@@ -207,6 +217,7 @@ class ClaimRescope:
     scope: tuple[str, ...]
     comment: IssueComment
     whole_reason: str | None = None
+    clear_whole_reason: bool = False
 
 
 @dataclass(frozen=True)
@@ -525,6 +536,22 @@ def _optional_whole_reason(payload: dict[str, object]) -> str | None:
     return _required_text(payload, "whole", maximum=512)
 
 
+WHOLE_CLEAR_MARKER_KEY = "whole_clear"
+
+
+def _rescope_clears_whole_reason(payload: dict[str, object], comment: IssueComment) -> bool:
+    """Whether a rescope marker explicitly drops its claim's whole-reason back to
+    unset -- a third state a bare `whole_reason=None` cannot carry, since absence
+    of `whole` already means "leave it alone" (see `ClaimRescope`)."""
+    if WHOLE_CLEAR_MARKER_KEY not in payload:
+        return False
+    if payload[WHOLE_CLEAR_MARKER_KEY] is not True:
+        raise InvalidClaimMarkerError(
+            f"trusted comment {comment.url} {WHOLE_CLEAR_MARKER_KEY} field must be true"
+        )
+    return True
+
+
 def _claim_id_if_parseable(payload: dict[str, object]) -> str | None:
     """Best-effort `claim_id` for an `UnreadableClaim`: only when it is itself
     well-formed, never validated any further than that."""
@@ -785,8 +812,14 @@ def _parse_claim_rescope(
         "role",
         "scope",
     }
+    if "whole" in payload and WHOLE_CLEAR_MARKER_KEY in payload:
+        raise InvalidClaimMarkerError(
+            f"trusted comment {comment.url} rescope cannot both set and clear the whole reason"
+        )
     if "whole" in payload:
         expected.add("whole")
+    if WHOLE_CLEAR_MARKER_KEY in payload:
+        expected.add(WHOLE_CLEAR_MARKER_KEY)
     _strict_keys(payload, frozenset(expected), comment)
     claim_id, agent, role = _event_identity(payload, comment)
     return ClaimRescope(
@@ -797,6 +830,7 @@ def _parse_claim_rescope(
         scope=_valid_scope(payload.get("scope")),
         comment=comment,
         whole_reason=_optional_whole_reason(payload),
+        clear_whole_reason=_rescope_clears_whole_reason(payload, comment),
     )
 
 
@@ -953,11 +987,13 @@ def _apply_claim_rescope_event(
         raise InvalidClaimMarkerError(
             f"claim id {event.claim_id!r} can only be rescoped by its claimant"
         )
-    active[event.claim_id] = replace(
-        current,
-        scope=event.scope,
-        whole_reason=(current.whole_reason if event.whole_reason is None else event.whole_reason),
-    )
+    if event.clear_whole_reason:
+        new_whole_reason = None
+    elif event.whole_reason is not None:
+        new_whole_reason = event.whole_reason
+    else:
+        new_whole_reason = current.whole_reason
+    active[event.claim_id] = replace(current, scope=event.scope, whole_reason=new_whole_reason)
 
 
 def _quarantine_active_claims(
@@ -1420,14 +1456,17 @@ def claim_comment(request: ClaimRequest) -> str:
     )
 
 
-def rescope_comment(
+def rescope_comment(  # noqa: PLR0913  # explicit clear alongside set/keep, issue #136
     claim: ActiveClaim,
     scope: tuple[str, ...],
     agent: str,
     role: str,
     *,
     whole_reason: str | None = None,
+    clear_whole_reason: bool = False,
 ) -> str:
+    if clear_whole_reason and whole_reason is not None:
+        raise ClaimError("rescope cannot both set and clear the whole reason")
     validated_agent = _outbound_text(agent, "agent", maximum=128)
     validated_role = _outbound_text(role, "role", maximum=64)
     payload: dict[str, object] = {
@@ -1440,7 +1479,10 @@ def rescope_comment(
     }
     scope_lines = "\n".join(f"- `{path}`" for path in scope)
     whole = ""
-    if whole_reason is not None:
+    if clear_whole_reason:
+        payload[WHOLE_CLEAR_MARKER_KEY] = True
+        whole = "- Whole: (cleared)\n"
+    elif whole_reason is not None:
         reason = _outbound_text(whole_reason, "whole reason", maximum=512)
         payload["whole"] = reason
         whole = f"- Whole: {reason}\n"
@@ -1803,6 +1845,26 @@ class ClaimPostedReconcileFailedError(ClaimError):
         super().__init__(str(error))
 
 
+class CompensationFailedError(ClaimError):
+    """A post-mutation race's own compensating repair failed to post (issue #136
+    finding 2): `live_claim` is still exactly as it was before the repair was
+    attempted -- the race that should have been undone is instead now the
+    caller's problem, so this is never rendered as a plain refusal. `cause` is
+    the underlying failure from posting the repair; `attempted_repair` is a
+    ready-to-run `agent-claim` command that finishes what the automatic repair
+    could not.
+    """
+
+    def __init__(self, live_claim: ActiveClaim, attempted_repair: str, cause: Exception):
+        self.live_claim = live_claim
+        self.attempted_repair = attempted_repair
+        self.cause = cause
+        super().__init__(
+            f"claim id {live_claim.claim_id!r} is still live; its automatic repair "
+            f"failed to post: {cause}"
+        )
+
+
 def _reject_unavailable_claim(aggregate: ClaimLedgerAggregate, request: ClaimRequest) -> None:
     """Raise if `request` cannot be posted against the ledger's current standing."""
     if request.claim_id in aggregate.seen_claim_ids:
@@ -1918,9 +1980,16 @@ def _resolve_unreadable_claim_race(
     blocker = next(iter(post_aggregate.unreadable), None)
     if blocker is None:
         return
-    client.post_comment(
-        LEDGER_ISSUE, release_comment(own, request.agent, request.role, "claim race lost")
-    )
+    try:
+        client.post_comment(
+            LEDGER_ISSUE, release_comment(own, request.agent, request.role, "claim race lost")
+        )
+    except Exception as error:
+        raise CompensationFailedError(
+            own,
+            f"agent-claim release --claim-id {own.claim_id} --abandoned 'claim race lost'",
+            error,
+        ) from error
     _reconcile_identity(client, request.identity)
     raise ClaimUnavailableError(
         f"claim refused: {_unreadable_claim_reason(blocker)} appeared while posting; "
@@ -2072,6 +2141,20 @@ def _select_rescope_claim(
     return selected
 
 
+def _rescope_revert_repair_command(selected: ActiveClaim, own: ActiveClaim) -> str:
+    """A ready-to-run `agent-claim rescope` that finishes reverting `own` back to
+    `selected`'s pre-rescope scope, for `CompensationFailedError` to hand the
+    caller when the automatic revert itself could not be posted."""
+    to_drop = tuple(path for path in own.scope if path not in selected.scope)
+    to_add = tuple(path for path in selected.scope if path not in own.scope)
+    flags = []
+    if to_drop:
+        flags.append(f"--drop {','.join(to_drop)}")
+    if to_add:
+        flags.append(f"--add {','.join(to_add)}")
+    return f"agent-claim rescope --claim-id {own.claim_id} " + " ".join(flags)
+
+
 def _resolve_unreadable_rescope_race(
     client: ClaimWriter,
     selected: ActiveClaim,
@@ -2081,20 +2164,27 @@ def _resolve_unreadable_rescope_race(
     """Post-mutation race (issue #136 finding 2): the pre-post check already
     proved the ledger clean, so an unreadable comment in `post_aggregate` can only
     be a concurrent post that landed during ours. Compensate by reverting the
-    scope change with another rescope back to `selected`'s pre-rescope scope, so a
-    `rescope` that reports failure never leaves its new scope live. (A concurrent
-    rescope that also just gave this claim its first-ever `--whole` reason is a
-    narrower case this revert does not undo, since a rescope event cannot force a
-    reason back to unset -- only replace it.)"""
+    scope change -- and, when this rescope just gave the claim its first-ever
+    `--whole` reason, that reason too -- with another rescope back to `selected`'s
+    pre-rescope state, so a `rescope` that reports failure never leaves either
+    live."""
     blocker = next(iter(post_aggregate.unreadable), None)
     if blocker is None:
         return
-    client.post_comment(
-        LEDGER_ISSUE,
-        rescope_comment(
-            own, selected.scope, selected.agent, selected.role, whole_reason=selected.whole_reason
-        ),
+    revert_reason: dict[str, object] = (
+        {"clear_whole_reason": True}
+        if selected.whole_reason is None
+        else {"whole_reason": selected.whole_reason}
     )
+    try:
+        client.post_comment(
+            LEDGER_ISSUE,
+            rescope_comment(own, selected.scope, selected.agent, selected.role, **revert_reason),
+        )
+    except Exception as error:
+        raise CompensationFailedError(
+            own, _rescope_revert_repair_command(selected, own), error
+        ) from error
     _reconcile_identity(client, selected.identity)
     raise ClaimUnavailableError(
         f"rescope refused: {_unreadable_claim_reason(blocker)} appeared while posting; "
