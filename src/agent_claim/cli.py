@@ -236,26 +236,29 @@ def _request(arguments: argparse.Namespace) -> protocol.ClaimRequest:
 LANE_ISSUE_HELP = "omit for lane mode, derived from a docs/ or fix/ checkout branch"
 
 
-def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="agent-claim", description=__doc__)
-    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
-    parser.add_argument("--repo", help="GitHub repository as OWNER/REPO")
-    commands = parser.add_subparsers(dest="command", required=True)
-
+def _add_bootstrap_parser(commands: argparse._SubParsersAction) -> None:
     commands.add_parser("bootstrap", help="create or adopt this repository's locked ledger")
 
+
+def _add_status_parser(commands: argparse._SubParsersAction) -> None:
     status = commands.add_parser("status", help="show repository-wide build claims")
     status.add_argument("issue", type=int, nargs="?")
     status.add_argument("--json", action="store_true")
 
+
+def _add_board_parser(commands: argparse._SubParsersAction) -> None:
     board_command = commands.add_parser("board", help="project the open work board without writes")
     board_command.add_argument("--json", action="store_true")
 
+
+def _add_rulings_parser(commands: argparse._SubParsersAction) -> None:
     rulings_command = commands.add_parser(
         "rulings", help="list open expectation lines without writes"
     )
     rulings_command.add_argument("--json", action="store_true")
 
+
+def _add_next_parser(commands: argparse._SubParsersAction) -> None:
     next_command = commands.add_parser(
         "next",
         help="name the board's top-priority item to pull",
@@ -263,6 +266,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     next_command.add_argument("--json", action="store_true")
 
+
+def _add_claim_parser(commands: argparse._SubParsersAction) -> None:
     claim = commands.add_parser("claim", help="claim an issue and scope before editing")
     claim.add_argument(
         "issue",
@@ -301,6 +306,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     claim.add_argument("--json", action="store_true")
 
+
+def _add_release_parser(commands: argparse._SubParsersAction) -> None:
     release = commands.add_parser("release", help="release a landed or abandoned claim")
     release.add_argument(
         "issue",
@@ -326,6 +333,8 @@ def _parser() -> argparse.ArgumentParser:
     release.add_argument("--coordinator-override", action="store_true")
     release.add_argument("--json", action="store_true")
 
+
+def _add_rescope_parser(commands: argparse._SubParsersAction) -> None:
     rescope = commands.add_parser(
         "rescope", help="add or drop paths on a live claim without releasing"
     )
@@ -354,13 +363,19 @@ def _parser() -> argparse.ArgumentParser:
     )
     rescope.add_argument("--json", action="store_true")
 
+
+def _add_who_parser(commands: argparse._SubParsersAction) -> None:
     who = commands.add_parser("who", help="show which live claim holds a path")
     who.add_argument("path")
     who.add_argument("--json", action="store_true")
 
+
+def _add_reconcile_parser(commands: argparse._SubParsersAction) -> None:
     reconcile = commands.add_parser("reconcile", help="repair claimed-label projections")
     reconcile.add_argument("issue", type=int, nargs="?")
 
+
+def _add_supersede_parser(commands: argparse._SubParsersAction) -> None:
     supersede = commands.add_parser(
         "supersede", help="atomically freeze a drained ledger for its successor"
     )
@@ -370,15 +385,49 @@ def _parser() -> argparse.ArgumentParser:
     supersede.add_argument("--reason", required=True)
     supersede.add_argument("--claim-id", required=True)
 
+
+def _add_pull_request_check_parser(commands: argparse._SubParsersAction) -> None:
     pull_request_check = commands.add_parser(
         "pr-check",
         help="check a pull request's typed work-item classification before it merges",
     )
     pull_request_check.add_argument("--pr", type=int, required=True, metavar="NUMBER")
 
+
+def _add_policy_parser(commands: argparse._SubParsersAction) -> None:
     policy = commands.add_parser("policy", help="print the provider-neutral loader block")
     policy.add_argument("--print", action="store_true", required=True, dest="print_loader")
+
+
+def _add_protect_parser(commands: argparse._SubParsersAction) -> None:
     commands.add_parser("protect", help="deny PreToolUse writes without this session's live claim")
+
+
+_SUBPARSER_BUILDERS: tuple[Callable[[argparse._SubParsersAction], None], ...] = (
+    _add_bootstrap_parser,
+    _add_status_parser,
+    _add_board_parser,
+    _add_rulings_parser,
+    _add_next_parser,
+    _add_claim_parser,
+    _add_release_parser,
+    _add_rescope_parser,
+    _add_who_parser,
+    _add_reconcile_parser,
+    _add_supersede_parser,
+    _add_pull_request_check_parser,
+    _add_policy_parser,
+    _add_protect_parser,
+)
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="agent-claim", description=__doc__)
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument("--repo", help="GitHub repository as OWNER/REPO")
+    commands = parser.add_subparsers(dest="command", required=True)
+    for add_subparser in _SUBPARSER_BUILDERS:
+        add_subparser(commands)
     return parser
 
 
@@ -448,6 +497,41 @@ def _print_unreadable_claim(record: protocol.UnreadableClaim) -> None:
     print(f"  {record.comment_url}")
 
 
+def _print_claim_status_lines(
+    claim: protocol.ActiveClaim,
+    claims_by_id: dict[str, protocol.ActiveClaim],
+    index: protocol.ClaimConflictIndex,
+    observed_at: datetime,
+) -> None:
+    state = "CONFLICT" if claim.claim_id in index.conflict_ids else "CLAIMED"
+    print(
+        f"{state} {_claim_subject(claim)}: {claim.agent} ({claim.role}) "
+        f"base={claim.base} branch={claim.branch} claim={claim.claim_id}"
+        f"{_claim_age_suffix(claim, observed_at)}"
+    )
+    for path in claim.scope:
+        print(f"  {path}")
+    if claim.resource is not None:
+        print(f"  resource {claim.resource.name}={claim.resource.value}")
+    if claim.whole_reason is not None:
+        print(f"  whole: {claim.whole_reason}")
+    note = _overlap_note(claims_by_id, protocol._overlap_peer_ids(index, claim))
+    if note is not None:
+        print(f"  {note}")
+
+
+def _print_related_claims(
+    claims: tuple[protocol.ActiveClaim, ...],
+    related: tuple[protocol.ActiveClaim, ...],
+    index: protocol.ClaimConflictIndex,
+    observed_at: datetime,
+) -> int:
+    claims_by_id = {claim.claim_id: claim for claim in claims}
+    for claim in related:
+        _print_claim_status_lines(claim, claims_by_id, index, observed_at)
+    return 2 if any(claim.claim_id in index.conflict_ids for claim in related) else 0
+
+
 def _status(
     claims: tuple[protocol.ActiveClaim, ...],
     issue: int | None,
@@ -457,29 +541,12 @@ def _status(
 ) -> int:
     observed_at = (now or datetime.now(UTC)).astimezone(UTC)
     related, index = _status_claims(claims, issue)
-    exit_code = 0
-    if not related:
+    if related:
+        exit_code = _print_related_claims(claims, related, index, observed_at)
+    else:
         subject = "repository" if issue is None else f"issue #{issue}"
         print(f"UNCLAIMED {subject}")
-    else:
-        claims_by_id = {claim.claim_id: claim for claim in claims}
-        for claim in related:
-            state = "CONFLICT" if claim.claim_id in index.conflict_ids else "CLAIMED"
-            print(
-                f"{state} {_claim_subject(claim)}: {claim.agent} ({claim.role}) "
-                f"base={claim.base} branch={claim.branch} claim={claim.claim_id}"
-                f"{_claim_age_suffix(claim, observed_at)}"
-            )
-            for path in claim.scope:
-                print(f"  {path}")
-            if claim.resource is not None:
-                print(f"  resource {claim.resource.name}={claim.resource.value}")
-            if claim.whole_reason is not None:
-                print(f"  whole: {claim.whole_reason}")
-            note = _overlap_note(claims_by_id, protocol._overlap_peer_ids(index, claim))
-            if note is not None:
-                print(f"  {note}")
-        exit_code = 2 if any(claim.claim_id in index.conflict_ids for claim in related) else 0
+        exit_code = 0
     for record in unreadable:
         _print_unreadable_claim(record)
     return exit_code
@@ -703,14 +770,17 @@ def _board(
         blocker_references = pool.submit(client.list_board_blockers, blockers)
         pull_requests = (open_pull_requests.result(), merged_pull_requests.result())
     return board.build_board(
-        issues,
-        *pull_requests,
-        claims,
-        board.load_config(toplevel / ".agent-claim" / "board.toml"),
-        repository=client.repository.path,
-        blocker_references=blocker_references.result(),
-        now=now,
-        trunk_landings=checkout.trunk_landing_times(),
+        board.BoardBuildInputs(
+            issues=issues,
+            open_pull_requests=pull_requests[0],
+            recent_merged_pull_requests=pull_requests[1],
+            claims=claims,
+            config=board.load_config(toplevel / ".agent-claim" / "board.toml"),
+            repository=client.repository.path,
+            blocker_references=blocker_references.result(),
+            now=now,
+            trunk_landings=checkout.trunk_landing_times(),
+        )
     )
 
 
@@ -1287,27 +1357,26 @@ def _protect_relative_path(raw_path: str) -> str | None:
 PATH_REQUIRED = "path required"
 
 
-def _protect_write(repository: str | None, payload: dict[str, object]) -> int:
+def _protect_hook_path(payload: dict[str, object]) -> str | None:
     tool_input = _hook_field(payload, "toolInput", "tool_input")
     if not isinstance(tool_input, dict):
-        return _hook_deny(PATH_REQUIRED)
-    raw_path = _hook_path(tool_input)
-    if raw_path is None:
-        return _hook_deny(PATH_REQUIRED)
-    agent = checkout._resolved_agent(None)
-    branch = checkout._git_output(["branch", "--show-current"])
+        return None
+    return _hook_path(tool_input)
+
+
+def _protect_checkout_refusal(branch: str) -> str | None:
     if branch in {"main", "master"}:
-        return _hook_deny("not main")
+        return "not main"
     git_directory = Path(checkout._git_output(["rev-parse", "--git-dir"])).resolve()
     common_directory = Path(checkout._git_output(["rev-parse", "--git-common-dir"])).resolve()
     if git_directory == common_directory:
-        return _hook_deny("worktree")
-    relative = _protect_relative_path(raw_path)
-    if relative is None:
-        return _hook_deny(PATH_REQUIRED)
-    forge_handle = github.GitHubForge(
-        github.discover_repository(repository, remote_url=checkout.origin_remote_url)
-    )
+        return "worktree"
+    return None
+
+
+def _protect_ledger_verdict(
+    forge_handle: forge.ForgeReader, agent: str, branch: str, relative: str
+) -> int:
     ledger = discovery.discover_ledger(forge_handle)
     if ledger is None:
         return _hook_deny("claim first")
@@ -1320,6 +1389,24 @@ def _protect_write(repository: str | None, payload: dict[str, object]) -> int:
         ):
             return _hook_allow()
     return _hook_deny("claim first")
+
+
+def _protect_write(repository: str | None, payload: dict[str, object]) -> int:
+    raw_path = _protect_hook_path(payload)
+    if raw_path is None:
+        return _hook_deny(PATH_REQUIRED)
+    agent = checkout._resolved_agent(None)
+    branch = checkout._git_output(["branch", "--show-current"])
+    refusal = _protect_checkout_refusal(branch)
+    if refusal is not None:
+        return _hook_deny(refusal)
+    relative = _protect_relative_path(raw_path)
+    if relative is None:
+        return _hook_deny(PATH_REQUIRED)
+    forge_handle = github.GitHubForge(
+        github.discover_repository(repository, remote_url=checkout.origin_remote_url)
+    )
+    return _protect_ledger_verdict(forge_handle, agent, branch, relative)
 
 
 def _protect(repository: str | None) -> int:
@@ -1359,18 +1446,7 @@ class _WriteSession:
     release_branch: str | None
 
 
-@dataclass(frozen=True)
-class _RescopeCommand:
-    identity: protocol.ClaimIdentity
-    agent: str
-    add: tuple[str, ...]
-    drop: tuple[str, ...]
-    claim_id: str | None
-    branch: str
-    whole_reason: str | None
-
-
-def _rescope_command(parsed: argparse.Namespace) -> _RescopeCommand:
+def _rescope_command(parsed: argparse.Namespace) -> protocol.RescopeRequest:
     branch = checkout._git_output(["branch", "--show-current"])
     if not branch:
         raise protocol.ClaimUnavailableError(
@@ -1379,7 +1455,7 @@ def _rescope_command(parsed: argparse.Namespace) -> _RescopeCommand:
         )
     checkout._validate_worktree_branch(branch)
     identity = _resolved_identity(_optional_issue_number(parsed.issue), branch)
-    return _RescopeCommand(
+    return protocol.RescopeRequest(
         identity=identity,
         agent=parsed.agent,
         add=protocol._valid_scope(parsed.add) if parsed.add else (),
@@ -1459,16 +1535,7 @@ def _cmd_rescope(parsed: argparse.Namespace, session: _WriteSession) -> None:
         )
         combined = protocol._combined_scope(selected.scope, requested.add, requested.drop)
         _reject_wide_scope(combined, versioned, requested.whole_reason)
-    rescoped = protocol.rescope_claim(
-        client,
-        requested.identity,
-        requested.agent,
-        requested.add,
-        requested.drop,
-        requested.claim_id,
-        branch=requested.branch,
-        whole_reason=requested.whole_reason,
-    )
+    rescoped = protocol.rescope_claim(client, requested)
     if parsed.json:
         _rescope_json(rescoped)
         return
@@ -1549,13 +1616,15 @@ def _cmd_release(parsed: argparse.Namespace, session: _WriteSession) -> None:
         _verify_merged_release(client, client.repository.path, identity, outcome)
     released = protocol.release_claim(
         client,
-        identity,
-        parsed.agent,
-        parsed.role,
-        outcome,
-        parsed.claim_id,
-        branch=session.release_branch,
-        coordinator_override=parsed.coordinator_override,
+        protocol.ReleaseContext(
+            identity=identity,
+            agent=parsed.agent,
+            role=parsed.role,
+            outcome=outcome,
+            claim_id=parsed.claim_id,
+            branch=session.release_branch,
+            coordinator_override=parsed.coordinator_override,
+        ),
     )
     if released.quarantined_by is not None:
         # The coordinator-override exception just released a quarantined claim
@@ -1576,11 +1645,13 @@ def _cmd_supersede(parsed: argparse.Namespace, session: _WriteSession) -> None:
     successor_issue = int(parsed.successor_issue)
     frozen = protocol.supersede_ledger(
         session.forge,
-        successor_issue,
-        parsed.agent,
-        parsed.role,
-        parsed.reason,
-        parsed.claim_id,
+        protocol.SupersedeRequest(
+            successor_issue=successor_issue,
+            agent=parsed.agent,
+            role=parsed.role,
+            reason=parsed.reason,
+            claim_id=parsed.claim_id,
+        ),
     )
     print(
         f"SUPERSEDED ledger #{protocol.LEDGER_ISSUE} successor "

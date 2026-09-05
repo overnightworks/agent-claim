@@ -1240,22 +1240,29 @@ def _board_item(
     )
 
 
-def build_board(  # noqa: PLR0913  # protocol/board slice, #103
-    issues: tuple[Issue, ...],
-    open_pull_requests: tuple[PullRequest, ...],
-    recent_merged_pull_requests: tuple[PullRequest, ...],
-    claims: tuple[protocol.ActiveClaim, ...],
-    config: BoardConfig,
-    *,
-    repository: str,
-    blocker_references: tuple[BlockerReference, ...] | None = None,
-    now: datetime | None = None,
-    trunk_landings: tuple[datetime, ...] = (),
-) -> Board:
-    observed_at = (now or datetime.now(UTC)).astimezone(UTC)
+@dataclass(frozen=True)
+class BoardBuildInputs:
+    issues: tuple[Issue, ...]
+    open_pull_requests: tuple[PullRequest, ...]
+    recent_merged_pull_requests: tuple[PullRequest, ...]
+    claims: tuple[protocol.ActiveClaim, ...]
+    config: BoardConfig
+    repository: str
+    blocker_references: tuple[BlockerReference, ...] | None = None
+    now: datetime | None = None
+    trunk_landings: tuple[datetime, ...] = ()
+
+
+def build_board(inputs: BoardBuildInputs) -> Board:
+    issues = inputs.issues
+    open_pull_requests = inputs.open_pull_requests
+    recent_merged_pull_requests = inputs.recent_merged_pull_requests
+    config = inputs.config
+    repository = inputs.repository
+    observed_at = (inputs.now or datetime.now(UTC)).astimezone(UTC)
     contracts = {issue.number: parse_contract(issue.body) for issue in issues}
     blocker_by_number, blocker_references = _validated_blocker_by_number(
-        issues, open_pull_requests, contracts, blocker_references
+        issues, open_pull_requests, contracts, inputs.blocker_references
     )
     contracts = {
         issue.number: _with_blocker_defects(contracts[issue.number], blocker_by_number)
@@ -1275,13 +1282,13 @@ def build_board(  # noqa: PLR0913  # protocol/board slice, #103
             issue.number: _freed_on(contracts[issue.number], blocker_by_number) for issue in issues
         },
         unblocks=unblocks,
-        claims_by_issue=_claim_by_issue(claims),
+        claims_by_issue=_claim_by_issue(inputs.claims),
         in_flight_references=_associated_issues(open_pull_requests, repository)
         | _touched_without_closing(open_pull_requests),
         landed_references=_associated_issues(recent_merged_pull_requests, repository)
         | _touched_without_closing(recent_merged_pull_requests),
         open_branches=frozenset(pr.head_ref_name for pr in open_pull_requests),
-        trunk_landings=trunk_landings,
+        trunk_landings=inputs.trunk_landings,
     )
     landed_work_items = declared_work_items(recent_merged_pull_requests, repository)
     ordered = tuple(
