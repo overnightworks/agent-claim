@@ -160,32 +160,25 @@ def _decoded(result: process.BoundedResult, purpose: str) -> str:
         raise forge.ForgeMalformedResponseError(f"{purpose} returned non-UTF-8 output") from error
 
 
-_ProcessFailureBuilder = Callable[[process.ProcessError, str], forge.ForgeError]
-_PROCESS_FAILURE_BUILDERS: dict[type[process.ProcessError], _ProcessFailureBuilder] = {
-    process.ProcessTimedOutError: (
-        lambda error, purpose: forge.ForgeTransientError(f"{purpose} timed out")
-    ),
-    process.ProcessIoFailedError: (
-        lambda error, purpose: forge.ForgeTransientError(
+def _forge_failure(error: process.ProcessError, purpose: str) -> forge.ForgeError:
+    """Translate a process failure that reached no forge response into a typed one.
+
+    An isinstance chain, not a dict keyed by `type(error)`: only the chain lets
+    each branch narrow `error` to the subtype that actually carries `.stage` and
+    `.detail`, so the dispatch and the type stay one honest fact instead of two
+    that could drift apart.
+    """
+    if isinstance(error, process.ProcessTimedOutError):
+        return forge.ForgeTransientError(f"{purpose} timed out")
+    if isinstance(error, process.ProcessIoFailedError):
+        return forge.ForgeTransientError(
             f"{purpose} failed while {error.stage.value}: {error.detail}"
         )
-    ),
-    process.ProcessDidNotExitError: (
-        lambda error, purpose: forge.ForgeTransientError(
-            f"{purpose} did not exit after closing its output"
-        )
-    ),
-    process.ProcessOutputTooLargeError: (
-        lambda error, purpose: forge.ForgeMalformedResponseError(
-            f"{purpose} exceeded its output limit"
-        )
-    ),
-}
-
-
-def _forge_failure(error: process.ProcessError, purpose: str) -> forge.ForgeError:
-    """Translate a process failure that reached no forge response into a typed one."""
-    return _PROCESS_FAILURE_BUILDERS[type(error)](error, purpose)
+    if isinstance(error, process.ProcessDidNotExitError):
+        return forge.ForgeTransientError(f"{purpose} did not exit after closing its output")
+    if isinstance(error, process.ProcessOutputTooLargeError):
+        return forge.ForgeMalformedResponseError(f"{purpose} exceeded its output limit")
+    raise AssertionError(f"unhandled process failure type: {type(error).__name__}")
 
 
 def _is_transient_signal(decoded: str) -> bool:

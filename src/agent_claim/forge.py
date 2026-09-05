@@ -154,6 +154,29 @@ class ForgeOperation(StrEnum):
     CLOSE_ITEM = "close_item"
 
 
+class BoardSource(Protocol):
+    """The read surface `_board` actually calls: the repository identity and the
+    four board list operations, not every `ForgeReader` operation. Any
+    `ForgeReader` already satisfies it structurally; a board-only fake needs
+    nothing more.
+    """
+
+    @property
+    def repository(self) -> RepositoryId: ...
+
+    def list_open_board_issues(self) -> tuple[board.Issue, ...]: ...
+
+    def list_board_blockers(
+        self, numbers: frozenset[int]
+    ) -> tuple[board.BlockerReference, ...]: ...
+
+    def list_open_board_pull_requests(self) -> tuple[board.PullRequest, ...]: ...
+
+    def list_recent_merged_board_pull_requests(
+        self, since: datetime
+    ) -> tuple[board.PullRequest, ...]: ...
+
+
 class ForgeReader(protocol.ClaimReader, Protocol):
     @property
     def repository(self) -> RepositoryId: ...

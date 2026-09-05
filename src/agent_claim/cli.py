@@ -750,7 +750,7 @@ def _merged_pull_request_floor(issues: tuple[board.Issue, ...], now: datetime) -
 
 
 def _board(
-    client: forge.ForgeReader,
+    client: forge.BoardSource,
     claims: tuple[protocol.ActiveClaim, ...],
     *,
     issues: tuple[board.Issue, ...] | None = None,

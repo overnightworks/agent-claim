@@ -233,6 +233,15 @@ def comment(
     )
 
 
+def issue_number(identity: protocol.ClaimIdentity) -> int:
+    """The numbered-issue identity's issue number. Every call site here builds an
+    issue-scoped claim (`request(issue=...)`, never `lane=True`), so a `LaneIdentity`
+    reaching this helper is a real defect in the calling test, not a case to
+    tolerate."""
+    assert isinstance(identity, IssueIdentity)
+    return identity.issue
+
+
 def request(
     claim_id: str = "claim-a",
     agent: str = "Codex Sol",
@@ -253,9 +262,12 @@ def request(
     from one `issue`/`lane` axis without hand-building identities at every call site.
     """
     lane = lane or issue is None
-    identity: protocol.ClaimIdentity = (
-        protocol.LaneIdentity() if lane else protocol.IssueIdentity(issue)
-    )
+    identity: protocol.ClaimIdentity
+    if lane:
+        identity = protocol.LaneIdentity()
+    else:
+        assert issue is not None, "lane is False only when the caller passed an issue"
+        identity = protocol.IssueIdentity(issue)
     default_branch = f"docs/lane-{claim_id}" if lane else f"codex/issue-{issue}-claims"
     return ClaimRequest(
         identity=identity,
@@ -500,12 +512,19 @@ class FakeForge:
             self.comments.setdefault(protocol.LEDGER_ISSUE, []).append(
                 self.inject_during_next_remove
             )
-            self.labels.add(self.inject_during_next_remove_event.identity.issue)
+            injected = self.inject_during_next_remove_event
+            assert not isinstance(injected, protocol.LedgerSupersede), (
+                "this fake only injects issue-scoped claim events"
+            )
+            assert isinstance(injected.identity, protocol.IssueIdentity), (
+                "this fake only injects issue-scoped claim events"
+            )
+            self.labels.add(injected.identity.issue)
             self.inject_during_next_remove = None
         self.labels.discard(issue)
 
     @property
-    def inject_during_next_remove_event(self):
+    def inject_during_next_remove_event(self) -> protocol.ClaimEvent:
         assert self.inject_during_next_remove is not None
         event = parse_claim_event(self.inject_during_next_remove)
         assert event is not None
@@ -3541,7 +3560,9 @@ def test_a_configured_idea_keeps_freeze_claim_and_blocker_reasons(
     active_claims = tuple(
         claim
         for claim_request in claims
-        if (claim := parse_claim_event(comment(1, claim_comment(claim_request)))) is not None
+        if isinstance(
+            claim := parse_claim_event(comment(1, claim_comment(claim_request))), ActiveClaim
+        )
     )
     projected = projected_board(
         (blocker, idea) if has_open_blocker else (idea,),
@@ -3623,7 +3644,7 @@ def marker(payload: dict[str, object], *, legacy: bool = False, attributed: bool
     return body
 
 
-def release_event(claim, *, agent: str | None = None, role: str | None = None) -> str:
+def release_event(claim: ActiveClaim, *, agent: str | None = None, role: str | None = None) -> str:
     return release_comment(
         claim,
         agent or claim.agent,
@@ -3645,7 +3666,7 @@ def test_claim_marker_round_trips_visible_contract(
     body = claim_comment(request(lane=lane))
     parsed = parse_claim_event(comment(1, body))
 
-    assert parsed is not None
+    assert isinstance(parsed, ActiveClaim)
     assert parsed.identity == expected_identity
     assert parsed.claim_id == "claim-a"
     assert parsed.base == BASE
@@ -3715,7 +3736,7 @@ def test_protocol_parser_returns_action_specific_types() -> None:
 
 def test_untrusted_claim_and_release_markers_are_ignored() -> None:
     claimed = parse_claim_event(comment(1, claim_comment(request())))
-    assert claimed is not None
+    assert isinstance(claimed, ActiveClaim)
     release = release_event(claimed)
 
     comments = (
@@ -3861,7 +3882,7 @@ def test_legacy_bootstrap_claim_is_read_only_when_marker_is_first_line() -> None
 
     parsed = parse_claim_event(comment(1, legacy))
 
-    assert parsed is not None
+    assert isinstance(parsed, ActiveClaim)
     assert parsed.identity == IssueIdentity(LEDGER_ISSUE)
     assert parsed.claim_id == "bootstrap"
 
@@ -4051,7 +4072,7 @@ def test_an_unreadable_rescope_quarantines_its_still_readable_claim() -> None:
 def test_release_must_come_from_original_claimant() -> None:
     claimed_body = claim_comment(request())
     claimed = parse_claim_event(comment(1, claimed_body))
-    assert claimed is not None
+    assert isinstance(claimed, ActiveClaim)
     foreign_release = release_event(claimed, agent="Other", role="builder")
 
     raised_argument_1 = comment(1, claimed_body)
@@ -4063,7 +4084,7 @@ def test_release_must_come_from_original_claimant() -> None:
 def test_coordinator_override_is_explicit_and_bound_to_claim_comment() -> None:
     claimed_body = claim_comment(request())
     claimed = parse_claim_event(comment(1, claimed_body))
-    assert claimed is not None
+    assert isinstance(claimed, ActiveClaim)
     override = release_comment(
         claimed,
         "Codex Commissioner",
@@ -4089,7 +4110,7 @@ def test_active_claims_strict_reader_refuses_reused_claim_ids_and_orphan_release
     tolerant repair pass are allowed to treat a duplicate claim id as recoverable."""
     claimed_body = claim_comment(request())
     claimed = parse_claim_event(comment(1, claimed_body))
-    assert claimed is not None
+    assert isinstance(claimed, ActiveClaim)
     released = release_event(claimed)
 
     raised_argument_1 = comment(1, claimed_body)
@@ -4111,7 +4132,7 @@ def test_active_claims_strict_reader_refuses_reused_claim_ids_and_orphan_release
 def test_duplicate_claimant_releases_are_idempotent() -> None:
     claimed_body = claim_comment(request())
     claimed = parse_claim_event(comment(1, claimed_body))
-    assert claimed is not None
+    assert isinstance(claimed, ActiveClaim)
     first_release = release_comment(claimed, "Codex Sol", "builder", "landed")
     second_release = release_comment(claimed, "Codex Sol", "builder", "landed retry")
 
@@ -4133,7 +4154,7 @@ def test_claimant_and_coordinator_release_race_is_idempotent(
 ) -> None:
     claimed_body = claim_comment(request())
     claimed = parse_claim_event(comment(1, claimed_body))
-    assert claimed is not None
+    assert isinstance(claimed, ActiveClaim)
     claimant = release_comment(claimed, "Codex Sol", "builder", "landed")
     coordinator = release_comment(
         claimed,
@@ -4714,8 +4735,8 @@ def test_who_reports_the_claim_holding_a_path() -> None:
     second = parse_claim_event(
         comment(2, claim_comment(request("claim-b", issue=73, scope=("src/widget.py",))))
     )
-    assert first is not None
-    assert second is not None
+    assert isinstance(first, ActiveClaim)
+    assert isinstance(second, ActiveClaim)
     claims = (first, second)
 
     assert claims_holding_path(claims, "docs/PRODUCT.md") == (first,)
@@ -4725,7 +4746,7 @@ def test_who_reports_the_claim_holding_a_path() -> None:
 
 def test_who_reports_a_directory_claim_for_a_descendant_path() -> None:
     parent = parse_claim_event(comment(1, claim_comment(request(issue=72, scope=("docs",)))))
-    assert parent is not None
+    assert isinstance(parent, ActiveClaim)
 
     assert claims_holding_path((parent,), "docs/decisions/one.md") == (parent,)
 
@@ -4744,7 +4765,7 @@ def test_disjoint_issues_can_be_claimed_and_are_projected() -> None:
         request("claim-b", "Grok 4.6", issue=73, scope=("src",)),
     )
 
-    assert {first.identity.issue, second.identity.issue} == {72, 73}
+    assert {issue_number(first.identity), issue_number(second.identity)} == {72, 73}
     assert client.labels == {72, 73}
     assert "🔒 **Claimed**" in client.comments[72][0].body
     assert "🔒 **Claimed**" in client.comments[73][0].body
@@ -4820,7 +4841,7 @@ def test_acquire_claim_refuses_reusing_an_active_claim_id_before_posting() -> No
 def test_acquire_claim_refuses_reusing_a_released_claim_id_before_posting() -> None:
     claimed_body = claim_comment(request("claim-a", issue=72))
     claimed = parse_claim_event(comment(1, claimed_body))
-    assert claimed is not None
+    assert isinstance(claimed, ActiveClaim)
     entries = [comment(1, claimed_body), comment(2, release_event(claimed))]
     client = FakeForge({LEDGER_ISSUE: list(entries)})
 
@@ -5193,7 +5214,7 @@ def test_release_claim_override_fails_before_ledger_without_the_coordinator_role
 def test_label_reconciliation_heals_claim_posted_during_release_remove() -> None:
     old_claim_body = claim_comment(request("old", issue=72, scope=("old",)))
     old_claim = parse_claim_event(comment(1, old_claim_body))
-    assert old_claim is not None
+    assert isinstance(old_claim, ActiveClaim)
     release_body = release_event(old_claim)
     new_claim_comment = comment(
         3,
@@ -5221,7 +5242,7 @@ def test_label_failure_is_loud_while_comment_truth_remains() -> None:
         acquire_claim(client, raised_argument_1)
 
     assert [
-        claim.identity.issue
+        issue_number(claim.identity)
         for claim in active_claims(client.list_protocol_candidates(LEDGER_ISSUE))
     ] == [72]
 
@@ -5258,7 +5279,7 @@ def test_reconcile_all_labels_ignores_lane_claims_on_a_mixed_ledger(
         request("lane-claim", "Grok 4.6", lane=True, branch="docs/lane-a", scope=("docs",)),
     )
 
-    lane_calls: list[tuple[str, object]] = []
+    lane_calls: list[tuple[str, int]] = []
     original_add_label = client.add_label
     original_remove_label = client.remove_label
     original_upsert_projection = client.upsert_projection
@@ -5266,18 +5287,18 @@ def test_reconcile_all_labels_ignores_lane_claims_on_a_mixed_ledger(
     # (#74); that is not a lane call, so it is excluded here alongside 72.
     non_lane_issues = {72, LEDGER_ISSUE}
 
-    def add_label(issue: object, label: str) -> None:
+    def add_label(issue: int, label: str) -> None:
         if issue not in non_lane_issues:
             lane_calls.append(("add_label", issue))
         return original_add_label(issue, label)
 
-    def remove_label(issue: object, label: str) -> None:
+    def remove_label(issue: int, label: str) -> None:
         if issue not in non_lane_issues:
             lane_calls.append(("remove_label", issue))
         return original_remove_label(issue, label)
 
     def upsert_projection(
-        issue: object, body: str, *, create: bool = True, adopt_stale: bool = False
+        issue: int, body: str, *, create: bool = True, adopt_stale: bool = False
     ) -> bool:
         if issue != 72:
             lane_calls.append(("upsert_projection", issue))
@@ -5336,7 +5357,7 @@ def test_repair_duplicate_claims_only_auto_resolves_the_safe_cases(
 ) -> None:
     older_body = claim_comment(request("claim-a", older_agent, issue=72, scope=("old",)))
     older_claim = parse_claim_event(comment(1, older_body))
-    assert older_claim is not None
+    assert isinstance(older_claim, ActiveClaim)
     entries = [comment(1, older_body)]
     if release_before_reuse:
         entries.append(comment(2, release_event(older_claim)))
@@ -5417,7 +5438,9 @@ def test_repair_duplicate_claims_attributes_a_late_release_to_the_original_occur
         ),
     )
     survivors = active_claims(client.list_protocol_candidates(LEDGER_ISSUE))
-    assert [(claim.identity.issue, claim.agent) for claim in survivors] == [(73, "Grok 4.6")]
+    assert [(issue_number(claim.identity), claim.agent) for claim in survivors] == [
+        (73, "Grok 4.6")
+    ]
 
 
 @pytest.mark.parametrize(
@@ -5463,7 +5486,9 @@ def test_repair_duplicate_claims_neutralizes_every_honored_terminal_comment(
         ),
     )
     survivors = active_claims(client.list_protocol_candidates(LEDGER_ISSUE))
-    assert [(claim.identity.issue, claim.agent) for claim in survivors] == [(73, "Grok 4.6")]
+    assert [(issue_number(claim.identity), claim.agent) for claim in survivors] == [
+        (73, "Grok 4.6")
+    ]
     # A truly clean repair: nothing left for a second reconcile pass to find or fix.
     assert repair_duplicate_claims(client) == ()
 
@@ -5519,7 +5544,9 @@ def test_repair_duplicate_claims_same_agent_cross_issue_keeps_only_the_newer_lan
         ),
     )
     survivors = active_claims(client.list_protocol_candidates(LEDGER_ISSUE))
-    assert [(claim.identity.issue, claim.claim_id) for claim in survivors] == [(73, "claim-a")]
+    assert [(issue_number(claim.identity), claim.claim_id) for claim in survivors] == [
+        (73, "claim-a")
+    ]
 
     assert reconcile_all_labels(client) == (73,)
     assert client.labels == {73}
@@ -5630,8 +5657,8 @@ def test_status_reports_repository_scope_overlaps_as_notes(
             claim_comment(request("claim-b", issue=73, scope=("shared/file.py",))),
         )
     )
-    assert first is not None
-    assert second is not None
+    assert isinstance(first, ActiveClaim)
+    assert isinstance(second, ActiveClaim)
 
     exit_code = _status((first, second), None)
 
@@ -5656,8 +5683,8 @@ def test_status_notes_a_scope_that_is_claimed_after_its_descendant(
     parent = parse_claim_event(
         comment(2, claim_comment(request("claim-b", issue=73, scope=("shared",))))
     )
-    assert descendant is not None
-    assert parent is not None
+    assert isinstance(descendant, ActiveClaim)
+    assert isinstance(parent, ActiveClaim)
 
     assert _status((descendant, parent), None) == 0
     rendered = capsys.readouterr().out
@@ -5866,8 +5893,7 @@ def test_repository_resolution_uses_github_quiet_environment(
 ) -> None:
     observed: dict[str, object] = {}
 
-    def fake_run(*arguments, **kwargs):
-        command = arguments[0]
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
         observed["command"] = command
         observed["env"] = kwargs.get("env")
         return subprocess.CompletedProcess(command, 0, b"\x1b[32mowner/repository\x1b[0m\n", b"")
@@ -5877,7 +5903,9 @@ def test_repository_resolution_uses_github_quiet_environment(
     resolved = github.discover_repository(None, remote_url=_unreachable_remote_url)
 
     assert resolved == forge.RepositoryId(github.GITHUB_HOST, ("owner",), "repository")
-    assert observed["command"][0] == "gh"
+    command = observed["command"]
+    assert isinstance(command, list)
+    assert command[0] == "gh"
     env = observed["env"]
     assert isinstance(env, dict)
     assert env["NO_COLOR"] == "1"
@@ -6308,8 +6336,15 @@ def test_bounded_command_reaps_child_when_selector_setup_fails(
     observed: dict[str, subprocess.Popen[bytes]] = {}
     original_popen = subprocess.Popen
 
-    def start(*arguments, **kwargs):
-        process = original_popen(*arguments, **kwargs)
+    def start(
+        command: list[str],
+        *,
+        stdin: int | None = None,
+        stdout: int | None = None,
+        stderr: int | None = None,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.Popen[bytes]:
+        process = original_popen(command, stdin=stdin, stdout=stdout, stderr=stderr, env=env)
         observed["process"] = process
         return process
 
@@ -6336,8 +6371,15 @@ def test_bounded_command_reaps_child_when_select_fails(
     observed: dict[str, subprocess.Popen[bytes]] = {}
     original_popen = subprocess.Popen
 
-    def start(*arguments, **kwargs):
-        process = original_popen(*arguments, **kwargs)
+    def start(
+        command: list[str],
+        *,
+        stdin: int | None = None,
+        stdout: int | None = None,
+        stderr: int | None = None,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.Popen[bytes]:
+        process = original_popen(command, stdin=stdin, stdout=stdout, stderr=stderr, env=env)
         observed["process"] = process
         return process
 
@@ -6384,8 +6426,15 @@ def test_bounded_command_reaps_child_when_output_read_fails(
     original_popen = subprocess.Popen
     original_read = github.os.read
 
-    def start(*arguments, **kwargs):
-        process = original_popen(*arguments, **kwargs)
+    def start(
+        command: list[str],
+        *,
+        stdin: int | None = None,
+        stdout: int | None = None,
+        stderr: int | None = None,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.Popen[bytes]:
+        process = original_popen(command, stdin=stdin, stdout=stdout, stderr=stderr, env=env)
         observed["process"] = process
         return process
 
@@ -6424,8 +6473,15 @@ def test_bounded_command_reaps_child_on_cancellation(
     observed: dict[str, subprocess.Popen[bytes]] = {}
     original_popen = subprocess.Popen
 
-    def start(*arguments, **kwargs):
-        process = original_popen(*arguments, **kwargs)
+    def start(
+        command: list[str],
+        *,
+        stdin: int | None = None,
+        stdout: int | None = None,
+        stderr: int | None = None,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.Popen[bytes]:
+        process = original_popen(command, stdin=stdin, stdout=stdout, stderr=stderr, env=env)
         observed["process"] = process
         return process
 
@@ -6472,8 +6528,15 @@ def test_bounded_command_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
     recorded: dict[str, subprocess.Popen[bytes]] = {}
     original_popen = subprocess.Popen
 
-    def start(*arguments, **kwargs):
-        process = original_popen(*arguments, **kwargs)
+    def start(
+        command: list[str],
+        *,
+        stdin: int | None = None,
+        stdout: int | None = None,
+        stderr: int | None = None,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.Popen[bytes]:
+        process = original_popen(command, stdin=stdin, stdout=stdout, stderr=stderr, env=env)
         recorded["process"] = process
         return process
 
@@ -6494,8 +6557,15 @@ def test_bounded_command_stops_a_child_that_hangs_after_closing_output(
     recorded: dict[str, subprocess.Popen[bytes]] = {}
     original_popen = subprocess.Popen
 
-    def start(*arguments, **kwargs):
-        process = original_popen(*arguments, **kwargs)
+    def start(
+        command: list[str],
+        *,
+        stdin: int | None = None,
+        stdout: int | None = None,
+        stderr: int | None = None,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.Popen[bytes]:
+        process = original_popen(command, stdin=stdin, stdout=stdout, stderr=stderr, env=env)
         recorded["process"] = process
         return process
 
@@ -6790,7 +6860,7 @@ def test_checkout_validation_binds_clean_head_and_branch(
 def test_checkout_validation_rejects_false_or_late_claims(
     monkeypatch: pytest.MonkeyPatch,
     candidate: ClaimRequest,
-    values: dict[tuple[str, str], str],
+    values: dict[tuple[str, ...], str],
     message: str,
 ) -> None:
     monkeypatch.setattr(checkout, "_git_output", lambda arguments: values[tuple(arguments)])
@@ -6806,7 +6876,7 @@ def _git_checkout(
     git_directory: str = "/repo/.git/worktrees/issue-72",
     common_directory: str = "/repo/.git",
     dirty: str = "",
-) -> dict[tuple[str, str], str]:
+) -> dict[tuple[str, ...], str]:
     return {
         ("rev-parse", "HEAD"): head,
         ("rev-parse", "--show-toplevel"): "/repo",
@@ -6936,7 +7006,7 @@ def _parse_claim_command(*flags: str):
 def test_claim_request_binds_omitted_base_and_branch_to_checkout(
     monkeypatch: pytest.MonkeyPatch,
     flags: tuple[str, ...],
-    git_values: dict[tuple[str, str], str],
+    git_values: dict[tuple[str, ...], str],
     error: str | None,
 ) -> None:
     monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
@@ -11008,9 +11078,9 @@ def _isolate_protect_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tu
 
 
 def _protect_git_values(
-    work: Path, overrides: dict[tuple[str, str], str] | None = None
-) -> dict[tuple[str, str], str]:
-    values = {
+    work: Path, overrides: dict[tuple[str, ...], str] | None = None
+) -> dict[tuple[str, ...], str]:
+    values: dict[tuple[str, ...], str] = {
         ("branch", "--show-current"): "codex/issue-72-claims",
         ("rev-parse", "--git-dir"): str(work / ".git" / "worktrees" / "issue-72"),
         ("rev-parse", "--git-common-dir"): str(work / ".git"),
@@ -11024,7 +11094,7 @@ def _protect_git_values(
 def _patch_protect_git(
     monkeypatch: pytest.MonkeyPatch,
     work: Path,
-    overrides: dict[tuple[str, str], str] | None = None,
+    overrides: dict[tuple[str, ...], str] | None = None,
 ) -> None:
     values = _protect_git_values(work, overrides)
 
@@ -12667,8 +12737,8 @@ def test_identity_conflict_still_marks_status_conflict(
             claim_comment(request("claim-b", "Grok 4.6", issue=72, scope=("src/b.py",))),
         )
     )
-    assert first is not None
-    assert second is not None
+    assert isinstance(first, ActiveClaim)
+    assert isinstance(second, ActiveClaim)
 
     assert _status((first, second), None) == 2
     rendered = capsys.readouterr().out
@@ -13220,6 +13290,17 @@ def test_a_closing_reference_to_another_repository_confers_no_stage() -> None:
 LANE_BRANCH = "docs/tidy-readme"
 
 
+@dataclass(frozen=True)
+class ReleaseMergeScenario:
+    """The pull request body and merge facts `merged_release_client` builds a
+    landing from -- one parametrized case's worth, typed instead of a loose
+    `dict[str, object]` so each keyword forwards to it honestly."""
+
+    body: str
+    merged: bool = True
+    base_ref_name: str = "main"
+
+
 def merged_release_client(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -13278,27 +13359,27 @@ def test_release_merged_accepts_an_issueless_lane_that_landed_without_an_item(
     ("scenario", "reason"),
     [
         pytest.param(
-            {"body": "Work-Item: #72\n\nCloses #72", "merged": False},
+            ReleaseMergeScenario(body="Work-Item: #72\n\nCloses #72", merged=False),
             "pull request #12 is not merged",
             id="not-merged",
         ),
         pytest.param(
-            {"body": "Work-Item: #72\n\nCloses #72", "base_ref_name": "release"},
+            ReleaseMergeScenario(body="Work-Item: #72\n\nCloses #72", base_ref_name="release"),
             "pull request #12 merged into 'release', not the default branch 'main'",
             id="wrong-base",
         ),
         pytest.param(
-            {"body": "Work-Item: #99\n\nCloses #99"},
+            ReleaseMergeScenario(body="Work-Item: #99\n\nCloses #99"),
             f"pull request #12 names Work-Item: {REPOSITORY}#99, not work item #72",
             id="another-item",
         ),
         pytest.param(
-            {"body": "No-Item: docs"},
+            ReleaseMergeScenario(body="No-Item: docs"),
             "pull request #12 names No-Item: docs, not work item #72",
             id="no-item-for-an-issue-claim",
         ),
         pytest.param(
-            {"body": "Advances #72"},
+            ReleaseMergeScenario(body="Advances #72"),
             "pull request #12 carries no `Work-Item:` or `No-Item:` line",
             id="unclassified",
         ),
@@ -13307,10 +13388,15 @@ def test_release_merged_accepts_an_issueless_lane_that_landed_without_an_item(
 def test_release_merged_refuses_a_landing_it_cannot_verify(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-    scenario: dict[str, object],
+    scenario: ReleaseMergeScenario,
     reason: str,
 ) -> None:
-    client = merged_release_client(monkeypatch, **scenario)
+    client = merged_release_client(
+        monkeypatch,
+        body=scenario.body,
+        merged=scenario.merged,
+        base_ref_name=scenario.base_ref_name,
+    )
     _stub_issue_reference(monkeypatch, {WORK_ITEM_ISSUE: (forge.ItemState.CLOSED, "", "")})
 
     assert issue_claim.main(["--repo", REPOSITORY, "release", "72", "--merged", "12"]) == 2
