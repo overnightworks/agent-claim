@@ -94,6 +94,8 @@ ignore_imports = [
 
 [tool.pyright]
 extraPaths = ["src"]
+venvPath = "."
+venv = ".venv"
 
 [dependency-groups]
 dev = [
