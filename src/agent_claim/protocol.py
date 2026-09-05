@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import PurePosixPath, PureWindowsPath
@@ -1456,20 +1457,10 @@ def claim_comment(request: ClaimRequest) -> str:
     )
 
 
-def rescope_comment(  # noqa: PLR0913  # explicit clear alongside set/keep, issue #136
-    claim: ActiveClaim,
-    scope: tuple[str, ...],
-    agent: str,
-    role: str,
-    *,
-    whole_reason: str | None = None,
-    clear_whole_reason: bool = False,
-) -> str:
-    if clear_whole_reason and whole_reason is not None:
-        raise ClaimError("rescope cannot both set and clear the whole reason")
-    validated_agent = _outbound_text(agent, "agent", maximum=128)
-    validated_role = _outbound_text(role, "role", maximum=64)
-    payload: dict[str, object] = {
+def _rescope_base_payload(
+    claim: ActiveClaim, scope: tuple[str, ...], validated_agent: str, validated_role: str
+) -> dict[str, object]:
+    return {
         "action": "rescope",
         "agent": validated_agent,
         "claim_id": claim.claim_id,
@@ -1477,15 +1468,20 @@ def rescope_comment(  # noqa: PLR0913  # explicit clear alongside set/keep, issu
         "role": validated_role,
         "scope": list(scope),
     }
-    scope_lines = "\n".join(f"- `{path}`" for path in scope)
-    whole = ""
-    if clear_whole_reason:
-        payload[WHOLE_CLEAR_MARKER_KEY] = True
-        whole = "- Whole: (cleared)\n"
-    elif whole_reason is not None:
-        reason = _outbound_text(whole_reason, "whole reason", maximum=512)
-        payload["whole"] = reason
-        whole = f"- Whole: {reason}\n"
+
+
+def _rescope_whole_line(payload: dict[str, object]) -> str:
+    if WHOLE_CLEAR_MARKER_KEY in payload:
+        return "- Whole: (cleared)\n"
+    if "whole" in payload:
+        return f"- Whole: {payload['whole']}\n"
+    return ""
+
+
+def _rescope_comment_body(
+    claim: ActiveClaim, validated_agent: str, validated_role: str, payload: dict[str, object]
+) -> str:
+    scope_lines = "\n".join(f"- `{path}`" for path in payload["scope"])
     return _validated_comment(
         f"{_marker(payload)}\n"
         "## RESCOPE — build lane\n\n"
@@ -1494,13 +1490,45 @@ def rescope_comment(  # noqa: PLR0913  # explicit clear alongside set/keep, issu
         f"- Base: `{claim.base}`\n"
         f"- Branch: `{claim.branch}`\n"
         f"- Claim ID: `{claim.claim_id}`\n"
-        f"{whole}"
+        f"{_rescope_whole_line(payload)}"
         "- Write scope:\n"
         f"{scope_lines}\n\n"
         "Repository-wide ledger event. Claim id and base are unchanged. "
         "No Auto-Runner.\n\n"
         f"Agent: {validated_agent} ({validated_role})"
     )
+
+
+def rescope_comment(
+    claim: ActiveClaim,
+    scope: tuple[str, ...],
+    agent: str,
+    role: str,
+    *,
+    whole_reason: str | None = None,
+) -> str:
+    validated_agent = _outbound_text(agent, "agent", maximum=128)
+    validated_role = _outbound_text(role, "role", maximum=64)
+    payload = _rescope_base_payload(claim, scope, validated_agent, validated_role)
+    if whole_reason is not None:
+        payload["whole"] = _outbound_text(whole_reason, "whole reason", maximum=512)
+    return _rescope_comment_body(claim, validated_agent, validated_role, payload)
+
+
+def rescope_clear_whole_reason_comment(
+    claim: ActiveClaim, scope: tuple[str, ...], agent: str, role: str
+) -> str:
+    """A rescope that also explicitly drops the claim's whole-reason back to
+    unset -- the only way back, since an ordinary rescope's omitted `whole`
+    field means "leave it alone" (issue #136). A distinct function, not a
+    `clear_whole_reason` flag on `rescope_comment`, makes setting and clearing
+    at once structurally impossible instead of a runtime check.
+    """
+    validated_agent = _outbound_text(agent, "agent", maximum=128)
+    validated_role = _outbound_text(role, "role", maximum=64)
+    payload = _rescope_base_payload(claim, scope, validated_agent, validated_role)
+    payload[WHOLE_CLEAR_MARKER_KEY] = True
+    return _rescope_comment_body(claim, validated_agent, validated_role, payload)
 
 
 def release_comment(
@@ -1851,14 +1879,26 @@ class CompensationFailedError(ClaimError):
     attempted -- the race that should have been undone is instead now the
     caller's problem, so this is never rendered as a plain refusal. `cause` is
     the underlying failure from posting the repair; `attempted_repair` is a
-    ready-to-run `agent-claim` command that finishes what the automatic repair
-    could not.
+    ready-to-run `agent-claim` command that finishes the repair -- always a
+    release, since a manual `claim`/`rescope` retry would itself be refused by
+    the very unreadable-claim fence that caused this race in the first place,
+    while a release of this reader's own live claim is not. `hint` is an
+    additional, non-executable note for a repair a release alone cannot finish
+    (e.g. re-claiming a rescope's pre-race scope afterwards).
     """
 
-    def __init__(self, live_claim: ActiveClaim, attempted_repair: str, cause: Exception):
+    def __init__(
+        self,
+        live_claim: ActiveClaim,
+        attempted_repair: str,
+        cause: Exception,
+        *,
+        hint: str | None = None,
+    ):
         self.live_claim = live_claim
         self.attempted_repair = attempted_repair
         self.cause = cause
+        self.hint = hint
         super().__init__(
             f"claim id {live_claim.claim_id!r} is still live; its automatic repair "
             f"failed to post: {cause}"
@@ -1966,6 +2006,25 @@ def _resolve_resource_race(
     raise ClaimUnavailableError(f"{expected.name} {expected.value} is held by another claim")
 
 
+def _claim_race_lost_repair_command(claim: ActiveClaim) -> str:
+    """The one manual repair that always works after a lost race (issue #136):
+    a `claim`/`rescope` retry would itself be refused by the very unreadable
+    comment that caused the race, but releasing this reader's own live claim is
+    not -- it is not the quarantined one, just stuck because the automatic
+    repair could not post. Names the issue explicitly for an `IssueIdentity`
+    claim so the repair works from any checkout, not only one on its branch (a
+    lane claim's `--claim-id` already pins it independently of any issue
+    number), and pins `--agent`/`--role` to the original claimant so the repair
+    does not depend on whatever identity the recovering shell happens to have.
+    """
+    issue_argument = f" {claim.identity.issue}" if isinstance(claim.identity, IssueIdentity) else ""
+    return (
+        f"agent-claim release{issue_argument} --claim-id {claim.claim_id} "
+        f"--agent {shlex.quote(claim.agent)} --role {shlex.quote(claim.role)} "
+        "--abandoned 'claim race lost'"
+    )
+
+
 def _resolve_unreadable_claim_race(
     client: ClaimWriter,
     request: ClaimRequest,
@@ -1985,11 +2044,7 @@ def _resolve_unreadable_claim_race(
             LEDGER_ISSUE, release_comment(own, request.agent, request.role, "claim race lost")
         )
     except Exception as error:
-        raise CompensationFailedError(
-            own,
-            f"agent-claim release --claim-id {own.claim_id} --abandoned 'claim race lost'",
-            error,
-        ) from error
+        raise CompensationFailedError(own, _claim_race_lost_repair_command(own), error) from error
     _reconcile_identity(client, request.identity)
     raise ClaimUnavailableError(
         f"claim refused: {_unreadable_claim_reason(blocker)} appeared while posting; "
@@ -2141,20 +2196,6 @@ def _select_rescope_claim(
     return selected
 
 
-def _rescope_revert_repair_command(selected: ActiveClaim, own: ActiveClaim) -> str:
-    """A ready-to-run `agent-claim rescope` that finishes reverting `own` back to
-    `selected`'s pre-rescope scope, for `CompensationFailedError` to hand the
-    caller when the automatic revert itself could not be posted."""
-    to_drop = tuple(path for path in own.scope if path not in selected.scope)
-    to_add = tuple(path for path in selected.scope if path not in own.scope)
-    flags = []
-    if to_drop:
-        flags.append(f"--drop {','.join(to_drop)}")
-    if to_add:
-        flags.append(f"--add {','.join(to_add)}")
-    return f"agent-claim rescope --claim-id {own.claim_id} " + " ".join(flags)
-
-
 def _resolve_unreadable_rescope_race(
     client: ClaimWriter,
     selected: ActiveClaim,
@@ -2167,23 +2208,43 @@ def _resolve_unreadable_rescope_race(
     scope change -- and, when this rescope just gave the claim its first-ever
     `--whole` reason, that reason too -- with another rescope back to `selected`'s
     pre-rescope state, so a `rescope` that reports failure never leaves either
-    live."""
+    live.
+
+    If that revert itself cannot post, no manual rescope retry can stand in for
+    it: the unreadable comment that caused the race would refuse it exactly as
+    it refused the automatic one. The repair is therefore the one command that
+    always works -- release -- plus a hint naming the pre-race scope to
+    re-claim afterwards.
+    """
     blocker = next(iter(post_aggregate.unreadable), None)
     if blocker is None:
         return
-    revert_reason: dict[str, object] = (
-        {"clear_whole_reason": True}
-        if selected.whole_reason is None
-        else {"whole_reason": selected.whole_reason}
-    )
     try:
-        client.post_comment(
-            LEDGER_ISSUE,
-            rescope_comment(own, selected.scope, selected.agent, selected.role, **revert_reason),
-        )
+        if selected.whole_reason is None:
+            client.post_comment(
+                LEDGER_ISSUE,
+                rescope_clear_whole_reason_comment(
+                    own, selected.scope, selected.agent, selected.role
+                ),
+            )
+        else:
+            client.post_comment(
+                LEDGER_ISSUE,
+                rescope_comment(
+                    own,
+                    selected.scope,
+                    selected.agent,
+                    selected.role,
+                    whole_reason=selected.whole_reason,
+                ),
+            )
     except Exception as error:
+        pre_race_scope = " ".join(shlex.quote(path) for path in selected.scope)
         raise CompensationFailedError(
-            own, _rescope_revert_repair_command(selected, own), error
+            own,
+            _claim_race_lost_repair_command(own),
+            error,
+            hint=f"then re-claim its pre-race scope: {pre_race_scope}",
         ) from error
     _reconcile_identity(client, selected.identity)
     raise ClaimUnavailableError(

@@ -1689,6 +1689,8 @@ def main(arguments: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         print(f"RECOVERY: run `{error.attempted_repair}` to finish the repair", file=sys.stderr)
+        if error.hint is not None:
+            print(f"RECOVERY: {error.hint}", file=sys.stderr)
         return 2
     except protocol.ClaimError as error:
         print(f"ERROR: {error}", file=sys.stderr)

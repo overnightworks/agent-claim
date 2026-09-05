@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import re
+import shlex
 import subprocess
 import sys
 from collections.abc import Callable
@@ -8343,6 +8344,18 @@ def test_cli_rescope_race_clears_the_whole_reason_it_just_set(
     assert standing[0].whole_reason is None
 
 
+def _executed_recovery_command(captured_err: str) -> list[str]:
+    """Pull the exact repair command a `CompensationFailedError` printed and
+    turn it into the argv `issue_claim.main` expects (issue #136 delta review:
+    the test proves the printed text is actually runnable, not merely present).
+    """
+    match = re.search(r"RECOVERY: run `([^`]+)` to finish the repair", captured_err)
+    assert match is not None, captured_err
+    argv = shlex.split(match.group(1))
+    assert argv[0] == "agent-claim"
+    return argv[1:]
+
+
 def test_cli_claim_race_reports_a_recovery_warning_when_the_compensating_release_fails(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -8350,7 +8363,9 @@ def test_cli_claim_race_reports_a_recovery_warning_when_the_compensating_release
     """Finding 2 (delta review): when the race-compensating release itself fails
     to post, the just-claimed id stays live and untracked by any refusal message
     -- the CLI must say so explicitly, naming the live claim and a ready repair
-    command, rather than printing the compensating write's own generic error."""
+    command, rather than printing the compensating write's own generic error.
+    The printed command is then actually run, proving it is not merely refused
+    text -- it releases the stuck claim for real."""
     client = FakeForge()
     client.inject_after_next_ledger_post = unreadable_ledger_comment(2, claim_id="claim-c")
     client.fail_ledger_post_at_call = 2
@@ -8386,11 +8401,19 @@ def test_cli_claim_race_reports_a_recovery_warning_when_the_compensating_release
         "post: ledger post failed (simulated)" in captured.err
     )
     assert (
-        "RECOVERY: run `agent-claim release --claim-id cli-claim "
-        "--abandoned 'claim race lost'` to finish the repair" in captured.err
+        "RECOVERY: run `agent-claim release 72 --claim-id cli-claim --agent "
+        "'Codex Sol' --role builder --abandoned 'claim race lost'` to finish "
+        "the repair" in captured.err
     )
     standing = active_claims(client.list_protocol_candidates(LEDGER_ISSUE))
     assert [claim.claim_id for claim in standing] == ["cli-claim"]
+
+    repair_argv = _executed_recovery_command(captured.err)
+    client.fail_ledger_post_at_call = None
+    repaired = issue_claim.main(["--repo", "example/agent-claim", *repair_argv])
+
+    assert repaired == 0
+    assert active_claims(client.list_protocol_candidates(LEDGER_ISSUE)) == ()
 
 
 def test_cli_rescope_race_reports_a_recovery_warning_when_the_reverting_rescope_fails(
@@ -8399,7 +8422,11 @@ def test_cli_rescope_race_reports_a_recovery_warning_when_the_reverting_rescope_
 ) -> None:
     """Finding 2 (delta review): the same recovery warning for `rescope`, when
     the compensating revert itself cannot be posted -- the widened scope stays
-    live, and the CLI names it plus the exact `--drop`/`--add` to run by hand."""
+    live, and the CLI names the one repair that always works (a release, since
+    a manual rescope retry would itself be refused by the same unreadable
+    comment) plus a hint to re-claim the pre-race scope. The printed command is
+    then actually run against the same ledger, proving it truly releases the
+    claim the failed automatic revert left stuck."""
     client = FakeForge()
     acquire_claim(client, request(issue=72, branch="codex/issue-72", scope=("src/widget.py",)))
     client.inject_after_next_ledger_post = unreadable_ledger_comment(99, claim_id="claim-c")
@@ -8423,11 +8450,20 @@ def test_cli_rescope_race_reports_a_recovery_warning_when_the_reverting_rescope_
         "post: ledger post failed (simulated)" in captured.err
     )
     assert (
-        "RECOVERY: run `agent-claim rescope --claim-id claim-a --drop src/new.py` "
-        "to finish the repair" in captured.err
+        "RECOVERY: run `agent-claim release 72 --claim-id claim-a --agent "
+        "'Codex Sol' --role builder --abandoned 'claim race lost'` to finish "
+        "the repair" in captured.err
     )
+    assert "RECOVERY: then re-claim its pre-race scope: src/widget.py" in captured.err
     standing = active_claims(client.list_protocol_candidates(LEDGER_ISSUE))
     assert standing[0].scope == ("src/widget.py", "src/new.py")
+
+    repair_argv = _executed_recovery_command(captured.err)
+    client.fail_ledger_post_at_call = None
+    repaired = issue_claim.main(["--repo", "example/agent-claim", *repair_argv])
+
+    assert repaired == 0
+    assert active_claims(client.list_protocol_candidates(LEDGER_ISSUE)) == ()
 
 
 def test_cli_status_hard_fails_on_a_comment_missing_a_required_field_plus_an_extra_one(
@@ -9787,8 +9823,8 @@ def test_rescope_whole_reason_lifecycle_none_reason_kept_then_cleared() -> None:
     """The full None -> reason -> (kept across an unrelated later rescope) ->
     cleared lifecycle for `whole_reason`, proven through `active_claims` -- the
     ledger's real reader (issue #136 delta review). Omitting `whole` on an
-    ordinary rescope leaves an existing reason alone; only an explicit
-    `clear_whole_reason=True` clears it back to unset."""
+    ordinary rescope leaves an existing reason alone; only the dedicated
+    `rescope_clear_whole_reason_comment` clears it back to unset."""
     claim_event = comment(1, claim_comment(request(issue=72, scope=("src",))))
     claimed = parse_claim_event(claim_event)
     assert isinstance(claimed, ActiveClaim)
@@ -9812,24 +9848,32 @@ def test_rescope_whole_reason_lifecycle_none_reason_kept_then_cleared() -> None:
 
     cleared_event = comment(
         4,
-        protocol.rescope_comment(
-            kept[0], ("src",), "Codex Sol", "builder", clear_whole_reason=True
-        ),
+        protocol.rescope_clear_whole_reason_comment(kept[0], ("src",), "Codex Sol", "builder"),
     )
     cleared = active_claims((claim_event, set_reason_event, unrelated_rescope_event, cleared_event))
     assert cleared[0].whole_reason is None
     assert cleared[0].scope == ("src",)
 
 
-def test_rescope_comment_rejects_setting_and_clearing_the_whole_reason_at_once() -> None:
-    claim_event = comment(1, claim_comment(request(issue=72, scope=("src",))))
-    claimed = parse_claim_event(claim_event)
-    assert isinstance(claimed, ActiveClaim)
-
-    with pytest.raises(ClaimError, match="cannot both set and clear"):
-        protocol.rescope_comment(
-            claimed, ("src",), "Codex Sol", "builder", whole_reason="x", clear_whole_reason=True
-        )
+def test_parse_claim_rescope_rejects_a_marker_with_both_whole_and_whole_clear() -> None:
+    """The parser still refuses this wire-level combination even though this
+    reader's own writer can no longer construct it (issue #136 delta review):
+    `rescope_comment` and `rescope_clear_whole_reason_comment` are now separate
+    functions, so setting and clearing at once is structurally impossible from
+    this writer, but a marker from another writer -- or a hand-crafted one --
+    could still carry both keys."""
+    payload = {
+        "action": "rescope",
+        "agent": "Codex Sol",
+        "claim_id": "claim-a",
+        "issue": 72,
+        "role": "builder",
+        "scope": ["src"],
+        "whole": "a reason",
+        "whole_clear": True,
+    }
+    with pytest.raises(InvalidClaimMarkerError, match="cannot both set and clear"):
+        parse_claim_event(comment(1, marker(payload)))
 
 
 def test_cli_claim_cut_does_not_exempt_a_directory_scope(
