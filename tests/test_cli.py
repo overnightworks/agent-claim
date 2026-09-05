@@ -8466,6 +8466,158 @@ def test_cli_rescope_race_reports_a_recovery_warning_when_the_reverting_rescope_
     assert active_claims(client.list_protocol_candidates(LEDGER_ISSUE)) == ()
 
 
+def test_cli_claim_race_same_id_repair_uses_coordinator_override_for_the_quarantined_claim(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Finding 1 (third delta review): when the racing unreadable comment names
+    this reader's own just-claimed id, that claim is quarantined -- a plain
+    release now refuses it too, so the printed repair must use the documented
+    coordinator-override exception instead. The command is then actually run,
+    and the bypassed quarantine refusal is printed as a warning, not lost."""
+    client = FakeForge()
+    client.inject_after_next_ledger_post = unreadable_ledger_comment(2, claim_id="cli-claim")
+    client.fail_ledger_post_at_call = 2
+    _patch_status_cli(monkeypatch, client)
+    monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
+    monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+
+    status = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "claim",
+            "72",
+            "--agent",
+            "Codex Sol",
+            "--role",
+            "builder",
+            "--base",
+            BASE,
+            "--branch",
+            "codex/issue-72",
+            "--scope",
+            "src",
+            "--claim-id",
+            "cli-claim",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 2
+    assert (
+        "RECOVERY: run `agent-claim release 72 --claim-id cli-claim --agent "
+        "'Codex Sol' --role coordinator --coordinator-override --abandoned "
+        "'claim race lost'` to finish the repair" in captured.err
+    )
+    standing = active_claims(client.list_protocol_candidates(LEDGER_ISSUE))
+    assert [claim.claim_id for claim in standing] == ["cli-claim"]
+    assert standing[0].quarantined_by is not None
+
+    repair_argv = _executed_recovery_command(captured.err)
+    client.fail_ledger_post_at_call = None
+    repaired = issue_claim.main(["--repo", "example/agent-claim", *repair_argv])
+    repaired_captured = capsys.readouterr()
+
+    assert repaired == 0
+    assert "WARNING: this claim was quarantined:" in repaired_captured.err
+    assert active_claims(client.list_protocol_candidates(LEDGER_ISSUE)) == ()
+
+
+def test_cli_claim_race_repair_for_a_lane_claim_names_its_checkout_branch(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Finding 2 (third delta review): `release` has no `--branch` selector and
+    always derives a lane claim from the current checkout, regardless of
+    `--claim-id` -- unlike an issue claim, a lane claim's repair command cannot
+    be made checkout-independent, so it also names the branch to run it from.
+    Executed with that branch resolvable in the fake, it releases the claim."""
+    client = FakeForge()
+    client.inject_after_next_ledger_post = unreadable_ledger_comment(2, claim_id="claim-c")
+    client.fail_ledger_post_at_call = 2
+    _set_agent_identity_env(monkeypatch, {issue_claim.AGENT_CLAIM_AGENT_ENV: "Codex Sol"})
+    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
+    monkeypatch.setattr(discovery, "discover_ledger", lambda _client: LEDGER_ISSUE)
+    git_values = {("branch", "--show-current"): "docs/lane-cleanup"}
+    monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
+    monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
+    monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+
+    status = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "claim",
+            "--role",
+            "builder",
+            "--base",
+            BASE,
+            "--branch",
+            "docs/lane-cleanup",
+            "--scope",
+            "docs",
+            "--claim-id",
+            "cli-lane-claim",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 2
+    assert (
+        "RECOVERY: run `agent-claim release --claim-id cli-lane-claim --agent "
+        "'Codex Sol' --role builder --abandoned 'claim race lost'` to finish "
+        "the repair" in captured.err
+    )
+    assert "RECOVERY: run from the lane's checkout (branch docs/lane-cleanup)" in captured.err
+
+    repair_argv = _executed_recovery_command(captured.err)
+    client.fail_ledger_post_at_call = None
+    repaired = issue_claim.main(["--repo", "example/agent-claim", *repair_argv])
+
+    assert repaired == 0
+    assert active_claims(client.list_protocol_candidates(LEDGER_ISSUE)) == ()
+
+
+def test_cli_rescope_race_repair_hint_includes_the_pre_race_whole_reason(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Finding 3 (third delta review): the rescope race's re-claim hint restores
+    scope only; when the pre-race claim already had a whole reason, dropping it
+    from the hint would silently lose it after the suggested repair."""
+    client = FakeForge()
+    acquire_claim(
+        client,
+        request(
+            issue=72,
+            branch="codex/issue-72",
+            scope=("src/widget.py",),
+            whole_reason="widen for launch",
+        ),
+    )
+    client.inject_after_next_ledger_post = unreadable_ledger_comment(99, claim_id="claim-c")
+    client.ledger_post_call_count = 0
+    client.fail_ledger_post_at_call = 2
+    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
+    monkeypatch.setattr(discovery, "discover_ledger", lambda _client: LEDGER_ISSUE)
+    git_values = _git_checkout()
+    monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
+    monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+    _set_agent_identity_env(monkeypatch, {issue_claim.AGENT_CLAIM_AGENT_ENV: "Codex Sol"})
+
+    status = issue_claim.main(
+        ["--repo", "example/agent-claim", "rescope", "72", "--add", "src/new.py"]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 2
+    assert (
+        "RECOVERY: then re-claim its pre-race scope: src/widget.py --whole "
+        "'widen for launch'" in captured.err
+    )
+
+
 def test_cli_status_hard_fails_on_a_comment_missing_a_required_field_plus_an_extra_one(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

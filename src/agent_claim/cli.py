@@ -1557,6 +1557,15 @@ def _cmd_release(parsed: argparse.Namespace, session: _WriteSession) -> None:
         branch=session.release_branch,
         coordinator_override=parsed.coordinator_override,
     )
+    if released.quarantined_by is not None:
+        # The coordinator-override exception just released a quarantined claim
+        # (issue #136): the refusal it bypassed must still reach the operator,
+        # not vanish because the override skipped raising it.
+        print(
+            f"WARNING: this claim was quarantined: "
+            f"{protocol._unreadable_claim_reason(released.quarantined_by)}",
+            file=sys.stderr,
+        )
     if parsed.json:
         _release_json(released, parsed.agent, parsed.role, outcome)
         return
@@ -1689,8 +1698,8 @@ def main(arguments: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         print(f"RECOVERY: run `{error.attempted_repair}` to finish the repair", file=sys.stderr)
-        if error.hint is not None:
-            print(f"RECOVERY: {error.hint}", file=sys.stderr)
+        for hint in error.hints:
+            print(f"RECOVERY: {hint}", file=sys.stderr)
         return 2
     except protocol.ClaimError as error:
         print(f"ERROR: {error}", file=sys.stderr)

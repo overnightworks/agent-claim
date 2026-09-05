@@ -1882,9 +1882,12 @@ class CompensationFailedError(ClaimError):
     ready-to-run `agent-claim` command that finishes the repair -- always a
     release, since a manual `claim`/`rescope` retry would itself be refused by
     the very unreadable-claim fence that caused this race in the first place,
-    while a release of this reader's own live claim is not. `hint` is an
-    additional, non-executable note for a repair a release alone cannot finish
-    (e.g. re-claiming a rescope's pre-race scope afterwards).
+    while a release of this reader's own live claim is not (a same-id race that
+    quarantined `live_claim` itself uses the documented coordinator-override
+    exception instead of a plain release). `hints` are additional,
+    non-executable notes a release alone cannot finish -- e.g. re-claiming a
+    rescope's pre-race scope afterwards, or that a lane claim's release must
+    run from its own checkout.
     """
 
     def __init__(
@@ -1893,12 +1896,12 @@ class CompensationFailedError(ClaimError):
         attempted_repair: str,
         cause: Exception,
         *,
-        hint: str | None = None,
+        hints: tuple[str, ...] = (),
     ):
         self.live_claim = live_claim
         self.attempted_repair = attempted_repair
         self.cause = cause
-        self.hint = hint
+        self.hints = hints
         super().__init__(
             f"claim id {live_claim.claim_id!r} is still live; its automatic repair "
             f"failed to post: {cause}"
@@ -2011,18 +2014,45 @@ def _claim_race_lost_repair_command(claim: ActiveClaim) -> str:
     a `claim`/`rescope` retry would itself be refused by the very unreadable
     comment that caused the race, but releasing this reader's own live claim is
     not -- it is not the quarantined one, just stuck because the automatic
-    repair could not post. Names the issue explicitly for an `IssueIdentity`
-    claim so the repair works from any checkout, not only one on its branch (a
-    lane claim's `--claim-id` already pins it independently of any issue
-    number), and pins `--agent`/`--role` to the original claimant so the repair
-    does not depend on whatever identity the recovering shell happens to have.
+    repair could not post.
+
+    Names the issue explicitly for an `IssueIdentity` claim so the repair works
+    from any checkout, not only one on its branch (a lane claim's `--claim-id`
+    cannot do the same -- see `_claim_race_lost_repair_hints`), and pins
+    `--agent`/`--role` to the original claimant so the repair does not depend
+    on whatever identity the recovering shell happens to have.
+
+    When the same unreadable comment that caused the race also names this
+    claim's own id, `claim.quarantined_by` is set: a plain release now refuses
+    a quarantined claim too, so this is the one case where the repair is the
+    documented coordinator-override exception instead.
     """
     issue_argument = f" {claim.identity.issue}" if isinstance(claim.identity, IssueIdentity) else ""
+    if claim.quarantined_by is not None:
+        return (
+            f"agent-claim release{issue_argument} --claim-id {claim.claim_id} "
+            f"--agent {shlex.quote(claim.agent)} --role coordinator --coordinator-override "
+            "--abandoned 'claim race lost'"
+        )
     return (
         f"agent-claim release{issue_argument} --claim-id {claim.claim_id} "
         f"--agent {shlex.quote(claim.agent)} --role {shlex.quote(claim.role)} "
         "--abandoned 'claim race lost'"
     )
+
+
+def _claim_race_lost_repair_hints(claim: ActiveClaim) -> tuple[str, ...]:
+    """Non-executable notes `_claim_race_lost_repair_command` alone cannot cover.
+
+    `release` has no `--branch` selector (issue #136): for an `IssueIdentity`
+    claim the printed command already names the issue and needs no checkout at
+    all, but a lane claim has no such number -- `release` derives the lane
+    from the current checkout regardless of `--claim-id`, so the repair only
+    works run from that lane's own checkout.
+    """
+    if isinstance(claim.identity, LaneIdentity):
+        return (f"run from the lane's checkout (branch {claim.branch})",)
+    return ()
 
 
 def _resolve_unreadable_claim_race(
@@ -2044,7 +2074,12 @@ def _resolve_unreadable_claim_race(
             LEDGER_ISSUE, release_comment(own, request.agent, request.role, "claim race lost")
         )
     except Exception as error:
-        raise CompensationFailedError(own, _claim_race_lost_repair_command(own), error) from error
+        raise CompensationFailedError(
+            own,
+            _claim_race_lost_repair_command(own),
+            error,
+            hints=_claim_race_lost_repair_hints(own),
+        ) from error
     _reconcile_identity(client, request.identity)
     raise ClaimUnavailableError(
         f"claim refused: {_unreadable_claim_reason(blocker)} appeared while posting; "
@@ -2196,6 +2231,20 @@ def _select_rescope_claim(
     return selected
 
 
+def _rescope_reclaim_hint(selected: ActiveClaim) -> str:
+    """Non-executable note for `CompensationFailedError`'s rescope race: the
+    repair is a release, which drops the claim entirely, so re-claiming
+    `selected`'s pre-race scope -- and whole reason, if it had one -- is a
+    separate, manual second step (issue #136 delta review)."""
+    scope = " ".join(shlex.quote(path) for path in selected.scope)
+    whole = (
+        f" --whole {shlex.quote(selected.whole_reason)}"
+        if selected.whole_reason is not None
+        else ""
+    )
+    return f"then re-claim its pre-race scope: {scope}{whole}"
+
+
 def _resolve_unreadable_rescope_race(
     client: ClaimWriter,
     selected: ActiveClaim,
@@ -2239,12 +2288,11 @@ def _resolve_unreadable_rescope_race(
                 ),
             )
     except Exception as error:
-        pre_race_scope = " ".join(shlex.quote(path) for path in selected.scope)
         raise CompensationFailedError(
             own,
             _claim_race_lost_repair_command(own),
             error,
-            hint=f"then re-claim its pre-race scope: {pre_race_scope}",
+            hints=(*_claim_race_lost_repair_hints(own), _rescope_reclaim_hint(selected)),
         ) from error
     _reconcile_identity(client, selected.identity)
     raise ClaimUnavailableError(
@@ -2334,6 +2382,16 @@ def release_claim(  # noqa: PLR0913, PLR0917  # protocol/board slice, #103
     branch: str | None = None,
     coordinator_override: bool = False,
 ) -> ActiveClaim:
+    """Release a live claim.
+
+    A quarantined claim (issue #136) ordinarily refuses release, since this
+    reader cannot trust what it thinks it knows about a claim a later unknown
+    field also touched. A `coordinator_override` is the one documented
+    exception: it may release a quarantined claim too -- the returned
+    `ActiveClaim` still carries `quarantined_by`, so a caller (`_cmd_release`)
+    can print the refusal it bypassed as a warning rather than losing it
+    silently.
+    """
     if coordinator_override:
         _require_coordinator_override(role)
     standing = _claims_for_identity(_ledger_claims(client), identity, branch)
@@ -2344,7 +2402,7 @@ def release_claim(  # noqa: PLR0913, PLR0917  # protocol/board slice, #103
     selected = _selected_claim(
         standing, _ClaimLookup(identity, agent, claim_id, branch), action="release"
     )
-    if selected.quarantined_by is not None:
+    if selected.quarantined_by is not None and not coordinator_override:
         raise ClaimUnavailableError(
             f"release refused: {_unreadable_claim_reason(selected.quarantined_by)}; "
             "upgrade the installed tool"
