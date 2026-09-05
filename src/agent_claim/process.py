@@ -158,8 +158,14 @@ def _write_process_input(
     selector: selectors.BaseSelector,
     process_handle: subprocess.Popen[bytes],
 ) -> memoryview:
+    # `key.fileobj` is typeshed's `int | HasFileno`, the general shape any selector
+    # registration may carry; this module only ever registers `process_handle`'s own
+    # streams (`_register_process_streams`), so the concretely typed stream comes
+    # from there instead of narrowing the selector's wider protocol.
+    stream = process_handle.stdin
+    assert stream is not None
     try:
-        written = os.write(key.fileobj.fileno(), pending_input)
+        written = os.write(stream.fileno(), pending_input)
     except BrokenPipeError:
         written = len(pending_input)
     except OSError as error:
@@ -168,7 +174,7 @@ def _write_process_input(
     remaining_input = pending_input[written:]
     if not remaining_input:
         selector.unregister(key.fileobj)
-        key.fileobj.close()
+        stream.close()
     return remaining_input
 
 
@@ -178,8 +184,10 @@ def _read_process_output(
     output: bytearray,
     process_handle: subprocess.Popen[bytes],
 ) -> None:
+    stream = process_handle.stdout
+    assert stream is not None
     try:
-        chunk = os.read(key.fileobj.fileno(), _OUTPUT_CHUNK_BYTES)
+        chunk = os.read(stream.fileno(), _OUTPUT_CHUNK_BYTES)
     except OSError as error:
         raise ProcessIoFailedError(IoStage.READING, str(error)) from error
     if not chunk:

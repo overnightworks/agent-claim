@@ -858,8 +858,10 @@ def parse_claim_event(comment: IssueComment) -> ClaimEvent | None:
             )
         identity: ClaimIdentity = IssueIdentity(LEDGER_ISSUE)
     elif action == "supersede":
-        # Supersede stays ledger-issue-only (Entschieden #6): no lane branching here.
-        identity = IssueIdentity(_required_issue(payload))
+        # Supersede stays ledger-issue-only (Entschieden #6): no lane branching here,
+        # so it returns straight from the issue number rather than routing through
+        # `identity` -- the shared union below never carries a supersede action.
+        return _parse_ledger_supersede(payload, comment, _required_issue(payload))
     else:
         identity = _required_identity(payload)
     if action == "claim":
@@ -868,9 +870,7 @@ def parse_claim_event(comment: IssueComment) -> ClaimEvent | None:
         return _parse_claimant_release(payload, comment, identity, legacy=legacy)
     if action == "override_release":
         return _parse_override_release(payload, comment, identity)
-    if action == "rescope":
-        return _parse_claim_rescope(payload, comment, identity)
-    return _parse_ledger_supersede(payload, comment, identity.issue)
+    return _parse_claim_rescope(payload, comment, identity)
 
 
 def _apply_terminal_event(
@@ -1479,9 +1479,13 @@ def _rescope_whole_line(payload: dict[str, object]) -> str:
 
 
 def _rescope_comment_body(
-    claim: ActiveClaim, validated_agent: str, validated_role: str, payload: dict[str, object]
+    claim: ActiveClaim,
+    validated_agent: str,
+    validated_role: str,
+    scope: tuple[str, ...],
+    payload: dict[str, object],
 ) -> str:
-    scope_lines = "\n".join(f"- `{path}`" for path in payload["scope"])
+    scope_lines = "\n".join(f"- `{path}`" for path in scope)
     return _validated_comment(
         f"{_marker(payload)}\n"
         "## RESCOPE — build lane\n\n"
@@ -1512,7 +1516,7 @@ def rescope_comment(
     payload = _rescope_base_payload(claim, scope, validated_agent, validated_role)
     if whole_reason is not None:
         payload["whole"] = _outbound_text(whole_reason, "whole reason", maximum=512)
-    return _rescope_comment_body(claim, validated_agent, validated_role, payload)
+    return _rescope_comment_body(claim, validated_agent, validated_role, scope, payload)
 
 
 def rescope_clear_whole_reason_comment(
@@ -1528,7 +1532,7 @@ def rescope_clear_whole_reason_comment(
     validated_role = _outbound_text(role, "role", maximum=64)
     payload = _rescope_base_payload(claim, scope, validated_agent, validated_role)
     payload[WHOLE_CLEAR_MARKER_KEY] = True
-    return _rescope_comment_body(claim, validated_agent, validated_role, payload)
+    return _rescope_comment_body(claim, validated_agent, validated_role, scope, payload)
 
 
 def release_comment(
@@ -1795,14 +1799,14 @@ def repair_duplicate_claims(client: ClaimWriter) -> tuple[DuplicateClaimRepair, 
         plans.append((claim_id, survivor, tuple(superseded_comments)))
 
     repairs: list[DuplicateClaimRepair] = []
-    for claim_id, survivor, superseded_comments in plans:
+    for claim_id, survivor, comments_to_neutralize in plans:
         body = _neutralized_claim_body(claim_id, survivor)
-        for superseded_comment in superseded_comments:
+        for superseded_comment in comments_to_neutralize:
             client.neutralize_claim_comment(superseded_comment.identifier, body)
         repairs.append(
             DuplicateClaimRepair(
                 claim_id=claim_id,
-                superseded_comment_ids=tuple(entry.identifier for entry in superseded_comments),
+                superseded_comment_ids=tuple(entry.identifier for entry in comments_to_neutralize),
                 survivor_comment_id=survivor.comment.identifier,
             )
         )

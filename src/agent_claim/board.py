@@ -788,7 +788,7 @@ def _single_classification_match(
     matches: tuple[re.Match[str], ...],
 ) -> re.Match[str] | ClassificationDefect:
     """The one classification line a body must carry, or why it doesn't have one."""
-    if not matches:
+    if len(matches) == 0:
         return ClassificationDefect("carries no `Work-Item:` or `No-Item:` line")
     work_items = tuple(match for match in matches if match.group("kind").lower() == WORK_ITEM_KIND)
     if len(work_items) > 1:
@@ -1000,8 +1000,11 @@ def _single_concrete_next(value: str | None) -> bool:
 
 
 def _claim_by_issue(claims: tuple[protocol.ActiveClaim, ...]) -> dict[int, protocol.ActiveClaim]:
-    issue_claims = (claim for claim in claims if isinstance(claim.identity, protocol.IssueIdentity))
-    return {claim.identity.issue: claim for claim in issue_claims}
+    return {
+        claim.identity.issue: claim
+        for claim in claims
+        if isinstance(claim.identity, protocol.IssueIdentity)
+    }
 
 
 def _priority_index(labels: tuple[str, ...], config: BoardConfig) -> int | None:

@@ -26,6 +26,8 @@ jobs:
         run: uv run --locked ruff check .
       - name: Check formatting
         run: uv run --locked ruff format --check .
+      - name: Check types
+        run: uv run --locked pyright src tests
       - name: Check for dead code
         run: uv run --locked vulture src whitelist_vulture.py --min-confidence 60
       - name: Check architecture contracts
