@@ -2038,16 +2038,17 @@ def _claim_race_lost_repair_command(claim: ActiveClaim) -> str:
     documented coordinator-override exception instead.
     """
     issue_argument = f" {claim.identity.issue}" if isinstance(claim.identity, IssueIdentity) else ""
+    abandoned_argument = f"--abandoned {shlex.quote(CLAIM_RACE_LOST_REASON)}"
     if claim.quarantined_by is not None:
         return (
             f"agent-claim release{issue_argument} --claim-id {claim.claim_id} "
             f"--agent {shlex.quote(claim.agent)} --role coordinator --coordinator-override "
-            "--abandoned 'claim race lost'"
+            f"{abandoned_argument}"
         )
     return (
         f"agent-claim release{issue_argument} --claim-id {claim.claim_id} "
         f"--agent {shlex.quote(claim.agent)} --role {shlex.quote(claim.role)} "
-        "--abandoned 'claim race lost'"
+        f"{abandoned_argument}"
     )
 
 
@@ -2067,8 +2068,6 @@ def _claim_race_lost_repair_hint(claim: ActiveClaim) -> str | None:
 
 
 def _as_hints(*hints: str | None) -> tuple[str, ...]:
-    """Compose `CompensationFailedError.hints` from a mix of required and
-    optional (possibly `None`) notes, dropping the absent ones."""
     return tuple(hint for hint in hints if hint is not None)
 
 

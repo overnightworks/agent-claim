@@ -144,21 +144,35 @@ jobs:
           else
             scope_query="branch=main"
           fi
-          report_path="${RUNNER_TEMP}/sonar-open-findings.json"
-          curl -s "https://sonarcloud.io/api/issues/search?componentKeys=${component_key}&${scope_query}&statuses=OPEN&ps=100" \
-            -o "${report_path}"
-          python3 - "${report_path}" <<'PYTHON'
+          python3 - "${component_key}" "${scope_query}" <<'PYTHON'
           import json
           import sys
+          import urllib.request
 
-          with open(sys.argv[1]) as handle:
-              report = json.load(handle)
+          component_key, scope_query = sys.argv[1], sys.argv[2]
 
-          total = report["total"]
-          for issue in report["issues"]:
-              file_path = issue["component"].split(":", 1)[1]
-              line = issue.get("line", "?")
-              print(f'{issue["rule"]} {file_path}:{line} {issue["message"]}')
+          def fetch_page(page: int) -> dict:
+              url = (
+                  "https://sonarcloud.io/api/issues/search"
+                  f"?componentKeys={component_key}&{scope_query}&statuses=OPEN&ps=100&p={page}"
+              )
+              with urllib.request.urlopen(url) as response:
+                  return json.load(response)
+
+          page = 1
+          printed = 0
+          total = None
+          while total is None or printed < total:
+              report = fetch_page(page)
+              total = report["total"]
+              for issue in report["issues"]:
+                  file_path = issue["component"].split(":", 1)[1]
+                  line = issue.get("line", "?")
+                  print(f'{issue["rule"]} {file_path}:{line} {issue["message"]}')
+                  printed += 1
+              if not report["issues"]:
+                  break
+              page += 1
 
           if total > 0:
               print(f"{total} open SonarCloud finding(s) on new code", file=sys.stderr)
