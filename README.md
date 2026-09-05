@@ -27,7 +27,12 @@ and still answers `board`, `next`, `who`, and `pr-check` for every other claim; 
 `claim` or `rescope` that could overlap the unreadable claim is refused, since the
 reader cannot tell. A new field therefore ships only in a release whose notes
 name it and the consumers pinned to an older tag, so each can bump its pin in its
-own lane instead of discovering the mismatch as a broken ledger read.
+own lane instead of discovering the mismatch as a broken ledger read. For
+example, the rescope marker's `whole_clear` field is written only by the
+automatic revert after a lost rescope race and is readable from 0.11.0 onward;
+a 0.10.1 reader sees it as an unknown field and, since the fence itself ships
+only in 0.11.0, still treats it as a whole-ledger refusal -- so a consumer must
+bump its pin to 0.11.0 before that repair path can appear on its ledger.
 
 ## Five-command quick start
 
