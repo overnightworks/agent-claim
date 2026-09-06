@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
+from typing import cast
 
 from . import protocol
 
@@ -138,6 +139,11 @@ UNDISPATCHED_SLICE_CELL = "—"
 # by` value is itself a contract defect (`_validate_blocked_by`), which
 # would read as a malformed body rather than an unfinished one.
 CHILD_SKELETON = f"## Now\n\n## Next\n\n## Blocked by\n{NO_BLOCKERS}\n\n## Done when\n"
+# Empty strings, not omitted keys: `parse_body` must read this as
+# `VALID`/incomplete, matching `CHILD_SKELETON`'s prose behavior. No
+# `source_slice` -- title, sub-issue relation, and GitHub history own
+# provenance instead.
+BLOCK_CHILD_SKELETON = '```agent-claim\nversion = 1\nnow = ""\nnext = ""\ndone_when = ""\n```\n'
 # The three slice-title forms seen in atelier-2 (`#79`): a parenthetical
 # after the real title (`(#962 Scheibe 4)`, `(#962 slice 4)`) or a leading
 # German phrase (`Scheibe 4 von #962`).
@@ -149,6 +155,16 @@ _SLICE_TITLE_VON_PATTERN = re.compile(
     r"Scheibe[ \t]+(?P<slice>[1-9]\d*)[ \t]+von[ \t]+#(?P<parent>[1-9]\d*)",
     re.IGNORECASE | re.ASCII,
 )
+# The one fenced-block info string a repository pinned to `body_contract =
+# "block"` (issue #150) reads as its typed work-item body -- any other
+# fence's info string is ordinary documentation.
+AGENT_CLAIM_FENCE_INFO = "agent-claim"
+BLOCK_TOP_LEVEL_KEYS = frozenset(
+    {"version", "now", "next", "done_when", "frozen_until", "expectation", "slice"}
+)
+BLOCK_VERSION = 1
+BLOCK_EXPECTATION_DEFAULTS = frozenset({"yes", "no", "later"})
+BLOCK_EXPECTATION_RULINGS = frozenset({"yes", "no"})
 
 
 class ItemKind(StrEnum):
@@ -172,6 +188,7 @@ class Issue:
     kind: ItemKind | None = None
     children_closed: int | None = None
     children_total: int | None = None
+    blocked_by_count: int = 0
 
 
 class BlockerState(StrEnum):
@@ -206,7 +223,7 @@ class ChildItem:
 
     number: int
     state: ChildState
-    blocked_by: tuple[int, ...] = ()
+    blocked_by: tuple[IssueReference, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -242,6 +259,34 @@ class IssueReference:
 
     def __str__(self) -> str:
         return f"{self.repository}#{self.number}"
+
+
+@dataclass(frozen=True)
+class IssueDependency:
+    """One `blocked_by` relation GitHub itself records for an issue (#150) --
+    same- or foreign-repository, open or closed, issue or pull request. The
+    board reads these instead of a `Blocked by:` body section once a
+    repository is pinned to `body_contract = "block"`."""
+
+    reference: IssueReference
+    state: BlockerState
+    is_pull_request: bool
+    closed_at: datetime | None = None
+
+
+def open_blocker_label(reference: IssueReference, repository: str) -> str:
+    """How one entry of `BoardItem.open_blockers` (or `ChildItem.blocked_by`)
+    is named against the board's own `repository`: a same-repository
+    blocker is its bare local number, `#n`; a foreign one is the qualified
+    `owner/repo#n` (`IssueReference.__str__`)."""
+    return f"#{reference.number}" if reference.repository == repository else str(reference)
+
+
+def _blocker_sort_key(reference: IssueReference, repository: str) -> tuple[int, str, int]:
+    """Local references first, ascending by number; foreign references
+    after them, ascending by `(repository, number)` (#150 §6) -- read
+    directly off the typed reference, never re-parsed from a label."""
+    return (0 if reference.repository == repository else 1, reference.repository, reference.number)
 
 
 @dataclass(frozen=True)
@@ -333,10 +378,20 @@ class MalformedSliceRow:
 SliceTableEntry = SliceTableRow | MalformedSliceTable | MalformedSliceRow
 
 
+class BodyContractMode(StrEnum):
+    """Whether a work-item body is read as prose (regex sections) or the
+    typed `agent-claim` TOML block. `parse_body` is the one selector;
+    nothing downstream re-derives it."""
+
+    PROSE = "prose"
+    BLOCK = "block"
+
+
 @dataclass(frozen=True)
 class BoardConfig:
     priority_labels: tuple[str, ...] = DEFAULT_PRIORITY_LABELS
     idea_label: str | None = None
+    body_contract: BodyContractMode = BodyContractMode.PROSE
 
 
 @dataclass(frozen=True)
@@ -349,7 +404,7 @@ def _contract_fields(contract: Contract) -> tuple[tuple[str, str | None], ...]:
     """The four body sections in body order, paired with their current
     value -- the one place that knows both the names and the order, so a
     caller asking which are present (`_contract_summary`) and a caller
-    asking which are missing (`Contract.missing_sections`) never drift
+    asking which are missing (`missing_or_empty_sections`) never drift
     apart."""
     return (
         ("Now", contract.now),
@@ -383,12 +438,6 @@ class Contract:
     @property
     def blocker_issues(self) -> frozenset[int]:
         return _blocker_references(self.blocked_by)
-
-    @property
-    def missing_sections(self) -> tuple[str, ...]:
-        """The empty sections, in body order -- what a `body incomplete`
-        refusal names instead of leaving the operator to find them."""
-        return tuple(name for name, value in _contract_fields(self) if value is None)
 
 
 class Stage(StrEnum):
@@ -429,7 +478,7 @@ class BoardItem:
     ruling_landings: int | None
     ruling_old: bool | None
     frozen_trigger: str | None
-    open_blockers: tuple[int, ...]
+    open_blockers: tuple[IssueReference, ...]
     freed_on: datetime | None
     freed_days: int | None
     stage: Stage
@@ -442,6 +491,7 @@ class BoardItem:
     score: int
     actionable: bool
     actionable_reason: str | None
+    read_state: BodyReadState
 
 
 @dataclass(frozen=True)
@@ -466,6 +516,8 @@ class Board:
     recovery: tuple[BoardItem, ...]
     uncut: tuple[UncutSlices, ...]
     blocker_references: tuple[BlockerReference, ...]
+    repository: str
+    body_contract: BodyContractMode
 
 
 def load_config(path: Path = CONFIG_PATH) -> BoardConfig:
@@ -497,7 +549,16 @@ def load_config(path: Path = CONFIG_PATH) -> BoardConfig:
         not isinstance(idea_label, str) or idea_label.strip() != idea_label or not idea_label
     ):
         raise protocol.ClaimError("board configuration idea_label must be a non-empty label")
-    return BoardConfig(priority_labels, idea_label)
+    body_contract_raw = raw.get("body_contract")
+    if body_contract_raw is None:
+        body_contract = BodyContractMode.PROSE
+    elif isinstance(body_contract_raw, str) and body_contract_raw in set(BodyContractMode):
+        body_contract = BodyContractMode(body_contract_raw)
+    else:
+        raise protocol.ClaimError(
+            f"board configuration {path} body_contract must be prose or block"
+        )
+    return BoardConfig(priority_labels, idea_label, body_contract)
 
 
 def _contract_field_value(
@@ -932,6 +993,561 @@ class SliceTableFindings:
     has_table: bool
 
 
+class BodyReadState(StrEnum):
+    """How `parse_body` read one issue's body under its repository's pin --
+    `VALID`/`LEGACY`/`MALFORMED` for a block-mode read; always `VALID` for
+    prose, which has no separate contract to be legacy or malformed against."""
+
+    VALID = "valid"
+    LEGACY = "legacy"
+    MALFORMED = "malformed"
+
+
+@dataclass(frozen=True)
+class ParsedBody:
+    """The one typed read of a work-item body, whichever grammar its
+    repository is pinned to. Every consumer reads this instead of
+    re-parsing the raw body or branching on the pin itself."""
+
+    contract: Contract
+    contract_complete: bool
+    projectionless: bool
+    expectation_state: ExpectationState
+    expectation_progress: ExpectationProgress
+    ruling_date: date | None
+    frozen_trigger: str | None
+    slice_findings: SliceTableFindings
+    read_state: BodyReadState
+
+
+def _line_ending(raw_line: str) -> str:
+    if raw_line.endswith("\r\n"):
+        return "\r\n"
+    if raw_line.endswith("\n"):
+        return "\n"
+    return ""
+
+
+def _line_without_ending(raw_line: str) -> str:
+    ending = _line_ending(raw_line)
+    return raw_line[: len(raw_line) - len(ending)] if ending else raw_line
+
+
+def _agent_claim_fence_matches(body: str) -> list[tuple[int, int | None, str]]:
+    """Every fence in `body` whose info string is exactly `agent-claim`
+    (issue #150 §4): `(opening line index, closing line index or None when
+    unclosed, interior text)`. Walks `body.splitlines(keepends=True)` --
+    stripping only each line's own ending before matching the CommonMark
+    fence patterns, so CRLF is recognized and every other byte, including
+    the fence's own line endings, is preserved for the caller. Only one
+    fence is ever open at a time, matching `_live_line_entries`: an
+    already-open fence, recognized or not, blocks a new opening delimiter
+    from being recognized until it closes.
+    """
+    lines = body.splitlines(keepends=True)
+    matches: list[tuple[int, int | None, str]] = []
+    index = 0
+    open_start: int | None = None
+    open_char = ""
+    open_length = 0
+    open_recognized = False
+    while index < len(lines):
+        bare = _line_without_ending(lines[index])
+        if open_start is None:
+            opening = FENCE_OPENING_PATTERN.match(bare)
+            if opening is not None:
+                run = opening.group("run")
+                info = bare[opening.end() :].strip(" \t")
+                open_start, open_char, open_length = index, run[0], len(run)
+                open_recognized = info == AGENT_CLAIM_FENCE_INFO
+            index += 1
+            continue
+        closing = FENCE_CLOSING_PATTERN.match(bare)
+        if (
+            closing is not None
+            and closing.group("run")[0] == open_char
+            and len(closing.group("run")) >= open_length
+        ):
+            if open_recognized:
+                matches.append((open_start, index, "".join(lines[open_start + 1 : index])))
+            open_start, open_recognized = None, False
+        index += 1
+    if open_start is not None and open_recognized:
+        matches.append((open_start, None, ""))
+    return matches
+
+
+def _block_version_defect(data: dict[str, object]) -> ContractDefect | None:
+    if "version" not in data:
+        return ContractDefect("version", "version is required and must be 1")
+    value = data["version"]
+    if isinstance(value, bool) or value != BLOCK_VERSION:
+        return ContractDefect("version", f"version must be exactly {BLOCK_VERSION}")
+    return None
+
+
+def _block_projection_defects(data: dict[str, object]) -> list[ContractDefect]:
+    defects: list[ContractDefect] = []
+    for key in ("now", "next", "done_when"):
+        if key not in data:
+            defects.append(ContractDefect(key, f"{key} is required"))
+        elif not isinstance(data[key], str):
+            defects.append(ContractDefect(key, f"{key} must be a string"))
+    return defects
+
+
+def _block_frozen_until_defects(data: dict[str, object]) -> list[ContractDefect]:
+    if "frozen_until" not in data:
+        return []
+    value = data["frozen_until"]
+    if not isinstance(value, dict):
+        return [
+            ContractDefect(
+                "frozen_until.trigger", "frozen_until must be a table with trigger and ruled_on"
+            )
+        ]
+    defects: list[ContractDefect] = []
+    trigger = value.get("trigger")
+    if not isinstance(trigger, str) or not trigger.strip():
+        defects.append(
+            ContractDefect(
+                "frozen_until.trigger", "frozen_until.trigger must be a non-empty string"
+            )
+        )
+    ruled_on = value.get("ruled_on")
+    if type(ruled_on) is not date:
+        defects.append(
+            ContractDefect(
+                "frozen_until.ruled_on", "frozen_until.ruled_on must be a TOML local date"
+            )
+        )
+    unknown = sorted(set(value) - {"trigger", "ruled_on"})
+    defects.extend(
+        ContractDefect(f"frozen_until.{key}", f"unknown key frozen_until.{key}") for key in unknown
+    )
+    return defects
+
+
+def _block_expectation_variant_defects(
+    prefix: str, entry: dict[str, object]
+) -> list[ContractDefect]:
+    has_default, has_ruling, has_ruled_on = (
+        "default" in entry,
+        "ruling" in entry,
+        "ruled_on" in entry,
+    )
+    if has_default and (has_ruling or has_ruled_on):
+        return [
+            ContractDefect(
+                f"{prefix}.default",
+                f"{prefix} must be proposed (default) or ruled (ruling, ruled_on), not both",
+            )
+        ]
+    if has_default:
+        if entry["default"] not in BLOCK_EXPECTATION_DEFAULTS:
+            return [
+                ContractDefect(f"{prefix}.default", f"{prefix}.default must be yes, no, or later")
+            ]
+        return []
+    if has_ruling or has_ruled_on:
+        defects = []
+        if entry.get("ruling") not in BLOCK_EXPECTATION_RULINGS:
+            defects.append(ContractDefect(f"{prefix}.ruling", f"{prefix}.ruling must be yes or no"))
+        if type(entry.get("ruled_on")) is not date:
+            defects.append(
+                ContractDefect(f"{prefix}.ruled_on", f"{prefix}.ruled_on must be a TOML local date")
+            )
+        return defects
+    return [
+        ContractDefect(
+            f"{prefix}.default", f"{prefix} must carry default, or both ruling and ruled_on"
+        )
+    ]
+
+
+def _block_expectation_entry_defects(index: int, entry: object) -> list[ContractDefect]:
+    prefix = f"expectation[{index}]"
+    if not isinstance(entry, dict):
+        return [ContractDefect(prefix, f"{prefix} must be a table")]
+    defects: list[ContractDefect] = []
+    text = entry.get("text")
+    if not isinstance(text, str) or not text.strip():
+        defects.append(
+            ContractDefect(f"{prefix}.text", f"{prefix}.text must be a non-empty string")
+        )
+    defects.extend(_block_expectation_variant_defects(prefix, entry))
+    unknown = sorted(set(entry) - {"text", "default", "ruling", "ruled_on"})
+    defects.extend(
+        ContractDefect(f"{prefix}.{key}", f"unknown key {prefix}.{key}") for key in unknown
+    )
+    return defects
+
+
+def _block_expectation_defects(entries: list[object]) -> list[ContractDefect]:
+    return [
+        defect
+        for index, entry in enumerate(entries)
+        for defect in _block_expectation_entry_defects(index, entry)
+    ]
+
+
+def _block_slice_entry_defects(
+    index: int, entry: object, seen_indices: dict[int, int]
+) -> list[ContractDefect]:
+    prefix = f"slice[{index}]"
+    if not isinstance(entry, dict):
+        return [ContractDefect(prefix, f"{prefix} must be a table")]
+    defects: list[ContractDefect] = []
+    slice_index = entry.get("index")
+    if not isinstance(slice_index, int) or isinstance(slice_index, bool) or slice_index <= 0:
+        defects.append(
+            ContractDefect(f"{prefix}.index", f"{prefix}.index must be a positive integer")
+        )
+    elif slice_index in seen_indices:
+        defects.append(
+            ContractDefect(
+                f"{prefix}.index", f"{prefix}.index duplicates slice index {slice_index}"
+            )
+        )
+    else:
+        seen_indices[slice_index] = index
+    title = entry.get("title")
+    if not isinstance(title, str) or not title.strip():
+        defects.append(
+            ContractDefect(f"{prefix}.title", f"{prefix}.title must be a non-empty string")
+        )
+    unknown = sorted(set(entry) - {"index", "title"})
+    defects.extend(
+        ContractDefect(f"{prefix}.{key}", f"unknown key {prefix}.{key}") for key in unknown
+    )
+    return defects
+
+
+def _block_slice_defects(entries: list[object]) -> list[ContractDefect]:
+    seen_indices: dict[int, int] = {}
+    defects: list[ContractDefect] = []
+    for index, entry in enumerate(entries):
+        defects.extend(_block_slice_entry_defects(index, entry, seen_indices))
+    return defects
+
+
+def _block_array_or_defect(
+    data: dict[str, object], key: str
+) -> tuple[list[object], ContractDefect | None]:
+    value = data.get(key, [])
+    if not isinstance(value, list):
+        return [], ContractDefect(key, f"{key} must be an array of tables")
+    return value, None
+
+
+def _block_schema_defects(data: dict[str, object]) -> tuple[ContractDefect, ...]:
+    defects: list[ContractDefect] = []
+    version_defect = _block_version_defect(data)
+    if version_defect is not None:
+        defects.append(version_defect)
+    defects.extend(_block_projection_defects(data))
+    defects.extend(_block_frozen_until_defects(data))
+    expectations, expectation_defect = _block_array_or_defect(data, "expectation")
+    defects.append(expectation_defect) if expectation_defect else defects.extend(
+        _block_expectation_defects(expectations)
+    )
+    slices, slice_defect = _block_array_or_defect(data, "slice")
+    defects.append(slice_defect) if slice_defect else defects.extend(_block_slice_defects(slices))
+    unknown = sorted(set(data) - BLOCK_TOP_LEVEL_KEYS)
+    defects.extend(ContractDefect(key, f"unknown top-level key {key}") for key in unknown)
+    return tuple(defects)
+
+
+def _malformed_parsed_body(defects: tuple[ContractDefect, ...]) -> ParsedBody:
+    return ParsedBody(
+        contract=Contract(None, None, None, None, defects),
+        contract_complete=False,
+        projectionless=False,
+        expectation_state=ExpectationState.NONE,
+        expectation_progress=ExpectationProgress(0, 0),
+        ruling_date=None,
+        frozen_trigger=None,
+        slice_findings=SliceTableFindings((), (), (), False),
+        read_state=BodyReadState.MALFORMED,
+    )
+
+
+_LEGACY_PARSED_BODY = ParsedBody(
+    contract=Contract(None, None, None, None, ()),
+    contract_complete=False,
+    projectionless=False,
+    expectation_state=ExpectationState.NONE,
+    expectation_progress=ExpectationProgress(0, 0),
+    ruling_date=None,
+    frozen_trigger=None,
+    slice_findings=SliceTableFindings((), (), (), False),
+    read_state=BodyReadState.LEGACY,
+)
+
+
+def _block_array(data: dict[str, object], key: str) -> list[object]:
+    value = data.get(key)
+    return value if isinstance(value, list) else []
+
+
+def _block_expectation_dicts(data: dict[str, object]) -> list[dict[str, object]]:
+    return [entry for entry in _block_array(data, "expectation") if isinstance(entry, dict)]
+
+
+def _block_expectation_state(expectations: list[dict[str, object]]) -> ExpectationState:
+    if not expectations:
+        return ExpectationState.NONE
+    if any("default" in entry for entry in expectations):
+        return ExpectationState.PROPOSED
+    return ExpectationState.RULED
+
+
+def _block_expectation_progress(expectations: list[dict[str, object]]) -> ExpectationProgress:
+    return ExpectationProgress(
+        open=sum(1 for entry in expectations if "default" in entry), total=len(expectations)
+    )
+
+
+def _block_ruling_date(expectations: list[dict[str, object]]) -> date | None:
+    ruled_dates = [
+        entry["ruled_on"]
+        for entry in expectations
+        if "ruled_on" in entry and type(entry["ruled_on"]) is date
+    ]
+    return min(ruled_dates) if ruled_dates else None
+
+
+def _block_frozen_trigger(data: dict[str, object]) -> str | None:
+    value = data.get("frozen_until")
+    trigger = value.get("trigger") if isinstance(value, dict) else None
+    return trigger if isinstance(trigger, str) else None
+
+
+def _block_slice_findings(data: dict[str, object]) -> SliceTableFindings:
+    cuttable = tuple(
+        SliceTableRow(
+            cast(int, entry["index"]), cast(str, entry["title"]), UNDISPATCHED_SLICE_CELL, None
+        )
+        for entry in _block_array(data, "slice")
+        if isinstance(entry, dict)
+        and isinstance(entry.get("index"), int)
+        and isinstance(entry.get("title"), str)
+    )
+    return SliceTableFindings(cuttable, (), (), "slice" in data)
+
+
+def _valid_block_parsed_body(data: dict[str, object]) -> ParsedBody:
+    now, next_value, done_when = (
+        cast(str, data["now"]).strip(),
+        cast(str, data["next"]).strip(),
+        cast(str, data["done_when"]).strip(),
+    )
+    expectations = _block_expectation_dicts(data)
+    expectation_state = _block_expectation_state(expectations)
+    return ParsedBody(
+        contract=Contract(now, next_value, None, done_when, ()),
+        contract_complete=bool(now and next_value and done_when),
+        projectionless=not (now or next_value or done_when),
+        expectation_state=expectation_state,
+        expectation_progress=_block_expectation_progress(expectations),
+        ruling_date=(
+            _block_ruling_date(expectations)
+            if expectation_state is ExpectationState.RULED
+            else None
+        ),
+        frozen_trigger=_block_frozen_trigger(data),
+        slice_findings=_block_slice_findings(data),
+        read_state=BodyReadState.VALID,
+    )
+
+
+def _parse_block_body(body: str) -> ParsedBody:
+    fences = _agent_claim_fence_matches(body)
+    if not fences:
+        return _LEGACY_PARSED_BODY
+    if len(fences) > 1:
+        return _malformed_parsed_body(
+            (
+                ContractDefect(
+                    AGENT_CLAIM_FENCE_INFO, "multiple agent-claim blocks; exactly one is allowed"
+                ),
+            )
+        )
+    _start, end, content = fences[0]
+    if end is None:
+        return _malformed_parsed_body(
+            (ContractDefect(AGENT_CLAIM_FENCE_INFO, "unclosed agent-claim block"),)
+        )
+    try:
+        data = tomllib.loads(content)
+    except tomllib.TOMLDecodeError as error:
+        return _malformed_parsed_body(
+            (
+                ContractDefect(
+                    AGENT_CLAIM_FENCE_INFO, f"agent-claim block is not valid TOML: {error}"
+                ),
+            )
+        )
+    defects = _block_schema_defects(data)
+    if defects:
+        return _malformed_parsed_body(defects)
+    return _valid_block_parsed_body(data)
+
+
+def _parse_prose_body(body: str) -> ParsedBody:
+    contract = parse_contract(body)
+    state = expectation_state(body)
+    return ParsedBody(
+        contract=contract,
+        contract_complete=contract.complete,
+        projectionless=contract.projectionless,
+        expectation_state=state,
+        expectation_progress=expectation_progress(body),
+        ruling_date=parse_ruling_date(body) if state is ExpectationState.RULED else None,
+        frozen_trigger=frozen_trigger(body),
+        slice_findings=slice_table_findings(body),
+        read_state=BodyReadState.VALID,
+    )
+
+
+def parse_body(body: str, mode: BodyContractMode) -> ParsedBody:
+    """The one grammar selector for a work-item body (issue #150): prose's
+    regex sections, or the repository-pinned typed `agent-claim` block.
+    Every consumer reads the returned `ParsedBody` instead of re-parsing the
+    raw body or branching on `mode` itself."""
+    if mode is BodyContractMode.BLOCK:
+        return _parse_block_body(body)
+    return _parse_prose_body(body)
+
+
+@dataclass(frozen=True)
+class LocatedBlock:
+    """A valid `agent-claim` block's decoded TOML, plus the byte-exact span
+    of its interior -- between the fence lines, which stay byte-identical --
+    and the newline convention new interior lines are rendered with (#150
+    §4/§7). Callable only on a body `parse_body` already read as `VALID`;
+    `cut` refuses a legacy or malformed target before ever calling this."""
+
+    data: dict[str, object]
+    content_start: int
+    content_end: int
+    newline: str
+
+
+def locate_agent_claim_block(body: str) -> LocatedBlock:
+    lines = body.splitlines(keepends=True)
+    matches = _agent_claim_fence_matches(body)
+    if not matches:
+        raise protocol.ClaimError("locate_agent_claim_block found no recognized agent-claim fence")
+    start_line, end_line, content = matches[0]
+    if end_line is None:
+        raise protocol.ClaimError("locate_agent_claim_block found no closed agent-claim fence")
+    content_start = sum(len(line) for line in lines[: start_line + 1])
+    content_end = sum(len(line) for line in lines[:end_line])
+    newline = _line_ending(lines[start_line]) or "\n"
+    return LocatedBlock(tomllib.loads(content), content_start, content_end, newline)
+
+
+_TOML_BASIC_STRING_ESCAPES = {
+    "\\": "\\\\",
+    '"': '\\"',
+    "\b": "\\b",
+    "\t": "\\t",
+    "\n": "\\n",
+    "\f": "\\f",
+    "\r": "\\r",
+}
+# The shape a decoded homogeneous array of tables (`[[expectation]]`,
+# `[[slice]]`) or an `asdict`'d list of dataclasses takes -- one alias so
+# `cast` names a real type instead of repeating the string.
+_JsonRows = list[dict[str, object]]
+
+
+def _toml_string(value: object) -> str:
+    """A TOML basic string for `value` -- the writer's one escaping path,
+    matching what `tomllib.loads` (the reader) accepts back unchanged."""
+    escaped = "".join(_TOML_BASIC_STRING_ESCAPES.get(char, char) for char in cast(str, value))
+    return f'"{escaped}"'
+
+
+def _render_frozen_until(data: Mapping[str, object]) -> list[str]:
+    frozen_until = data.get("frozen_until")
+    if not isinstance(frozen_until, dict):
+        return []
+    ruled_on = cast(date, frozen_until["ruled_on"])
+    return [
+        "",
+        f"frozen_until = {{ trigger = {_toml_string(frozen_until['trigger'])}, "
+        f"ruled_on = {ruled_on.isoformat()} }}",
+    ]
+
+
+def _render_expectations(data: Mapping[str, object]) -> list[str]:
+    lines: list[str] = []
+    for expectation in cast(_JsonRows, data.get("expectation", [])):
+        lines.extend(("", "[[expectation]]", f"text = {_toml_string(expectation['text'])}"))
+        if "default" in expectation:
+            lines.append(f"default = {_toml_string(expectation['default'])}")
+        else:
+            ruled_on = cast(date, expectation["ruled_on"])
+            lines.append(f"ruling = {_toml_string(expectation['ruling'])}")
+            lines.append(f"ruled_on = {ruled_on.isoformat()}")
+    return lines
+
+
+def _render_slices(data: Mapping[str, object]) -> list[str]:
+    if "slice" not in data:
+        return []
+    slices = cast(_JsonRows, data["slice"])
+    if not slices:
+        return ["", "slice = []"]
+    lines: list[str] = []
+    for entry in slices:
+        lines.extend(
+            (
+                "",
+                "[[slice]]",
+                f"index = {entry['index']}",
+                f"title = {_toml_string(entry['title'])}",
+            )
+        )
+    return lines
+
+
+def render_block(data: Mapping[str, object], newline: str = "\n") -> str:
+    """The canonical `agent-claim` block interior for `data` (#150 §4):
+    schema key order, TOML-safe strings, unquoted dates, ending in
+    `newline` so a following fence line starts clean. Production caller:
+    block-mode `cut`; there is no standalone validator."""
+    lines = [f"version = {data['version']}"]
+    lines.extend(f"{key} = {_toml_string(data[key])}" for key in ("now", "next", "done_when"))
+    lines.extend(_render_frozen_until(data))
+    lines.extend(_render_expectations(data))
+    lines.extend(_render_slices(data))
+    return newline.join((*lines, ""))
+
+
+def replace_agent_claim_block(body: str, located: LocatedBlock, data: Mapping[str, object]) -> str:
+    """`body` with its one `agent-claim` block's interior replaced by
+    `render_block(data, located.newline)` -- pure, changing only that span
+    and preserving every other byte, fence lines included."""
+    return (
+        body[: located.content_start]
+        + render_block(data, located.newline)
+        + body[located.content_end :]
+    )
+
+
+def missing_or_empty_sections(contract: Contract) -> tuple[str, ...]:
+    """Every projection section a body-incomplete refusal names: `None`
+    (prose's unset section) or the empty string (a block's fresh skeleton
+    value, #150) both count, even though both stay legitimate CONTRACT-column
+    *presence* (`_contract_summary` is `None`-only for that column, matching
+    #150 §5's rule that a block skeleton still shows `Now, Next, Done
+    when`)."""
+    return tuple(name for name, value in _contract_fields(contract) if not value)
+
+
 def slice_table_findings(body: str) -> SliceTableFindings:
     entries = parse_slice_table(body)
     cuttable: list[SliceTableRow] = []
@@ -1171,12 +1787,15 @@ def landings_since(trunk_landings: tuple[datetime, ...], ruling: date) -> int:
     return sum(1 for moment in trunk_landings if moment >= start)
 
 
-def ruling_freshness(
-    body: str, trunk_landings: tuple[datetime, ...]
+def _ruling_freshness_from(
+    ruling_date: date | None, trunk_landings: tuple[datetime, ...]
 ) -> tuple[int | None, bool | None]:
-    if expectation_state(body) is not ExpectationState.RULED:
+    """`ruling_landings`/`ruling_old` from an already-resolved ruling date --
+    the one place `_board_item` reads freshness, for either mode, since
+    `ParsedBody.ruling_date` is already `None` except when `RULED` (#150)."""
+    if ruling_date is None:
         return None, None
-    count = landings_since(trunk_landings, parse_ruling_date(body))
+    count = landings_since(trunk_landings, ruling_date)
     return count, count >= RULING_OLD_AFTER_LANDINGS
 
 
@@ -1214,9 +1833,11 @@ def _with_blocker_defects(contract: Contract, blockers: dict[int, BlockerReferen
     )
 
 
-def _open_blockers(contract: Contract, blockers: dict[int, BlockerReference]) -> tuple[int, ...]:
+def _open_blockers(
+    contract: Contract, blockers: dict[int, BlockerReference], repository: str
+) -> tuple[IssueReference, ...]:
     return tuple(
-        blocker
+        IssueReference(repository, blocker)
         for blocker in sorted(contract.blocker_issues)
         if (not blockers[blocker].is_pull_request and blockers[blocker].state is BlockerState.OPEN)
     )
@@ -1234,6 +1855,35 @@ def _freed_on(contract: Contract, blockers: dict[int, BlockerReference]) -> date
         return None
     return max(
         (blocker.closed_at for blocker in issue_blockers if blocker.closed_at is not None),
+        default=None,
+    )
+
+
+def _open_dependency_blockers(
+    dependencies: tuple[IssueDependency, ...], repository: str
+) -> tuple[IssueReference, ...]:
+    """Block mode's `open_blockers` (#150 §6): every open dependency, same-
+    or foreign-repository -- unlike prose, a same-repository pull-request
+    dependency blocks like any other (`blocker-is-a-PR` is prose-only)."""
+    references = (
+        dependency.reference for dependency in dependencies if dependency.state is BlockerState.OPEN
+    )
+    return tuple(sorted(references, key=lambda reference: _blocker_sort_key(reference, repository)))
+
+
+def _dependency_freed_on(
+    dependencies: tuple[IssueDependency, ...], repository: str
+) -> datetime | None:
+    """Block mode's `freed_on` (#150 §6): only same-repository dependencies
+    can free an item -- a foreign dependency, open or closed, is dropped
+    here and never blocks freedom on its own repository being unreachable."""
+    local = tuple(
+        dependency for dependency in dependencies if dependency.reference.repository == repository
+    )
+    if not local or any(dependency.state is not BlockerState.CLOSED for dependency in local):
+        return None
+    return max(
+        (dependency.closed_at for dependency in local if dependency.closed_at is not None),
         default=None,
     )
 
@@ -1276,7 +1926,12 @@ def _single_concrete_next(value: str | None) -> bool:
 # line has its own small set of "nothing left" spellings -- German and
 # English, ASCII only. `pr-check`'s last-child rule and `next`'s
 # cut_slice/close_container split both read a `Next` line the same way.
-_NO_FURTHER_WORK_VALUES = frozenset({"keiner", "keine", NO_BLOCKERS, "none", "-"})
+# "" joins this vocabulary for #150's block `next`: a block skeleton's
+# `next = ""` (never mapped to `None` the way prose's empty section is, so
+# CONTRACT still shows it, #150 §5) must still mean "no further work",
+# exactly like prose's `None`. Inert for prose, whose `Contract.next` is
+# never the empty string.
+_NO_FURTHER_WORK_VALUES = frozenset({"keiner", "keine", NO_BLOCKERS, "none", "-", ""})
 
 
 def has_further_work(next_line: str | None) -> bool:
@@ -1478,7 +2133,8 @@ class _BoardBuildContext:
     """Per-run board state that every issue's `BoardItem` is derived against."""
 
     contracts: dict[int, Contract]
-    blockers: dict[int, tuple[int, ...]]
+    parsed_bodies: dict[int, ParsedBody]
+    blockers: dict[int, tuple[IssueReference, ...]]
     freed_on: dict[int, datetime | None]
     unblocks: dict[int, int]
     claims_by_issue: dict[int, protocol.ActiveClaim]
@@ -1488,6 +2144,7 @@ class _BoardBuildContext:
     trunk_landings: tuple[datetime, ...]
     container_progress: dict[int, ContainerProgress]
     child_container: dict[int, int]
+    repository: str
 
 
 def _board_stage(
@@ -1528,7 +2185,7 @@ def _board_score(stage: Stage, unblocks_count: int, single_next: bool) -> int:
 def _container_progress(
     issue: Issue,
     children: Mapping[int, tuple[ChildItem, ...]],
-    blockers: dict[int, tuple[int, ...]],
+    blockers: dict[int, tuple[IssueReference, ...]],
 ) -> ContainerProgress | None:
     """`issue`'s own container progress, or `None` when it isn't a container
     the forge reports numbers for -- a container whose type support is
@@ -1574,9 +2231,11 @@ def _completes_container(
 
 
 def _malformed_only_uncut(
-    issue: Issue, contract: Contract, container_progress: ContainerProgress | None
+    contract: Contract,
+    findings: SliceTableFindings,
+    container_progress: ContainerProgress | None,
 ) -> tuple[MalformedSliceRow, ...]:
-    """The malformed slice-table rows blocking `issue` when it is a
+    """The malformed slice-table rows blocking an item when it is a
     container with no open child, no further `Next` work, and no still-open
     cuttable or unlinkable row left -- exactly the state `next_action` skips
     instead of proposing to close, and what its skip reason names via the
@@ -1585,7 +2244,6 @@ def _malformed_only_uncut(
         return ()
     if has_further_work(contract.next):
         return ()
-    findings = slice_table_findings(issue.body)
     if findings.cuttable or findings.unlinkable:
         return ()
     return findings.malformed
@@ -1595,9 +2253,10 @@ def _board_item(
     issue: Issue, context: _BoardBuildContext, config: BoardConfig, observed_at: datetime
 ) -> BoardItem:
     contract = context.contracts[issue.number]
+    parsed = context.parsed_bodies[issue.number]
     freed_at = context.freed_on[issue.number]
-    ruling_landings, ruling_old = ruling_freshness(issue.body, context.trunk_landings)
-    frozen = frozen_trigger(issue.body)
+    ruling_landings, ruling_old = _ruling_freshness_from(parsed.ruling_date, context.trunk_landings)
+    frozen = parsed.frozen_trigger
     claim = context.claims_by_issue.get(issue.number)
     stage = _board_stage(
         issue,
@@ -1607,7 +2266,7 @@ def _board_item(
         open_branches=context.open_branches,
     )
     single_next = _single_concrete_next(contract.next)
-    projectionless_idea = contract.projectionless and _has_label(issue.labels, config.idea_label)
+    projectionless_idea = parsed.projectionless and _has_label(issue.labels, config.idea_label)
     next_step = IDEA_REFINEMENT_STEP if projectionless_idea else contract.next
     unblocks_count = context.unblocks[issue.number]
     container_parent = context.child_container.get(issue.number)
@@ -1630,9 +2289,16 @@ def _board_item(
             frozen_trigger=frozen,
             active_claim=active_claim,
             open_blockers=open_blockers,
-            contract_complete=contract.complete,
+            repository=context.repository,
+            contract_complete=parsed.contract_complete,
             projectionless_idea=projectionless_idea,
-            malformed_uncut=_malformed_only_uncut(issue, contract, container_progress),
+            read_state=parsed.read_state,
+            malformed_defect_field=(
+                contract.defects[0].field if parsed.read_state is BodyReadState.MALFORMED else None
+            ),
+            malformed_uncut=_malformed_only_uncut(
+                contract, parsed.slice_findings, container_progress
+            ),
         )
     )
     return BoardItem(
@@ -1647,10 +2313,10 @@ def _board_item(
         container_parent=container_parent,
         contract=contract,
         next_step=next_step,
-        contract_complete=contract.complete,
+        contract_complete=parsed.contract_complete,
         projectionless_idea=projectionless_idea,
-        expectation_state=expectation_state(issue.body),
-        expectation_progress=expectation_progress(issue.body),
+        expectation_state=parsed.expectation_state,
+        expectation_progress=parsed.expectation_progress,
         ruling_landings=ruling_landings,
         ruling_old=ruling_old,
         frozen_trigger=frozen,
@@ -1667,6 +2333,7 @@ def _board_item(
         score=_board_score(stage, unblocks_count, single_next),
         actionable=actionable_reason is None,
         actionable_reason=actionable_reason,
+        read_state=parsed.read_state,
     )
 
 
@@ -1682,6 +2349,7 @@ class BoardBuildInputs:
     now: datetime | None = None
     trunk_landings: tuple[datetime, ...] = ()
     children: Mapping[int, tuple[ChildItem, ...]] = field(default_factory=dict)
+    dependencies: Mapping[int, tuple[IssueDependency, ...]] = field(default_factory=dict)
 
 
 def build_board(inputs: BoardBuildInputs) -> Board:
@@ -1691,7 +2359,20 @@ def build_board(inputs: BoardBuildInputs) -> Board:
     config = inputs.config
     repository = inputs.repository
     observed_at = (inputs.now or datetime.now(UTC)).astimezone(UTC)
-    contracts = {issue.number: parse_contract(issue.body) for issue in issues}
+    # `protocol.LEDGER_ISSUE` is the one per-item exception to the
+    # repository's pin (#150): its body belongs to ledger discovery, not the
+    # work-item grammar, so it is always read as prose regardless of
+    # `body_contract`, and never reports body legacy/malformed.
+    modes = {
+        issue.number: (
+            BodyContractMode.PROSE
+            if issue.number == protocol.LEDGER_ISSUE
+            else config.body_contract
+        )
+        for issue in issues
+    }
+    parsed_bodies = {issue.number: parse_body(issue.body, modes[issue.number]) for issue in issues}
+    contracts = {number: parsed.contract for number, parsed in parsed_bodies.items()}
     blocker_by_number, blocker_references = _validated_blocker_by_number(
         issues, open_pull_requests, contracts, inputs.blocker_references
     )
@@ -1699,11 +2380,19 @@ def build_board(inputs: BoardBuildInputs) -> Board:
         issue.number: _with_blocker_defects(contracts[issue.number], blocker_by_number)
         for issue in issues
     }
-    blockers = {
-        issue.number: _open_blockers(contracts[issue.number], blocker_by_number) for issue in issues
+    blockers: dict[int, tuple[IssueReference, ...]] = {
+        issue.number: (
+            _open_blockers(contracts[issue.number], blocker_by_number, repository)
+            if modes[issue.number] is BodyContractMode.PROSE
+            else _open_dependency_blockers(inputs.dependencies.get(issue.number, ()), repository)
+        )
+        for issue in issues
     }
     unblocks = {
-        issue.number: sum(issue.number in other_blockers for other_blockers in blockers.values())
+        issue.number: sum(
+            IssueReference(repository, issue.number) in other_blockers
+            for other_blockers in blockers.values()
+        )
         for issue in issues
     }
     container_progress = {
@@ -1718,9 +2407,15 @@ def build_board(inputs: BoardBuildInputs) -> Board:
     }
     context = _BoardBuildContext(
         contracts=contracts,
+        parsed_bodies=parsed_bodies,
         blockers=blockers,
         freed_on={
-            issue.number: _freed_on(contracts[issue.number], blocker_by_number) for issue in issues
+            issue.number: (
+                _freed_on(contracts[issue.number], blocker_by_number)
+                if modes[issue.number] is BodyContractMode.PROSE
+                else _dependency_freed_on(inputs.dependencies.get(issue.number, ()), repository)
+            )
+            for issue in issues
         },
         unblocks=unblocks,
         claims_by_issue=_claim_by_issue(inputs.claims),
@@ -1732,6 +2427,7 @@ def build_board(inputs: BoardBuildInputs) -> Board:
         trunk_landings=inputs.trunk_landings,
         container_progress=container_progress,
         child_container=child_container,
+        repository=repository,
     )
     landed_work_items = declared_work_items(recent_merged_pull_requests, repository)
     ordered = tuple(
@@ -1741,7 +2437,7 @@ def build_board(inputs: BoardBuildInputs) -> Board:
         )
     )
     per_issue_findings = (
-        _uncut_slices(issue.number, slice_table_findings(issue.body)) for issue in issues
+        _uncut_slices(issue.number, parsed_bodies[issue.number].slice_findings) for issue in issues
     )
     uncut = tuple(
         sorted(
@@ -1764,6 +2460,8 @@ def build_board(inputs: BoardBuildInputs) -> Board:
         ),
         uncut=uncut,
         blocker_references=blocker_references,
+        repository=repository,
+        body_contract=config.body_contract,
     )
 
 
@@ -1829,6 +2527,12 @@ def next_action(board: Board) -> NextAction | None:
     `cut` without `--row` accepts every container `next` names here, linking
     its first still-cuttable row when one exists and otherwise creating an
     untied child -- table or not, uncut row or none left in it.
+
+    A `LEGACY` or `MALFORMED` container (#150) is skipped here exactly like
+    one still holding an open child: its own finding already surfaces
+    through `actionable_reason`/`SKIPPED`, and proposing to cut or close a
+    body that could not be read would act on a guess this module never
+    makes.
     """
     uncut_by_container = {finding.item: finding for finding in board.uncut}
     for item in board.items:
@@ -1837,27 +2541,70 @@ def next_action(board: Board) -> NextAction | None:
         container = item.container
         if item.kind is not ItemKind.CONTAINER or container is None or container.open_children:
             continue
-        next_line = item.contract.next
-        if next_line is not None and has_further_work(next_line):
-            return CutSliceAction(item, container, next_line)
-        uncut = uncut_by_container.get(item.number)
-        if uncut is not None and uncut.rows:
-            return CutSliceAction(item, container, uncut.rows[0].title)
-        if uncut is not None and uncut.malformed:
-            continue
-        return CloseContainerAction(item, container)
+        action = _container_next_action(item, container, uncut_by_container)
+        if action is not None:
+            return action
     return None
+
+
+def _container_next_action(
+    item: BoardItem, container: ContainerProgress, uncut_by_container: dict[int, UncutSlices]
+) -> NextAction | None:
+    """The action a childless container qualifies for, or `None` to skip it:
+    a non-`VALID` body, or a slice table whose only findings are malformed
+    rows, name their own finding elsewhere and are never guessed through."""
+    if item.read_state is not BodyReadState.VALID:
+        return None
+    next_line = item.contract.next
+    if next_line is not None and has_further_work(next_line):
+        return CutSliceAction(item, container, next_line)
+    uncut = uncut_by_container.get(item.number)
+    if uncut is not None and uncut.rows:
+        return CutSliceAction(item, container, uncut.rows[0].title)
+    if uncut is not None and uncut.malformed:
+        return None
+    return CloseContainerAction(item, container)
+
+
+def _project_blocker_references(
+    entry: dict[str, object], key: str, repository: str, *, block_mode: bool
+) -> None:
+    """Rewrite `entry[key]` (a list of `asdict`'d `IssueReference`s) into
+    the pre-#150 local-int list, adding a sibling `foreign_blockers` key
+    only in block mode (A2) -- the one projector `board_json` uses for both
+    `BoardItem.open_blockers` and each open child's `ChildItem.blocked_by`,
+    never a mixed `int | str` list and never re-parsed from a label."""
+    references = cast(_JsonRows, entry.pop(key))
+    entry[key] = [
+        reference["number"] for reference in references if reference["repository"] == repository
+    ]
+    if block_mode:
+        entry["foreign_blockers"] = [
+            f"{reference['repository']}#{reference['number']}"
+            for reference in references
+            if reference["repository"] != repository
+        ]
 
 
 def board_json(board: Board) -> str:
     payload = asdict(board)
     payload.pop("blocker_references")
+    repository = payload.pop("repository")
+    block_mode = payload.pop("body_contract") is BodyContractMode.BLOCK
     for group in ("items", "ready_now", "stale", "recovery"):
         for item in payload[group]:
             freed_on = item["freed_on"]
             item["freed_on"] = (
                 None if freed_on is None else freed_on.astimezone(UTC).date().isoformat()
             )
+            item.pop("read_state")
+            _project_blocker_references(item, "open_blockers", repository, block_mode=block_mode)
+            container = item["container"]
+            if container is not None:
+                for child in container["open_children"]:
+                    _project_blocker_references(
+                        child, "blocked_by", repository, block_mode=block_mode
+                    )
     return json.dumps(payload, default=lambda value: value.value)
 
 
@@ -1904,7 +2651,11 @@ def render(board: Board) -> str:
                 _freed_cell(item),
                 _claim_cell(item),
                 "yes" if item.actionable else f"no: {item.actionable_reason}",
-                ",".join(f"#{number}" for number in item.open_blockers) or "-",
+                ",".join(
+                    open_blocker_label(reference, board.repository)
+                    for reference in item.open_blockers
+                )
+                or "-",
                 str(item.unblocks_count),
                 item.title,
             )
@@ -1927,21 +2678,25 @@ def render(board: Board) -> str:
     )
 
 
-def _open_child_cell(child: ChildItem) -> str:
+def _open_child_cell(child: ChildItem, repository: str) -> str:
     if not child.blocked_by:
         return f"#{child.number}"
-    blockers = ", ".join(f"#{number}" for number in child.blocked_by)
+    blockers = ", ".join(
+        open_blocker_label(reference, repository) for reference in child.blocked_by
+    )
     return f"#{child.number} (blocked by {blockers})"
 
 
-def _container_line(number: int, container: ContainerProgress) -> str:
-    open_children = ", ".join(_open_child_cell(child) for child in container.open_children)
+def _container_line(number: int, container: ContainerProgress, repository: str) -> str:
+    open_children = ", ".join(
+        _open_child_cell(child, repository) for child in container.open_children
+    )
     return f"#{number} {container.closed}/{container.total} closed; open: {open_children or 'none'}"
 
 
 def _container_lines(board: Board) -> list[str]:
     return [
-        _container_line(item.number, item.container)
+        _container_line(item.number, item.container, board.repository)
         for item in board.items
         if item.container is not None
     ]
@@ -1977,9 +2732,12 @@ class _ActionabilityFacts:
     kind: ItemKind | None
     frozen_trigger: str | None
     active_claim: str | None
-    open_blockers: tuple[int, ...]
+    open_blockers: tuple[IssueReference, ...]
+    repository: str
     contract_complete: bool
     projectionless_idea: bool
+    read_state: BodyReadState = BodyReadState.VALID
+    malformed_defect_field: str | None = None
     malformed_uncut: tuple[MalformedSliceRow, ...] = ()
 
 
@@ -1990,18 +2748,38 @@ def _container_actionable_reason(malformed_uncut: tuple[MalformedSliceRow, ...])
     return f"container; {named}"
 
 
-def _actionable_reason(facts: _ActionabilityFacts) -> str | None:
-    if facts.kind is ItemKind.CONTAINER:
-        return _container_actionable_reason(facts.malformed_uncut)
+def _read_state_actionable_reason(facts: _ActionabilityFacts) -> str | None:
+    """The one refusal a legacy or malformed body gets, ahead of every other
+    reason -- including the container rule, so a container whose body
+    itself cannot be read is never offered as "claim a child" (#150 §5)."""
+    if facts.read_state is BodyReadState.LEGACY:
+        return "body legacy"
+    if facts.read_state is BodyReadState.MALFORMED:
+        return f"body malformed: {facts.malformed_defect_field}"
+    return None
+
+
+def _claim_or_completeness_reason(facts: _ActionabilityFacts) -> str | None:
     if facts.frozen_trigger is not None:
         return f"frozen: {facts.frozen_trigger}"
     if facts.active_claim is not None:
         return "claimed"
     if facts.open_blockers:
-        return "blocked by " + ", ".join(f"#{number}" for number in facts.open_blockers)
+        return "blocked by " + ", ".join(
+            open_blocker_label(reference, facts.repository) for reference in facts.open_blockers
+        )
     if not facts.contract_complete and not facts.projectionless_idea:
         return "body incomplete"
     return None
+
+
+def _actionable_reason(facts: _ActionabilityFacts) -> str | None:
+    read_state_reason = _read_state_actionable_reason(facts)
+    if read_state_reason is not None:
+        return read_state_reason
+    if facts.kind is ItemKind.CONTAINER:
+        return _container_actionable_reason(facts.malformed_uncut)
+    return _claim_or_completeness_reason(facts)
 
 
 def _expectation_cell(item: BoardItem) -> str:
@@ -2029,7 +2807,10 @@ def _freed_cell(item: BoardItem) -> str:
 
 
 def _brief(value: str | None, *, maximum: int = 48) -> str:
-    if value is None:
+    # `None` (prose's unset Next) and `""` (a block skeleton's unfilled
+    # `next`, #150 §5) render identically: a fresh child looks the same in
+    # this column whichever mode its repository is pinned to.
+    if value is None or not value.strip():
         return "-"
     one_line = " ".join(value.split())
     return one_line if len(one_line) <= maximum else one_line[: maximum - 1] + "…"

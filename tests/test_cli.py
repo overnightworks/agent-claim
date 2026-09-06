@@ -8,6 +8,8 @@ import runpy
 import shlex
 import subprocess
 import sys
+import threading
+import tomllib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
@@ -384,6 +386,7 @@ def projected_board(
     now: datetime | None = None,
     trunk_landings: tuple[datetime, ...] = (),
     children: Mapping[int, tuple[board.ChildItem, ...]] = MappingProxyType({}),
+    dependencies: Mapping[int, tuple[board.IssueDependency, ...]] = MappingProxyType({}),
 ) -> board.Board:
     """`board.build_board` for scenarios that do not turn on which repository is projected."""
     return board.build_board(
@@ -398,6 +401,7 @@ def projected_board(
             now=now,
             trunk_landings=trunk_landings,
             children=children,
+            dependencies=dependencies,
         )
     )
 
@@ -434,6 +438,7 @@ class FakeForge:
     board_open_pull_requests: tuple[board.PullRequest, ...] = ()
     board_merged_pull_requests: tuple[board.PullRequest, ...] = ()
     board_blocker_references: tuple[board.BlockerReference, ...] | None = None
+    board_dependencies: dict[int, tuple[board.IssueDependency, ...]] = field(default_factory=dict)
     repository: forge.RepositoryId = field(
         default_factory=lambda: github._repository_id(REPOSITORY)
     )
@@ -628,6 +633,9 @@ class FakeForge:
             for number in sorted(numbers)
         )
 
+    def list_board_dependencies(self, number: int) -> tuple[board.IssueDependency, ...]:
+        return self.board_dependencies.get(number, ())
+
     def list_open_board_pull_requests(self) -> tuple[board.PullRequest, ...]:
         return self.board_open_pull_requests
 
@@ -771,7 +779,7 @@ def test_forge_operation_exhaustiveness_matches_the_declared_reader_and_writer_m
         if not name.startswith("_") and name not in {"repository", "capability"}
     }
     assert {operation.value for operation in forge.ForgeOperation} == declared_methods
-    assert len(forge.ForgeOperation) == 25
+    assert len(forge.ForgeOperation) == 26
     assert set(github.GITHUB_CAPABILITIES) == set(forge.ForgeOperation)
     assert forge.Capability.UNSUPPORTED not in github.GITHUB_CAPABILITIES.values()
 
@@ -953,6 +961,7 @@ def raw_board_issue(**overrides: object) -> dict[str, object]:
         "kind": None,
         "childrenClosed": None,
         "childrenTotal": None,
+        "blockedByCount": 0,
     }
     base.update(overrides)
     return base
@@ -1351,6 +1360,7 @@ def _board_fixture_environment(monkeypatch: pytest.MonkeyPatch) -> list[list[str
             ),
             "createdAt": "2026-08-10T00:00:00Z",
             "updatedAt": "2026-08-20T00:00:00Z",
+            "blockedByCount": 0,
         },
         {
             "number": 11,
@@ -1362,6 +1372,7 @@ def _board_fixture_environment(monkeypatch: pytest.MonkeyPatch) -> list[list[str
             ),
             "createdAt": "2026-08-12T00:00:00Z",
             "updatedAt": "2026-08-20T00:00:00Z",
+            "blockedByCount": 0,
         },
         {
             "number": 12,
@@ -1370,6 +1381,7 @@ def _board_fixture_environment(monkeypatch: pytest.MonkeyPatch) -> list[list[str
             "body": "Unstructured notes.",
             "createdAt": "2026-08-01T00:00:00Z",
             "updatedAt": "2026-08-10T00:00:00Z",
+            "blockedByCount": 0,
         },
         {
             "number": 13,
@@ -1381,6 +1393,7 @@ def _board_fixture_environment(monkeypatch: pytest.MonkeyPatch) -> list[list[str
             ),
             "createdAt": "2026-08-02T00:00:00Z",
             "updatedAt": "2026-08-19T00:00:00Z",
+            "blockedByCount": 0,
         },
         {
             "number": 14,
@@ -1389,6 +1402,7 @@ def _board_fixture_environment(monkeypatch: pytest.MonkeyPatch) -> list[list[str
             "body": "Unstructured notes.",
             "createdAt": "2026-08-02T00:00:00Z",
             "updatedAt": "2026-08-20T00:00:00Z",
+            "blockedByCount": 0,
         },
     ]
     open_prs_json = [
@@ -1669,6 +1683,28 @@ def test_rulings_lists_open_expectations_by_board_priority_then_open_count(
         "#40 2/3: More open security work",
         "#60 1/1: Lower-priority product work",
     ]
+
+
+def test_rulings_reads_expectation_progress_from_the_block_not_stale_prose(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """`rulings` must consume `BoardItem.expectation_progress`, not re-scan
+    the raw body: a fully-ruled `## Erwartungen` heading left beside a still-
+    proposed `[[expectation]]` would otherwise hide this item from `rulings`
+    entirely (#150)."""
+    stale_disagreeing_prose = (
+        "\n\n## Erwartungen (refine-Lauf 28.08.2026)\n"
+        "- Ruled one *(geregelt: ja)*\n"
+        "- Ruled two *(geregelt: ja)*\n"
+    )
+    toml_text = f'{MINIMAL_BLOCK_TOML}[[expectation]]\ntext = "Proposed"\ndefault = "later"\n'
+    body = agent_claim_body(toml_text) + stale_disagreeing_prose
+    issue = board_issue(400, "Block-only expectations", body)
+    _configured_board_client(monkeypatch, tmp_path, open_issues=(issue,))
+    _write_block_pin(tmp_path)
+
+    assert issue_claim.main(["--repo", "example/agent-claim", "rulings"]) == 0
+    assert capsys.readouterr().out == "#400 1/1: Block-only expectations\n"
 
 
 def test_rulings_renders_text_json_and_empty_success(
@@ -3383,6 +3419,346 @@ def test_cut_names_the_created_child_when_the_relation_post_fails(
     assert "do not re-run" in err
 
 
+def test_render_block_round_trips_every_field() -> None:
+    toml_text = (
+        f"{MINIMAL_BLOCK_TOML}"
+        'frozen_until = { trigger = "named trigger", ruled_on = 2026-09-06 }\n'
+        '[[expectation]]\ntext = "Proposed"\ndefault = "later"\n'
+        '[[expectation]]\ntext = "Ruled"\nruling = "yes"\nruled_on = 2026-09-05\n'
+        '[[slice]]\nindex = 4\ntitle = "Block contract in issue bodies"\n'
+    )
+    located = board.locate_agent_claim_block(agent_claim_body(toml_text))
+
+    reparsed = tomllib.loads(board.render_block(located.data))
+
+    assert reparsed == located.data
+
+
+def test_render_block_escapes_quotes_and_backslashes() -> None:
+    toml_text = f'{MINIMAL_BLOCK_TOML}[[slice]]\nindex = 1\ntitle = "Quote \\" and back\\\\slash"\n'
+    located = board.locate_agent_claim_block(agent_claim_body(toml_text))
+
+    reparsed = tomllib.loads(board.render_block(located.data))
+
+    assert reparsed == located.data
+
+
+def test_replace_agent_claim_block_preserves_crlf_and_surrounding_bytes() -> None:
+    body = (
+        "Prose before.\r\n\r\n"
+        "```agent-claim\r\n"
+        'version = 1\r\nnow = "N"\r\nnext = "X"\r\ndone_when = "D"\r\n'
+        "```\r\n\r\nProse after.\r\n"
+    )
+    located = board.locate_agent_claim_block(body)
+    new_data = {**located.data, "now": "Changed"}
+
+    new_body = board.replace_agent_claim_block(body, located, new_data)
+
+    assert new_body.startswith("Prose before.\r\n\r\n```agent-claim\r\n")
+    assert new_body.endswith("```\r\n\r\nProse after.\r\n")
+    assert '\nnow = "Changed"\r\n' in new_body
+    assert board.parse_body(new_body, board.BodyContractMode.BLOCK).contract.now == "Changed"
+
+
+def test_render_block_emits_an_empty_slice_array_after_removing_the_final_entry() -> None:
+    toml_text = f'{MINIMAL_BLOCK_TOML}[[slice]]\nindex = 1\ntitle = "Only slice"\n'
+    located = board.locate_agent_claim_block(agent_claim_body(toml_text))
+    new_data = {**located.data, "slice": []}
+
+    rendered = board.render_block(new_data)
+
+    assert "slice = []" in rendered
+    assert tomllib.loads(rendered)["slice"] == []
+
+
+def _write_block_pin(tmp_path: Path) -> None:
+    (tmp_path / ".agent-claim").mkdir(exist_ok=True)
+    (tmp_path / ".agent-claim" / "board.toml").write_text('body_contract = "block"\n')
+
+
+def _block_cut_container_issue(toml_text: str) -> board.Issue:
+    return board.Issue(
+        CUT_CONTAINER,
+        "Epic",
+        (),
+        agent_claim_body(toml_text),
+        "2026-08-20T00:00:00Z",
+        "2026-08-20T00:00:00Z",
+        kind=board.ItemKind.CONTAINER,
+        children_closed=0,
+        children_total=0,
+    )
+
+
+def test_cut_block_creates_a_child_and_removes_the_first_cuttable_slice(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    toml_text = (
+        f"{MINIMAL_BLOCK_TOML}"
+        '[[slice]]\nindex = 1\ntitle = "Scheibe 1"\n'
+        '[[slice]]\nindex = 2\ntitle = "Scheibe 2"\n'
+    )
+    container = _block_cut_container_issue(toml_text)
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
+    _write_block_pin(tmp_path)
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
+    )
+
+    assert exit_code == 0
+    child = client.next_created_child_number - 1
+    assert client.created_children == [
+        (CUT_CONTAINER, "Scheibe 1", board.BLOCK_CHILD_SKELETON, board.ItemKind.TASK)
+    ]
+    new_data = board.locate_agent_claim_block(client.item_bodies[CUT_CONTAINER]).data
+    assert new_data["slice"] == [{"index": 2, "title": "Scheibe 2"}]
+    assert capsys.readouterr().out == f"CUT #{CUT_CONTAINER} row 1 -> #{child}\n"
+
+
+def test_cut_block_selects_a_row_by_number_and_removes_only_that_entry(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    toml_text = (
+        f"{MINIMAL_BLOCK_TOML}"
+        '[[slice]]\nindex = 1\ntitle = "Scheibe 1"\n'
+        '[[slice]]\nindex = 2\ntitle = "Scheibe 2"\n'
+    )
+    container = _block_cut_container_issue(toml_text)
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
+    _write_block_pin(tmp_path)
+
+    exit_code = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "cut",
+            str(CUT_CONTAINER),
+            "--title",
+            "Scheibe 2",
+            "--row",
+            "2",
+            "--json",
+        ]
+    )
+
+    assert exit_code == 0
+    child = client.next_created_child_number - 1
+    assert json.loads(capsys.readouterr().out) == {
+        "container": CUT_CONTAINER,
+        "row": 2,
+        "child": child,
+    }
+    remaining = board.locate_agent_claim_block(client.item_bodies[CUT_CONTAINER]).data
+    assert remaining["slice"] == [{"index": 1, "title": "Scheibe 1"}]
+
+
+def test_cut_block_creates_an_untied_child_with_no_slice_table(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    container = _block_cut_container_issue(MINIMAL_BLOCK_TOML)
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
+    _write_block_pin(tmp_path)
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "Untied"]
+    )
+
+    assert exit_code == 0
+    assert client.item_bodies == {}
+    child = client.next_created_child_number - 1
+    assert capsys.readouterr().out == f"CUT #{CUT_CONTAINER} -> #{child}\n"
+
+
+def test_cut_block_creates_an_untied_child_when_slice_is_explicitly_empty(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    toml_text = f"{MINIMAL_BLOCK_TOML}slice = []\n"
+    container = _block_cut_container_issue(toml_text)
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
+    _write_block_pin(tmp_path)
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "Untied"]
+    )
+
+    assert exit_code == 0
+    assert client.item_bodies == {}
+
+
+def test_cut_block_refuses_a_row_with_no_slice_table(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    container = _block_cut_container_issue(MINIMAL_BLOCK_TOML)
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
+    _write_block_pin(tmp_path)
+
+    exit_code = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "cut",
+            str(CUT_CONTAINER),
+            "--title",
+            "X",
+            "--row",
+            "1",
+        ]
+    )
+
+    assert exit_code == 2
+    assert (
+        f"ERROR: #{CUT_CONTAINER} has no slice table; --row needs one to select a row from"
+        in capsys.readouterr().err
+    )
+    assert client.created_children == []
+
+
+def test_cut_block_refuses_a_row_with_no_cuttable_row(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    toml_text = f'{MINIMAL_BLOCK_TOML}[[slice]]\nindex = 1\ntitle = "Scheibe 1"\n'
+    container = _block_cut_container_issue(toml_text)
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
+    _write_block_pin(tmp_path)
+
+    exit_code = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "cut",
+            str(CUT_CONTAINER),
+            "--title",
+            "X",
+            "--row",
+            "9",
+        ]
+    )
+
+    assert exit_code == 2
+    assert (
+        f"ERROR: #{CUT_CONTAINER} has no cuttable slice row; 0 malformed rows need a hand fix"
+        in capsys.readouterr().err
+    )
+    assert client.created_children == []
+
+
+def test_cut_block_refuses_a_title_mismatch_before_any_write(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    toml_text = f'{MINIMAL_BLOCK_TOML}[[slice]]\nindex = 1\ntitle = "Scheibe 1"\n'
+    container = _block_cut_container_issue(toml_text)
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
+    _write_block_pin(tmp_path)
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "Wrong title"]
+    )
+
+    assert exit_code == 2
+    assert (
+        f"ERROR: #{CUT_CONTAINER}'s slice 1 is titled 'Scheibe 1'; --title must match it exactly"
+        in capsys.readouterr().err
+    )
+    assert client.created_children == []
+    assert client.item_bodies == {}
+
+
+def test_cut_block_refuses_a_legacy_container_before_any_write(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    container = board.Issue(
+        CUT_CONTAINER,
+        "Epic",
+        (),
+        "## Now\nOld prose.\n",
+        "2026-08-20T00:00:00Z",
+        "2026-08-20T00:00:00Z",
+        kind=board.ItemKind.CONTAINER,
+        children_closed=0,
+        children_total=0,
+    )
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
+    _write_block_pin(tmp_path)
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "X"]
+    )
+
+    assert exit_code == 2
+    assert "body legacy" in capsys.readouterr().err
+    assert client.created_children == []
+
+
+def test_cut_block_refuses_a_malformed_container_before_any_write(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    container = _block_cut_container_issue('version = 2\nnow = "N"\nnext = "X"\ndone_when = "D"\n')
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
+    _write_block_pin(tmp_path)
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "X"]
+    )
+
+    assert exit_code == 2
+    assert (
+        f"ERROR: #{CUT_CONTAINER} body malformed: version: version must be exactly 1; "
+        "cut needs a valid agent-claim block" in capsys.readouterr().err
+    )
+    assert client.created_children == []
+
+
+def test_cut_block_names_the_created_child_when_linking_fails(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    toml_text = f'{MINIMAL_BLOCK_TOML}[[slice]]\nindex = 1\ntitle = "Scheibe 1"\n'
+    container = _block_cut_container_issue(toml_text)
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
+    _write_block_pin(tmp_path)
+    client.fail_update_item_body = True
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
+    )
+
+    assert exit_code == 2
+    child = client.next_created_child_number - 1
+    assert client.created_children == [
+        (CUT_CONTAINER, "Scheibe 1", board.BLOCK_CHILD_SKELETON, board.ItemKind.TASK)
+    ]
+    err = capsys.readouterr().err
+    assert (
+        f"created #{child} but failed to remove row 1 from #{CUT_CONTAINER}'s agent-claim block"
+        in err
+    )
+    assert "do not re-run" in err
+
+
+def test_next_prints_a_cut_command_block_mode_accepts_for_a_valid_container(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    toml_text = (
+        'version = 1\nnow = "N"\nnext = "nichts"\ndone_when = "D"\n'
+        '[[slice]]\nindex = 1\ntitle = "Scheibe 1"\n'
+    )
+    container = _block_cut_container_issue(toml_text)
+    _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
+    _write_block_pin(tmp_path)
+
+    exit_code = issue_claim.main(["--repo", "example/agent-claim", "next"])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert f'agent-claim cut {CUT_CONTAINER} --title "Scheibe 1"' in out
+
+    cut_exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
+    )
+    assert cut_exit_code == 0
+
+
 def test_claim_json_refusal_carries_refused_issue_and_checks(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -3845,7 +4221,10 @@ def test_board_collects_every_open_blocker_from_issue_list() -> None:
     )
     item = next(item for item in projected.items if item.number == 10)
 
-    assert item.open_blockers == (642, 790)
+    assert item.open_blockers == (
+        board.IssueReference(REPOSITORY, 642),
+        board.IssueReference(REPOSITORY, 790),
+    )
     assert item.actionable is False
     assert item.actionable_reason == "blocked by #642, #790"
 
@@ -4263,6 +4642,12 @@ def test_board_reads_priority_configuration_from_the_checkout_root(
     class BoardClient:
         repository = github._repository_id(REPOSITORY)
 
+        def capability(self, operation: forge.ForgeOperation) -> forge.Capability:
+            return github.GITHUB_CAPABILITIES[operation]
+
+        def list_board_dependencies(self, number: int) -> tuple[board.IssueDependency, ...]:
+            return ()
+
         def list_open_board_issues(self) -> tuple[board.Issue, ...]:
             return (
                 board.Issue(
@@ -4350,7 +4735,7 @@ def test_board_ranks_a_real_blocker_ahead_of_a_blocked_product_item() -> None:
 
     assert [item.number for item in projected.items] == [20, 21]
     assert projected.items[0].unblocks_count == 1
-    assert projected.items[1].open_blockers == (20,)
+    assert projected.items[1].open_blockers == (board.IssueReference(REPOSITORY, 20),)
 
 
 def test_board_never_counts_an_open_pull_request_as_a_blocker() -> None:
@@ -4796,6 +5181,65 @@ def test_board_shows_a_container_child_blocked_by_another_open_issue() -> None:
     )
 
     assert "#120 0/1 closed; open: #121 (blocked by #130)" in board.render(projected)
+
+    payload = json.loads(board.board_json(projected))
+    container_json = next(item for item in payload["items"] if item["number"] == 120)
+    assert container_json["container"]["open_children"] == [
+        {"number": 121, "state": "open", "blocked_by": [130]}
+    ]
+
+
+def test_board_json_splits_a_container_childs_foreign_blocker_only_in_block_mode() -> None:
+    """`board --json`'s `container.open_children[].blocked_by` projects the
+    same way `BoardItem.open_blockers` does (#150 A2): local-int only, with
+    a sibling `foreign_blockers` key present only under the block pin."""
+    container = board.Issue(
+        120,
+        "Container",
+        (),
+        agent_claim_body(MINIMAL_BLOCK_TOML),
+        "2026-08-20T00:00:00Z",
+        "2026-08-20T00:00:00Z",
+        kind=board.ItemKind.CONTAINER,
+        children_closed=0,
+        children_total=1,
+    )
+    open_child = board.Issue(
+        121,
+        "Open child",
+        (),
+        agent_claim_body(MINIMAL_BLOCK_TOML),
+        "2026-08-20T00:00:00Z",
+        "2026-08-20T00:00:00Z",
+        blocked_by_count=1,
+    )
+    dependencies = {
+        121: (block_dependency(3), block_dependency(9, repository="overnightworks/other-repo"))
+    }
+
+    projected = projected_board(
+        (container, open_child),
+        (),
+        (),
+        (),
+        board.BoardConfig(body_contract=board.BodyContractMode.BLOCK),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+        children={120: (board.ChildItem(121, board.ChildState.OPEN),)},
+        dependencies=dependencies,
+    )
+
+    payload = json.loads(board.board_json(projected))
+    container_json = next(item for item in payload["items"] if item["number"] == 120)
+    open_children = container_json["container"]["open_children"]
+
+    assert open_children == [
+        {
+            "number": 121,
+            "state": "open",
+            "blocked_by": [3],
+            "foreign_blockers": ["overnightworks/other-repo#9"],
+        }
+    ]
 
 
 def test_board_kind_cell_shows_a_plain_kind_for_a_non_container_item() -> None:
@@ -5546,6 +5990,12 @@ def test_board_queries_merged_pull_requests_back_to_the_oldest_open_issue(
     class BoardClient:
         repository = github._repository_id(REPOSITORY)
 
+        def capability(self, operation: forge.ForgeOperation) -> forge.Capability:
+            return github.GITHUB_CAPABILITIES[operation]
+
+        def list_board_dependencies(self, number: int) -> tuple[board.IssueDependency, ...]:
+            return ()
+
         def list_open_board_issues(self) -> tuple[board.Issue, ...]:
             return (old_epic, recent_issue)
 
@@ -5587,6 +6037,12 @@ def test_board_loads_each_distinct_blocker_once(
 
     class BoardClient:
         repository = github._repository_id(REPOSITORY)
+
+        def capability(self, operation: forge.ForgeOperation) -> forge.Capability:
+            return github.GITHUB_CAPABILITIES[operation]
+
+        def list_board_dependencies(self, number: int) -> tuple[board.IssueDependency, ...]:
+            return ()
 
         def list_open_board_issues(self) -> tuple[board.Issue, ...]:
             return (first, second)
@@ -5637,6 +6093,12 @@ def test_board_fetches_children_only_for_container_kinded_issues(
 
     class BoardClient:
         repository = github._repository_id(REPOSITORY)
+
+        def capability(self, operation: forge.ForgeOperation) -> forge.Capability:
+            return github.GITHUB_CAPABILITIES[operation]
+
+        def list_board_dependencies(self, number: int) -> tuple[board.IssueDependency, ...]:
+            return ()
 
         def list_open_board_issues(self) -> tuple[board.Issue, ...]:
             return (container, plain)
@@ -5696,6 +6158,743 @@ def test_board_configuration_reads_and_validates_the_idea_label(tmp_path: Path) 
     config_path.write_text('idea_label = ""\n')
     with pytest.raises(ClaimError, match="idea_label"):
         board.load_config(config_path)
+
+
+def test_board_configuration_reads_and_validates_body_contract(tmp_path: Path) -> None:
+    config_path = tmp_path / "board.toml"
+    assert board.load_config(config_path).body_contract is board.BodyContractMode.PROSE
+
+    config_path.write_text('body_contract = "block"\n')
+    assert board.load_config(config_path).body_contract is board.BodyContractMode.BLOCK
+
+    config_path.write_text('body_contract = "sideways"\n')
+    with pytest.raises(
+        ClaimError, match=f"{re.escape(str(config_path))} body_contract must be prose or block"
+    ):
+        board.load_config(config_path)
+
+    config_path.write_text("body_contract = true\n")
+    with pytest.raises(ClaimError, match="body_contract must be prose or block"):
+        board.load_config(config_path)
+
+
+def agent_claim_body(toml_text: str, *, fence: str = "```") -> str:
+    """A body carrying one recognized `agent-claim` fence around `toml_text`,
+    with ordinary prose before and after it (issue #150 §4)."""
+    return f"Prose before.\n\n{fence}agent-claim\n{toml_text}\n{fence}\n\nProse after.\n"
+
+
+MINIMAL_BLOCK_TOML = 'version = 1\nnow = "N"\nnext = "X"\ndone_when = "D"\n'
+
+
+def test_parse_body_reads_a_valid_minimal_block() -> None:
+    parsed = board.parse_body(agent_claim_body(MINIMAL_BLOCK_TOML), board.BodyContractMode.BLOCK)
+
+    assert parsed.read_state is board.BodyReadState.VALID
+    assert parsed.contract == board.Contract("N", "X", None, "D", ())
+    assert parsed.contract_complete is True
+
+
+def test_parse_body_reads_a_skeleton_block_as_incomplete_but_valid() -> None:
+    skeleton = 'version = 1\nnow = ""\nnext = ""\ndone_when = ""\n'
+
+    parsed = board.parse_body(agent_claim_body(skeleton), board.BodyContractMode.BLOCK)
+
+    assert parsed.read_state is board.BodyReadState.VALID
+    assert parsed.contract_complete is False
+    assert parsed.projectionless is True
+
+
+def test_parse_body_treats_a_fenceless_body_as_legacy() -> None:
+    parsed = board.parse_body("## Now\nOld prose.\n", board.BodyContractMode.BLOCK)
+
+    assert parsed.read_state is board.BodyReadState.LEGACY
+    assert parsed.contract == board.Contract(None, None, None, None, ())
+
+
+def test_parse_body_refuses_multiple_agent_claim_blocks() -> None:
+    body = agent_claim_body(MINIMAL_BLOCK_TOML) + agent_claim_body(MINIMAL_BLOCK_TOML)
+
+    parsed = board.parse_body(body, board.BodyContractMode.BLOCK)
+
+    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert parsed.contract.defects[0].field == "agent-claim"
+
+
+def test_parse_body_refuses_an_unclosed_agent_claim_block() -> None:
+    parsed = board.parse_body("```agent-claim\nversion = 1\n", board.BodyContractMode.BLOCK)
+
+    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert parsed.contract.defects == (
+        board.ContractDefect("agent-claim", "unclosed agent-claim block"),
+    )
+
+
+def test_parse_body_refuses_invalid_toml() -> None:
+    parsed = board.parse_body(agent_claim_body("this is not toml ="), board.BodyContractMode.BLOCK)
+
+    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert parsed.contract.defects[0].field == "agent-claim"
+
+
+def test_parse_body_orders_schema_defects_deterministically() -> None:
+    toml_text = (
+        "now = 1\n"
+        "unexpected = 1\n"
+        'frozen_until = { trigger = "", ruled_on = "2026-09-06", odd = 1 }\n'
+        "[[expectation]]\n"
+        'text = ""\n'
+        "[[slice]]\n"
+        'title = ""\n'
+        "weird = 1\n"
+    )
+
+    parsed = board.parse_body(agent_claim_body(toml_text), board.BodyContractMode.BLOCK)
+
+    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert [defect.field for defect in parsed.contract.defects] == [
+        "version",
+        "now",
+        "next",
+        "done_when",
+        "frozen_until.trigger",
+        "frozen_until.ruled_on",
+        "frozen_until.odd",
+        "expectation[0].text",
+        "expectation[0].default",
+        "slice[0].index",
+        "slice[0].title",
+        "slice[0].weird",
+        "unexpected",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("entry_toml", "expected_field"),
+    [
+        pytest.param('text = "E"\ndefault = "maybe"\n', "expectation[0].default", id="bad-default"),
+        pytest.param(
+            'text = "E"\nruling = "maybe"\nruled_on = 2026-09-06\n',
+            "expectation[0].ruling",
+            id="bad-ruling",
+        ),
+        pytest.param(
+            'text = "E"\ndefault = "yes"\nruling = "yes"\nruled_on = 2026-09-06\n',
+            "expectation[0].default",
+            id="both-default-and-ruling",
+        ),
+        pytest.param('text = "E"\n', "expectation[0].default", id="neither"),
+        pytest.param(
+            'text = "E"\nruling = "yes"\nruled_on = "not-a-date"\n',
+            "expectation[0].ruled_on",
+            id="bad-ruled-on",
+        ),
+    ],
+)
+def test_parse_body_validates_the_expectation_variant_union(
+    entry_toml: str, expected_field: str
+) -> None:
+    toml_text = f"{MINIMAL_BLOCK_TOML}[[expectation]]\n{entry_toml}"
+
+    parsed = board.parse_body(agent_claim_body(toml_text), board.BodyContractMode.BLOCK)
+
+    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert parsed.contract.defects[0].field == expected_field
+
+
+def test_parse_body_ruling_date_is_the_oldest_across_non_monotonic_expectations() -> None:
+    toml_text = (
+        f"{MINIMAL_BLOCK_TOML}"
+        '[[expectation]]\ntext = "A"\nruling = "yes"\nruled_on = 2026-09-10\n'
+        '[[expectation]]\ntext = "B"\nruling = "yes"\nruled_on = 2026-08-01\n'
+    )
+
+    parsed = board.parse_body(agent_claim_body(toml_text), board.BodyContractMode.BLOCK)
+
+    assert parsed.read_state is board.BodyReadState.VALID
+    assert parsed.expectation_state is board.ExpectationState.RULED
+    assert parsed.ruling_date == date(2026, 8, 1)
+
+
+def test_parse_body_refuses_a_frozen_until_that_is_not_a_table() -> None:
+    toml_text = f'{MINIMAL_BLOCK_TOML}frozen_until = "not a table"\n'
+
+    parsed = board.parse_body(agent_claim_body(toml_text), board.BodyContractMode.BLOCK)
+
+    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert parsed.contract.defects[0].field == "frozen_until.trigger"
+
+
+def test_parse_body_refuses_a_non_table_expectation_entry() -> None:
+    toml_text = f'{MINIMAL_BLOCK_TOML}expectation = ["oops"]\n'
+
+    parsed = board.parse_body(agent_claim_body(toml_text), board.BodyContractMode.BLOCK)
+
+    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert parsed.contract.defects[0].field == "expectation[0]"
+
+
+def test_parse_body_refuses_a_non_table_slice_entry() -> None:
+    toml_text = f'{MINIMAL_BLOCK_TOML}slice = ["oops"]\n'
+
+    parsed = board.parse_body(agent_claim_body(toml_text), board.BodyContractMode.BLOCK)
+
+    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert parsed.contract.defects[0].field == "slice[0]"
+
+
+def test_parse_body_refuses_a_duplicate_slice_index() -> None:
+    toml_text = (
+        f'{MINIMAL_BLOCK_TOML}[[slice]]\nindex = 1\ntitle = "First"\n'
+        '[[slice]]\nindex = 1\ntitle = "Second"\n'
+    )
+
+    parsed = board.parse_body(agent_claim_body(toml_text), board.BodyContractMode.BLOCK)
+
+    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert parsed.contract.defects[0].field == "slice[1].index"
+
+
+@pytest.mark.parametrize(
+    ("key", "malformed_toml"),
+    [
+        pytest.param("expectation", 'expectation = "oops"\n', id="expectation-not-a-list"),
+        pytest.param("slice", 'slice = "oops"\n', id="slice-not-a-list"),
+    ],
+)
+def test_parse_body_refuses_a_top_level_array_key_that_is_not_a_list(
+    key: str, malformed_toml: str
+) -> None:
+    parsed = board.parse_body(
+        agent_claim_body(f"{MINIMAL_BLOCK_TOML}{malformed_toml}"), board.BodyContractMode.BLOCK
+    )
+
+    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert parsed.contract.defects[0].field == key
+
+
+def test_parse_body_handles_a_body_with_no_trailing_newline() -> None:
+    """`_line_ending` (used while walking every line for a fenced block)
+    must also return `""` for the last line of a body that ends without a
+    newline at all -- an ordinary GitHub body shape, not just a CRLF/LF one."""
+    body = agent_claim_body(MINIMAL_BLOCK_TOML).rstrip("\n") + "\nProse with no trailing newline"
+
+    parsed = board.parse_body(body, board.BodyContractMode.BLOCK)
+
+    assert parsed.read_state is board.BodyReadState.VALID
+
+
+def test_locate_agent_claim_block_fails_loud_with_no_recognized_fence() -> None:
+    with pytest.raises(ClaimError, match="found no recognized agent-claim fence"):
+        board.locate_agent_claim_block("## Now\nOld prose.\n")
+
+
+def test_locate_agent_claim_block_fails_loud_with_an_unclosed_fence() -> None:
+    with pytest.raises(ClaimError, match="found no closed agent-claim fence"):
+        board.locate_agent_claim_block("```agent-claim\nversion = 1\n")
+
+
+def test_parse_body_reads_an_explicit_empty_slice_array_as_a_present_table() -> None:
+    toml_text = f"{MINIMAL_BLOCK_TOML}slice = []\n"
+
+    parsed = board.parse_body(agent_claim_body(toml_text), board.BodyContractMode.BLOCK)
+
+    assert parsed.read_state is board.BodyReadState.VALID
+    assert parsed.slice_findings == board.SliceTableFindings((), (), (), True)
+
+
+def test_parse_body_reads_slice_entries_as_cuttable_rows() -> None:
+    toml_text = (
+        f'{MINIMAL_BLOCK_TOML}[[slice]]\nindex = 4\ntitle = "Block contract in issue bodies"\n'
+    )
+
+    parsed = board.parse_body(agent_claim_body(toml_text), board.BodyContractMode.BLOCK)
+
+    assert parsed.slice_findings.has_table is True
+    assert parsed.slice_findings.cuttable == (
+        board.SliceTableRow(
+            4, "Block contract in issue bodies", board.UNDISPATCHED_SLICE_CELL, None
+        ),
+    )
+
+
+def test_parse_body_recognizes_a_crlf_fenced_block() -> None:
+    body = (
+        "Prose before.\r\n\r\n"
+        "```agent-claim\r\n"
+        'version = 1\r\nnow = "N"\r\nnext = "X"\r\ndone_when = "D"\r\n'
+        "```\r\n\r\nProse after.\r\n"
+    )
+
+    parsed = board.parse_body(body, board.BodyContractMode.BLOCK)
+
+    assert parsed.read_state is board.BodyReadState.VALID
+    assert parsed.contract == board.Contract("N", "X", None, "D", ())
+
+
+def test_parse_body_prose_mode_ignores_a_stray_agent_claim_fence() -> None:
+    """A repository still pinned to prose reads its sections exactly as
+    before, even if a body happens to carry an `agent-claim` fence -- the
+    pin, not the body's shape, selects the grammar (#150 §3)."""
+    body = complete_contract("Keep going.") + "\n\n" + agent_claim_body(MINIMAL_BLOCK_TOML)
+
+    parsed = board.parse_body(body, board.BodyContractMode.PROSE)
+
+    assert parsed.read_state is board.BodyReadState.VALID
+    assert parsed.contract.next == "Keep going."
+
+
+def test_build_board_always_reads_the_ledger_issue_as_prose_under_a_block_pin() -> None:
+    ledger = board_issue(protocol.LEDGER_ISSUE, "Ledger", complete_contract("Refine the ledger."))
+
+    projected = projected_board(
+        (ledger,),
+        (),
+        (),
+        (),
+        board.BoardConfig(body_contract=board.BodyContractMode.BLOCK),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+    )
+
+    item = next(item for item in projected.items if item.number == protocol.LEDGER_ISSUE)
+    assert item.read_state is board.BodyReadState.VALID
+
+
+def test_body_contract_checks_names_a_legacy_container_by_the_body_legacy_check() -> None:
+    body = "## Now\nOld prose.\n\n## Next\nDo the thing.\n"
+    legacy = replace(
+        board_issue(201, "Legacy container", body),
+        kind=board.ItemKind.CONTAINER,
+        children_closed=0,
+        children_total=0,
+    )
+    projected = projected_board(
+        (legacy,),
+        (),
+        (),
+        (),
+        board.BoardConfig(body_contract=board.BodyContractMode.BLOCK),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+    )
+    item = next(item for item in projected.items if item.number == 201)
+
+    checks = issue_claim._body_contract_checks(item, projected.blocker_references)
+
+    assert checks == (issue_claim.SliceCheck("error", "body-legacy", "body legacy", issue=201),)
+
+
+def test_body_contract_checks_names_a_malformed_body_by_its_first_defect() -> None:
+    malformed_body = agent_claim_body('version = 2\nnow = "N"\nnext = "X"\ndone_when = "D"\n')
+    malformed = board_issue(202, "Malformed", malformed_body)
+    projected = projected_board(
+        (malformed,),
+        (),
+        (),
+        (),
+        board.BoardConfig(body_contract=board.BodyContractMode.BLOCK),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+    )
+    item = next(item for item in projected.items if item.number == 202)
+
+    checks = issue_claim._body_contract_checks(item, projected.blocker_references)
+
+    assert checks == (
+        issue_claim.SliceCheck(
+            "error", "body-contract", "body malformed: version: version must be exactly 1"
+        ),
+    )
+
+
+def test_next_action_skips_a_legacy_childless_container() -> None:
+    body = "## Now\nStill going.\n\n## Next\nDo the thing.\n"
+    container = replace(
+        board_issue(210, "Legacy container", body),
+        kind=board.ItemKind.CONTAINER,
+        children_closed=0,
+        children_total=0,
+    )
+    projected = projected_board(
+        (container,),
+        (),
+        (),
+        (),
+        board.BoardConfig(body_contract=board.BodyContractMode.BLOCK),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+    )
+
+    assert board.next_action(projected) is None
+    item = next(item for item in projected.items if item.number == 210)
+    assert item.actionable_reason == "body legacy"
+
+
+def test_next_action_skips_a_malformed_childless_container() -> None:
+    body = agent_claim_body('version = 2\nnow = "N"\nnext = "X"\ndone_when = "D"\n')
+    container = replace(
+        board_issue(211, "Malformed container", body),
+        kind=board.ItemKind.CONTAINER,
+        children_closed=0,
+        children_total=0,
+    )
+    projected = projected_board(
+        (container,),
+        (),
+        (),
+        (),
+        board.BoardConfig(body_contract=board.BodyContractMode.BLOCK),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+    )
+
+    assert board.next_action(projected) is None
+    item = next(item for item in projected.items if item.number == 211)
+    assert item.actionable_reason == "body malformed: version"
+
+
+def test_render_shows_projection_presence_and_dash_next_for_a_valid_block_skeleton() -> None:
+    skeleton = 'version = 1\nnow = ""\nnext = ""\ndone_when = ""\n'
+    issue = board_issue(220, "Skeleton", agent_claim_body(skeleton))
+    projected = projected_board(
+        (issue,),
+        (),
+        (),
+        (),
+        board.BoardConfig(body_contract=board.BodyContractMode.BLOCK),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+    )
+
+    line = next(line for line in board.render(projected).splitlines() if f"#{issue.number}" in line)
+    cells = re.split(r"\s{2,}", line.strip())
+
+    assert cells[5] == "Now, Next, Done when"
+    assert cells[7] == "-"
+
+
+def test_a_complete_block_item_is_body_complete_with_no_blocked_by_projection() -> None:
+    issue = board_issue(230, "Complete block item", agent_claim_body(MINIMAL_BLOCK_TOML))
+    projected = projected_board(
+        (issue,),
+        (),
+        (),
+        (),
+        board.BoardConfig(body_contract=board.BodyContractMode.BLOCK),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+    )
+
+    item = next(item for item in projected.items if item.number == 230)
+
+    assert item.contract_complete is True
+    assert item.contract.blocked_by is None
+
+
+def block_dependency(
+    number: int,
+    *,
+    repository: str = REPOSITORY,
+    state: board.BlockerState = board.BlockerState.OPEN,
+    is_pull_request: bool = False,
+    closed_at: datetime | None = None,
+) -> board.IssueDependency:
+    return board.IssueDependency(
+        board.IssueReference(repository, number), state, is_pull_request, closed_at
+    )
+
+
+def test_board_reports_open_local_and_foreign_dependencies_as_blockers() -> None:
+    issue = board_issue(300, "Depends on two", agent_claim_body(MINIMAL_BLOCK_TOML))
+    dependencies = {
+        300: (
+            block_dependency(3),
+            block_dependency(7, repository="overnightworks/other-repo"),
+        )
+    }
+    projected = projected_board(
+        (issue,),
+        (),
+        (),
+        (),
+        board.BoardConfig(body_contract=board.BodyContractMode.BLOCK),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+        dependencies=dependencies,
+    )
+
+    item = next(item for item in projected.items if item.number == 300)
+
+    assert item.open_blockers == (
+        board.IssueReference(REPOSITORY, 3),
+        board.IssueReference("overnightworks/other-repo", 7),
+    )
+    assert item.actionable_reason == "blocked by #3, overnightworks/other-repo#7"
+
+
+def test_board_json_splits_local_and_foreign_blockers_only_in_block_mode() -> None:
+    """A2 (#150): `open_blockers` keeps its pre-#150 local-int-only shape;
+    `foreign_blockers` is a separate key, present only under the block pin."""
+    issue = board_issue(300, "Depends on two", agent_claim_body(MINIMAL_BLOCK_TOML))
+    dependencies = {
+        300: (
+            block_dependency(3),
+            block_dependency(7, repository="overnightworks/other-repo"),
+        )
+    }
+    projected = projected_board(
+        (issue,),
+        (),
+        (),
+        (),
+        board.BoardConfig(body_contract=board.BodyContractMode.BLOCK),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+        dependencies=dependencies,
+    )
+
+    payload = json.loads(board.board_json(projected))
+    item = next(item for item in payload["items"] if item["number"] == 300)
+
+    assert item["open_blockers"] == [3]
+    assert item["foreign_blockers"] == ["overnightworks/other-repo#7"]
+
+
+def test_board_json_omits_foreign_blockers_key_in_prose_mode() -> None:
+    issue = board_issue(10, "Prose item", complete_contract("Ship it.", blocked_by="#642"))
+    other = board_issue(642, "Blocker", complete_contract("Ship it."))
+    projected = projected_board(
+        (issue, other), (), (), (), board.BoardConfig(), now=datetime(2026, 8, 21, tzinfo=UTC)
+    )
+
+    payload = json.loads(board.board_json(projected))
+    item = next(item for item in payload["items"] if item["number"] == 10)
+
+    assert item["open_blockers"] == [642]
+    assert "foreign_blockers" not in item
+
+
+def test_board_shows_freed_from_a_sole_closed_local_dependency_and_claim_reaches_mutation(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """A complete block item whose sole dependency is closed passes body
+    checks and reaches claim mutation (#150 §6/§10): FREED on the projection,
+    and `claim` (without `--out-of-order`) actually posts a claim comment
+    through the fake, not just a non-blocked projection."""
+    closed_dependency = (
+        block_dependency(
+            151, state=board.BlockerState.CLOSED, closed_at=datetime(2026, 8, 20, tzinfo=UTC)
+        ),
+    )
+    projected = projected_board(
+        (board_issue(301, "Freed", agent_claim_body(MINIMAL_BLOCK_TOML)),),
+        (),
+        (),
+        (),
+        board.BoardConfig(body_contract=board.BodyContractMode.BLOCK),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+        dependencies={301: closed_dependency},
+    )
+    item = next(item for item in projected.items if item.number == 301)
+    assert item.open_blockers == ()
+    assert item.freed_on == datetime(2026, 8, 20, tzinfo=UTC)
+    assert item.actionable is True
+
+    live_issue = replace(
+        board_issue(301, "Freed by a closed dependency", agent_claim_body(MINIMAL_BLOCK_TOML)),
+        blocked_by_count=1,
+    )
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(live_issue,))
+    _write_block_pin(tmp_path)
+    client.board_dependencies = {301: closed_dependency}
+    monkeypatch.setattr(
+        issue_claim, "_request", lambda _arguments: request(issue=301, scope=("src/work.py",))
+    )
+
+    exit_code = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "claim",
+            "301",
+            "--agent",
+            "Ada",
+            "--scope",
+            "src/work.py",
+        ]
+    )
+
+    assert exit_code == 0
+    assert len(client.comments[LEDGER_ISSUE]) == 1
+    assert "ERROR:" not in capsys.readouterr().err
+
+
+def test_board_never_frees_on_a_closed_foreign_dependency_alone() -> None:
+    issue = board_issue(302, "Foreign-only", agent_claim_body(MINIMAL_BLOCK_TOML))
+    dependencies = {
+        302: (
+            block_dependency(
+                9,
+                repository="overnightworks/other-repo",
+                state=board.BlockerState.CLOSED,
+                closed_at=datetime(2026, 8, 20, tzinfo=UTC),
+            ),
+        )
+    }
+    projected = projected_board(
+        (issue,),
+        (),
+        (),
+        (),
+        board.BoardConfig(body_contract=board.BodyContractMode.BLOCK),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+        dependencies=dependencies,
+    )
+
+    item = next(item for item in projected.items if item.number == 302)
+
+    assert item.freed_on is None
+    assert item.open_blockers == ()
+
+
+def test_board_treats_a_same_repository_pull_request_dependency_like_any_other() -> None:
+    """Block mode has no `blocker-is-a-PR` check (prose-only): a same-
+    repository PR dependency follows its own open/closed state."""
+    issue = board_issue(303, "PR blocker", agent_claim_body(MINIMAL_BLOCK_TOML))
+    dependencies = {303: (block_dependency(88, is_pull_request=True),)}
+    projected = projected_board(
+        (issue,),
+        (),
+        (),
+        (),
+        board.BoardConfig(body_contract=board.BodyContractMode.BLOCK),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+        dependencies=dependencies,
+    )
+
+    item = next(item for item in projected.items if item.number == 303)
+
+    assert item.open_blockers == (board.IssueReference(REPOSITORY, 88),)
+
+
+def test_blocked_check_reports_a_foreign_dependency_and_the_out_of_order_warning() -> None:
+    issue = board_issue(304, "Foreign blocked", agent_claim_body(MINIMAL_BLOCK_TOML))
+    dependencies = {304: (block_dependency(9, repository="overnightworks/other-repo"),)}
+    projected = projected_board(
+        (issue,),
+        (),
+        (),
+        (),
+        board.BoardConfig(body_contract=board.BodyContractMode.BLOCK),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+        dependencies=dependencies,
+    )
+    item = next(item for item in projected.items if item.number == 304)
+
+    error_check = issue_claim._blocked_check(item, None, REPOSITORY)
+    assert error_check == issue_claim.SliceCheck(
+        "error",
+        "blocked",
+        "#304 is blocked by overnightworks/other-repo#9 (open); "
+        "pass --out-of-order REASON to claim it anyway",
+        issue=304,
+    )
+    warning_check = issue_claim._blocked_check(item, "reason", REPOSITORY)
+    assert warning_check is not None
+    assert warning_check.level == "warning"
+
+
+@dataclass
+class _MinimalBoardSource:
+    """The smallest real `forge.BoardSource` -- every read empty, `capability`
+    and the dependency fetch injectable -- for tests that exercise exactly
+    one of `_load_board_config`/`_fetch_dependencies` in isolation."""
+
+    repository: forge.RepositoryId = field(
+        default_factory=lambda: github._repository_id(REPOSITORY)
+    )
+    capability_result: forge.Capability = forge.Capability.READ_ONLY
+    dependencies_fetcher: Callable[[int], tuple[board.IssueDependency, ...]] = lambda _number: ()
+
+    def capability(self, operation: forge.ForgeOperation) -> forge.Capability:
+        del operation
+        return self.capability_result
+
+    def list_open_board_issues(self) -> tuple[board.Issue, ...]:
+        return ()
+
+    def list_board_blockers(self, numbers: frozenset[int]) -> tuple[board.BlockerReference, ...]:
+        del numbers
+        return ()
+
+    def list_board_dependencies(self, number: int) -> tuple[board.IssueDependency, ...]:
+        return self.dependencies_fetcher(number)
+
+    def list_open_board_pull_requests(self) -> tuple[board.PullRequest, ...]:
+        return ()
+
+    def list_recent_merged_board_pull_requests(
+        self, since: datetime
+    ) -> tuple[board.PullRequest, ...]:
+        del since
+        return ()
+
+    def list_children(self, number: int) -> tuple[board.ChildItem, ...]:
+        del number
+        return ()
+
+
+def test_load_board_config_refuses_a_block_pin_the_forge_cannot_support(tmp_path: Path) -> None:
+    (tmp_path / ".agent-claim").mkdir()
+    (tmp_path / ".agent-claim" / "board.toml").write_text('body_contract = "block"\n')
+
+    client = _MinimalBoardSource(capability_result=forge.Capability.UNSUPPORTED)
+
+    with pytest.raises(ClaimError, match="list_board_dependencies"):
+        issue_claim._load_board_config(client, tmp_path)
+
+
+def test_fetch_dependencies_bounds_concurrency_at_the_shared_constant() -> None:
+    concurrency = issue_claim.BOARD_CHILD_FETCH_CONCURRENCY
+    release = threading.Barrier(concurrency)
+    active = 0
+    peak = 0
+    lock = threading.Lock()
+    exceeded = threading.Event()
+
+    def fetch(number: int) -> tuple[board.IssueDependency, ...]:
+        nonlocal active, peak
+        del number
+        with lock:
+            active += 1
+            peak = max(peak, active)
+            if active > concurrency:
+                exceeded.set()
+        release.wait(timeout=5)
+        with lock:
+            active -= 1
+        return ()
+
+    client = _MinimalBoardSource(dependencies_fetcher=fetch)
+
+    issue_claim._fetch_dependencies(client, tuple(range(concurrency * 2)))
+
+    assert not exceeded.is_set()
+    assert peak == concurrency
+
+
+def test_validated_dependencies_refuses_a_length_mismatch() -> None:
+    issue = board_issue(305, "Length mismatch", agent_claim_body(MINIMAL_BLOCK_TOML))
+    issue = replace(issue, blocked_by_count=2)
+    fetched = {305: (block_dependency(1),)}
+
+    with pytest.raises(
+        forge.ForgeMalformedResponseError,
+        match=r"malformed board blocked-by list for #305: listing total_blocked_by=2, "
+        r"detail length=1",
+    ):
+        issue_claim._validated_dependencies((issue,), fetched)
+
+
+def test_validated_dependencies_refuses_a_duplicate_dependency() -> None:
+    issue = board_issue(306, "Duplicate", agent_claim_body(MINIMAL_BLOCK_TOML))
+    issue = replace(issue, blocked_by_count=2)
+    fetched = {306: (block_dependency(1), block_dependency(1))}
+
+    with pytest.raises(forge.ForgeMalformedResponseError, match="malformed board blocked-by list"):
+        issue_claim._validated_dependencies((issue,), fetched)
 
 
 def test_next_pulls_a_configured_projectionless_idea_with_refinement_step(
@@ -8747,6 +9946,117 @@ def test_github_board_blocker_fails_loud_on_an_uncalendared_closed_timestamp() -
     raised_argument_1 = frozenset({86})
     with pytest.raises(ClaimError, match="malformed board blocker"):
         client.list_board_blockers(raised_argument_1)
+
+
+def test_github_reads_board_dependencies_local_and_foreign(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[list[str]] = []
+
+    def run(arguments: list[str]) -> str:
+        observed.append(arguments)
+        rows = [
+            {
+                "number": 151,
+                "state": "closed",
+                "closedAt": "2026-09-05T00:00:00Z",
+                "repository": "example/agent-claim",
+                "isPullRequest": False,
+            },
+            {
+                "number": 7,
+                "state": "open",
+                "closedAt": None,
+                "repository": "overnightworks/other-repo",
+                "isPullRequest": False,
+            },
+        ]
+        return "\n".join(json.dumps(row) for row in rows)
+
+    client = GitHubForge(github._repository_id("example/agent-claim"), run=run)
+
+    assert client.list_board_dependencies(150) == (
+        board.IssueDependency(
+            board.IssueReference("example/agent-claim", 151),
+            board.BlockerState.CLOSED,
+            False,
+            datetime(2026, 9, 5, tzinfo=UTC),
+        ),
+        board.IssueDependency(
+            board.IssueReference("overnightworks/other-repo", 7),
+            board.BlockerState.OPEN,
+            False,
+            None,
+        ),
+    )
+    assert observed == [
+        [
+            "api",
+            "--paginate",
+            "repos/example/agent-claim/issues/150/dependencies/blocked_by?per_page=100",
+            "--jq",
+            ".[] | {number,state,closedAt:.closed_at,repository:.repository.full_name,"
+            'isPullRequest:has("pull_request")}',
+        ]
+    ]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param(json.dumps(["not-a-dict"]), id="not-a-dict"),
+        pytest.param(
+            json.dumps(
+                {
+                    "number": 151,
+                    "state": "open",
+                    "closedAt": None,
+                    "repository": "not a repo",
+                    "isPullRequest": False,
+                }
+            ),
+            id="malformed-repository",
+        ),
+        pytest.param(
+            json.dumps(
+                {
+                    "number": 151,
+                    "state": "closed",
+                    "closedAt": None,
+                    "repository": "example/agent-claim",
+                    "isPullRequest": False,
+                }
+            ),
+            id="closed-without-timestamp",
+        ),
+    ],
+)
+def test_github_board_dependency_fails_loud_on_a_malformed_shape(raw: str) -> None:
+    client = GitHubForge(github._repository_id("example/agent-claim"), run=lambda _arguments: raw)
+
+    with pytest.raises(ClaimError, match="malformed board blocked-by dependency"):
+        client.list_board_dependencies(150)
+
+
+def test_github_board_dependency_fails_loud_on_an_uncalendared_closed_timestamp() -> None:
+    """`closedAt` can pass the timestamp-shape check (digits in the right
+    places) while still naming no real calendar date; `datetime.fromisoformat`
+    itself is the second, calendar-aware check that catches that."""
+    client = GitHubForge(
+        github._repository_id("example/agent-claim"),
+        run=lambda _arguments: json.dumps(
+            {
+                "number": 151,
+                "state": "closed",
+                "closedAt": "9999-99-99T00:00:00Z",
+                "repository": "example/agent-claim",
+                "isPullRequest": False,
+            }
+        ),
+    )
+
+    with pytest.raises(ClaimError, match="malformed board blocked-by dependency"):
+        client.list_board_dependencies(150)
 
 
 def _comment_row(identifier: int, body: str = "ordinary prose") -> dict[str, object]:
@@ -17286,6 +18596,70 @@ def test_pr_check_accepts_a_last_child_landing_when_the_parent_still_has_next_wo
     assert run_pr_check() == 0
     assert capsys.readouterr().out == (
         f"PR #12 by ada declares Work-Item: {REPOSITORY}#{WORK_ITEM_ISSUE}\n"
+    )
+
+
+def test_pr_check_reads_the_parents_next_from_the_block_not_stale_prose(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """The last-child rule reads a block-pinned parent's `next` through
+    `parse_body` under the loaded pin, not the stale prose beside it (#150)."""
+    monkeypatch.setattr(checkout, "_git_output", lambda _arguments: str(tmp_path))
+    _write_block_pin(tmp_path)
+    parent_body = (
+        agent_claim_body('version = 1\nnow = "N"\nnext = "Cut the next slice."\ndone_when = "D"\n')
+        + "\n\n## Next\nnichts\n"
+    )
+    parented_pr_check_client(
+        monkeypatch,
+        body="Work-Item: #72\n\nCloses #72",
+        parent_body=parent_body,
+        open_children=(board.IssueReference(REPOSITORY, WORK_ITEM_ISSUE),),
+    )
+
+    assert run_pr_check() == 0
+    assert capsys.readouterr().out == (
+        f"PR #12 by ada declares Work-Item: {REPOSITORY}#{WORK_ITEM_ISSUE}\n"
+    )
+
+
+def test_pr_check_refuses_a_legacy_parent_before_the_next_check(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    monkeypatch.setattr(checkout, "_git_output", lambda _arguments: str(tmp_path))
+    _write_block_pin(tmp_path)
+    parented_pr_check_client(
+        monkeypatch,
+        body="Work-Item: #72\n\nCloses #72",
+        parent_body="## Now\nOld prose.\n",
+        open_children=(board.IssueReference(REPOSITORY, WORK_ITEM_ISSUE),),
+    )
+
+    assert run_pr_check() == 1
+    assert capsys.readouterr().err == (
+        f"REFUSED: pull request #12 has parent {REPOSITORY}#{PARENT_ISSUE} with a legacy body\n"
+    )
+
+
+def test_pr_check_refuses_a_malformed_parent_before_the_next_check(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    monkeypatch.setattr(checkout, "_git_output", lambda _arguments: str(tmp_path))
+    _write_block_pin(tmp_path)
+    malformed_parent_body = agent_claim_body(
+        'version = 2\nnow = "N"\nnext = "X"\ndone_when = "D"\n'
+    )
+    parented_pr_check_client(
+        monkeypatch,
+        body="Work-Item: #72\n\nCloses #72",
+        parent_body=malformed_parent_body,
+        open_children=(board.IssueReference(REPOSITORY, WORK_ITEM_ISSUE),),
+    )
+
+    assert run_pr_check() == 1
+    assert capsys.readouterr().err == (
+        f"REFUSED: pull request #12 has parent {REPOSITORY}#{PARENT_ISSUE} with a malformed "
+        "body: version: version must be exactly 1\n"
     )
 
 

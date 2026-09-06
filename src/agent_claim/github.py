@@ -253,6 +253,7 @@ _READ_ONLY_OPERATIONS = (
     forge.ForgeOperation.DEFAULT_BRANCH,
     forge.ForgeOperation.LIST_OPEN_BOARD_ISSUES,
     forge.ForgeOperation.LIST_BOARD_BLOCKERS,
+    forge.ForgeOperation.LIST_BOARD_DEPENDENCIES,
     forge.ForgeOperation.LIST_OPEN_BOARD_PULL_REQUESTS,
     forge.ForgeOperation.LIST_RECENT_MERGED_BOARD_PULL_REQUESTS,
     forge.ForgeOperation.LIST_ITEMS,
@@ -500,6 +501,7 @@ class GitHubForge:
         kind_raw = value.get("kind")
         children_closed = value.get("childrenClosed")
         children_total = value.get("childrenTotal")
+        blocked_by_count = value.get("blockedByCount")
         if (
             isinstance(number, bool)
             or not isinstance(number, int)
@@ -514,6 +516,9 @@ class GitHubForge:
             or TIMESTAMP_PATTERN.fullmatch(updated_at) is None
             or (kind_raw is not None and not isinstance(kind_raw, str))
             or not self._valid_children_progress(children_closed, children_total)
+            or isinstance(blocked_by_count, bool)
+            or not isinstance(blocked_by_count, int)
+            or blocked_by_count < 0
         ):
             raise forge.ForgeMalformedResponseError("GitHub returned a malformed board issue")
         return board.Issue(
@@ -526,6 +531,7 @@ class GitHubForge:
             self._issue_kind(kind_raw),
             children_closed,
             children_total,
+            blocked_by_count,
         )
 
     def _board_pull_request(self, value: object) -> board.PullRequest:
@@ -722,7 +728,8 @@ class GitHubForge:
                     'isPullRequest:has("pull_request"),'
                     "kind:(.type.name // null),"
                     "childrenClosed:(.sub_issues_summary.completed // null),"
-                    "childrenTotal:(.sub_issues_summary.total // null)}"
+                    "childrenTotal:(.sub_issues_summary.total // null),"
+                    "blockedByCount:(.issue_dependencies_summary.total_blocked_by // 0)}"
                 ),
             ]
         )
@@ -791,6 +798,60 @@ class GitHubForge:
             return ()
         with ThreadPoolExecutor(max_workers=min(len(numbers), PARALLEL_FETCH_CONCURRENCY)) as pool:
             return tuple(pool.map(self._board_blocker, sorted(numbers)))
+
+    MALFORMED_BOARD_DEPENDENCY = "GitHub returned a malformed board blocked-by dependency"
+
+    def _board_dependency(self, value: object) -> board.IssueDependency:
+        if not isinstance(value, dict):
+            raise forge.ForgeMalformedResponseError(self.MALFORMED_BOARD_DEPENDENCY)
+        number = value.get("number")
+        state = value.get("state")
+        closed_at = value.get("closedAt")
+        repository = value.get("repository")
+        is_pull_request = value.get("isPullRequest")
+        blocker_state = API_ISSUE_STATES.get(state) if isinstance(state, str) else None
+        if (
+            isinstance(number, bool)
+            or not isinstance(number, int)
+            or number < 1
+            or blocker_state is None
+            or not isinstance(repository, str)
+            or re.fullmatch(REPOSITORY_PATTERN, repository) is None
+            or not isinstance(is_pull_request, bool)
+            or (closed_at is not None and not isinstance(closed_at, str))
+            or (isinstance(closed_at, str) and TIMESTAMP_PATTERN.fullmatch(closed_at) is None)
+            or (blocker_state is board.BlockerState.CLOSED and closed_at is None)
+        ):
+            raise forge.ForgeMalformedResponseError(self.MALFORMED_BOARD_DEPENDENCY)
+        parsed_closed_at = None
+        if closed_at is not None:
+            try:
+                parsed_closed_at = datetime.fromisoformat(closed_at)
+            except ValueError as error:
+                raise forge.ForgeMalformedResponseError(self.MALFORMED_BOARD_DEPENDENCY) from error
+            parsed_closed_at = parsed_closed_at.astimezone(UTC)
+        return board.IssueDependency(
+            board.IssueReference(repository, number),
+            blocker_state,
+            is_pull_request,
+            parsed_closed_at,
+        )
+
+    def list_board_dependencies(self, number: int) -> tuple[board.IssueDependency, ...]:
+        raw = self._run(
+            [
+                "api",
+                "--paginate",
+                f"repos/{self.repository}/issues/{number}/dependencies/blocked_by"
+                f"?per_page={ISSUES_PER_PAGE}",
+                "--jq",
+                ".[] | {number,state,closedAt:.closed_at,repository:.repository.full_name,"
+                'isPullRequest:has("pull_request")}',
+            ]
+        )
+        return tuple(
+            self._board_dependency(value) for value in self._json_lines(raw, "board dependency")
+        )
 
     def list_open_board_pull_requests(self) -> tuple[board.PullRequest, ...]:
         raw = self._run(
