@@ -1,3 +1,3 @@
 """agent-claim: a portable, append-only GitHub claim ledger."""
 
-__version__ = "0.12.2"
+__version__ = "0.13.0"
