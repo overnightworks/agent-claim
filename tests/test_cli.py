@@ -1685,6 +1685,28 @@ def test_rulings_lists_open_expectations_by_board_priority_then_open_count(
     ]
 
 
+def test_rulings_reads_expectation_progress_from_the_block_not_stale_prose(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """`rulings` must consume `BoardItem.expectation_progress`, not re-scan
+    the raw body: a fully-ruled `## Erwartungen` heading left beside a still-
+    proposed `[[expectation]]` would otherwise hide this item from `rulings`
+    entirely (#150)."""
+    stale_disagreeing_prose = (
+        "\n\n## Erwartungen (refine-Lauf 28.08.2026)\n"
+        "- Ruled one *(geregelt: ja)*\n"
+        "- Ruled two *(geregelt: ja)*\n"
+    )
+    toml_text = f'{MINIMAL_BLOCK_TOML}[[expectation]]\ntext = "Proposed"\ndefault = "later"\n'
+    body = agent_claim_body(toml_text) + stale_disagreeing_prose
+    issue = board_issue(400, "Block-only expectations", body)
+    _configured_board_client(monkeypatch, tmp_path, open_issues=(issue,))
+    _write_block_pin(tmp_path)
+
+    assert issue_claim.main(["--repo", "example/agent-claim", "rulings"]) == 0
+    assert capsys.readouterr().out == "#400 1/1: Block-only expectations\n"
+
+
 def test_rulings_renders_text_json_and_empty_success(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
@@ -4180,7 +4202,10 @@ def test_board_collects_every_open_blocker_from_issue_list() -> None:
     )
     item = next(item for item in projected.items if item.number == 10)
 
-    assert item.open_blockers == (642, 790)
+    assert item.open_blockers == (
+        board.IssueReference(REPOSITORY, 642),
+        board.IssueReference(REPOSITORY, 790),
+    )
     assert item.actionable is False
     assert item.actionable_reason == "blocked by #642, #790"
 
@@ -4691,7 +4716,7 @@ def test_board_ranks_a_real_blocker_ahead_of_a_blocked_product_item() -> None:
 
     assert [item.number for item in projected.items] == [20, 21]
     assert projected.items[0].unblocks_count == 1
-    assert projected.items[1].open_blockers == (20,)
+    assert projected.items[1].open_blockers == (board.IssueReference(REPOSITORY, 20),)
 
 
 def test_board_never_counts_an_open_pull_request_as_a_blocker() -> None:
@@ -6138,7 +6163,7 @@ def test_parse_body_orders_schema_defects_deterministically() -> None:
     toml_text = (
         "now = 1\n"
         "unexpected = 1\n"
-        'frozen_until = { trigger = "", ruled_on = "2026-09-06" }\n'
+        'frozen_until = { trigger = "", ruled_on = "2026-09-06", odd = 1 }\n'
         "[[expectation]]\n"
         'text = ""\n'
         "[[slice]]\n"
@@ -6156,6 +6181,7 @@ def test_parse_body_orders_schema_defects_deterministically() -> None:
         "done_when",
         "frozen_until.trigger",
         "frozen_until.ruled_on",
+        "frozen_until.odd",
         "expectation[0].text",
         "expectation[0].default",
         "slice[0].index",
@@ -6431,21 +6457,21 @@ def test_board_reports_open_local_and_foreign_dependencies_as_blockers() -> None
 
     item = next(item for item in projected.items if item.number == 300)
 
-    assert item.open_blockers == (3, "overnightworks/other-repo#7")
+    assert item.open_blockers == (
+        board.IssueReference(REPOSITORY, 3),
+        board.IssueReference("overnightworks/other-repo", 7),
+    )
     assert item.actionable_reason == "blocked by #3, overnightworks/other-repo#7"
 
 
-def test_board_shows_freed_from_a_sole_closed_local_dependency_and_claim_reaches_mutation(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A complete block item whose sole dependency is closed passes body
-    checks and reaches claim mutation (#150 §6/§10)."""
-    issue = board_issue(301, "Freed by a closed dependency", agent_claim_body(MINIMAL_BLOCK_TOML))
+def test_board_json_splits_local_and_foreign_blockers_only_in_block_mode() -> None:
+    """A2 (#150): `open_blockers` keeps its pre-#150 local-int-only shape;
+    `foreign_blockers` is a separate key, present only under the block pin."""
+    issue = board_issue(300, "Depends on two", agent_claim_body(MINIMAL_BLOCK_TOML))
     dependencies = {
-        301: (
-            block_dependency(
-                151, state=board.BlockerState.CLOSED, closed_at=datetime(2026, 8, 20, tzinfo=UTC)
-            ),
+        300: (
+            block_dependency(3),
+            block_dependency(7, repository="overnightworks/other-repo"),
         )
     }
     projected = projected_board(
@@ -6458,11 +6484,80 @@ def test_board_shows_freed_from_a_sole_closed_local_dependency_and_claim_reaches
         dependencies=dependencies,
     )
 
-    item = next(item for item in projected.items if item.number == 301)
+    payload = json.loads(board.board_json(projected))
+    item = next(item for item in payload["items"] if item["number"] == 300)
 
+    assert item["open_blockers"] == [3]
+    assert item["foreign_blockers"] == ["overnightworks/other-repo#7"]
+
+
+def test_board_json_omits_foreign_blockers_key_in_prose_mode() -> None:
+    issue = board_issue(10, "Prose item", complete_contract("Ship it.", blocked_by="#642"))
+    other = board_issue(642, "Blocker", complete_contract("Ship it."))
+    projected = projected_board(
+        (issue, other), (), (), (), board.BoardConfig(), now=datetime(2026, 8, 21, tzinfo=UTC)
+    )
+
+    payload = json.loads(board.board_json(projected))
+    item = next(item for item in payload["items"] if item["number"] == 10)
+
+    assert item["open_blockers"] == [642]
+    assert "foreign_blockers" not in item
+
+
+def test_board_shows_freed_from_a_sole_closed_local_dependency_and_claim_reaches_mutation(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """A complete block item whose sole dependency is closed passes body
+    checks and reaches claim mutation (#150 §6/§10): FREED on the projection,
+    and `claim` (without `--out-of-order`) actually posts a claim comment
+    through the fake, not just a non-blocked projection."""
+    closed_dependency = (
+        block_dependency(
+            151, state=board.BlockerState.CLOSED, closed_at=datetime(2026, 8, 20, tzinfo=UTC)
+        ),
+    )
+    projected = projected_board(
+        (board_issue(301, "Freed", agent_claim_body(MINIMAL_BLOCK_TOML)),),
+        (),
+        (),
+        (),
+        board.BoardConfig(body_contract=board.BodyContractMode.BLOCK),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+        dependencies={301: closed_dependency},
+    )
+    item = next(item for item in projected.items if item.number == 301)
     assert item.open_blockers == ()
     assert item.freed_on == datetime(2026, 8, 20, tzinfo=UTC)
     assert item.actionable is True
+
+    live_issue = replace(
+        board_issue(301, "Freed by a closed dependency", agent_claim_body(MINIMAL_BLOCK_TOML)),
+        blocked_by_count=1,
+    )
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(live_issue,))
+    _write_block_pin(tmp_path)
+    client.board_dependencies = {301: closed_dependency}
+    monkeypatch.setattr(
+        issue_claim, "_request", lambda _arguments: request(issue=301, scope=("src/work.py",))
+    )
+
+    exit_code = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "claim",
+            "301",
+            "--agent",
+            "Ada",
+            "--scope",
+            "src/work.py",
+        ]
+    )
+
+    assert exit_code == 0
+    assert len(client.comments[LEDGER_ISSUE]) == 1
+    assert "ERROR:" not in capsys.readouterr().err
 
 
 def test_board_never_frees_on_a_closed_foreign_dependency_alone() -> None:
@@ -6510,7 +6605,7 @@ def test_board_treats_a_same_repository_pull_request_dependency_like_any_other()
 
     item = next(item for item in projected.items if item.number == 303)
 
-    assert item.open_blockers == (88,)
+    assert item.open_blockers == (board.IssueReference(REPOSITORY, 88),)
 
 
 def test_blocked_check_reports_a_foreign_dependency_and_the_out_of_order_warning() -> None:
@@ -6527,7 +6622,7 @@ def test_blocked_check_reports_a_foreign_dependency_and_the_out_of_order_warning
     )
     item = next(item for item in projected.items if item.number == 304)
 
-    error_check = issue_claim._blocked_check(item, None)
+    error_check = issue_claim._blocked_check(item, None, REPOSITORY)
     assert error_check == issue_claim.SliceCheck(
         "error",
         "blocked",
@@ -6535,7 +6630,7 @@ def test_blocked_check_reports_a_foreign_dependency_and_the_out_of_order_warning
         "pass --out-of-order REASON to claim it anyway",
         issue=304,
     )
-    warning_check = issue_claim._blocked_check(item, "reason")
+    warning_check = issue_claim._blocked_check(item, "reason", REPOSITORY)
     assert warning_check is not None
     assert warning_check.level == "warning"
 
@@ -18319,6 +18414,48 @@ def test_pr_check_accepts_a_last_child_landing_when_the_parent_still_has_next_wo
     assert run_pr_check() == 0
     assert capsys.readouterr().out == (
         f"PR #12 by ada declares Work-Item: {REPOSITORY}#{WORK_ITEM_ISSUE}\n"
+    )
+
+
+def test_pr_check_reads_the_parents_next_from_the_block_not_stale_prose(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """The last-child rule reads a block-pinned parent's `next` through
+    `parse_body` under the loaded pin, not the stale prose beside it (#150)."""
+    monkeypatch.setattr(checkout, "_git_output", lambda _arguments: str(tmp_path))
+    _write_block_pin(tmp_path)
+    parent_body = (
+        agent_claim_body('version = 1\nnow = "N"\nnext = "Cut the next slice."\ndone_when = "D"\n')
+        + "\n\n## Next\nnichts\n"
+    )
+    parented_pr_check_client(
+        monkeypatch,
+        body="Work-Item: #72\n\nCloses #72",
+        parent_body=parent_body,
+        open_children=(board.IssueReference(REPOSITORY, WORK_ITEM_ISSUE),),
+    )
+
+    assert run_pr_check() == 0
+    assert capsys.readouterr().out == (
+        f"PR #12 by ada declares Work-Item: {REPOSITORY}#{WORK_ITEM_ISSUE}\n"
+    )
+
+
+def test_pr_check_refuses_a_legacy_parent_before_the_next_check(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    monkeypatch.setattr(checkout, "_git_output", lambda _arguments: str(tmp_path))
+    _write_block_pin(tmp_path)
+    parented_pr_check_client(
+        monkeypatch,
+        body="Work-Item: #72\n\nCloses #72",
+        parent_body="## Now\nOld prose.\n",
+        open_children=(board.IssueReference(REPOSITORY, WORK_ITEM_ISSUE),),
+    )
+
+    assert run_pr_check() == 1
+    assert capsys.readouterr().err == (
+        f"REFUSED: pull request #12 has parent {REPOSITORY}#{PARENT_ISSUE} with a legacy body\n"
     )
 
 

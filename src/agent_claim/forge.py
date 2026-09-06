@@ -3,11 +3,11 @@
 `ForgeReader`/`ForgeWriter` are the provider-neutral contract every adapter
 (today: GitHub) implements; `ForgeOperation` names every operation on that
 contract and `Capability` answers, per operation, whether an adapter can
-perform it at all. Nothing in this module or its callers branches on that
-answer yet -- the GitHub adapter never refuses an operation -- so the first
-real consumer is #112 (item kind as the native issue type; decision record
-0001 ruling D3 maps kind read-only on GitLab Free, which cannot create a
-custom `Container` type).
+perform it at all. The GitHub adapter never itself refuses an operation.
+`cli._load_board_config` is the one caller that branches on a capability
+answer -- the `body_contract = "block"` pin gate (#150), which requires
+`LIST_BOARD_DEPENDENCIES` at `READ_ONLY` or better before a repository may
+read bodies through the block.
 """
 
 from __future__ import annotations

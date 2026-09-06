@@ -921,14 +921,13 @@ def _board(
     )
 
 
-def _rulings(projected: board.Board, issues: tuple[board.Issue, ...], *, as_json: bool) -> None:
-    progress_by_issue = {issue.number: board.expectation_progress(issue.body) for issue in issues}
+def _rulings(projected: board.Board, *, as_json: bool) -> None:
     items = tuple(
         sorted(
             (
-                (item, progress_by_issue[item.number])
+                (item, item.expectation_progress)
                 for item in projected.items
-                if progress_by_issue[item.number].open > 0
+                if item.expectation_progress.open > 0
             ),
             key=lambda entry: (
                 *board.board_rank(entry[0])[:2],
@@ -1155,11 +1154,13 @@ def _out_of_order_check(
 
 
 def _blocked_check(
-    item: board.BoardItem | None, out_of_order_reason: str | None
+    item: board.BoardItem | None, out_of_order_reason: str | None, repository: str
 ) -> SliceCheck | None:
     if item is None or not item.open_blockers:
         return None
-    blockers = ", ".join(board.open_blocker_label(number) for number in item.open_blockers)
+    blockers = ", ".join(
+        board.open_blocker_label(reference, repository) for reference in item.open_blockers
+    )
     return SliceCheck(
         "warning" if out_of_order_reason is not None else "error",
         "blocked",
@@ -1281,7 +1282,7 @@ def _slice_rule_checks(
         checks.append(
             SliceCheck("error", "container", f"#{issue} is a container; claim a child", issue=issue)
         )
-    blocked = _blocked_check(item, out_of_order_reason)
+    blocked = _blocked_check(item, out_of_order_reason, lookup.repository)
     if blocked is not None:
         checks.append(blocked)
     state, title, _body = _issue_reference_state(lookup.client, lookup.open_by_number, issue)
@@ -1381,22 +1382,20 @@ class _ParentRequirement:
     last_child: bool
 
 
-def _parent_requirement(
-    client: forge.ForgeReader,
-    repository: str,
-    item: board.IssueReference,
-) -> _ParentRequirement | board.ClassificationDefect | None:
-    """The parent's demand, read from GitHub's sub-issue relation.
+def _parent_body_finding(reference: board.IssueReference, parsed: board.ParsedBody) -> str:
+    """Why a legacy or malformed parent body refuses the last-child rule
+    before its `Next` line is ever consulted (#150)."""
+    if parsed.read_state is board.BodyReadState.LEGACY:
+        return f"has parent {reference} with a legacy body"
+    defect = parsed.contract.defects[0]
+    return f"has parent {reference} with a malformed body: {defect.field}: {defect.message}"
 
-    Closing a parent's last open child completes the parent only when the
-    parent's own `Next` line names no further work; otherwise the container
-    keeps dispatching slices, and the landing may close the parent (its one
-    remaining child) but need not. A parent keeping other open children
-    stays open, and must say what happens next.
-    """
-    parent = client.parent_issue(item.number)
-    if parent is None:
-        return None
+
+def _parent_reference_defect(
+    parent: board.ParentIssue, repository: str
+) -> board.ClassificationDefect | None:
+    """Whether the parent itself is even a same-repository container --
+    checked before its body is read at all."""
     if parent.reference.repository != repository:
         return board.ClassificationDefect(
             f"has parent {parent.reference} in another repository, "
@@ -1408,6 +1407,33 @@ def _parent_requirement(
             f"has parent {parent.reference} of kind {kind_text}, which is not a "
             "container; only a container holds children"
         )
+    return None
+
+
+def _parent_requirement(
+    client: forge.ForgeReader,
+    repository: str,
+    item: board.IssueReference,
+    mode: board.BodyContractMode,
+) -> _ParentRequirement | board.ClassificationDefect | None:
+    """The parent's demand, read from GitHub's sub-issue relation and its
+    body under the repository's own pin (#150).
+
+    Closing a parent's last open child completes the parent only when the
+    parent's own `Next` line names no further work; otherwise the container
+    keeps dispatching slices, and the landing may close the parent (its one
+    remaining child) but need not. A parent keeping other open children
+    stays open, and must say what happens next.
+    """
+    parent = client.parent_issue(item.number)
+    if parent is None:
+        return None
+    reference_defect = _parent_reference_defect(parent, repository)
+    if reference_defect is not None:
+        return reference_defect
+    parsed_parent = board.parse_body(parent.body, mode)
+    if parsed_parent.read_state is not board.BodyReadState.VALID:
+        return board.ClassificationDefect(_parent_body_finding(parent.reference, parsed_parent))
     remaining = tuple(
         child
         for child in client.list_children(parent.reference.number)
@@ -1416,10 +1442,10 @@ def _parent_requirement(
     if not remaining:
         return _ParentRequirement(
             parent.reference,
-            not board.has_further_work(board.parse_contract(parent.body).next),
+            not board.has_further_work(parsed_parent.contract.next),
             True,
         )
-    if board.parse_contract(parent.body).next is None:
+    if not parsed_parent.contract.next:
         children = "child" if len(remaining) == 1 else "children"
         return board.ClassificationDefect(
             f"leaves parent {parent.reference} open with {len(remaining)} other open "
@@ -1463,6 +1489,7 @@ def _work_item_defect(
     repository: str,
     detail: forge.Landing,
     item: board.IssueReference,
+    mode: board.BodyContractMode,
 ) -> board.ClassificationDefect | None:
     """Why this repository does not accept `item` as the landing pull request's work item."""
     if item.repository != repository:
@@ -1476,14 +1503,14 @@ def _work_item_defect(
     claim_defect = _claim_defect(client, detail, protocol.IssueIdentity(item.number))
     if claim_defect is not None:
         return claim_defect
-    requirement = _parent_requirement(client, repository, item)
+    requirement = _parent_requirement(client, repository, item, mode)
     if isinstance(requirement, board.ClassificationDefect):
         return requirement
     return _closing_defect(detail, repository, item, requirement)
 
 
 def _checked_classification(
-    client: forge.ForgeReader, repository: str, detail: forge.Landing
+    client: forge.ForgeReader, repository: str, detail: forge.Landing, mode: board.BodyContractMode
 ) -> board.Classification | board.ClassificationDefect:
     if detail.source_repository.path != repository:
         return board.ClassificationDefect(
@@ -1501,14 +1528,16 @@ def _checked_classification(
     defect = (
         _no_item_defect(client, repository, detail)
         if isinstance(classification, board.NoItemClassification)
-        else _work_item_defect(client, repository, detail, classification.item)
+        else _work_item_defect(client, repository, detail, classification.item, mode)
     )
     return classification if defect is None else defect
 
 
-def _pull_request_check(client: forge.ForgeReader, repository: str, number: int) -> int:
+def _pull_request_check(
+    client: forge.ForgeReader, repository: str, number: int, mode: board.BodyContractMode
+) -> int:
     detail = client.landing(number)
-    checked = _checked_classification(client, repository, detail)
+    checked = _checked_classification(client, repository, detail, mode)
     if isinstance(checked, board.ClassificationDefect):
         print(f"REFUSED: pull request #{detail.number} {checked.message}", file=sys.stderr)
         return 1
@@ -1726,7 +1755,11 @@ def _rescope_command(parsed: argparse.Namespace) -> protocol.RescopeRequest:
 
 def _cmd_pull_request_check(parsed: argparse.Namespace, session: _ReadSession) -> int:
     pull_request_number = int(parsed.pr)
-    return _pull_request_check(session.forge, session.forge.repository.path, pull_request_number)
+    toplevel = Path(checkout._git_output(["rev-parse", "--show-toplevel"]))
+    config = _load_board_config(session.forge, toplevel)
+    return _pull_request_check(
+        session.forge, session.forge.repository.path, pull_request_number, config.body_contract
+    )
 
 
 def _cmd_status(parsed: argparse.Namespace, session: _ReadSession) -> int:
@@ -1751,7 +1784,7 @@ def _cmd_rulings(parsed: argparse.Namespace, session: _ReadSession) -> None:
     comments = session.forge.list_protocol_candidates(protocol.LEDGER_ISSUE)
     issues = session.forge.list_open_board_issues()
     projected = _board(session.forge, protocol.active_claims(comments), issues=issues)
-    _rulings(projected, issues, as_json=parsed.json)
+    _rulings(projected, as_json=parsed.json)
 
 
 def _next_action_container_number(action: board.NextAction | None) -> int | None:
