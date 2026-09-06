@@ -518,6 +518,7 @@ class Board:
     blocker_references: tuple[BlockerReference, ...]
     repository: str
     body_contract: BodyContractMode
+    requests: int
 
 
 def load_config(path: Path = CONFIG_PATH) -> BoardConfig:
@@ -2350,6 +2351,7 @@ class BoardBuildInputs:
     trunk_landings: tuple[datetime, ...] = ()
     children: Mapping[int, tuple[ChildItem, ...]] = field(default_factory=dict)
     dependencies: Mapping[int, tuple[IssueDependency, ...]] = field(default_factory=dict)
+    requests: int = 0
 
 
 def build_board(inputs: BoardBuildInputs) -> Board:
@@ -2462,6 +2464,7 @@ def build_board(inputs: BoardBuildInputs) -> Board:
         blocker_references=blocker_references,
         repository=repository,
         body_contract=config.body_contract,
+        requests=inputs.requests,
     )
 
 
@@ -2674,7 +2677,7 @@ def render(board: Board) -> str:
     uncut = "\n".join(_uncut_line(finding) for finding in board.uncut) or "none"
     return (
         f"{table}\n\nREADY NOW\n{ready}\n\nSTALE\n{stale}\n\nRECOVERY ({RECOVERY_STEP})\n{recovery}"
-        f"\n\nCONTAINERS\n{containers}\n\nUNCUT\n{uncut}"
+        f"\n\nCONTAINERS\n{containers}\n\nUNCUT\n{uncut}\n\nrequests: {board.requests}"
     )
 
 

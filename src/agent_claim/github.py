@@ -6,6 +6,7 @@ import json
 import os
 import re
 import sys
+import threading
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime, timedelta
@@ -290,8 +291,10 @@ class GitHubForge:
         run: Callable[..., str] | None = None,
     ) -> None:
         self.repository = repository
-        self._run = run if run is not None else self._gh
+        self._perform = run if run is not None else self._gh
         self._rollover_warning_printed = False
+        self.requests = 0
+        self._requests_lock = threading.Lock()
 
     def _gh(self, arguments: list[str], *, input_data: bytes | None = None) -> str:
         return _bounded_command(
@@ -299,6 +302,29 @@ class GitHubForge:
             purpose="GitHub issue coordination",
             input_data=input_data,
         )
+
+    def _run(self, arguments: list[str], *, input_data: bytes | None = None) -> str:
+        """The one chokepoint every board or claim read/write funnels through
+        (issue #168): every one of this class's operations calls `self._run`,
+        never `self._gh` or an injected `run` directly, so `requests` counts
+        every round trip exactly once regardless of which operation asked for
+        it. Locked because `board` fans reads out across worker threads
+        (`cli._board`'s pools, and this adapter's own paginated/sharded
+        fetches) that call `_run` concurrently -- an unlocked `+=` could lose
+        an increment and under-count.
+
+        Forwards `input_data` only when a caller actually passed one: tests
+        across this suite inject `run=` callables shaped like `_gh` was
+        called before this method existed, most of them taking no
+        `input_data` keyword at all, and this preserves that call shape
+        exactly rather than widening every fixture's signature for a
+        counting concern they have nothing to do with.
+        """
+        with self._requests_lock:
+            self.requests += 1
+        if input_data is None:
+            return self._perform(arguments)
+        return self._perform(arguments, input_data=input_data)
 
     def capability(self, operation: forge.ForgeOperation) -> forge.Capability:
         return GITHUB_CAPABILITIES[operation]

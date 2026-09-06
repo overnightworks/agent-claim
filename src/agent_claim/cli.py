@@ -872,8 +872,16 @@ def _board(
     if issues is None:
         issues = client.list_open_board_issues()
     since = _merged_pull_request_floor(issues, now)
+    # A container whose own summary already says 0 (or carries no summary at
+    # all, `children_total is None`) can never own an open child either way:
+    # `_container_progress` returns no progress at all without both numbers,
+    # and returns an empty open-children list when they're both 0 -- exactly
+    # what an absent `children` entry already defaults to. Fetching its
+    # detail list would cost a request `board` never needed (issue #168).
     container_numbers = tuple(
-        issue.number for issue in issues if issue.kind is board.ItemKind.CONTAINER
+        issue.number
+        for issue in issues
+        if issue.kind is board.ItemKind.CONTAINER and issue.children_total
     )
     prose = config.body_contract is board.BodyContractMode.PROSE
     # Open and recently-merged pull requests, the prose blocker lookup, and
@@ -918,6 +926,7 @@ def _board(
             trunk_landings=checkout.trunk_landing_times(),
             children=children,
             dependencies=dependencies,
+            requests=client.requests,
         )
     )
 
