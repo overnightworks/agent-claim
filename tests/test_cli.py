@@ -653,6 +653,12 @@ class FakeForge:
         return self.children.get(number, ())
 
     def list_board_blockers(self, numbers: frozenset[int]) -> tuple[board.BlockerReference, ...]:
+        if not numbers:
+            # Mirrors `GitHubForge.list_board_blockers`'s own early return
+            # (issue #168): no numbers means no network call at all, so
+            # nothing to count -- an empty prose board must cost the same
+            # zero requests here as it does against the real adapter.
+            return ()
         self._run()
         if self.board_blocker_references is not None:
             return self.board_blocker_references
@@ -818,7 +824,7 @@ def test_forge_operation_exhaustiveness_matches_the_declared_reader_and_writer_m
     declared_methods = {
         name
         for name in dir(forge.ForgeWriter)
-        if not name.startswith("_") and name not in {"repository", "capability"}
+        if not name.startswith("_") and name not in {"repository", "capability", "requests"}
     }
     assert {operation.value for operation in forge.ForgeOperation} == declared_methods
     assert len(forge.ForgeOperation) == 26
@@ -1671,9 +1677,11 @@ def test_board_skips_the_children_list_for_a_container_with_zero_children(
     rendered = capsys.readouterr().out
 
     assert observed_children_calls == [30]
-    # Ledger comments, open issues, open PRs, merged PRs, the prose blocker
-    # lookup, and exactly one `list_children` call (for #30, never #20).
-    assert client.requests == 6
+    # Ledger comments, open issues, open PRs, merged PRs, and exactly one
+    # `list_children` call (for #30, never #20). No issue here names a
+    # blocker, so `list_board_blockers` never runs -- an empty numbers set
+    # costs no request, on the fake exactly as on the real adapter.
+    assert client.requests == 5
     assert f"requests: {client.requests}" in rendered
 
     client.requests = 0
@@ -1682,7 +1690,7 @@ def test_board_skips_the_children_list_for_a_container_with_zero_children(
     payload = json.loads(capsys.readouterr().out)
 
     assert observed_children_calls == [30]
-    assert payload["requests"] == client.requests == 6
+    assert payload["requests"] == client.requests == 5
 
 
 def test_board_skips_the_dependency_list_for_a_zero_blocker_item_in_block_mode(

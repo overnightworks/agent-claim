@@ -239,7 +239,7 @@ A container is never itself actionable — its `board`/`next` reason reads
 sibling has closed) ranks above ordinary work, though never above a critical
 item or a real blocker.
 
-`board` also ends with an `UNCUT` section naming, per item, the slice-table
+`board` also shows an `UNCUT` section naming, per item, the slice-table
 rows (`#79`'s grammar) that are not yet linked to a dispatched child — an
 undispatched (`—`) row, or one whose item cell is neither the marker nor a
 well-formed `#n` link — by row index, as `#<item>: rows N, N, … uncut`; a row
@@ -259,6 +259,10 @@ items first with that step: open issues that a merged pull request already
 declared as its `Work-Item:` — the landing happened, the bookkeeping did not. It
 is keyed on that typed line, never on an issue's update time, and never names
 the ledger issue. `next --json` carries the same items under `recovery`.
+
+`board` ends its text output with a `requests: N` line, counting every read
+the command made through the forge port; `board --json` carries the same
+count as a top-level `"requests"` field.
 
 `agent-claim rulings` lists only open board items with open expectation lines
 as `#NUMBER OPEN/TOTAL: TITLE`; `rulings --json` returns the same `number`,
