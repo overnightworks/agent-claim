@@ -921,9 +921,9 @@ def _row_item_cell_span(
     row_start: int,
     offset: int,
 ) -> tuple[int, int]:
-    """The item-cell span of the row at `row_entries[offset]` -- `offset` is
-    the caller's own already-confirmed match, mapped back into `body`'s real
-    character offsets."""
+    """The item-cell span of the row at `entries[row_start + offset]` --
+    `offset` is the caller's own already-confirmed match, mapped back into
+    `body`'s real character offsets."""
     original_index, raw_line = entries[row_start + offset]
     spans = _row_cell_spans(raw_line)
     preceding = sum(len(raw) + 1 for raw in raw_lines[:original_index])
@@ -935,8 +935,7 @@ def locate_slice_row(body: str, row_index: int) -> tuple[int, int] | None:
     """The character span of slice-table row `row_index`'s item cell in
     `body`, padding included -- so `link_slice_row` can replace exactly that
     cell and leave every other byte untouched. `None` when no such row
-    exists (already cut, the index does not name a row, or the row's own
-    line is not cell-shaped).
+    exists: already cut, or the index does not name a row.
 
     Walks the same header/row scan `parse_slice_table` does, over
     `_live_line_entries` instead of `_live_text` alone, so a fenced example

@@ -1508,8 +1508,13 @@ def test_board_renders_fixture_as_text_without_github_writes(
 
 
 def test_recent_merged_pull_requests_refuses_a_window_that_ends_before_it_starts() -> None:
+    """A fixed far-future `since` -- never `datetime.now(UTC)`-relative -- so
+    this stays deterministic regardless of when the suite runs: a real-clock
+    window could cross UTC midnight between this line and the production
+    code's own `datetime.now(UTC)` call, sometimes closing the window and
+    falling through to a real, unfaked `gh` call instead of raising."""
     client = GitHubForge(github._repository_id("example/agent-claim"))
-    raised_argument_1 = datetime.now(UTC) + timedelta(days=1)
+    raised_argument_1 = datetime(2099, 1, 1, tzinfo=UTC)
     with pytest.raises(ClaimError, match="merged pull request window ends before it starts"):
         client.list_recent_merged_board_pull_requests(raised_argument_1)
 
@@ -9085,20 +9090,19 @@ class _FakeBoundedProcess:
         self.stdin = None
         self.stderr = None
         self._ignores_terminate = ignores_terminate
-        self.terminate_called = False
-        self.kill_called = False
+        self.events: list[str] = []
         self._exited = already_exited
 
     def poll(self) -> int | None:
         return 0 if self._exited else None
 
     def terminate(self) -> None:
-        self.terminate_called = True
+        self.events.append("terminate")
         if not self._ignores_terminate:
             self._exited = True
 
     def kill(self) -> None:
-        self.kill_called = True
+        self.events.append("kill")
         self._exited = True
 
     def wait(self, timeout: float = 0.0) -> int:
@@ -9126,8 +9130,9 @@ def test_run_bounded_times_out_even_when_the_child_already_exited(
     with pytest.raises(process.ProcessTimedOutError):
         process.run_bounded(["fake"], timeout=5.0)
 
-    assert fake_process.terminate_called is False
-    assert fake_process.kill_called is False
+    assert fake_process.events == []
+    assert fake_process.stdout.closed is True
+    assert fake_process.poll() is not None
 
 
 def test_run_bounded_kills_a_child_that_ignores_termination(
@@ -9144,8 +9149,9 @@ def test_run_bounded_kills_a_child_that_ignores_termination(
     with pytest.raises(process.ProcessTimedOutError):
         process.run_bounded(["fake"], timeout=-1.0)
 
-    assert fake_process.terminate_called is True
-    assert fake_process.kill_called is True
+    assert fake_process.events == ["terminate", "kill"]
+    assert fake_process.stdout.closed is True
+    assert fake_process.poll() is not None
 
 
 def test_run_bounded_treats_a_broken_input_pipe_as_fully_sent(
