@@ -3098,6 +3098,38 @@ def test_cut_refuses_a_row_when_no_cuttable_row_exists(
     assert client.item_bodies == {}
 
 
+def test_cut_refuses_a_row_with_the_wrong_cell_count(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """A row with the wrong column count -- three cells instead of four --
+    is named by its `#` cell and the exact cell-count reason, not only the
+    non-numeric-index reason the other malformed test pins."""
+    body = "| # | Scheibe | Item | Hängt ab von |\n|---|---|---|---|\n| 1 | Broken | — |\n"
+    container = _cut_container_issue(body)
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
+
+    exit_code = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "cut",
+            str(CUT_CONTAINER),
+            "--title",
+            "Scheibe 1",
+            "--row",
+            "1",
+        ]
+    )
+
+    assert exit_code == 2
+    expected = (
+        f'ERROR: #{CUT_CONTAINER} has no cuttable slice row; row "1": expected 4 cells, found 3'
+    )
+    assert expected in capsys.readouterr().err
+    assert client.created_children == []
+    assert client.item_bodies == {}
+
+
 def test_cut_refuses_a_row_already_cut_into_another_item(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
@@ -4838,6 +4870,35 @@ def test_next_action_closes_a_container_with_no_open_child_and_no_further_work()
     assert action.container_progress == board.ContainerProgress(3, 3, ())
 
 
+def test_next_action_skips_a_container_whose_only_uncut_rows_are_malformed() -> None:
+    """A container with no open child and no further `Next` work, but a
+    slice table holding only malformed rows, is never proposed for closure
+    -- a hand fix is still owed (Grok review finding 1 of #155,
+    06.09.2026). Its `actionable_reason` names the malformed row the same
+    way `board`'s own `UNCUT` section does, so `next`'s `SKIPPED` line
+    matches."""
+    body = "| # | Scheibe | Item | Hängt ab von |\n|---|---|---|---|\n| B | Broken | — | — |\n"
+    container = board.Issue(
+        163,
+        "Container",
+        (),
+        body,
+        "2026-08-20T00:00:00Z",
+        "2026-08-20T00:00:00Z",
+        kind=board.ItemKind.CONTAINER,
+        children_closed=0,
+        children_total=0,
+    )
+    projected = projected_board(
+        (container,), (), (), (), board.BoardConfig(), now=datetime(2026, 8, 21, tzinfo=UTC)
+    )
+
+    assert board.next_action(projected) is None
+    container_item = next(item for item in projected.items if item.number == 163)
+    reason = 'container; row "B": index must be a positive integer'
+    assert container_item.actionable_reason == reason
+
+
 def test_next_action_cuts_a_container_with_an_uncut_row_and_no_further_next_work() -> None:
     """An empty `Next` line alone must not close a container that still has
     an undispatched slice-table row (#112 finding 1)."""
@@ -5019,6 +5080,45 @@ def test_board_json_and_render_name_a_malformed_row_by_its_cell_and_reason() -> 
         }
     ]
     assert 'UNCUT\n#161: row "B": index must be a positive integer' in board.render(projected)
+
+
+def test_board_json_and_render_name_a_row_with_the_wrong_cell_count() -> None:
+    """A row with the wrong column count -- three cells instead of four --
+    is named by its `#` cell and the exact cell-count reason, matching the
+    `cut --row` refusal's own naming for the same defect."""
+    body = "| # | Scheibe | Item | Hängt ab von |\n|---|---|---|---|\n| 1 | Broken | — |\n"
+    container = board.Issue(
+        162,
+        "Container",
+        (),
+        body,
+        "2026-08-20T00:00:00Z",
+        "2026-08-20T00:00:00Z",
+        kind=board.ItemKind.CONTAINER,
+        children_closed=0,
+        children_total=0,
+    )
+    projected = projected_board(
+        (container,), (), (), (), board.BoardConfig(), now=datetime(2026, 8, 21, tzinfo=UTC)
+    )
+
+    malformed_row = board.MalformedSliceRow("| 1 | Broken | — |", "1", "expected 4 cells, found 3")
+    assert projected.uncut == (board.UncutSlices(162, (), (malformed_row,)),)
+    payload = json.loads(board.board_json(projected))
+    assert payload["uncut"] == [
+        {
+            "item": 162,
+            "rows": [],
+            "malformed": [
+                {
+                    "line": "| 1 | Broken | — |",
+                    "id_cell": "1",
+                    "reason": "expected 4 cells, found 3",
+                }
+            ],
+        }
+    ]
+    assert 'UNCUT\n#162: row "1": expected 4 cells, found 3' in board.render(projected)
 
 
 def test_next_action_skips_a_container_that_still_holds_an_open_child() -> None:
@@ -5613,6 +5713,41 @@ def test_next_keeps_an_unlabelled_projectionless_item_skipped_with_an_active_ide
         "action": None,
         "recovery": [],
         "skipped": [{"number": 10, "reason": "body incomplete"}],
+    }
+
+
+def test_next_skips_a_malformed_only_container_instead_of_closing_it(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """A 0-open-child container whose slice table is only malformed rows,
+    with an empty `Next`, is skipped with that reason -- never proposed for
+    closure in text or JSON (Grok review finding 1 of #155, 06.09.2026)."""
+    body = "| # | Scheibe | Item | Hängt ab von |\n|---|---|---|---|\n| B | Broken | — | — |\n"
+    container = board.Issue(
+        164,
+        "Container",
+        (),
+        body,
+        "2026-08-20T00:00:00Z",
+        "2026-08-20T00:00:00Z",
+        kind=board.ItemKind.CONTAINER,
+        children_closed=0,
+        children_total=0,
+    )
+    _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
+
+    assert issue_claim.main(["--repo", "example/agent-claim", "next"]) == 3
+    out = capsys.readouterr().out
+    reason = 'container; row "B": index must be a positive integer'
+    assert out == f"No actionable item.\n\nSKIPPED\n#164: {reason}\n"
+    assert "close_container" not in out
+
+    assert issue_claim.main(["--repo", "example/agent-claim", "next", "--json"]) == 3
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {
+        "action": None,
+        "recovery": [],
+        "skipped": [{"number": 164, "reason": reason}],
     }
 
 

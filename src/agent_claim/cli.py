@@ -1851,12 +1851,9 @@ def _cut_target(client: forge.ForgeWriter, number: int) -> board.Issue:
 
 
 def _row_index_ranges(indices: Sequence[int]) -> str:
-    """`indices` (any order) as ascending, comma-joined ranges -- a
-    contiguous run collapses to `start-end`, e.g. `4-7` for `[4, 5, 6, 7]`,
-    so a long run of cut rows reads as one span instead of a long list. A
-    plain hyphen, not an en dash: RUF001/RUF002 read the repository's own
-    output text like any other string literal, and this repository takes no
-    inline suppressions."""
+    """A plain hyphen joins each range, not an en dash: RUF001/RUF002 read
+    the repository's own output text like any other string literal, and
+    this repository takes no inline suppressions."""
     ranges: list[tuple[int, int]] = []
     for value in sorted(indices):
         if ranges and value == ranges[-1][1] + 1:

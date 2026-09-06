@@ -1573,6 +1573,24 @@ def _completes_container(
     return progress.closed >= 1 and len(progress.open_children) == 1
 
 
+def _malformed_only_uncut(
+    issue: Issue, contract: Contract, container_progress: ContainerProgress | None
+) -> tuple[MalformedSliceRow, ...]:
+    """The malformed slice-table rows blocking `issue` when it is a
+    container with no open child, no further `Next` work, and no still-open
+    cuttable or unlinkable row left -- exactly the state `next_action` skips
+    instead of proposing to close, and what its skip reason names via the
+    same `malformed_row_clause` `board`'s own `UNCUT` section uses."""
+    if container_progress is None or container_progress.open_children:
+        return ()
+    if has_further_work(contract.next):
+        return ()
+    findings = slice_table_findings(issue.body)
+    if findings.cuttable or findings.unlinkable:
+        return ()
+    return findings.malformed
+
+
 def _board_item(
     issue: Issue, context: _BoardBuildContext, config: BoardConfig, observed_at: datetime
 ) -> BoardItem:
@@ -1605,6 +1623,7 @@ def _board_item(
     )
     active_claim, claim_age_text, claim_old = _claim_projection(claim, observed_at)
     open_blockers = context.blockers[issue.number]
+    container_progress = context.container_progress.get(issue.number)
     actionable_reason = _actionable_reason(
         _ActionabilityFacts(
             kind=issue.kind,
@@ -1613,6 +1632,7 @@ def _board_item(
             open_blockers=open_blockers,
             contract_complete=contract.complete,
             projectionless_idea=projectionless_idea,
+            malformed_uncut=_malformed_only_uncut(issue, contract, container_progress),
         )
     )
     return BoardItem(
@@ -1623,7 +1643,7 @@ def _board_item(
         priority_category=rank.category,
         priority_bucket=rank.bucket,
         priority_order=rank.order,
-        container=context.container_progress.get(issue.number),
+        container=container_progress,
         container_parent=container_parent,
         contract=contract,
         next_step=next_step,
@@ -1795,13 +1815,15 @@ def next_action(board: Board) -> NextAction | None:
     and returns the first row that is either an actionable non-container
     (`WorkItemAction`; a container is never actionable, so this branch never
     fires for one) or a container with no open child (`CutSliceAction` when
-    its own `Next` line still names work or its slice table still carries an
-    uncut row, else `CloseContainerAction`). `_container_progress` already
-    fails loud on a container whose summary disagrees with its open-children
-    list, so "no open child" here reliably means every created child has
-    closed. Every other row -- blocked, claimed, incomplete, or a container
-    still holding an open child -- is skipped, never blocking a lower-ranked
-    qualifying row.
+    its own `Next` line still names work or its slice table still carries a
+    cuttable or unlinkable row, else `CloseContainerAction`). `_container_progress`
+    already fails loud on a container whose summary disagrees with its
+    open-children list, so "no open child" here reliably means every
+    created child has closed. Every other row -- blocked, claimed,
+    incomplete, a container still holding an open child, or a container
+    whose only uncut findings are malformed rows (nothing left to close for
+    and nothing `cut` could link either) -- is skipped, never blocking a
+    lower-ranked qualifying row.
 
     Whichever branch fires, the printed command never carries `--row` (#151):
     `cut` without `--row` accepts every container `next` names here, linking
@@ -1821,6 +1843,8 @@ def next_action(board: Board) -> NextAction | None:
         uncut = uncut_by_container.get(item.number)
         if uncut is not None and uncut.rows:
             return CutSliceAction(item, container, uncut.rows[0].title)
+        if uncut is not None and uncut.malformed:
+            continue
         return CloseContainerAction(item, container)
     return None
 
@@ -1956,11 +1980,19 @@ class _ActionabilityFacts:
     open_blockers: tuple[int, ...]
     contract_complete: bool
     projectionless_idea: bool
+    malformed_uncut: tuple[MalformedSliceRow, ...] = ()
+
+
+def _container_actionable_reason(malformed_uncut: tuple[MalformedSliceRow, ...]) -> str:
+    if not malformed_uncut:
+        return "container; claim a child"
+    named = "; ".join(malformed_row_clause(row) for row in malformed_uncut)
+    return f"container; {named}"
 
 
 def _actionable_reason(facts: _ActionabilityFacts) -> str | None:
     if facts.kind is ItemKind.CONTAINER:
-        return "container; claim a child"
+        return _container_actionable_reason(facts.malformed_uncut)
     if facts.frozen_trigger is not None:
         return f"frozen: {facts.frozen_trigger}"
     if facts.active_claim is not None:
