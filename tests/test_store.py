@@ -202,16 +202,16 @@ class _AcceptThenRaiseTransport:
         self.calls = 0
         self._real = store.GitPushTransport()
 
-    def push(self, **kwargs: object) -> None:
+    def push(self, *, worktree: Path, remote: str, ref: str, new_oid: protocol.ObjectId) -> None:
         self.calls += 1
-        self._real.push(**kwargs)  # type: ignore[arg-type]
+        self._real.push(worktree=worktree, remote=remote, ref=ref, new_oid=new_oid)
         raise protocol.PushRejectedError("simulated lost response")
 
 
 class _AlwaysRejectingTransport:
     """A `PushTransport` that never lands a push -- exhausts the retry loop."""
 
-    def push(self, **kwargs: object) -> None:
+    def push(self, *, worktree: Path, remote: str, ref: str, new_oid: protocol.ObjectId) -> None:
         raise protocol.PushRejectedError("simulated permanent rejection")
 
 
@@ -648,15 +648,53 @@ def test_run_git_with_input_translates_process_failures_to_claim_error(
         store._run_git_with_input(worktree, ["mktree"], input_data=b"")
 
 
-def test_find_operation_id_returns_none_when_the_range_is_unresolvable(worktree: Path) -> None:
-    found = store._find_operation_id(
-        worktree,
-        since=_UNRESOLVABLE_OBJECT_ID,
-        until=_PLACEHOLDER_TIP,
-        operation_id="whatever",
+def test_find_operation_id_fails_loud_when_the_range_is_unresolvable(worktree: Path) -> None:
+    with pytest.raises(protocol.ClaimError, match="cannot search"):
+        store._find_operation_id(
+            worktree,
+            since=_UNRESOLVABLE_OBJECT_ID,
+            until=_PLACEHOLDER_TIP,
+            operation_id="whatever",
+        )
+
+
+def test_push_retry_stops_instead_of_committing_again_when_the_search_fails(
+    monkeypatch: pytest.MonkeyPatch, bare_remote: Path, worktree: Path
+) -> None:
+    """A failing `operation_id` search after a rejected push must stop the
+    retry loud, never be read as "not found" -- that would commit a second
+    time on top of a lost response whose commit already landed."""
+    observed = store.fetch_state(worktree=worktree, remote=str(bare_remote))
+    transport = _AcceptThenRaiseTransport()
+    operation_id = "operation-under-test"
+    pending = store.PendingCommit(
+        tree_oid=store._write_empty_state_tree(worktree),
+        message=f"bootstrap empty claim state\n\noperation_id: {operation_id}\n",
+        operation_id=operation_id,
     )
 
-    assert found is None
+    def failing_search(*_args: object, **_kwargs: object) -> None:
+        raise protocol.ClaimError("simulated search failure")
+
+    monkeypatch.setattr(store, "_find_operation_id", failing_search)
+
+    with pytest.raises(protocol.ClaimError, match="simulated search failure"):
+        store.push_tree(
+            worktree=worktree,
+            remote=str(bare_remote),
+            observed=observed,
+            pending=pending,
+            transport=transport,
+        )
+
+    assert transport.calls == 1
+    log = subprocess.run(
+        ["git", "--git-dir", str(bare_remote), "rev-list", "--count", store.STATE_REF],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert log.stdout.strip() == "1"
 
 
 def test_commit_tree_fails_loud_on_an_unresolvable_tree(worktree: Path) -> None:

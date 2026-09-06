@@ -288,11 +288,20 @@ def _find_operation_id(
     One `git log -1` per candidate commit rather than a single delimited
     dump: the range this ever searches is a handful of commits contending
     over one push, not a hot path, so the simplest correct parse wins.
+
+    Both ends of the range are already-resolved commits by the time the
+    retry loop calls this (its own just-built commit, and a tip
+    `fetch_state` just parsed), so a failing walk is a broken invariant, not
+    an absent id: reading it as "not found" would let a lost response whose
+    commit already landed be pushed a second time.
     """
     range_argument = f"{since}..{until}" if since is not None else str(until)
     listing = _run_git(worktree, ["log", "--format=%H", range_argument])
     if listing.exit_status != 0:
-        return None
+        detail = listing.stderr.decode().strip() or "unknown git failure"
+        raise ClaimError(
+            f"cannot search {range_argument} for operation_id {operation_id}: {detail}"
+        )
     needle = f"operation_id: {operation_id}"
     for candidate in listing.stdout.decode().split():
         message = _run_git(worktree, ["log", "-1", "--format=%B", candidate])

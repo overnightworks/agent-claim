@@ -255,7 +255,10 @@ LANE_ISSUE_HELP = "omit for lane mode, derived from a docs/ or fix/ checkout bra
 
 def _add_bootstrap_parser(commands: argparse._SubParsersAction) -> None:
     commands.add_parser(
-        "bootstrap", help="create or report this repository's refs/aco/state claim store"
+        "bootstrap",
+        help=(
+            "create or adopt this repository's locked ledger, then create or report refs/aco/state"
+        ),
     )
 
 
