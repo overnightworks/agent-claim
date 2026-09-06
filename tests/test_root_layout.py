@@ -80,3 +80,10 @@ def test_untracked_non_ignored_stray_file_counts(tmp_path: Path) -> None:
     (tmp_path / "stray.txt").write_text("content\n")
 
     assert violations(tmp_path) == (f"stray.txt: {VIOLATION_MESSAGE}",)
+
+
+def test_agent_claim_config_directory_is_allowed(tmp_path: Path) -> None:
+    _init_repository(tmp_path)
+    _track(tmp_path, "pyproject.toml", ".agent-claim/board.toml")
+
+    assert violations(tmp_path) == ()
