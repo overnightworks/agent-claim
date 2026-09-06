@@ -28,7 +28,7 @@ ALLOWED_ROOT_FILES = frozenset(
     }
 )
 
-ALLOWED_ROOT_DIRECTORIES = frozenset({".github", "docs", "scripts", "src", "tests"})
+ALLOWED_ROOT_DIRECTORIES = frozenset({".agent-claim", ".github", "docs", "scripts", "src", "tests"})
 
 VIOLATION_MESSAGE = (
     "belongs next to its owner (a baseline beside its check, a fixture beside "
