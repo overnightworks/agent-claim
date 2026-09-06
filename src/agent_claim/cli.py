@@ -1626,6 +1626,37 @@ def _verify_merged_release(
         )
 
 
+def _canonical_remote_repository(canonical_remote: str) -> forge.RepositoryId:
+    """The repository `canonical_remote`'s configured URL names (issue #176, §2).
+
+    Refuses by name when the URL does not match GitHub's remote pattern --
+    the same pattern `github.discover_repository` already parses with.
+    """
+    url = checkout.remote_url(canonical_remote)
+    match = github.GITHUB_REMOTE_PATTERN.search(url)
+    if match is None:
+        raise protocol.ClaimError(
+            f"canonical remote {canonical_remote!r} url {url!r} does not name a GitHub repository"
+        )
+    return forge.RepositoryId(github.GITHUB_HOST, (match.group(1),), match.group(2))
+
+
+def _refuse_canonical_remote_mismatch(
+    forge_target: forge.RepositoryId, canonical_remote: str
+) -> None:
+    """Every store command's shared refusal (Erwartung 6): the forge target
+    (`--repo`, or whatever `discover_repository` resolved) must name the same
+    repository the canonical remote's own URL points at, or nothing is read
+    or written.
+    """
+    canonical_repository = _canonical_remote_repository(canonical_remote)
+    if canonical_repository.path != forge_target.path:
+        raise protocol.ClaimUnavailableError(
+            f"forge target {forge_target.path} does not match canonical remote "
+            f"{canonical_repository.path}; run bootstrap --ledger from that repository's checkout"
+        )
+
+
 MUTATING_HOOK_TOOLS = frozenset({"Edit", "MultiEdit", "Write", "search_replace", "write"})
 
 

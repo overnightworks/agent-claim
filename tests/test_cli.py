@@ -10632,6 +10632,49 @@ def test_remote_url_reads_any_named_remote(monkeypatch: pytest.MonkeyPatch) -> N
     assert calls == [["config", "--get", "remote.upstream.url"]]
 
 
+def test_canonical_remote_repository_parses_the_configured_remote_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(checkout, "remote_url", lambda remote: "git@github.com:owner/repo.git")
+
+    repository = issue_claim._canonical_remote_repository("origin")
+
+    assert repository.path == "owner/repo"
+
+
+def test_canonical_remote_repository_refuses_a_non_github_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(checkout, "remote_url", lambda remote: "https://example.com/owner/repo")
+
+    with pytest.raises(ClaimError, match="does not name a GitHub repository"):
+        issue_claim._canonical_remote_repository("origin")
+
+
+def test_refuse_canonical_remote_mismatch_allows_a_matching_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(checkout, "remote_url", lambda remote: "git@github.com:owner/repo.git")
+
+    issue_claim._refuse_canonical_remote_mismatch(
+        forge.RepositoryId(github.GITHUB_HOST, ("owner",), "repo"), "origin"
+    )
+
+
+def test_refuse_canonical_remote_mismatch_names_both_repositories(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(checkout, "remote_url", lambda remote: "git@github.com:owner/repo.git")
+
+    with pytest.raises(
+        ClaimUnavailableError,
+        match="forge target other/repo does not match canonical remote owner/repo",
+    ):
+        issue_claim._refuse_canonical_remote_mismatch(
+            forge.RepositoryId(github.GITHUB_HOST, ("other",), "repo"), "origin"
+        )
+
+
 def test_fake_and_github_adapters_expose_only_common_protocol_candidates() -> None:
     trusted = comment(1, claim_comment(request()))
     prose = comment(2, "ordinary prose")
