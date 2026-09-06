@@ -66,6 +66,24 @@ BASE = "a" * 40
 REPOSITORY = "example/agent-claim"
 LANDED = protocol.MergedRelease(12)
 
+# Exactly `protocol.WIDE_SCOPE_SHARE_FLOOR` versioned files: three named scope
+# paths (LICENSE, README.md, src) cover four of them (src holds two), the
+# minimal fixture that still trips the share condition (issue #163).
+TWELVE_VERSIONED_FILES = (
+    "LICENSE",
+    "README.md",
+    "pyproject.toml",
+    "src/agent_claim/__init__.py",
+    "src/a.py",
+    "docs/b.md",
+    "docs/c.md",
+    "docs/d.md",
+    "docs/e.md",
+    "docs/f.md",
+    "docs/g.md",
+    "docs/h.md",
+)
+
 
 def ledger_item(
     number: int,
@@ -2524,6 +2542,7 @@ def test_claim_help_names_the_whole_reason(
     assert "three paths" in help_text
     assert "directory" in help_text
     assert "quarter" in help_text
+    assert "twelve" in help_text
 
 
 def test_rescope_help_names_the_whole_reason(
@@ -14562,6 +14581,7 @@ def test_cli_claim_share_above_a_quarter_requires_whole(
     monkeypatch.setattr(discovery, "discover_ledger", lambda _client: LEDGER_ISSUE)
     monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
     monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+    monkeypatch.setattr(checkout, "versioned_paths", lambda: TWELVE_VERSIONED_FILES)
 
     status = issue_claim.main(
         [
@@ -14579,6 +14599,8 @@ def test_cli_claim_share_above_a_quarter_requires_whole(
             "LICENSE",
             "--scope",
             "README.md",
+            "--scope",
+            "src",
             "--claim-id",
             "wide",
         ]
@@ -14592,17 +14614,18 @@ def test_cli_claim_share_above_a_quarter_requires_whole(
     assert LEDGER_ISSUE not in client.comments
 
 
-def test_cli_claim_wide_scope_refusal_names_the_share(
+def test_cli_claim_below_the_share_floor_is_never_wide_on_share(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """A share-tripped refusal names the covered/versioned counts and the
-    percentage, not the whole rule."""
+    """Eleven versioned files stay under `WIDE_SCOPE_SHARE_FLOOR`: three named
+    paths covering 4 of 11 is still not wide (Audit ruling 7c, #163)."""
     client = FakeForge()
     monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
     monkeypatch.setattr(discovery, "discover_ledger", lambda _client: LEDGER_ISSUE)
     monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
     monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+    monkeypatch.setattr(checkout, "versioned_paths", lambda: TWELVE_VERSIONED_FILES[:-1])
 
     status = issue_claim.main(
         [
@@ -14620,6 +14643,49 @@ def test_cli_claim_wide_scope_refusal_names_the_share(
             "LICENSE",
             "--scope",
             "README.md",
+            "--scope",
+            "src",
+            "--claim-id",
+            "below-floor",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert status == 0
+    assert captured.out.endswith("4 of 11 versioned files (36%); overlaps no other open claims\n")
+
+
+def test_cli_claim_wide_scope_refusal_names_the_share(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A share-tripped refusal names the covered/versioned counts and the
+    percentage, not the whole rule."""
+    client = FakeForge()
+    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
+    monkeypatch.setattr(discovery, "discover_ledger", lambda _client: LEDGER_ISSUE)
+    monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
+    monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+    monkeypatch.setattr(checkout, "versioned_paths", lambda: TWELVE_VERSIONED_FILES)
+
+    status = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "claim",
+            "72",
+            "--agent",
+            "Ada",
+            "--base",
+            BASE,
+            "--branch",
+            "codex/issue-72",
+            "--scope",
+            "LICENSE",
+            "--scope",
+            "README.md",
+            "--scope",
+            "src",
             "--claim-id",
             "named-share",
         ]
@@ -14627,7 +14693,7 @@ def test_cli_claim_wide_scope_refusal_names_the_share(
 
     assert status == 2
     assert capsys.readouterr().err == (
-        "ERROR: scope is wide: 2 paths of 4 versioned files (50 %) exceeds a quarter; "
+        "ERROR: scope is wide: 4 paths of 12 versioned files (33 %) exceeds a quarter; "
         "pass --whole REASON\n"
     )
 
@@ -14641,6 +14707,7 @@ def test_cli_claim_share_above_a_quarter_succeeds_with_whole(
     monkeypatch.setattr(discovery, "discover_ledger", lambda _client: LEDGER_ISSUE)
     monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
     monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+    monkeypatch.setattr(checkout, "versioned_paths", lambda: TWELVE_VERSIONED_FILES)
 
     status = issue_claim.main(
         [
@@ -14658,8 +14725,10 @@ def test_cli_claim_share_above_a_quarter_succeeds_with_whole(
             "LICENSE",
             "--scope",
             "README.md",
+            "--scope",
+            "src",
             "--whole",
-            "cover two files",
+            "cover four files",
             "--claim-id",
             "wide",
             "--json",
@@ -14668,22 +14737,24 @@ def test_cli_claim_share_above_a_quarter_succeeds_with_whole(
     payload = json.loads(capsys.readouterr().out)
 
     assert status == 0
-    assert payload["versioned_files"] == 2
-    assert payload["versioned_files_total"] == 4
-    assert payload["share"] == 0.5
+    assert payload["versioned_files"] == 4
+    assert payload["versioned_files_total"] == 12
+    assert payload["share"] == pytest.approx(1 / 3)
     assert payload["touches"] == []
-    assert "- Whole: cover two files" in client.comments[LEDGER_ISSUE][0].body
+    assert "- Whole: cover four files" in client.comments[LEDGER_ISSUE][0].body
 
 
 def test_cli_claim_share_at_a_quarter_does_not_need_whole(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    """Exactly a quarter of twelve versioned files does not exceed the limit."""
     client = FakeForge()
     monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
     monkeypatch.setattr(discovery, "discover_ledger", lambda _client: LEDGER_ISSUE)
     monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
     monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+    monkeypatch.setattr(checkout, "versioned_paths", lambda: TWELVE_VERSIONED_FILES)
 
     status = issue_claim.main(
         [
@@ -14698,7 +14769,11 @@ def test_cli_claim_share_at_a_quarter_does_not_need_whole(
             "--branch",
             "codex/issue-72",
             "--scope",
-            "src",
+            "LICENSE",
+            "--scope",
+            "README.md",
+            "--scope",
+            "pyproject.toml",
             "--claim-id",
             "quarter",
         ]
@@ -14706,7 +14781,7 @@ def test_cli_claim_share_at_a_quarter_does_not_need_whole(
 
     assert status == 0
     assert capsys.readouterr().out.endswith(
-        "1 of 4 versioned files (25%); overlaps no other open claims\n"
+        "3 of 12 versioned files (25%); overlaps no other open claims\n"
     )
 
 
@@ -15213,6 +15288,7 @@ def test_cli_rescope_add_that_raises_combined_share_requires_whole(
     git_values = _git_checkout()
     monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
     monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+    monkeypatch.setattr(checkout, "versioned_paths", lambda: TWELVE_VERSIONED_FILES)
     _set_agent_identity_env(monkeypatch, {issue_claim.AGENT_CLAIM_AGENT_ENV: "Codex Sol"})
 
     status = issue_claim.main(
@@ -15302,10 +15378,22 @@ def test_wide_scope_trip_for_paths_directory_or_share_above_the_limits() -> None
     )
     assert (
         protocol.wide_scope_trip(
-            ("a.py", "b.py"), directories=(), covered_file_count=2, versioned_file_count=4
+            ("a.py", "b.py", "c.py"),
+            directories=(),
+            covered_file_count=3,
+            versioned_file_count=protocol.WIDE_SCOPE_SHARE_FLOOR - 1,
+        )
+        is None
+    ), "below the share floor, a share over a quarter still does not trip"
+    assert (
+        protocol.wide_scope_trip(
+            ("a.py", "b.py", "c.py"),
+            directories=(),
+            covered_file_count=4,
+            versioned_file_count=protocol.WIDE_SCOPE_SHARE_FLOOR,
         )
         is not None
-    )
+    ), "at the share floor, a share over a quarter trips"
     assert (
         protocol.wide_scope_trip(
             ("a.py",), directories=(), covered_file_count=0, versioned_file_count=0
@@ -15325,8 +15413,13 @@ def test_wide_scope_trip_names_the_condition_in_the_rule_s_priority_order() -> N
         ("docs",), directories=("docs",), covered_file_count=1, versioned_file_count=20
     ) == protocol.WideScopeTrip(protocol.WideScopeReason.DIRECTORY, 1, ("docs",), 1, 20)
     assert protocol.wide_scope_trip(
-        ("a.py", "b.py"), directories=(), covered_file_count=2, versioned_file_count=4
-    ) == protocol.WideScopeTrip(protocol.WideScopeReason.SHARE, 2, (), 2, 4)
+        ("a.py", "b.py", "c.py"),
+        directories=(),
+        covered_file_count=4,
+        versioned_file_count=protocol.WIDE_SCOPE_SHARE_FLOOR,
+    ) == protocol.WideScopeTrip(
+        protocol.WideScopeReason.SHARE, 3, (), 4, protocol.WIDE_SCOPE_SHARE_FLOOR
+    )
     assert (
         protocol.wide_scope_trip(
             ("a.py",), directories=(), covered_file_count=1, versioned_file_count=4

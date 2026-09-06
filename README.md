@@ -82,12 +82,14 @@ base commit, branch, issue, and repository-relative scope. `--scope a,b` is
 the same as `--scope a --scope b`; each path is stored and compared
 separately, including when an older ledger comment still has one comma-joined
 string. A scope is wide when it declares more than three paths, any directory,
-or more than a quarter of versioned files. Named new paths count; children of
-containers are never exempt. The refusal names the one condition that
-tripped, with its numbers, instead of restating the whole rule: `scope is
-wide: 4 paths exceeds three; pass --whole REASON`, `scope is wide: 1
-directory in scope (docs); pass --whole REASON`, or `scope is wide: 2 paths
-of 4 versioned files (50 %) exceeds a quarter; pass --whole REASON`. Wide
+or, once the repository has at least twelve versioned files, more than a
+quarter of them; a single named path in a smaller repository is never wide on
+share. Named new paths count; children of containers are never exempt. The
+refusal names the one condition that tripped, with its numbers, instead of
+restating the whole rule: `scope is wide: 4 paths exceeds three; pass --whole
+REASON`, `scope is wide: 1 directory in scope (docs); pass --whole REASON`,
+or `scope is wide: 4 paths of 12 versioned files (33 %) exceeds a quarter;
+pass --whole REASON`. Wide
 scopes need `--whole "<one sentence why it does not split>"`; the sentence
 lands in the claim record and `status`/`who` show it. `--allow-directory` is
 removed: pass `--whole` instead. Live claims
