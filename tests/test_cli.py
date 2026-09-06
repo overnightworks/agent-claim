@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import re
 import runpy
 import shlex
 import subprocess
 import sys
-import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
@@ -1211,7 +1211,14 @@ def test_github_adapter_neutralizes_a_claim_comment() -> None:
     ]
 
 
-def test_github_adapter_adds_and_removes_a_label() -> None:
+@pytest.mark.parametrize(
+    ("operation", "flag"),
+    [
+        pytest.param("add_label", "--add-label", id="add-label"),
+        pytest.param("remove_label", "--remove-label", id="remove-label"),
+    ],
+)
+def test_github_adapter_edits_an_issue_label(operation: str, flag: str) -> None:
     observed: list[list[str]] = []
 
     def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
@@ -1219,14 +1226,9 @@ def test_github_adapter_adds_and_removes_a_label() -> None:
         return ""
 
     client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
+    getattr(client, operation)(10, "agent-claim:active")
 
-    client.add_label(10, "agent-claim:active")
-    client.remove_label(10, "agent-claim:active")
-
-    assert observed == [
-        ["issue", "edit", "10", "--repo", REPOSITORY, "--add-label", "agent-claim:active"],
-        ["issue", "edit", "10", "--repo", REPOSITORY, "--remove-label", "agent-claim:active"],
-    ]
+    assert observed == [["issue", "edit", "10", "--repo", REPOSITORY, flag, "agent-claim:active"]]
 
 
 def test_github_adapter_creates_a_child_and_links_it_as_a_sub_issue() -> None:
@@ -1505,11 +1507,11 @@ def test_board_renders_fixture_as_text_without_github_writes(
     }
 
 
-def test_query_days_refuses_a_window_that_ends_before_it_starts() -> None:
-    raised_argument_1 = date(2026, 8, 21)
-    raised_argument_2 = date(2026, 8, 1)
+def test_recent_merged_pull_requests_refuses_a_window_that_ends_before_it_starts() -> None:
+    client = GitHubForge(github._repository_id("example/agent-claim"))
+    raised_argument_1 = datetime.now(UTC) + timedelta(days=1)
     with pytest.raises(ClaimError, match="merged pull request window ends before it starts"):
-        github._query_days(raised_argument_1, raised_argument_2)
+        client.list_recent_merged_board_pull_requests(raised_argument_1)
 
 
 def test_board_projects_fixture_json_without_github_writes(
@@ -3272,14 +3274,22 @@ def test_locate_slice_row_skips_a_fenced_example() -> None:
     assert board.locate_slice_row(fenced, 1) is None
 
 
-def test_parse_ruling_date_refuses_a_body_without_any_expectation_heading() -> None:
-    with pytest.raises(ClaimError, match="ruled expectations have no readable date"):
-        board.parse_ruling_date("no expectation heading here at all\n")
-
-
-def test_parse_ruling_date_refuses_an_invalid_calendar_date_in_the_heading() -> None:
-    with pytest.raises(ClaimError, match=r"invalid date 31\.02\.2026"):
-        board.parse_ruling_date("## Erwartungen 31.02.2026\n")
+@pytest.mark.parametrize(
+    ("body", "match"),
+    [
+        pytest.param(
+            "no expectation heading here at all\n",
+            "ruled expectations have no readable date",
+            id="no-heading",
+        ),
+        pytest.param(
+            "## Erwartungen 31.02.2026\n", r"invalid date 31\.02\.2026", id="invalid-calendar-date"
+        ),
+    ],
+)
+def test_parse_ruling_date_fails_loud_on_a_malformed_body(body: str, match: str) -> None:
+    with pytest.raises(ClaimError, match=match):
+        board.parse_ruling_date(body)
 
 
 @pytest.mark.parametrize(
@@ -3289,47 +3299,10 @@ def test_parse_ruling_date_refuses_an_invalid_calendar_date_in_the_heading() -> 
         pytest.param("2026-08-20T00:00:00", id="missing-offset"),
     ],
 )
-def test_board_timestamp_fails_loud_on_a_malformed_github_timestamp(raw_timestamp: str) -> None:
+def test_claim_age_fails_loud_on_a_malformed_github_timestamp(raw_timestamp: str) -> None:
+    raised_argument_1 = datetime(2026, 8, 21, tzinfo=UTC)
     with pytest.raises(ClaimError, match="GitHub returned a malformed board timestamp"):
-        board._timestamp(raw_timestamp)
-
-
-def test_references_is_empty_for_no_text() -> None:
-    """`_references` is typed to accept `None` (an absent section), distinct
-    from an empty or unreferencing string; both must answer with no
-    references rather than raise."""
-    assert board._references(None) == frozenset()
-
-
-def test_row_item_cell_span_is_none_when_the_matched_line_is_not_cell_shaped() -> None:
-    """`_row_item_cell_span` documents `None` "only when that row's own line
-    is not cell-shaped" -- exercised directly, since its real caller
-    (`locate_slice_row`) only ever supplies a `raw_line` that already parsed
-    as a well-formed `SliceTableRow`, for which this can never actually
-    happen (`_row_cell_spans` mirrors `_table_row_cells` exactly)."""
-    row = board.SliceTableRow(1, "Name", "undispatched", None)
-    entries = [(0, "not a table row at all")]
-
-    assert board._row_item_cell_span(entries, ["not a table row at all"], 0, (row,), 1) is None
-
-
-def test_row_item_cell_span_is_none_when_no_row_entry_matches_the_index() -> None:
-    """The trailing `None` after the search loop is unreachable through
-    `locate_slice_row` (which only calls in after confirming a match exists)
-    but is still this function's own documented fallback."""
-    row = board.SliceTableRow(1, "Name", "undispatched", None)
-    entries = [(0, "| 1 | Name | undispatched | — |")]
-
-    assert board._row_item_cell_span(entries, [entries[0][1]], 0, (row,), 2) is None
-
-
-def test_row_cell_spans_is_none_for_a_blank_line() -> None:
-    """`_row_cell_spans` documents `None` for a line that isn't table-shaped;
-    a blank line is the simplest such case, and `_table_row_cells` (which
-    gates every real caller) already refuses it before `_row_cell_spans`
-    would ever see it -- so this pins the pure function's own contract
-    directly rather than fabricating a caller that could reach it."""
-    assert board._row_cell_spans("   ") is None
+        board.claim_age(raw_timestamp, raised_argument_1)
 
 
 def test_child_skeleton_is_an_incomplete_contract_with_no_defects() -> None:
@@ -5363,7 +5336,10 @@ def test_required_text_refuses_a_non_string_marker_field() -> None:
 
 
 def test_outbound_text_refuses_a_non_string_field() -> None:
-    raised_argument_1 = request(agent=123)  # type: ignore[arg-type]
+    # `replace`'s `**changes` is typed `Any` in the standard library -- the
+    # one boundary this malformed, non-`str` `agent` can enter through
+    # without a field-by-field type lie.
+    raised_argument_1 = replace(request(), agent=123)
     with pytest.raises(ClaimError, match="agent must be text"):
         claim_comment(raised_argument_1)
 
@@ -5733,28 +5709,13 @@ def test_invalid_branch_and_private_or_noncanonical_scope_fail_loud(
         parse_claim_event(raised_argument_1)
 
 
-@pytest.mark.parametrize(
-    ("scope", "match"),
-    [
-        pytest.param(None, "non-empty list", id="not-a-list"),
-        pytest.param([], "non-empty list", id="empty-list"),
-        pytest.param([123], "entries must be text", id="entry-not-text"),
-        pytest.param(
-            ["src"] * (protocol.MAX_SCOPE_ENTRIES + 1),
-            f"exceeds {protocol.MAX_SCOPE_ENTRIES} entries",
-            id="too-many-entries",
-        ),
-        pytest.param(["src", "src"], "duplicate paths", id="duplicate-paths"),
-    ],
-)
-def test_valid_scope_fails_loud_on_malformed_input(scope: object, match: str) -> None:
-    with pytest.raises(InvalidClaimMarkerError, match=match):
-        protocol._valid_scope(scope)
-
-
-def test_validated_comment_refuses_a_nul_byte() -> None:
+def test_claim_comment_refuses_a_nul_byte_in_its_rendered_body() -> None:
+    """A NUL byte can only arrive through a field `claim_comment` does not itself
+    sanitize -- `scope` entries flow straight into the rendered body, so this is
+    the one field that reaches `_validated_comment`'s NUL-byte guard unfiltered."""
+    raised_argument_1 = request(scope=("src/new.py\x00",))
     with pytest.raises(ClaimError, match="contains a NUL byte"):
-        protocol._validated_comment("prefix\x00suffix")
+        claim_comment(raised_argument_1)
 
 
 def test_supersede_comment_requires_an_issue_identified_claim() -> None:
@@ -5834,6 +5795,15 @@ def _valid_claim_payload(**overrides: object) -> dict[str, object]:
             "resource_value must be a positive integer",
             id="invalid-resource-value",
         ),
+        pytest.param({"scope": None}, "non-empty list", id="scope-not-a-list"),
+        pytest.param({"scope": []}, "non-empty list", id="scope-empty-list"),
+        pytest.param({"scope": [123]}, "entries must be text", id="scope-entry-not-text"),
+        pytest.param(
+            {"scope": ["src"] * (protocol.MAX_SCOPE_ENTRIES + 1)},
+            f"exceeds {protocol.MAX_SCOPE_ENTRIES} entries",
+            id="scope-too-many-entries",
+        ),
+        pytest.param({"scope": ["src", "src"]}, "duplicate paths", id="scope-duplicate-paths"),
     ],
 )
 def test_parse_active_claim_fails_loud_on_malformed_fields(
@@ -5890,11 +5860,9 @@ def test_unreadable_claim_has_no_claim_id_when_its_own_is_unparseable() -> None:
         "surprise": True,
     }
 
-    raised_argument_1 = comment(1, marker(payload))
-    with pytest.raises(protocol.UnreadableClaimError) as excinfo:
-        parse_claim_event(raised_argument_1)
+    unreadable = protocol.unreadable_claims((comment(1, marker(payload)),))
 
-    assert excinfo.value.claim.claim_id is None
+    assert unreadable[0].claim_id is None
 
 
 def test_aggregation_fences_an_unknown_field_comment_instead_of_failing_the_ledger() -> None:
@@ -6565,6 +6533,7 @@ def test_rescope_adds_a_path_without_changing_claim_id_or_base() -> None:
     assert [claim.scope for claim in standing] == [("src/widget.py", "src/new.py")]
 
 
+@dataclass
 class _ReadAfterWriteForge(FakeForge):
     """A `FakeForge` whose second `list_protocol_candidates()` call -- the
     post-write check `acquire_claim`/`rescope_claim` both make right after
@@ -6574,16 +6543,14 @@ class _ReadAfterWriteForge(FakeForge):
     hidden, so a still-live rescope target is found but still shows its
     pre-rescope scope."""
 
-    def __init__(self, *args: object, hide_claim: bool = False, **kwargs: object) -> None:
-        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
-        self._list_calls = 0
-        self._hide_claim = hide_claim
+    hide_claim: bool = False
+    _list_calls: int = field(default=0, init=False)
 
     def list_protocol_candidates(self, issue: int) -> tuple[IssueComment, ...]:
         candidates = super().list_protocol_candidates(issue)
         self._list_calls += 1
         if self._list_calls == 2:
-            return () if self._hide_claim else candidates[:-1]
+            return () if self.hide_claim else candidates[:-1]
         return candidates
 
 
@@ -7361,25 +7328,26 @@ def test_label_reconciliation_heals_claim_posted_during_release_remove() -> None
     assert client.labels == {72}
 
 
+@dataclass
 class _FlappingClaimForge(FakeForge):
     """A `FakeForge` whose ledger claim for one issue is a different claim id
     on every read -- simulating an issue whose claim keeps flapping (claim,
     release, claim again) faster than `reconcile_issue_label`'s own bounded
     retries can ever catch a stable snapshot."""
 
-    def __init__(self, *args: object, issue: int, **kwargs: object) -> None:
-        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
-        self._issue = issue
-        self._call = 0
+    flapping_issue: int = 0
+    _call: int = field(default=0, init=False)
 
     def list_protocol_candidates(self, issue: int) -> tuple[IssueComment, ...]:
         self._call += 1
-        body = claim_comment(request(f"claim-{self._call}", issue=self._issue, scope=("src",)))
+        body = claim_comment(
+            request(f"claim-{self._call}", issue=self.flapping_issue, scope=("src",))
+        )
         return (comment(self._call, body),)
 
 
 def test_reconcile_issue_label_fails_loud_when_the_claim_keeps_flapping() -> None:
-    client = _FlappingClaimForge(issue=72)
+    client = _FlappingClaimForge(flapping_issue=72)
 
     with pytest.raises(ClaimError, match="claim label changed repeatedly during reconciliation"):
         reconcile_issue_label(client, 72)
@@ -8778,9 +8746,9 @@ def test_repository_resolution_refuses_when_no_remote_matches(
         github.discover_repository(None, remote_url=lambda: "https://example.com/owner/repo")
 
 
-def test_repository_id_requires_owner_slash_repo_shape() -> None:
+def test_discover_repository_requires_owner_slash_repo_shape_for_an_explicit_repo() -> None:
     with pytest.raises(ClaimError, match="repository must be OWNER/REPO"):
-        github._repository_id("not-a-repository-shape")
+        github.discover_repository("not-a-repository-shape", remote_url=lambda: "")
 
 
 def test_cli_version_exits_before_requiring_a_command(
@@ -9102,87 +9070,85 @@ def test_bounded_command_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
     assert recorded["process"].poll() is not None
 
 
-def test_bounded_command_times_out_against_a_child_that_already_exited(
+class _FakeBoundedProcess:
+    """A deterministic `subprocess.Popen`-shaped double: a real closed pipe for
+    `stdout` (so the selector has a real, immediately-EOF file descriptor to
+    register) plus scripted `poll`/`terminate`/`kill`/`wait`, so
+    `process.run_bounded`'s stop-and-reap behavior is proven without spawning a
+    child or depending on real OS scheduling.
+    """
+
+    def __init__(self, *, already_exited: bool = False, ignores_terminate: bool = False) -> None:
+        read_fd, write_fd = os.pipe()
+        os.close(write_fd)
+        self.stdout = os.fdopen(read_fd, "rb")
+        self.stdin = None
+        self.stderr = None
+        self._ignores_terminate = ignores_terminate
+        self.terminate_called = False
+        self.kill_called = False
+        self._exited = already_exited
+
+    def poll(self) -> int | None:
+        return 0 if self._exited else None
+
+    def terminate(self) -> None:
+        self.terminate_called = True
+        if not self._ignores_terminate:
+            self._exited = True
+
+    def kill(self) -> None:
+        self.kill_called = True
+        self._exited = True
+
+    def wait(self, timeout: float = 0.0) -> int:
+        if not self._exited:
+            raise subprocess.TimeoutExpired(cmd="fake", timeout=timeout)
+        return 0
+
+
+def test_run_bounded_times_out_even_when_the_child_already_exited(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A deadline already passed by the time I/O is awaited must fail loud even
     when the child happened to finish first -- stopping an already-exited
     process is then a safe no-op, never a second signal or a raised error."""
-    recorded: dict[str, subprocess.Popen[bytes]] = {}
-    original_popen = subprocess.Popen
-
-    def start(
-        command: list[str],
-        *,
-        stdin: int | None = None,
-        stdout: int | None = None,
-        stderr: int | None = None,
-        env: dict[str, str] | None = None,
-    ) -> subprocess.Popen[bytes]:
-        spawned = original_popen(command, stdin=stdin, stdout=stdout, stderr=stderr, env=env)
-        recorded["process"] = spawned
-        return spawned
-
-    call_count = {"n": 0}
-    real_monotonic = time.monotonic
+    fake_process = _FakeBoundedProcess(already_exited=True)
+    calls = {"n": 0}
 
     def already_past_deadline() -> float:
-        call_count["n"] += 1
-        if call_count["n"] == 1:
-            return 0.0
-        # Give the quick-exiting child real time to finish before the code
-        # under test checks whether the deadline has passed, even on a
-        # heavily loaded machine.
-        time.sleep(1.0)
-        return real_monotonic() + 10_000
+        calls["n"] += 1
+        return 0.0 if calls["n"] == 1 else 1_000_000.0
 
-    monkeypatch.setattr(subprocess, "Popen", start)
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: fake_process)
     monkeypatch.setattr(process.time, "monotonic", already_past_deadline)
 
-    with pytest.raises(ClaimError, match="timed out"):
-        github._bounded_command([sys.executable, "-c", "pass"], purpose="expired probe")
+    with pytest.raises(process.ProcessTimedOutError):
+        process.run_bounded(["fake"], timeout=5.0)
 
-    assert recorded["process"].poll() is not None
+    assert fake_process.terminate_called is False
+    assert fake_process.kill_called is False
 
 
-def test_bounded_command_kills_a_child_that_ignores_termination(
+def test_run_bounded_kills_a_child_that_ignores_termination(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    recorded: dict[str, subprocess.Popen[bytes]] = {}
-    original_popen = subprocess.Popen
+    """A child that survives `terminate()` (ignoring the request to stop) must
+    be `kill()`ed -- proven with a deterministic process fake controlling
+    `poll`/`terminate`/`kill`/`wait`, not a real child ignoring a real SIGTERM."""
+    fake_process = _FakeBoundedProcess(ignores_terminate=True)
 
-    def start(
-        command: list[str],
-        *,
-        stdin: int | None = None,
-        stdout: int | None = None,
-        stderr: int | None = None,
-        env: dict[str, str] | None = None,
-    ) -> subprocess.Popen[bytes]:
-        spawned = original_popen(command, stdin=stdin, stdout=stdout, stderr=stderr, env=env)
-        recorded["process"] = spawned
-        return spawned
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: fake_process)
+    monkeypatch.setattr(process.time, "monotonic", lambda: 0.0)
 
-    monkeypatch.setattr(subprocess, "Popen", start)
-    # Long enough that the child has certainly installed its SIGTERM handler
-    # before this deadline fires, even on a heavily loaded machine -- a
-    # shorter budget only proves how fast the machine is, not this behavior.
-    monkeypatch.setattr(github, "GH_TIMEOUT_SECONDS", 1.0)
-    with pytest.raises(ClaimError, match="timed out"):
-        github._bounded_command(
-            [
-                sys.executable,
-                "-c",
-                "import signal, time\n"
-                "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-                "time.sleep(30)",
-            ],
-            purpose="stubborn child probe",
-        )
-    assert recorded["process"].poll() is not None
+    with pytest.raises(process.ProcessTimedOutError):
+        process.run_bounded(["fake"], timeout=-1.0)
+
+    assert fake_process.terminate_called is True
+    assert fake_process.kill_called is True
 
 
-def test_bounded_command_treats_a_broken_input_pipe_as_fully_sent(
+def test_run_bounded_treats_a_broken_input_pipe_as_fully_sent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A stdin write that raises `BrokenPipeError` -- the child closed its read
@@ -9194,15 +9160,14 @@ def test_bounded_command_treats_a_broken_input_pipe_as_fully_sent(
 
     monkeypatch.setattr(process.os, "write", broken_write)
 
-    observed = github._bounded_command(
+    observed = process.run_bounded(
         [sys.executable, "-c", "print('done')"],
-        purpose="broken pipe probe",
         input_data=b"unread input",
     )
-    assert observed == "done"
+    assert observed.output == b"done\n"
 
 
-def test_bounded_command_reaps_the_child_when_the_selector_fails_to_close(
+def test_run_bounded_reaps_the_child_when_the_selector_fails_to_close(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A selector that cannot close itself on the way out must not mask the
@@ -9230,10 +9195,8 @@ def test_bounded_command_reaps_the_child_when_the_selector_fails_to_close(
 
     monkeypatch.setattr(process.selectors, "DefaultSelector", CloseFailingSelector)
 
-    observed = github._bounded_command(
-        [sys.executable, "-c", "print('ok')"], purpose="close failure probe"
-    )
-    assert observed == "ok"
+    observed = process.run_bounded([sys.executable, "-c", "print('ok')"])
+    assert observed.output == b"ok\n"
 
 
 def test_bounded_command_stops_a_child_that_hangs_after_closing_output(
@@ -9318,7 +9281,7 @@ def test_bounded_command_rejects_non_utf8_output() -> None:
         pytest.param(
             process.BoundedResult(0, bytes((255,))),
             forge.ForgeMalformedResponseError,
-            "adapter probe returned non-UTF-8 output",
+            "GitHub issue coordination returned non-UTF-8 output",
             id="malformed-non-utf8-output",
         ),
         pytest.param(
@@ -9360,7 +9323,7 @@ def test_bounded_command_rejects_non_utf8_output() -> None:
         pytest.param(
             process.BoundedResult(1, b""),
             forge.ForgeError,
-            "adapter probe failed with exit 1",
+            "GitHub issue coordination failed with exit 1",
             id="unclassified-empty-exit",
         ),
         pytest.param(
@@ -9372,43 +9335,43 @@ def test_bounded_command_rejects_non_utf8_output() -> None:
         pytest.param(
             process.ProcessIoFailedError(process.IoStage.WAITING, "boom"),
             forge.ForgeTransientError,
-            "adapter probe failed while waiting for I/O: boom",
+            "GitHub issue coordination failed while waiting for I/O: boom",
             id="io-stage-waiting",
         ),
         pytest.param(
             process.ProcessIoFailedError(process.IoStage.SENDING, "boom"),
             forge.ForgeTransientError,
-            "adapter probe failed while sending bounded input: boom",
+            "GitHub issue coordination failed while sending bounded input: boom",
             id="io-stage-sending",
         ),
         pytest.param(
             process.ProcessIoFailedError(process.IoStage.READING, "boom"),
             forge.ForgeTransientError,
-            "adapter probe failed while reading output: boom",
+            "GitHub issue coordination failed while reading output: boom",
             id="io-stage-reading",
         ),
         pytest.param(
             process.ProcessIoFailedError(process.IoStage.COORDINATING, "boom"),
             forge.ForgeTransientError,
-            "adapter probe failed while coordinating I/O: boom",
+            "GitHub issue coordination failed while coordinating I/O: boom",
             id="io-stage-coordinating",
         ),
         pytest.param(
             process.ProcessDidNotExitError(),
             forge.ForgeTransientError,
-            "adapter probe did not exit after closing its output",
+            "GitHub issue coordination did not exit after closing its output",
             id="did-not-exit",
         ),
         pytest.param(
             process.ProcessTimedOutError(),
             forge.ForgeTransientError,
-            "adapter probe timed out",
+            "GitHub issue coordination timed out",
             id="process-timed-out",
         ),
         pytest.param(
             process.ProcessOutputTooLargeError(),
             forge.ForgeMalformedResponseError,
-            "adapter probe exceeded its output limit",
+            "GitHub issue coordination exceeded its output limit",
             id="output-too-large",
         ),
     ],
@@ -9419,10 +9382,11 @@ def test_bounded_command_classifies_every_forge_failure_signal(
     expected_type: type[forge.ForgeError],
     expected_message: str,
 ) -> None:
-    """Adapter-boundary proof: every nonzero-exit signal (#4.2) and every
-    process failure that reaches no forge response (#4.1) becomes the exact
-    typed `ForgeError` subclass with the exact message -- not just some
-    `ClaimError`."""
+    """Adapter-boundary proof, driven through `GitHubForge.default_branch`
+    (the real caller of `_gh` -> `_bounded_command`) with `process.run_bounded`
+    faked: every nonzero-exit signal (#4.2) and every process failure that
+    reaches no forge response (#4.1) becomes the exact typed `ForgeError`
+    subclass with the exact message -- not just some `ClaimError`."""
 
     def fake_run_bounded(*args, **kwargs):
         if isinstance(outcome, process.ProcessError):
@@ -9430,26 +9394,36 @@ def test_bounded_command_classifies_every_forge_failure_signal(
         return outcome
 
     monkeypatch.setattr(process, "run_bounded", fake_run_bounded)
+    client = GitHubForge(github._repository_id("example/agent-claim"))
 
     with pytest.raises(expected_type) as excinfo:
-        github._bounded_command(["gh", "probe"], purpose="adapter probe")
+        client.default_branch()
 
     assert type(excinfo.value) is expected_type
     assert str(excinfo.value) == expected_message
 
 
-def test_forge_failure_refuses_a_process_error_type_it_does_not_classify() -> None:
-    """The isinstance chain above names every concrete `process.ProcessError`
-    subclass; a hypothetical new one added there without updating this
-    dispatch must fail loud as a defect, not silently fall through as some
-    generic `ForgeError`."""
+def test_bounded_command_refuses_a_process_error_type_it_does_not_classify(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The isinstance chain the GitHub adapter's failure classifier walks names
+    every concrete `process.ProcessError` subclass; a hypothetical new one added
+    there without updating this dispatch must fail loud as a defect, not
+    silently fall through as some generic `ForgeError` -- proven through
+    `GitHubForge.default_branch`, the real caller, with `process.run_bounded`
+    faked to raise the unclassified type."""
 
     class _UnknownProcessError(process.ProcessError):
         pass
 
-    raised_argument_1 = _UnknownProcessError()
+    def fake_run_bounded(*args, **kwargs):
+        raise _UnknownProcessError
+
+    monkeypatch.setattr(process, "run_bounded", fake_run_bounded)
+    client = GitHubForge(github._repository_id("example/agent-claim"))
+
     with pytest.raises(AssertionError, match="unhandled process failure type"):
-        github._forge_failure(raised_argument_1, "adapter probe")
+        client.default_branch()
 
 
 def test_scope_directories_detects_a_git_tree(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -10482,21 +10456,47 @@ def test_versioned_paths_reads_nul_terminated_ls_files_without_stripping(
     assert observed == [["git", "ls-files", "-z", "--full-name"]]
 
 
-def test_versioned_paths_fails_loud_like_git_output(monkeypatch: pytest.MonkeyPatch) -> None:
-    def missing(*_arguments, **_kwargs):
-        raise FileNotFoundError("git")
+@pytest.mark.parametrize(
+    "git_call",
+    [
+        pytest.param(_LIVE_VERSIONED_PATHS, id="versioned-paths"),
+        pytest.param(checkout.origin_remote_url, id="origin-remote-url"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("raised", "match"),
+    [
+        pytest.param(
+            FileNotFoundError("git"), "git is required for issue claims", id="missing-executable"
+        ),
+        pytest.param(
+            subprocess.TimeoutExpired(["git"], process.DEFAULT_TIMEOUT_SECONDS),
+            "git timed out while validating the build checkout",
+            id="timed-out",
+        ),
+    ],
+)
+def test_checkout_git_calls_fail_loud_when_git_is_missing_or_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+    git_call: Callable[[], object],
+    raised: Exception,
+    match: str,
+) -> None:
+    """`versioned_paths` and `origin_remote_url` -- both direct `subprocess.run`
+    callers (`_git_output` backs the latter) -- must translate a missing
+    executable or a timeout to the same `ClaimError` text."""
 
-    monkeypatch.setattr(subprocess, "run", missing)
-    with pytest.raises(ClaimError, match="git is required for issue claims"):
-        _LIVE_VERSIONED_PATHS()
+    def fails(*_arguments, **_kwargs):
+        raise raised
 
-    def timed_out(*_arguments, **_kwargs):
-        raise subprocess.TimeoutExpired(["git"], process.DEFAULT_TIMEOUT_SECONDS)
+    monkeypatch.setattr(subprocess, "run", fails)
+    with pytest.raises(ClaimError, match=match):
+        git_call()
 
-    monkeypatch.setattr(subprocess, "run", timed_out)
-    with pytest.raises(ClaimError, match="git timed out while validating the build checkout"):
-        _LIVE_VERSIONED_PATHS()
 
+def test_versioned_paths_fails_loud_on_a_nonzero_git_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     def failed(arguments, **_kwargs):
         return subprocess.CompletedProcess(
             arguments, 128, stdout=b"", stderr=b"fatal: not a git repository\n"
@@ -10505,28 +10505,6 @@ def test_versioned_paths_fails_loud_like_git_output(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(subprocess, "run", failed)
     with pytest.raises(ClaimError, match="fatal: not a git repository"):
         _LIVE_VERSIONED_PATHS()
-
-
-def test_git_output_fails_loud_when_git_is_missing_or_times_out(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """`_git_output` backs every other checkout git call (`origin_remote_url`
-    here); it must translate a missing executable or a timeout the same way
-    `versioned_paths`'s own copy does."""
-
-    def missing(*_arguments, **_kwargs):
-        raise FileNotFoundError("git")
-
-    monkeypatch.setattr(subprocess, "run", missing)
-    with pytest.raises(ClaimError, match="git is required for issue claims"):
-        checkout.origin_remote_url()
-
-    def timed_out(*_arguments, **_kwargs):
-        raise subprocess.TimeoutExpired(["git"], process.DEFAULT_TIMEOUT_SECONDS)
-
-    monkeypatch.setattr(subprocess, "run", timed_out)
-    with pytest.raises(ClaimError, match="git timed out while validating the build checkout"):
-        checkout.origin_remote_url()
 
 
 @pytest.fixture(autouse=True)

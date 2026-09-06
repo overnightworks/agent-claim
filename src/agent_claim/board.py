@@ -734,7 +734,7 @@ def _table_row_cells(line: str) -> tuple[str, ...] | None:
     return cells or None
 
 
-def _row_cell_spans(line: str) -> tuple[tuple[int, int], ...] | None:
+def _row_cell_spans(line: str) -> tuple[tuple[int, int], ...]:
     """Each pipe-delimited cell's character span in `line`, unstripped.
 
     `_table_row_cells` returns the same cells stripped of surrounding
@@ -743,11 +743,14 @@ def _row_cell_spans(line: str) -> tuple[tuple[int, int], ...] | None:
     byte of the row untouched. Mirrors `_table_row_cells`'s optional
     leading/trailing `|` handling exactly, so the same row yields the same
     cells either way.
+
+    Callable only on a line `_table_row_cells` has already accepted as
+    "|"-containing and non-blank (`_row_item_cell_span`'s sole call site
+    passes only a raw line a `SliceTableRow` was already built from) -- that
+    guarantee is this function's whole contract, not re-checked here.
     """
     start = len(line) - len(line.lstrip())
     end = len(line.rstrip())
-    if start >= end:
-        return None
     if line[start] == "|":
         start += 1
     # Never `start > end` here: the leading strip above needs only one
@@ -916,23 +919,16 @@ def _row_item_cell_span(
     entries: list[tuple[int, str]],
     raw_lines: list[str],
     row_start: int,
-    row_entries: tuple[SliceTableEntry, ...],
-    row_index: int,
-) -> tuple[int, int] | None:
-    """`row_index`'s item-cell span among `row_entries`, given the caller
-    already confirmed it is present there -- `None` only when that row's own
-    line is not cell-shaped."""
-    for offset, entry in enumerate(row_entries):
-        if not (isinstance(entry, SliceTableRow) and entry.index == row_index):
-            continue
-        original_index, raw_line = entries[row_start + offset]
-        spans = _row_cell_spans(raw_line)
-        if spans is None or len(spans) != len(SLICE_TABLE_HEADER_CELLS):
-            return None
-        preceding = sum(len(raw) + 1 for raw in raw_lines[:original_index])
-        start, end = spans[2]
-        return preceding + start, preceding + end
-    return None
+    offset: int,
+) -> tuple[int, int]:
+    """The item-cell span of the row at `row_entries[offset]` -- `offset` is
+    the caller's own already-confirmed match, mapped back into `body`'s real
+    character offsets."""
+    original_index, raw_line = entries[row_start + offset]
+    spans = _row_cell_spans(raw_line)
+    preceding = sum(len(raw) + 1 for raw in raw_lines[:original_index])
+    start, end = spans[2]
+    return preceding + start, preceding + end
 
 
 def locate_slice_row(body: str, row_index: int) -> tuple[int, int] | None:
@@ -962,11 +958,16 @@ def locate_slice_row(body: str, row_index: int) -> tuple[int, int] | None:
             continue
         row_start = line_index + 2
         row_entries, line_index = _slice_table_rows(lines, row_start)
-        row_present = any(
-            isinstance(entry, SliceTableRow) and entry.index == row_index for entry in row_entries
+        offset = next(
+            (
+                offset
+                for offset, entry in enumerate(row_entries)
+                if isinstance(entry, SliceTableRow) and entry.index == row_index
+            ),
+            None,
         )
-        if row_present:
-            return _row_item_cell_span(entries, raw_lines, row_start, row_entries, row_index)
+        if offset is not None:
+            return _row_item_cell_span(entries, raw_lines, row_start, offset)
     return None
 
 
@@ -1120,9 +1121,7 @@ def ruling_freshness(
     return count, count >= RULING_OLD_AFTER_LANDINGS
 
 
-def _references(text: str | None) -> frozenset[int]:
-    if text is None:
-        return frozenset()
+def _references(text: str) -> frozenset[int]:
     return frozenset(int(number) for number in REFERENCE_PATTERN.findall(text))
 
 
