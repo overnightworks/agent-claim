@@ -386,6 +386,19 @@ def _add_supersede_parser(commands: argparse._SubParsersAction) -> None:
     supersede.add_argument("--claim-id", required=True)
 
 
+def _add_cut_parser(commands: argparse._SubParsersAction) -> None:
+    cut = commands.add_parser("cut", help="create a container's next slice as a fresh child issue")
+    cut.add_argument("issue", type=int, help="the container to cut")
+    cut.add_argument("--title", required=True, help="the fresh child issue's title")
+    cut.add_argument(
+        "--row",
+        type=int,
+        metavar="N",
+        help="the slice table's # column value to cut; default is the first cuttable row",
+    )
+    cut.add_argument("--json", action="store_true")
+
+
 def _add_pull_request_check_parser(commands: argparse._SubParsersAction) -> None:
     pull_request_check = commands.add_parser(
         "pr-check",
@@ -415,6 +428,7 @@ _SUBPARSER_BUILDERS: tuple[Callable[[argparse._SubParsersAction], None], ...] = 
     _add_who_parser,
     _add_reconcile_parser,
     _add_supersede_parser,
+    _add_cut_parser,
     _add_pull_request_check_parser,
     _add_policy_parser,
     _add_protect_parser,
@@ -1738,6 +1752,84 @@ def _cmd_supersede(parsed: argparse.Namespace, session: _WriteSession) -> None:
     )
 
 
+def _cut_target(client: forge.ForgeWriter, number: int) -> board.Issue:
+    """The open container `cut` targets, or why it refuses before any write."""
+    open_issues = client.list_open_board_issues()
+    target = next((issue for issue in open_issues if issue.number == number), None)
+    if target is None:
+        raise protocol.ClaimUnavailableError(f"#{number} is not an open container")
+    if target.kind is not board.ItemKind.CONTAINER:
+        raise protocol.ClaimUnavailableError(f"#{number} is not a container")
+    parent = client.parent_issue(number)
+    if parent is not None:
+        raise protocol.ClaimUnavailableError(
+            f"#{number} is itself a child of {parent.reference}; "
+            "nested containers are not supported"
+        )
+    return target
+
+
+def _cut_row(target: board.Issue, row_number: int | None) -> board.SliceTableRow:
+    """The slice-table row `cut` dispatches -- `--row N`, or the first cuttable row."""
+    findings = board.slice_table_findings(target.body)
+    if row_number is not None:
+        row = next(
+            (candidate for candidate in findings.cuttable if candidate.index == row_number), None
+        )
+    else:
+        row = findings.cuttable[0] if findings.cuttable else None
+    if row is None:
+        raise protocol.ClaimUnavailableError(
+            f"#{target.number} has no cuttable slice row; "
+            f"{len(findings.malformed)} malformed rows need a hand fix"
+        )
+    return row
+
+
+def _link_created_child(
+    client: forge.ForgeWriter, container: int, new_body: str, child: int, row_index: int
+) -> None:
+    """Link the just-created `child` into `container`'s slice table.
+
+    Not atomic with `create_child` -- GitHub has no transaction across the
+    two writes. A failure here still leaves the created child behind, so the
+    refusal names it and instructs a hand link rather than a re-run, which
+    would create a second child.
+    """
+    try:
+        client.update_item_body(container, new_body)
+    except protocol.ClaimError as error:
+        raise protocol.ClaimUnavailableError(
+            f"created #{child} but failed to link it into #{container}'s slice table row "
+            f"{row_index}: {error}; do not re-run -- link #{child} into that row by hand"
+        ) from error
+
+
+def _cmd_cut(parsed: argparse.Namespace, session: _WriteSession) -> int:
+    client = session.forge
+    number = int(parsed.issue)
+    for operation in (forge.ForgeOperation.CREATE_CHILD, forge.ForgeOperation.UPDATE_ITEM_BODY):
+        if client.capability(operation) is not forge.Capability.READ_WRITE:
+            raise protocol.ClaimUnavailableError(
+                f"this forge cannot {operation.value}; cut the slice by hand"
+            )
+    target = _cut_target(client, number)
+    row = _cut_row(target, parsed.row)
+    span = board.locate_slice_row(target.body, row.index)
+    if span is None:
+        raise protocol.ClaimUnavailableError(f"#{number}'s row {row.index} could not be located")
+    child = client.create_child(
+        parent=number, title=parsed.title, body=board.CHILD_SKELETON, kind=board.ItemKind.TASK
+    )
+    new_body = board.link_slice_row(target.body, span, child)
+    _link_created_child(client, number, new_body, child, row.index)
+    if parsed.json:
+        print(json.dumps({"container": number, "row": row.index, "child": child}))
+        return 0
+    print(f"CUT #{number} row {row.index} -> #{child}")
+    return 0
+
+
 def _cmd_reconcile(parsed: argparse.Namespace, session: _WriteSession) -> None:
     client = session.forge
     try:
@@ -1778,6 +1870,7 @@ _WRITE_HANDLERS: dict[str, Callable[[argparse.Namespace, _WriteSession], int | N
     "release": _cmd_release,
     "supersede": _cmd_supersede,
     "reconcile": _cmd_reconcile,
+    "cut": _cmd_cut,
 }
 
 

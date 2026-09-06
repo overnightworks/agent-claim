@@ -76,6 +76,12 @@ _ISSUE_TYPE_KINDS: dict[str, board.ItemKind] = {
     "task": board.ItemKind.TASK,
     "feature": board.ItemKind.FEATURE,
 }
+# The write-side names GitHub's issue-type API expects (`cut`'s
+# `create_child`) -- derived from the one read-side mapping above so the
+# type name has a single owner, capitalized the way GitHub itself names them.
+_ITEM_KIND_TYPE_NAMES: dict[board.ItemKind, str] = {
+    kind: name.capitalize() for name, kind in _ISSUE_TYPE_KINDS.items()
+}
 _LEDGER_ITEM_STATES: dict[str, forge.ItemState] = {
     "open": forge.ItemState.OPEN,
     "closed": forge.ItemState.CLOSED,
@@ -262,6 +268,8 @@ _READ_WRITE_OPERATIONS = (
     forge.ForgeOperation.CREATE_ITEM,
     forge.ForgeOperation.LOCK_ITEM,
     forge.ForgeOperation.CLOSE_ITEM,
+    forge.ForgeOperation.CREATE_CHILD,
+    forge.ForgeOperation.UPDATE_ITEM_BODY,
 )
 # The GitHub adapter never refuses an operation: every member answers
 # READ_ONLY or READ_WRITE, never UNSUPPORTED (decision record 0001 §2).
@@ -1131,3 +1139,60 @@ class GitHubForge:
 
     def close_item(self, number: int) -> None:
         self._run(["issue", "close", str(number), "--repo", self.repository.path])
+
+    def create_child(self, *, parent: int, title: str, body: str, kind: board.ItemKind) -> int:
+        """Create a fresh issue of `kind` and record it as `parent`'s sub-issue.
+
+        Not atomic: GitHub has no transaction across the create and the
+        sub-issue POST, nor within the create itself. `cli._cmd_cut` names
+        the created child and refuses a hand-link instruction on failure
+        after this point, rather than risking a second child on retry.
+        """
+        raw = self._run(
+            ["api", "--method", "POST", f"repos/{self.repository}/issues", "--input", "-"],
+            input_data=json.dumps(
+                {"title": title, "body": body, "type": _ITEM_KIND_TYPE_NAMES[kind]}
+            ).encode("utf-8"),
+        )
+        try:
+            created = json.loads(raw)
+        except json.JSONDecodeError as error:
+            raise forge.ForgeMalformedResponseError(
+                "GitHub returned invalid created-child JSON"
+            ) from error
+        identifier = created.get("id") if isinstance(created, dict) else None
+        number = created.get("number") if isinstance(created, dict) else None
+        if (
+            isinstance(identifier, bool)
+            or not isinstance(identifier, int)
+            or identifier < 1
+            or isinstance(number, bool)
+            or not isinstance(number, int)
+            or number < 1
+        ):
+            raise forge.ForgeMalformedResponseError("GitHub did not return a created child issue")
+        self._run(
+            [
+                "api",
+                "--method",
+                "POST",
+                f"repos/{self.repository}/issues/{parent}/sub_issues",
+                "--input",
+                "-",
+            ],
+            input_data=json.dumps({"sub_issue_id": identifier}).encode("utf-8"),
+        )
+        return number
+
+    def update_item_body(self, number: int, body: str) -> None:
+        self._run(
+            [
+                "api",
+                "--method",
+                "PATCH",
+                f"repos/{self.repository}/issues/{number}",
+                "--input",
+                "-",
+            ],
+            input_data=json.dumps({"body": body}).encode("utf-8"),
+        )

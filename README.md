@@ -289,6 +289,29 @@ marker — examples belong in a fence. A blockquoted `> Eingefroren bis: …`
 still freezes; this repo already quotes operator rulings, so a quoted freeze
 line reads as the freeze itself.
 
+## Cutting a container's next slice
+
+`agent-claim cut <container> --title "…"` dispatches a container's next slice
+as a fresh child issue in one step: it creates the issue (native type `Task`),
+records it as the container's sub-issue, and rewrites the container's slice
+table so the cut row now links `#<child>` instead of the undispatched `—`
+marker. The fresh child's body is `board.CHILD_SKELETON` — every contract
+section present, `Now`/`Next`/`Done when` empty and `Blocked by: nichts` — so
+it is `body incomplete` (invisible to `next`, refused by `claim`) until the
+head fills it in.
+
+Every refusal precedes every write. `cut` refuses when the forge cannot
+create a child issue or update an item body (`capability()` answers anything
+but `read_write` for either); when the target is not an open container, or is
+itself a child of another issue (nested containers are not supported); and
+when no cuttable slice-table row exists — `--row N` selects a specific row (a
+`board`-reported `uncut` finding's own `#` column value), or the first
+cuttable row by default; a row already linked to any issue, or one whose item
+cell is malformed, is never a target. The two writes are not atomic — GitHub
+has no transaction across them — so a failure after the child issue exists
+names the created child and instructs a hand link, explicitly warning against
+a re-run, which would create a second child.
+
 ## Issueless lane claims
 
 `docs/`- and `fix/`-prefixed branches land within one session without a GitHub

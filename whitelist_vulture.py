@@ -10,17 +10,14 @@ is never imported by the package itself.
 capability-refusal surface (decision record 0001 §2, §4 criterion D3): the
 GitHub adapter never refuses an operation, so both stay uncalled/unconstructed
 until the first adapter that can refuse one (the GitLab adapter, per #112)
-lands. `RepositoryId.host` and `ForgeReader.capability`/`GitHubForge.capability`
-are likewise part of the port's declared shape with no production reader yet
--- `capability()` is exercised only by tests (the exhaustiveness test and
-`ReaderOnlyForge`), and `host` only matters once a second forge host exists.
+lands. `RepositoryId.host` is likewise part of the port's declared shape with
+no production reader yet -- it only matters once a second forge host exists.
 None of this is speculative: it is the port surface issue #131 declares today,
 each with a named future caller.
 """
 
 from agent_claim.board import NoItemKind
-from agent_claim.forge import Capability, ForgeReader, ForgeUnsupportedError, RepositoryId
-from agent_claim.github import GitHubForge
+from agent_claim.forge import Capability, ForgeUnsupportedError, RepositoryId
 
 _referenced_only_for_vulture = (
     NoItemKind.DOCS,
@@ -28,6 +25,4 @@ _referenced_only_for_vulture = (
     ForgeUnsupportedError,
     Capability.UNSUPPORTED,
     RepositoryId("host", (), "name").host,
-    ForgeReader.capability,
-    GitHubForge.capability,
 )

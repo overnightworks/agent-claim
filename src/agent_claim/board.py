@@ -130,6 +130,14 @@ _SLICE_TABLE_SEPARATOR_CELL_PATTERN = re.compile(r"^:?-+:?$")
 _SLICE_TABLE_INDEX_PATTERN = re.compile(r"^[1-9]\d*$", re.ASCII)
 _SLICE_TABLE_ITEM_LINK_PATTERN = re.compile(r"^#([1-9]\d*)$", re.ASCII)
 UNDISPATCHED_SLICE_CELL = "—"
+# `cut`'s fresh child: every contract section present, `Now`/`Next`/`Done
+# when` empty. `parse_contract` maps an empty section to `None`, so this
+# skeleton is `contract_complete=False` -- invisible to `next`, refused by
+# `claim` -- until the head fills it in. `Blocked by` is prefilled `nichts`
+# (NO_BLOCKERS): a fresh child names no blocker yet, and an empty `Blocked
+# by` value is itself a contract defect (`_validate_blocked_by`), which
+# would read as a malformed body rather than an unfinished one.
+CHILD_SKELETON = f"## Now\n\n## Next\n\n## Blocked by\n{NO_BLOCKERS}\n\n## Done when\n"
 # The three slice-title forms seen in atelier-2 (`#79`): a parenthetical
 # after the real title (`(#962 Scheibe 4)`, `(#962 slice 4)`) or a leading
 # German phrase (`Scheibe 4 von #962`).
@@ -659,8 +667,12 @@ def _closing_fence_delimiter(line: str) -> tuple[str, int] | None:
     return run[0], len(run)
 
 
-def _live_text(body: str) -> str:
-    """The body's non-fenced lines, joined back in order — what GitHub renders as prose.
+def _live_line_entries(body: str) -> list[tuple[int, str]]:
+    """Every non-fenced line of `body`, paired with its original `splitlines()` index.
+
+    The one fence-walk both `_live_text` (which only needs the joined prose)
+    and `locate_slice_row` (which needs the original index to map a table
+    cell back to `body`'s real character offsets) read.
 
     Walks the body once carrying CommonMark fence state: a line opens a fence
     (an info string after the run is allowed, e.g. ` ```python `), and only a
@@ -679,22 +691,27 @@ def _live_text(body: str) -> str:
     form). A marker written there is read as live — visible on `board`/`next`
     and correctable by fencing it properly, never a silent divergence.
     """
-    live_lines: list[str] = []
+    entries: list[tuple[int, str]] = []
     fence_char: str | None = None
     fence_length = 0
-    for line in body.splitlines():
+    for index, line in enumerate(body.splitlines()):
         if fence_char is None:
             opening = _opening_fence_delimiter(line)
             if opening is not None:
                 fence_char, fence_length = opening
                 continue
-            live_lines.append(line)
+            entries.append((index, line))
             continue
         closing = _closing_fence_delimiter(line)
         if closing is not None and closing[0] == fence_char and closing[1] >= fence_length:
             fence_char, fence_length = None, 0
         # Still inside the fence (or just closed it): never scanned for a marker.
-    return "\n".join(live_lines)
+    return entries
+
+
+def _live_text(body: str) -> str:
+    """The body's non-fenced lines, joined back in order — what GitHub renders as prose."""
+    return "\n".join(line for _, line in _live_line_entries(body))
 
 
 def _table_row_cells(line: str) -> tuple[str, ...] | None:
@@ -711,6 +728,34 @@ def _table_row_cells(line: str) -> tuple[str, ...] | None:
     stripped = stripped.removesuffix("|")
     cells = tuple(cell.strip() for cell in stripped.split("|"))
     return cells or None
+
+
+def _row_cell_spans(line: str) -> tuple[tuple[int, int], ...] | None:
+    """Each pipe-delimited cell's character span in `line`, unstripped.
+
+    `_table_row_cells` returns the same cells stripped of surrounding
+    whitespace; this positions them back in `line` instead, so a caller can
+    replace exactly one cell's text (padding included) and leave every other
+    byte of the row untouched. Mirrors `_table_row_cells`'s optional
+    leading/trailing `|` handling exactly, so the same row yields the same
+    cells either way.
+    """
+    start = len(line) - len(line.lstrip())
+    end = len(line.rstrip())
+    if start >= end:
+        return None
+    if line[start] == "|":
+        start += 1
+    if end > start and line[end - 1] == "|":
+        end -= 1
+    if start > end:
+        return None
+    spans: list[tuple[int, int]] = []
+    cursor = start
+    for part in line[start:end].split("|"):
+        spans.append((cursor, cursor + len(part)))
+        cursor += len(part) + 1
+    return tuple(spans)
 
 
 def _is_slice_table_separator(line: str) -> bool:
@@ -859,6 +904,52 @@ def _uncut_slices(issue_number: int, findings: SliceTableFindings) -> UncutSlice
     named = tuple(row.name for row in (*findings.cuttable, *findings.unlinkable))
     rows = named + findings.malformed
     return UncutSlices(issue_number, rows) if rows else None
+
+
+def locate_slice_row(body: str, row_index: int) -> tuple[int, int] | None:
+    """The character span of slice-table row `row_index`'s item cell in
+    `body`, padding included -- so `link_slice_row` can replace exactly that
+    cell and leave every other byte untouched. `None` when no such row
+    exists (already cut, the index does not name a row, or the row's own
+    line is not cell-shaped).
+
+    Walks the same header/row scan `parse_slice_table` does, over
+    `_live_line_entries` instead of `_live_text` alone, so a fenced example
+    is skipped exactly as it always is, while each live line still carries
+    the original index needed to map back into `body`'s real offsets.
+    """
+    entries = _live_line_entries(body)
+    lines = [line for _, line in entries]
+    raw_lines = body.splitlines()
+    line_index = 0
+    while line_index < len(lines):
+        header = _slice_table_header_at(lines, line_index)
+        if header is None:
+            line_index += 1
+            continue
+        well_formed_header, has_separator = header
+        if not well_formed_header or not has_separator:
+            line_index += 1
+            continue
+        row_start = line_index + 2
+        row_entries, line_index = _slice_table_rows(lines, row_start)
+        for offset, entry in enumerate(row_entries):
+            if isinstance(entry, SliceTableRow) and entry.index == row_index:
+                original_index, raw_line = entries[row_start + offset]
+                spans = _row_cell_spans(raw_line)
+                if spans is None or len(spans) != len(SLICE_TABLE_HEADER_CELLS):
+                    return None
+                preceding = sum(len(raw) + 1 for raw in raw_lines[:original_index])
+                start, end = spans[2]
+                return preceding + start, preceding + end
+    return None
+
+
+def link_slice_row(body: str, span: tuple[int, int], child: int) -> str:
+    """Rewrite the slice-table cell at `span` to link `child` -- pure,
+    changing only that cell and nothing else in `body`."""
+    start, end = span
+    return f"{body[:start]} #{child} {body[end:]}"
 
 
 def _issue_reference(match: re.Match[str], repository: str) -> IssueReference:

@@ -419,9 +419,14 @@ class FakeForge:
     item_labels: dict[int, frozenset[str]] = field(default_factory=dict)
     list_items_calls: list[tuple[forge.ItemState | None, str | None]] = field(default_factory=list)
     list_items_error: Exception | None = None
+    created_children: list[tuple[int, str, str, board.ItemKind]] = field(default_factory=list)
+    next_created_child_number: int = 900
+    item_bodies: dict[int, str] = field(default_factory=dict)
+    fail_update_item_body: bool = False
+    capability_overrides: dict[forge.ForgeOperation, forge.Capability] = field(default_factory=dict)
 
     def capability(self, operation: forge.ForgeOperation) -> forge.Capability:
-        return github.GITHUB_CAPABILITIES[operation]
+        return self.capability_overrides.get(operation, github.GITHUB_CAPABILITIES[operation])
 
     def list_items(
         self, *, state: forge.ItemState | None = None, label: str | None = None
@@ -463,6 +468,17 @@ class FakeForge:
             replace(item, state=forge.ItemState.CLOSED) if item.number == number else item
             for item in self.ledger_items
         ]
+
+    def create_child(self, *, parent: int, title: str, body: str, kind: board.ItemKind) -> int:
+        number = self.next_created_child_number
+        self.next_created_child_number += 1
+        self.created_children.append((parent, title, body, kind))
+        return number
+
+    def update_item_body(self, number: int, body: str) -> None:
+        if self.fail_update_item_body:
+            raise ClaimError("update item body failed (simulated)")
+        self.item_bodies[number] = body
 
     def list_protocol_candidates(self, issue: int) -> tuple[IssueComment, ...]:
         return tuple(
@@ -689,6 +705,12 @@ class ReaderOnlyForge(FakeForge):
     def close_item(self, number: int) -> None:
         pytest.fail("a read-only command must never close an item")
 
+    def create_child(self, *, parent: int, title: str, body: str, kind: board.ItemKind) -> int:
+        pytest.fail("a read-only command must never create a child")
+
+    def update_item_body(self, number: int, body: str) -> None:
+        pytest.fail("a read-only command must never update an item body")
+
 
 def test_forge_operation_exhaustiveness_matches_the_declared_reader_and_writer_methods() -> None:
     """Every `ForgeOperation` member names a `ForgeReader`/`ForgeWriter` method and
@@ -700,7 +722,7 @@ def test_forge_operation_exhaustiveness_matches_the_declared_reader_and_writer_m
         if not name.startswith("_") and name not in {"repository", "capability"}
     }
     assert {operation.value for operation in forge.ForgeOperation} == declared_methods
-    assert len(forge.ForgeOperation) == 23
+    assert len(forge.ForgeOperation) == 25
     assert set(github.GITHUB_CAPABILITIES) == set(forge.ForgeOperation)
     assert forge.Capability.UNSUPPORTED not in github.GITHUB_CAPABILITIES.values()
 
@@ -970,6 +992,71 @@ def test_github_adapter_closes_an_item() -> None:
     client.close_item(11)
 
     assert observed == [["issue", "close", "11", "--repo", REPOSITORY]]
+
+
+def test_github_adapter_creates_a_child_and_links_it_as_a_sub_issue() -> None:
+    observed: list[tuple[list[str], bytes | None]] = []
+
+    def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
+        observed.append((arguments, input_data))
+        if arguments[2] == "POST" and arguments[3].endswith("/issues"):
+            return json.dumps({"id": 555444, "number": 101})
+        return ""
+
+    client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
+
+    child = client.create_child(
+        parent=79, title="Scheibe 4", body=board.CHILD_SKELETON, kind=board.ItemKind.TASK
+    )
+
+    assert child == 101
+    assert observed == [
+        (
+            ["api", "--method", "POST", f"repos/{REPOSITORY}/issues", "--input", "-"],
+            json.dumps({"title": "Scheibe 4", "body": board.CHILD_SKELETON, "type": "Task"}).encode(
+                "utf-8"
+            ),
+        ),
+        (
+            ["api", "--method", "POST", f"repos/{REPOSITORY}/issues/79/sub_issues", "--input", "-"],
+            json.dumps({"sub_issue_id": 555444}).encode("utf-8"),
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param("not json", id="invalid-json"),
+        pytest.param(json.dumps({"id": 1}), id="missing-number"),
+        pytest.param(json.dumps({"number": 1}), id="missing-id"),
+        pytest.param(json.dumps({"id": True, "number": 1}), id="id-is-a-bool"),
+    ],
+)
+def test_github_adapter_fails_loud_on_a_malformed_created_child(payload: str) -> None:
+    client = GitHubForge(github._repository_id(REPOSITORY), run=lambda *_a, **_k: payload)
+
+    with pytest.raises(ClaimError, match=r"created.child"):
+        client.create_child(parent=79, title="Scheibe 4", body="", kind=board.ItemKind.TASK)
+
+
+def test_github_adapter_updates_an_item_body() -> None:
+    observed: list[tuple[list[str], bytes | None]] = []
+
+    def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
+        observed.append((arguments, input_data))
+        return ""
+
+    client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
+
+    client.update_item_body(79, "new body")
+
+    assert observed == [
+        (
+            ["api", "--method", "PATCH", f"repos/{REPOSITORY}/issues/79", "--input", "-"],
+            json.dumps({"body": "new body"}).encode("utf-8"),
+        )
+    ]
 
 
 def test_read_only_commands_never_write_through_a_reader_only_forge(
@@ -2337,6 +2424,170 @@ def test_claim_refuses_a_container(
     assert "ERROR: #72 is a container; claim a child" in captured.err
 
 
+CUT_CONTAINER = 79
+
+
+def _cut_container_issue(body: str, **overrides: object) -> board.Issue:
+    fields: dict[str, object] = {
+        "number": CUT_CONTAINER,
+        "title": "Epic",
+        "labels": (),
+        "body": body,
+        "created_at": "2026-08-20T00:00:00Z",
+        "updated_at": "2026-08-20T00:00:00Z",
+        "kind": board.ItemKind.CONTAINER,
+        "children_closed": 0,
+        "children_total": 0,
+    }
+    fields.update(overrides)
+    return board.Issue(**fields)  # type: ignore[arg-type]
+
+
+def test_cut_creates_a_child_and_links_the_first_cuttable_row(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    body = slice_table(("1", "Scheibe 1", "—", "—"))
+    container = _cut_container_issue(body)
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
+    )
+
+    assert exit_code == 0
+    assert client.created_children == [
+        (CUT_CONTAINER, "Scheibe 1", board.CHILD_SKELETON, board.ItemKind.TASK)
+    ]
+    child = client.next_created_child_number - 1
+    assert client.item_bodies == {CUT_CONTAINER: slice_table(("1", "Scheibe 1", f"#{child}", "—"))}
+    assert capsys.readouterr().out == f"CUT #{CUT_CONTAINER} row 1 -> #{child}\n"
+
+
+def test_cut_selects_a_row_by_number(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    body = slice_table(("1", "Scheibe 1", "—", "—"), ("2", "Scheibe 2", "—", "—"))
+    container = _cut_container_issue(body)
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
+
+    exit_code = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "cut",
+            str(CUT_CONTAINER),
+            "--title",
+            "Scheibe 2",
+            "--row",
+            "2",
+            "--json",
+        ]
+    )
+
+    assert exit_code == 0
+    child = client.next_created_child_number - 1
+    assert json.loads(capsys.readouterr().out) == {
+        "container": CUT_CONTAINER,
+        "row": 2,
+        "child": child,
+    }
+    assert client.item_bodies[CUT_CONTAINER] == slice_table(
+        ("1", "Scheibe 1", "—", "—"), ("2", "Scheibe 2", f"#{child}", "—")
+    )
+
+
+def test_cut_refuses_a_non_container(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    plain = board_issue(CUT_CONTAINER, "Not a container", complete_contract("Ship it."))
+    _configured_board_client(monkeypatch, tmp_path, open_issues=(plain,))
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
+    )
+
+    assert exit_code == 2
+    assert f"ERROR: #{CUT_CONTAINER} is not a container" in capsys.readouterr().err
+
+
+def test_cut_refuses_a_container_that_already_has_a_parent(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    body = slice_table(("1", "Scheibe 1", "—", "—"))
+    container = _cut_container_issue(body)
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
+    client.parents[CUT_CONTAINER] = board.ParentIssue(
+        board.IssueReference(REPOSITORY, 1), "", board.ItemKind.CONTAINER
+    )
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
+    )
+
+    assert exit_code == 2
+    assert (
+        f"ERROR: #{CUT_CONTAINER} is itself a child of {REPOSITORY}#1; "
+        "nested containers are not supported" in capsys.readouterr().err
+    )
+
+
+def test_cut_refuses_when_no_cuttable_row_exists(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    body = "| # | Scheibe | Item | Hängt ab von |\n|---|---|---|---|\n| x | Broken | — | — |\n"
+    container = _cut_container_issue(body)
+    _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
+    )
+
+    assert exit_code == 2
+    assert (
+        f"ERROR: #{CUT_CONTAINER} has no cuttable slice row; 1 malformed rows need a hand fix"
+        in capsys.readouterr().err
+    )
+
+
+def test_cut_refuses_when_the_forge_cannot_create_children(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    body = slice_table(("1", "Scheibe 1", "—", "—"))
+    container = _cut_container_issue(body)
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
+    client.capability_overrides[forge.ForgeOperation.CREATE_CHILD] = forge.Capability.READ_ONLY
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
+    )
+
+    assert exit_code == 2
+    assert client.created_children == []
+    assert "ERROR: this forge cannot create_child; cut the slice by hand" in capsys.readouterr().err
+
+
+def test_cut_names_the_created_child_when_linking_fails(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    body = slice_table(("1", "Scheibe 1", "—", "—"))
+    container = _cut_container_issue(body)
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
+    client.fail_update_item_body = True
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
+    )
+
+    assert exit_code == 2
+    child = client.next_created_child_number - 1
+    assert client.created_children == [
+        (CUT_CONTAINER, "Scheibe 1", board.CHILD_SKELETON, board.ItemKind.TASK)
+    ]
+    err = capsys.readouterr().err
+    assert f"created #{child} but failed to link it" in err
+    assert "do not re-run" in err
+
+
 def test_claim_json_refusal_carries_refused_issue_and_checks(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -2518,6 +2769,47 @@ def test_uncut_slices_is_none_when_every_row_is_linked() -> None:
 )
 def test_has_further_work(next_line: str | None, expected: bool) -> None:
     assert board.has_further_work(next_line) is expected
+
+
+def test_locate_and_link_slice_row_replaces_only_the_target_cell() -> None:
+    body = slice_table(
+        ("1", "First slice", "—", "—"),
+        ("2", "Second slice", "—", "—"),
+    )
+
+    span = board.locate_slice_row(body, 2)
+
+    assert span is not None
+    linked = board.link_slice_row(body, span, 101)
+    assert linked == slice_table(
+        ("1", "First slice", "—", "—"),
+        ("2", "Second slice", "#101", "—"),
+    )
+    # Only the targeted row's item cell changed.
+    assert linked.splitlines()[2] == "| 1 | First slice | — | — |"
+
+
+def test_locate_slice_row_returns_none_for_an_absent_row_index() -> None:
+    body = slice_table(("1", "Only slice", "—", "—"))
+
+    assert board.locate_slice_row(body, 2) is None
+
+
+def test_locate_slice_row_skips_a_fenced_example() -> None:
+    fenced = "```markdown\n" + slice_table(("1", "Example slice", "—", "—")) + "```\n"
+
+    assert board.locate_slice_row(fenced, 1) is None
+
+
+def test_child_skeleton_is_an_incomplete_contract_with_no_defects() -> None:
+    contract = board.parse_contract(board.CHILD_SKELETON)
+
+    assert contract.complete is False
+    assert contract.defects == ()
+    assert contract.now is None
+    assert contract.next is None
+    assert contract.blocked_by == board.NO_BLOCKERS
+    assert contract.done_when is None
 
 
 @pytest.mark.parametrize(

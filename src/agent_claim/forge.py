@@ -152,6 +152,8 @@ class ForgeOperation(StrEnum):
     CREATE_ITEM = "create_item"
     LOCK_ITEM = "lock_item"
     CLOSE_ITEM = "close_item"
+    CREATE_CHILD = "create_child"
+    UPDATE_ITEM_BODY = "update_item_body"
 
 
 class BoardSource(Protocol):
@@ -224,3 +226,7 @@ class ForgeWriter(ForgeReader, protocol.ClaimWriter, Protocol):
     def lock_item(self, number: int) -> None: ...
 
     def close_item(self, number: int) -> None: ...
+
+    def create_child(self, *, parent: int, title: str, body: str, kind: board.ItemKind) -> int: ...
+
+    def update_item_body(self, number: int, body: str) -> None: ...
