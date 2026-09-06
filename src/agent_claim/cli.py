@@ -766,9 +766,25 @@ def _merged_pull_request_floor(issues: tuple[board.Issue, ...], now: datetime) -
 # A container's children are their own `gh list_children` subprocess call;
 # an unbounded pool would spawn one worker per container on a large board.
 # This caps that fan-out -- a stable invariant of this executor, not
-# something an operator tunes -- while excess containers simply queue behind
-# it, same as the fixed base workers below.
+# something an operator tunes. `_fetch_children` gives it a dedicated
+# executor sized to exactly this constant, so the cap holds regardless of
+# whether the three base board reads below have already finished.
 BOARD_CHILD_FETCH_CONCURRENCY = 4
+
+
+def _fetch_children(
+    client: forge.BoardSource, container_numbers: tuple[int, ...]
+) -> dict[int, tuple[board.ChildItem, ...]]:
+    """Every container's children, at most `BOARD_CHILD_FETCH_CONCURRENCY`
+    `gh` subprocesses at a time; excess containers queue behind it."""
+    if not container_numbers:
+        return {}
+    workers = min(len(container_numbers), BOARD_CHILD_FETCH_CONCURRENCY)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            number: pool.submit(client.list_children, number) for number in container_numbers
+        }
+        return {number: future.result() for number, future in futures.items()}
 
 
 def _board(
@@ -789,17 +805,16 @@ def _board(
     # Open and recently-merged pull requests, the blocker lookup, and each
     # container's children are independent reads once `since` is known, so
     # fetching them on separate threads instead of one after another overlaps
-    # their `gh` subprocess wait time.
-    child_fetch_workers = min(len(container_numbers), BOARD_CHILD_FETCH_CONCURRENCY)
-    with ThreadPoolExecutor(max_workers=3 + child_fetch_workers) as pool:
+    # their `gh` subprocess wait time. Children get their own executor
+    # (`_fetch_children`) so their concurrency stays capped at
+    # `BOARD_CHILD_FETCH_CONCURRENCY` even once these three base reads finish
+    # and free their own pool's workers.
+    with ThreadPoolExecutor(max_workers=3) as pool:
         open_pull_requests = pool.submit(client.list_open_board_pull_requests)
         merged_pull_requests = pool.submit(client.list_recent_merged_board_pull_requests, since)
         blocker_references = pool.submit(client.list_board_blockers, blockers)
-        children_by_container = {
-            number: pool.submit(client.list_children, number) for number in container_numbers
-        }
+        children = _fetch_children(client, container_numbers)
         pull_requests = (open_pull_requests.result(), merged_pull_requests.result())
-        children = {number: future.result() for number, future in children_by_container.items()}
     return board.build_board(
         board.BoardBuildInputs(
             issues=issues,
@@ -1089,11 +1104,14 @@ def _body_contract_checks(
                     issue=blocker,
                 )
             )
-    # `board`'s own `_actionable_reason` already owns "complete or a configured
-    # projectionless idea"; `claim` reuses that one verdict instead of
-    # re-deriving it, so a freshly `cut` child (an incomplete but defect-free
-    # skeleton) is refused here exactly as it is invisible to `next`.
-    if item.actionable_reason == "body incomplete":
+    # Read the two atomic facts directly rather than `item.actionable_reason`:
+    # that reason is the *first* one `_actionable_reason` finds (frozen,
+    # claimed, blocked, then incomplete), so an item that is both blocked and
+    # incomplete would report only "blocked" there -- masking the incomplete
+    # body this check exists to name. A freshly `cut` child (an incomplete
+    # but defect-free skeleton) is refused here exactly as it is invisible to
+    # `next`, regardless of what else may also be true of it.
+    if not item.contract_complete and not item.projectionless_idea:
         checks.append(SliceCheck("error", "body-incomplete", "body incomplete", issue=item.number))
     return tuple(checks)
 

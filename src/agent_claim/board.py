@@ -396,6 +396,7 @@ class BoardItem:
     contract: Contract
     next_step: str | None
     contract_complete: bool
+    projectionless_idea: bool
     expectation_state: ExpectationState
     expectation_progress: ExpectationProgress
     ruling_landings: int | None
@@ -1548,6 +1549,7 @@ def _board_item(
         contract=contract,
         next_step=next_step,
         contract_complete=contract.complete,
+        projectionless_idea=projectionless_idea,
         expectation_state=expectation_state(issue.body),
         expectation_progress=expectation_progress(issue.body),
         ruling_landings=ruling_landings,

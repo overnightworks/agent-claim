@@ -2484,6 +2484,41 @@ def test_claim_refuses_a_freshly_cut_childs_incomplete_skeleton(
     assert "ERROR: body incomplete" in captured.err
 
 
+def test_claim_names_an_incomplete_body_even_when_the_item_is_also_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """`item.actionable_reason` names only the first applicable reason
+    (frozen, claimed, blocked, then incomplete) -- that must not mask the
+    incomplete-body refusal when another reason also applies (#112 finding
+    2, delta review)."""
+    blocker = board_issue(50, "Blocker", complete_contract("Ship it."))
+    dependent = board_issue(51, "Dependent", "## Now\nWork.\n\n## Blocked by\n#50")
+    _configured_board_client(monkeypatch, tmp_path, open_issues=(blocker, dependent))
+    monkeypatch.setattr(
+        issue_claim, "_request", lambda _arguments: request(issue=51, scope=("src/work.py",))
+    )
+
+    exit_code = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "claim",
+            "51",
+            "--agent",
+            "Codex Sol",
+            "--scope",
+            "src/work.py",
+            "--json",
+        ]
+    )
+
+    assert exit_code == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert "body-incomplete" in {check["check"] for check in payload["checks"]}
+
+
 CUT_CONTAINER = 79
 
 
