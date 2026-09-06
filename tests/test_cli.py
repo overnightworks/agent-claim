@@ -18227,6 +18227,37 @@ def test_pr_check_reads_the_same_work_item_from_shorthand_and_qualified_lines(
     )
 
 
+def test_pr_check_refuses_a_named_sentence_outside_a_checkout(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #178: `tests/conftest.py`'s autouse `_isolate_git_toplevel`
+    fixture fakes `rev-parse --show-toplevel` to succeed for every test, so
+    no test could otherwise observe a missing working tree -- this is its
+    counterpart, overriding the fake back to the failure atelier-2's
+    checkout-less CI job hit, to prove the command refuses with the named
+    sentence instead of raising git's own message."""
+    pr_check_client(
+        monkeypatch,
+        landing_pull_request(
+            body=f"Work-Item: {REPOSITORY}#{WORK_ITEM_ISSUE}\n\nCloses #{WORK_ITEM_ISSUE}"
+        ),
+    )
+
+    def outside_a_checkout(arguments: list[str]) -> str:
+        assert arguments == ["rev-parse", "--show-toplevel"]
+        raise ClaimError("fatal: not a git repository (or any of the parent directories): .git")
+
+    monkeypatch.setattr(checkout, "_git_output", outside_a_checkout)
+
+    assert run_pr_check() == 2
+    assert capsys.readouterr().err == (
+        "ERROR: this command reads the repository's body contract from "
+        ".agent-claim/board.toml and needs a checkout (a shallow one is "
+        "enough): fatal: not a git repository (or any of the parent "
+        "directories): .git\n"
+    )
+
+
 def test_pr_check_accepts_an_issueless_documentation_pull_request(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

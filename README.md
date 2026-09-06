@@ -152,7 +152,9 @@ checkout's repository (or `--repo OWNER/REPOSITORY`) and answers one question:
 which item does this landing close? It prints `PR #<n> by <author> declares
 <classification>` and exits 0, or prints one `REFUSED: pull request #<n> ...`
 line and exits 1. Run it as a required check on every pull request that targets
-the default branch.
+the default branch. It needs a working tree of the repository (a shallow
+checkout is enough) to read the repository's `body_contract` pin from
+`.agent-claim/board.toml`, and refuses outright without one.
 
 A pull request body carries exactly one classification line:
 
