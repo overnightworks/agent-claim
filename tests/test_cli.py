@@ -3691,6 +3691,25 @@ def test_cut_block_refuses_a_legacy_container_before_any_write(
     assert client.created_children == []
 
 
+def test_cut_block_refuses_a_malformed_container_before_any_write(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    container = _block_cut_container_issue('version = 2\nnow = "N"\nnext = "X"\ndone_when = "D"\n')
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
+    _write_block_pin(tmp_path)
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "X"]
+    )
+
+    assert exit_code == 2
+    assert (
+        f"ERROR: #{CUT_CONTAINER} body malformed: version: version must be exactly 1; "
+        "cut needs a valid agent-claim block" in capsys.readouterr().err
+    )
+    assert client.created_children == []
+
+
 def test_cut_block_names_the_created_child_when_linking_fails(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
@@ -6265,6 +6284,11 @@ def test_parse_body_orders_schema_defects_deterministically() -> None:
             id="both-default-and-ruling",
         ),
         pytest.param('text = "E"\n', "expectation[0].default", id="neither"),
+        pytest.param(
+            'text = "E"\nruling = "yes"\nruled_on = "not-a-date"\n',
+            "expectation[0].ruled_on",
+            id="bad-ruled-on",
+        ),
     ],
 )
 def test_parse_body_validates_the_expectation_variant_union(
@@ -6290,6 +6314,84 @@ def test_parse_body_ruling_date_is_the_oldest_across_non_monotonic_expectations(
     assert parsed.read_state is board.BodyReadState.VALID
     assert parsed.expectation_state is board.ExpectationState.RULED
     assert parsed.ruling_date == date(2026, 8, 1)
+
+
+def test_parse_body_refuses_a_frozen_until_that_is_not_a_table() -> None:
+    toml_text = f'{MINIMAL_BLOCK_TOML}frozen_until = "not a table"\n'
+
+    parsed = board.parse_body(agent_claim_body(toml_text), board.BodyContractMode.BLOCK)
+
+    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert parsed.contract.defects[0].field == "frozen_until.trigger"
+
+
+def test_parse_body_refuses_a_non_table_expectation_entry() -> None:
+    toml_text = f'{MINIMAL_BLOCK_TOML}expectation = ["oops"]\n'
+
+    parsed = board.parse_body(agent_claim_body(toml_text), board.BodyContractMode.BLOCK)
+
+    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert parsed.contract.defects[0].field == "expectation[0]"
+
+
+def test_parse_body_refuses_a_non_table_slice_entry() -> None:
+    toml_text = f'{MINIMAL_BLOCK_TOML}slice = ["oops"]\n'
+
+    parsed = board.parse_body(agent_claim_body(toml_text), board.BodyContractMode.BLOCK)
+
+    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert parsed.contract.defects[0].field == "slice[0]"
+
+
+def test_parse_body_refuses_a_duplicate_slice_index() -> None:
+    toml_text = (
+        f'{MINIMAL_BLOCK_TOML}[[slice]]\nindex = 1\ntitle = "First"\n'
+        '[[slice]]\nindex = 1\ntitle = "Second"\n'
+    )
+
+    parsed = board.parse_body(agent_claim_body(toml_text), board.BodyContractMode.BLOCK)
+
+    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert parsed.contract.defects[0].field == "slice[1].index"
+
+
+@pytest.mark.parametrize(
+    ("key", "malformed_toml"),
+    [
+        pytest.param("expectation", 'expectation = "oops"\n', id="expectation-not-a-list"),
+        pytest.param("slice", 'slice = "oops"\n', id="slice-not-a-list"),
+    ],
+)
+def test_parse_body_refuses_a_top_level_array_key_that_is_not_a_list(
+    key: str, malformed_toml: str
+) -> None:
+    parsed = board.parse_body(
+        agent_claim_body(f"{MINIMAL_BLOCK_TOML}{malformed_toml}"), board.BodyContractMode.BLOCK
+    )
+
+    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert parsed.contract.defects[0].field == key
+
+
+def test_parse_body_handles_a_body_with_no_trailing_newline() -> None:
+    """`_line_ending` (used while walking every line for a fenced block)
+    must also return `""` for the last line of a body that ends without a
+    newline at all -- an ordinary GitHub body shape, not just a CRLF/LF one."""
+    body = agent_claim_body(MINIMAL_BLOCK_TOML).rstrip("\n") + "\nProse with no trailing newline"
+
+    parsed = board.parse_body(body, board.BodyContractMode.BLOCK)
+
+    assert parsed.read_state is board.BodyReadState.VALID
+
+
+def test_locate_agent_claim_block_fails_loud_with_no_recognized_fence() -> None:
+    with pytest.raises(ClaimError, match="found no recognized agent-claim fence"):
+        board.locate_agent_claim_block("## Now\nOld prose.\n")
+
+
+def test_locate_agent_claim_block_fails_loud_with_an_unclosed_fence() -> None:
+    with pytest.raises(ClaimError, match="found no closed agent-claim fence"):
+        board.locate_agent_claim_block("```agent-claim\nversion = 1\n")
 
 
 def test_parse_body_reads_an_explicit_empty_slice_array_as_a_present_table() -> None:
@@ -9931,6 +10033,27 @@ def test_github_reads_board_dependencies_local_and_foreign(
 )
 def test_github_board_dependency_fails_loud_on_a_malformed_shape(raw: str) -> None:
     client = GitHubForge(github._repository_id("example/agent-claim"), run=lambda _arguments: raw)
+
+    with pytest.raises(ClaimError, match="malformed board blocked-by dependency"):
+        client.list_board_dependencies(150)
+
+
+def test_github_board_dependency_fails_loud_on_an_uncalendared_closed_timestamp() -> None:
+    """`closedAt` can pass the timestamp-shape check (digits in the right
+    places) while still naming no real calendar date; `datetime.fromisoformat`
+    itself is the second, calendar-aware check that catches that."""
+    client = GitHubForge(
+        github._repository_id("example/agent-claim"),
+        run=lambda _arguments: json.dumps(
+            {
+                "number": 151,
+                "state": "closed",
+                "closedAt": "9999-99-99T00:00:00Z",
+                "repository": "example/agent-claim",
+                "isPullRequest": False,
+            }
+        ),
+    )
 
     with pytest.raises(ClaimError, match="malformed board blocked-by dependency"):
         client.list_board_dependencies(150)
@@ -18515,6 +18638,28 @@ def test_pr_check_refuses_a_legacy_parent_before_the_next_check(
     assert run_pr_check() == 1
     assert capsys.readouterr().err == (
         f"REFUSED: pull request #12 has parent {REPOSITORY}#{PARENT_ISSUE} with a legacy body\n"
+    )
+
+
+def test_pr_check_refuses_a_malformed_parent_before_the_next_check(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    monkeypatch.setattr(checkout, "_git_output", lambda _arguments: str(tmp_path))
+    _write_block_pin(tmp_path)
+    malformed_parent_body = agent_claim_body(
+        'version = 2\nnow = "N"\nnext = "X"\ndone_when = "D"\n'
+    )
+    parented_pr_check_client(
+        monkeypatch,
+        body="Work-Item: #72\n\nCloses #72",
+        parent_body=malformed_parent_body,
+        open_children=(board.IssueReference(REPOSITORY, WORK_ITEM_ISSUE),),
+    )
+
+    assert run_pr_check() == 1
+    assert capsys.readouterr().err == (
+        f"REFUSED: pull request #12 has parent {REPOSITORY}#{PARENT_ISSUE} with a malformed "
+        "body: version: version must be exactly 1\n"
     )
 
 
