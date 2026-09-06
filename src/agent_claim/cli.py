@@ -1023,6 +1023,7 @@ def _next_action_payload(action: board.NextAction) -> dict[str, object]:
             "number": action.container.number,
             "title": action.container.title,
             "slice": action.next_step,
+            "cut_title": action.cut_title,
         }
     return {
         "action": "close_container",
@@ -1075,7 +1076,7 @@ def _next_action_lines(action: board.NextAction) -> list[str]:
     if isinstance(action, board.CutSliceAction):
         return [
             f"cut_slice #{action.container.number}: {action.next_step}",
-            f'Next: agent-claim cut {action.container.number} --title "{action.next_step}"',
+            f'Next: agent-claim cut {action.container.number} --title "{action.cut_title}"',
         ]
     progress = action.container_progress
     return [

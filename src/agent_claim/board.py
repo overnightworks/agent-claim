@@ -2490,12 +2490,18 @@ class WorkItemAction:
 
 @dataclass(frozen=True)
 class CutSliceAction:
-    """`container` has no open child and still names work: cut `next_step`
-    (its own `Next` line) and dispatch the fresh slice."""
+    """`container` has no open child and still names work: `next_step` is
+    the container's own words (its `Next` line, or the first uncut slice
+    title when it has none) for the human-readable action line; `cut_title`
+    is the exact string `cut` itself accepts for the printed `cut` command --
+    the first uncut `[[slice]]` row's title when one exists (that is the
+    entry `cut` without `--row` links), else `next_step`. The two agree only
+    when no uncut row exists."""
 
     container: BoardItem
     container_progress: ContainerProgress
     next_step: str
+    cut_title: str
 
 
 @dataclass(frozen=True)
@@ -2559,11 +2565,15 @@ def _container_next_action(
     if item.read_state is not BodyReadState.VALID:
         return None
     next_line = item.contract.next
-    if next_line is not None and has_further_work(next_line):
-        return CutSliceAction(item, container, next_line)
     uncut = uncut_by_container.get(item.number)
     if uncut is not None and uncut.rows:
-        return CutSliceAction(item, container, uncut.rows[0].title)
+        cut_title = uncut.rows[0].title
+        next_step = (
+            next_line if next_line is not None and has_further_work(next_line) else cut_title
+        )
+        return CutSliceAction(item, container, next_step, cut_title)
+    if next_line is not None and has_further_work(next_line):
+        return CutSliceAction(item, container, next_line, next_line)
     if uncut is not None and uncut.malformed:
         return None
     return CloseContainerAction(item, container)
