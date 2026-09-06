@@ -2554,6 +2554,41 @@ def test_claim_names_an_incomplete_body_even_when_the_item_is_also_blocked(
     assert "body-incomplete" in {check["check"] for check in payload["checks"]}
 
 
+def test_claim_reports_incomplete_body_when_blocked_by_itself_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """A contract missing its own "Blocked by" section has no blocker to
+    check at all -- `Contract.blocker_issues` reads that absence as "none
+    named", not a crash -- so only the incompleteness itself is reported."""
+    issue = board_issue(
+        51, "Dependent", "## Now\nWork.\n\n## Next\nDo it.\n\n## Done when\nMerged."
+    )
+    _configured_board_client(monkeypatch, tmp_path, open_issues=(issue,))
+    monkeypatch.setattr(
+        issue_claim, "_request", lambda _arguments: request(issue=51, scope=("src/work.py",))
+    )
+
+    exit_code = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "claim",
+            "51",
+            "--agent",
+            "Codex Sol",
+            "--scope",
+            "src/work.py",
+            "--json",
+        ]
+    )
+
+    assert exit_code == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert "body-incomplete" in {check["check"] for check in payload["checks"]}
+
+
 CUT_CONTAINER = 79
 
 
@@ -3010,10 +3045,86 @@ def test_locate_slice_row_returns_none_for_an_absent_row_index() -> None:
     assert board.locate_slice_row(body, 2) is None
 
 
+def test_locate_slice_row_skips_ordinary_prose_and_a_near_miss_header() -> None:
+    """Scanning for the real table must step past an ordinary line (no header
+    match at all) and a near-miss header (looks like an attempt but is
+    missing columns) without mistaking either for the genuine table."""
+    body = (
+        "Some ordinary prose line before the table.\n\n"
+        "| # | Scheibe |\n"
+        "|---|---|\n\n" + slice_table(("1", "Real slice", "—", "—"))
+    )
+
+    span = board.locate_slice_row(body, 1)
+
+    assert span is not None
+    assert body[span[0] : span[1]] == " — "
+
+
 def test_locate_slice_row_skips_a_fenced_example() -> None:
     fenced = "```markdown\n" + slice_table(("1", "Example slice", "—", "—")) + "```\n"
 
     assert board.locate_slice_row(fenced, 1) is None
+
+
+def test_parse_ruling_date_refuses_a_body_without_any_expectation_heading() -> None:
+    with pytest.raises(ClaimError, match="ruled expectations have no readable date"):
+        board.parse_ruling_date("no expectation heading here at all\n")
+
+
+def test_parse_ruling_date_refuses_an_invalid_calendar_date_in_the_heading() -> None:
+    with pytest.raises(ClaimError, match=r"invalid date 31\.02\.2026"):
+        board.parse_ruling_date("## Erwartungen 31.02.2026\n")
+
+
+@pytest.mark.parametrize(
+    "raw_timestamp",
+    [
+        pytest.param("not-a-timestamp", id="unparsable"),
+        pytest.param("2026-08-20T00:00:00", id="missing-offset"),
+    ],
+)
+def test_board_timestamp_fails_loud_on_a_malformed_github_timestamp(raw_timestamp: str) -> None:
+    with pytest.raises(ClaimError, match="GitHub returned a malformed board timestamp"):
+        board._timestamp(raw_timestamp)
+
+
+def test_references_is_empty_for_no_text() -> None:
+    """`_references` is typed to accept `None` (an absent section), distinct
+    from an empty or unreferencing string; both must answer with no
+    references rather than raise."""
+    assert board._references(None) == frozenset()
+
+
+def test_row_item_cell_span_is_none_when_the_matched_line_is_not_cell_shaped() -> None:
+    """`_row_item_cell_span` documents `None` "only when that row's own line
+    is not cell-shaped" -- exercised directly, since its real caller
+    (`locate_slice_row`) only ever supplies a `raw_line` that already parsed
+    as a well-formed `SliceTableRow`, for which this can never actually
+    happen (`_row_cell_spans` mirrors `_table_row_cells` exactly)."""
+    row = board.SliceTableRow(1, "Name", "undispatched", None)
+    entries = [(0, "not a table row at all")]
+
+    assert board._row_item_cell_span(entries, ["not a table row at all"], 0, (row,), 1) is None
+
+
+def test_row_item_cell_span_is_none_when_no_row_entry_matches_the_index() -> None:
+    """The trailing `None` after the search loop is unreachable through
+    `locate_slice_row` (which only calls in after confirming a match exists)
+    but is still this function's own documented fallback."""
+    row = board.SliceTableRow(1, "Name", "undispatched", None)
+    entries = [(0, "| 1 | Name | undispatched | — |")]
+
+    assert board._row_item_cell_span(entries, [entries[0][1]], 0, (row,), 2) is None
+
+
+def test_row_cell_spans_is_none_for_a_blank_line() -> None:
+    """`_row_cell_spans` documents `None` for a line that isn't table-shaped;
+    a blank line is the simplest such case, and `_table_row_cells` (which
+    gates every real caller) already refuses it before `_row_cell_spans`
+    would ever see it -- so this pins the pure function's own contract
+    directly rather than fabricating a caller that could reach it."""
+    assert board._row_cell_spans("   ") is None
 
 
 def test_child_skeleton_is_an_incomplete_contract_with_no_defects() -> None:
@@ -3816,6 +3927,28 @@ def test_board_reports_when_the_last_stale_blocker_closed() -> None:
     assert item["freed_days"] == 2
 
 
+def test_build_board_refuses_when_github_omits_a_referenced_blocker() -> None:
+    """A contract names a blocker, but the blocker snapshot GitHub actually
+    returned does not include it at all -- never silently treat that as
+    "no blocker", since that would let a slice through its own blocked-by
+    gate."""
+    dependent = board_issue(51, "Dependent", complete_contract("Ship it.", blocked_by="#9"))
+
+    with pytest.raises(ClaimError, match="GitHub did not return blocker #9"):
+        projected_board((dependent,), (), (), (), board.BoardConfig(), blocker_references=())
+
+
+def test_build_board_refuses_a_closed_blocker_missing_closed_at() -> None:
+    """A blocker GitHub reports closed but without a `closed_at` cannot be
+    dated for the freed-on note; that is a malformed response, not a
+    freshly-closed blocker with no timestamp yet."""
+    dependent = board_issue(51, "Dependent", complete_contract("Ship it.", blocked_by="#9"))
+    blockers = (board.BlockerReference(9, board.BlockerState.CLOSED, False),)
+
+    with pytest.raises(ClaimError, match="GitHub did not return closed_at for blocker #9"):
+        projected_board((dependent,), (), (), (), board.BoardConfig(), blocker_references=blockers)
+
+
 def test_board_text_and_json_show_freed_on_and_freed_days() -> None:
     freed = board_issue(20, "Freed", complete_contract("Ship it.", blocked_by="#10"))
     blocked = board_issue(21, "Blocked", complete_contract("Ship it.", blocked_by="#11"))
@@ -4098,6 +4231,56 @@ def test_board_shows_container_progress_and_refuses_it_as_actionable() -> None:
     assert child_json["kind"] is None
     assert child_json["container_parent"] == 120
     assert child_json["priority_order"] == 0
+
+
+def test_board_shows_a_container_child_blocked_by_another_open_issue() -> None:
+    """An open container child can itself be blocked; the container's own
+    open-children note must show that, not just the bare child number."""
+    container = board.Issue(
+        120,
+        "Container",
+        (),
+        "",
+        "2026-08-20T00:00:00Z",
+        "2026-08-20T00:00:00Z",
+        kind=board.ItemKind.CONTAINER,
+        children_closed=0,
+        children_total=1,
+    )
+    blocker = board_issue(130, "Blocker", complete_contract("Ship it."))
+    open_child = board_issue(121, "Open child", complete_contract("Ship it.", blocked_by="#130"))
+
+    projected = projected_board(
+        (container, blocker, open_child),
+        (),
+        (),
+        (),
+        board.BoardConfig(),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+        children={120: (board.ChildItem(121, board.ChildState.OPEN),)},
+    )
+
+    assert "#120 0/1 closed; open: #121 (blocked by #130)" in board.render(projected)
+
+
+def test_board_kind_cell_shows_a_plain_kind_for_a_non_container_item() -> None:
+    """`_kind_cell` names a real kind (task/bug/feature) plainly, without the
+    container's "closed/total" progress suffix that only a container gets."""
+    task = board.Issue(
+        90,
+        "Fix the thing",
+        (),
+        "",
+        "2026-08-20T00:00:00Z",
+        "2026-08-20T00:00:00Z",
+        kind=board.ItemKind.TASK,
+    )
+
+    projected = projected_board((task,), (), (), (), board.BoardConfig())
+
+    header, row = board.render(projected).splitlines()[:2]
+    kind_start = header.index("KIND")
+    assert row[kind_start:].startswith("task")
 
 
 def test_board_json_carries_a_nonzero_priority_order_for_a_critical_label() -> None:
@@ -4700,6 +4883,14 @@ def test_board_configuration_requires_unique_ordered_labels(tmp_path: Path) -> N
 
     config_path.write_text("priority_labels = []\n")
     with pytest.raises(ClaimError, match="priority_labels"):
+        board.load_config(config_path)
+
+
+def test_board_configuration_fails_loud_on_unparsable_toml(tmp_path: Path) -> None:
+    config_path = tmp_path / "board.toml"
+    config_path.write_text("this is not valid toml =\n")
+
+    with pytest.raises(ClaimError, match=f"cannot read board configuration {config_path}"):
         board.load_config(config_path)
 
 

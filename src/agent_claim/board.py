@@ -750,10 +750,12 @@ def _row_cell_spans(line: str) -> tuple[tuple[int, int], ...] | None:
         return None
     if line[start] == "|":
         start += 1
+    # Never `start > end` here: the leading strip above needs only one
+    # character of room, and the trailing strip only fires when `end > start`
+    # already holds -- the two can cross only on a single-character `stripped`
+    # (a lone "|"), where the trailing strip's own guard already refuses.
     if end > start and line[end - 1] == "|":
         end -= 1
-    if start > end:
-        return None
     spans: list[tuple[int, int]] = []
     cursor = start
     for part in line[start:end].split("|"):
