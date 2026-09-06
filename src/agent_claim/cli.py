@@ -1116,9 +1116,29 @@ def _parent_checks(
     )
 
 
+def _legacy_or_malformed_checks(item: board.BoardItem) -> tuple[SliceCheck, ...] | None:
+    """The one refusal a legacy or malformed block body gets (#150) --
+    every other body-contract check (blocker state, completeness) never
+    runs, since neither the parsed projections nor the blocker set can be
+    trusted once the body itself failed to read."""
+    if item.read_state is board.BodyReadState.LEGACY:
+        return (SliceCheck("error", "body-legacy", "body legacy", issue=item.number),)
+    if item.read_state is board.BodyReadState.MALFORMED:
+        return tuple(
+            SliceCheck(
+                "error", "body-contract", f"body malformed: {defect.field}: {defect.message}"
+            )
+            for defect in item.contract.defects
+        )
+    return None
+
+
 def _body_contract_checks(
     item: board.BoardItem, blocker_references: tuple[board.BlockerReference, ...]
 ) -> tuple[SliceCheck, ...]:
+    legacy_or_malformed = _legacy_or_malformed_checks(item)
+    if legacy_or_malformed is not None:
+        return legacy_or_malformed
     contract = item.contract
     checks = [SliceCheck("error", "body-contract", defect.message) for defect in contract.defects]
     blocker_by_number = {reference.number: reference for reference in blocker_references}
@@ -1149,7 +1169,7 @@ def _body_contract_checks(
     # but defect-free skeleton) is refused here exactly as it is invisible to
     # `next`, regardless of what else may also be true of it.
     if not item.contract_complete and not item.projectionless_idea:
-        missing = ", ".join(contract.missing_sections)
+        missing = ", ".join(board.missing_or_empty_sections(contract))
         checks.append(
             SliceCheck(
                 "error",

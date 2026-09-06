@@ -5698,6 +5698,347 @@ def test_board_configuration_reads_and_validates_the_idea_label(tmp_path: Path) 
         board.load_config(config_path)
 
 
+def test_board_configuration_reads_and_validates_body_contract(tmp_path: Path) -> None:
+    config_path = tmp_path / "board.toml"
+    assert board.load_config(config_path).body_contract is board.BodyContractMode.PROSE
+
+    config_path.write_text('body_contract = "block"\n')
+    assert board.load_config(config_path).body_contract is board.BodyContractMode.BLOCK
+
+    config_path.write_text('body_contract = "sideways"\n')
+    with pytest.raises(
+        ClaimError, match=f"{re.escape(str(config_path))} body_contract must be prose or block"
+    ):
+        board.load_config(config_path)
+
+    config_path.write_text("body_contract = true\n")
+    with pytest.raises(ClaimError, match="body_contract must be prose or block"):
+        board.load_config(config_path)
+
+
+def agent_claim_body(toml_text: str, *, fence: str = "```") -> str:
+    """A body carrying one recognized `agent-claim` fence around `toml_text`,
+    with ordinary prose before and after it (issue #150 §4)."""
+    return f"Prose before.\n\n{fence}agent-claim\n{toml_text}\n{fence}\n\nProse after.\n"
+
+
+MINIMAL_BLOCK_TOML = 'version = 1\nnow = "N"\nnext = "X"\ndone_when = "D"\n'
+
+
+def test_parse_body_reads_a_valid_minimal_block() -> None:
+    parsed = board.parse_body(agent_claim_body(MINIMAL_BLOCK_TOML), board.BodyContractMode.BLOCK)
+
+    assert parsed.read_state is board.BodyReadState.VALID
+    assert parsed.contract == board.Contract("N", "X", None, "D", ())
+    assert parsed.contract_complete is True
+
+
+def test_parse_body_reads_a_skeleton_block_as_incomplete_but_valid() -> None:
+    skeleton = 'version = 1\nnow = ""\nnext = ""\ndone_when = ""\n'
+
+    parsed = board.parse_body(agent_claim_body(skeleton), board.BodyContractMode.BLOCK)
+
+    assert parsed.read_state is board.BodyReadState.VALID
+    assert parsed.contract_complete is False
+    assert parsed.projectionless is True
+
+
+def test_parse_body_treats_a_fenceless_body_as_legacy() -> None:
+    parsed = board.parse_body("## Now\nOld prose.\n", board.BodyContractMode.BLOCK)
+
+    assert parsed.read_state is board.BodyReadState.LEGACY
+    assert parsed.contract == board.Contract(None, None, None, None, ())
+
+
+def test_parse_body_refuses_multiple_agent_claim_blocks() -> None:
+    body = agent_claim_body(MINIMAL_BLOCK_TOML) + agent_claim_body(MINIMAL_BLOCK_TOML)
+
+    parsed = board.parse_body(body, board.BodyContractMode.BLOCK)
+
+    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert parsed.contract.defects[0].field == "agent-claim"
+
+
+def test_parse_body_refuses_an_unclosed_agent_claim_block() -> None:
+    parsed = board.parse_body("```agent-claim\nversion = 1\n", board.BodyContractMode.BLOCK)
+
+    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert parsed.contract.defects == (
+        board.ContractDefect("agent-claim", "unclosed agent-claim block"),
+    )
+
+
+def test_parse_body_refuses_invalid_toml() -> None:
+    parsed = board.parse_body(agent_claim_body("this is not toml ="), board.BodyContractMode.BLOCK)
+
+    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert parsed.contract.defects[0].field == "agent-claim"
+
+
+def test_parse_body_orders_schema_defects_deterministically() -> None:
+    toml_text = (
+        "now = 1\n"
+        "unexpected = 1\n"
+        'frozen_until = { trigger = "", ruled_on = "2026-09-06" }\n'
+        "[[expectation]]\n"
+        'text = ""\n'
+        "[[slice]]\n"
+        'title = ""\n'
+        "weird = 1\n"
+    )
+
+    parsed = board.parse_body(agent_claim_body(toml_text), board.BodyContractMode.BLOCK)
+
+    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert [defect.field for defect in parsed.contract.defects] == [
+        "version",
+        "now",
+        "next",
+        "done_when",
+        "frozen_until.trigger",
+        "frozen_until.ruled_on",
+        "expectation[0].text",
+        "expectation[0].default",
+        "slice[0].index",
+        "slice[0].title",
+        "slice[0].weird",
+        "unexpected",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("entry_toml", "expected_field"),
+    [
+        pytest.param('text = "E"\ndefault = "maybe"\n', "expectation[0].default", id="bad-default"),
+        pytest.param(
+            'text = "E"\nruling = "maybe"\nruled_on = 2026-09-06\n',
+            "expectation[0].ruling",
+            id="bad-ruling",
+        ),
+        pytest.param(
+            'text = "E"\ndefault = "yes"\nruling = "yes"\nruled_on = 2026-09-06\n',
+            "expectation[0].default",
+            id="both-default-and-ruling",
+        ),
+        pytest.param('text = "E"\n', "expectation[0].default", id="neither"),
+    ],
+)
+def test_parse_body_validates_the_expectation_variant_union(
+    entry_toml: str, expected_field: str
+) -> None:
+    toml_text = f"{MINIMAL_BLOCK_TOML}[[expectation]]\n{entry_toml}"
+
+    parsed = board.parse_body(agent_claim_body(toml_text), board.BodyContractMode.BLOCK)
+
+    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert parsed.contract.defects[0].field == expected_field
+
+
+def test_parse_body_ruling_date_is_the_oldest_across_non_monotonic_expectations() -> None:
+    toml_text = (
+        f"{MINIMAL_BLOCK_TOML}"
+        '[[expectation]]\ntext = "A"\nruling = "yes"\nruled_on = 2026-09-10\n'
+        '[[expectation]]\ntext = "B"\nruling = "yes"\nruled_on = 2026-08-01\n'
+    )
+
+    parsed = board.parse_body(agent_claim_body(toml_text), board.BodyContractMode.BLOCK)
+
+    assert parsed.read_state is board.BodyReadState.VALID
+    assert parsed.expectation_state is board.ExpectationState.RULED
+    assert parsed.ruling_date == date(2026, 8, 1)
+
+
+def test_parse_body_reads_an_explicit_empty_slice_array_as_a_present_table() -> None:
+    toml_text = f"{MINIMAL_BLOCK_TOML}slice = []\n"
+
+    parsed = board.parse_body(agent_claim_body(toml_text), board.BodyContractMode.BLOCK)
+
+    assert parsed.read_state is board.BodyReadState.VALID
+    assert parsed.slice_findings == board.SliceTableFindings((), (), (), True)
+
+
+def test_parse_body_reads_slice_entries_as_cuttable_rows() -> None:
+    toml_text = (
+        f'{MINIMAL_BLOCK_TOML}[[slice]]\nindex = 4\ntitle = "Block contract in issue bodies"\n'
+    )
+
+    parsed = board.parse_body(agent_claim_body(toml_text), board.BodyContractMode.BLOCK)
+
+    assert parsed.slice_findings.has_table is True
+    assert parsed.slice_findings.cuttable == (
+        board.SliceTableRow(
+            4, "Block contract in issue bodies", board.UNDISPATCHED_SLICE_CELL, None
+        ),
+    )
+
+
+def test_parse_body_recognizes_a_crlf_fenced_block() -> None:
+    body = (
+        "Prose before.\r\n\r\n"
+        "```agent-claim\r\n"
+        'version = 1\r\nnow = "N"\r\nnext = "X"\r\ndone_when = "D"\r\n'
+        "```\r\n\r\nProse after.\r\n"
+    )
+
+    parsed = board.parse_body(body, board.BodyContractMode.BLOCK)
+
+    assert parsed.read_state is board.BodyReadState.VALID
+    assert parsed.contract == board.Contract("N", "X", None, "D", ())
+
+
+def test_parse_body_prose_mode_ignores_a_stray_agent_claim_fence() -> None:
+    """A repository still pinned to prose reads its sections exactly as
+    before, even if a body happens to carry an `agent-claim` fence -- the
+    pin, not the body's shape, selects the grammar (#150 §3)."""
+    body = complete_contract("Keep going.") + "\n\n" + agent_claim_body(MINIMAL_BLOCK_TOML)
+
+    parsed = board.parse_body(body, board.BodyContractMode.PROSE)
+
+    assert parsed.read_state is board.BodyReadState.VALID
+    assert parsed.contract.next == "Keep going."
+
+
+def test_build_board_always_reads_the_ledger_issue_as_prose_under_a_block_pin() -> None:
+    ledger = board_issue(protocol.LEDGER_ISSUE, "Ledger", complete_contract("Refine the ledger."))
+
+    projected = projected_board(
+        (ledger,),
+        (),
+        (),
+        (),
+        board.BoardConfig(body_contract=board.BodyContractMode.BLOCK),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+    )
+
+    item = next(item for item in projected.items if item.number == protocol.LEDGER_ISSUE)
+    assert item.read_state is board.BodyReadState.VALID
+
+
+def test_body_contract_checks_names_a_legacy_container_by_the_body_legacy_check() -> None:
+    body = "## Now\nOld prose.\n\n## Next\nDo the thing.\n"
+    legacy = replace(
+        board_issue(201, "Legacy container", body),
+        kind=board.ItemKind.CONTAINER,
+        children_closed=0,
+        children_total=0,
+    )
+    projected = projected_board(
+        (legacy,),
+        (),
+        (),
+        (),
+        board.BoardConfig(body_contract=board.BodyContractMode.BLOCK),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+    )
+    item = next(item for item in projected.items if item.number == 201)
+
+    checks = issue_claim._body_contract_checks(item, projected.blocker_references)
+
+    assert checks == (issue_claim.SliceCheck("error", "body-legacy", "body legacy", issue=201),)
+
+
+def test_body_contract_checks_names_a_malformed_body_by_its_first_defect() -> None:
+    malformed_body = agent_claim_body('version = 2\nnow = "N"\nnext = "X"\ndone_when = "D"\n')
+    malformed = board_issue(202, "Malformed", malformed_body)
+    projected = projected_board(
+        (malformed,),
+        (),
+        (),
+        (),
+        board.BoardConfig(body_contract=board.BodyContractMode.BLOCK),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+    )
+    item = next(item for item in projected.items if item.number == 202)
+
+    checks = issue_claim._body_contract_checks(item, projected.blocker_references)
+
+    assert checks == (
+        issue_claim.SliceCheck(
+            "error", "body-contract", "body malformed: version: version must be exactly 1"
+        ),
+    )
+
+
+def test_next_action_skips_a_legacy_childless_container() -> None:
+    body = "## Now\nStill going.\n\n## Next\nDo the thing.\n"
+    container = replace(
+        board_issue(210, "Legacy container", body),
+        kind=board.ItemKind.CONTAINER,
+        children_closed=0,
+        children_total=0,
+    )
+    projected = projected_board(
+        (container,),
+        (),
+        (),
+        (),
+        board.BoardConfig(body_contract=board.BodyContractMode.BLOCK),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+    )
+
+    assert board.next_action(projected) is None
+    item = next(item for item in projected.items if item.number == 210)
+    assert item.actionable_reason == "body legacy"
+
+
+def test_next_action_skips_a_malformed_childless_container() -> None:
+    body = agent_claim_body('version = 2\nnow = "N"\nnext = "X"\ndone_when = "D"\n')
+    container = replace(
+        board_issue(211, "Malformed container", body),
+        kind=board.ItemKind.CONTAINER,
+        children_closed=0,
+        children_total=0,
+    )
+    projected = projected_board(
+        (container,),
+        (),
+        (),
+        (),
+        board.BoardConfig(body_contract=board.BodyContractMode.BLOCK),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+    )
+
+    assert board.next_action(projected) is None
+    item = next(item for item in projected.items if item.number == 211)
+    assert item.actionable_reason == "body malformed: version"
+
+
+def test_render_shows_projection_presence_and_dash_next_for_a_valid_block_skeleton() -> None:
+    skeleton = 'version = 1\nnow = ""\nnext = ""\ndone_when = ""\n'
+    issue = board_issue(220, "Skeleton", agent_claim_body(skeleton))
+    projected = projected_board(
+        (issue,),
+        (),
+        (),
+        (),
+        board.BoardConfig(body_contract=board.BodyContractMode.BLOCK),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+    )
+
+    line = next(line for line in board.render(projected).splitlines() if f"#{issue.number}" in line)
+    cells = re.split(r"\s{2,}", line.strip())
+
+    assert cells[5] == "Now, Next, Done when"
+    assert cells[7] == "-"
+
+
+def test_a_complete_block_item_is_body_complete_with_no_blocked_by_projection() -> None:
+    issue = board_issue(230, "Complete block item", agent_claim_body(MINIMAL_BLOCK_TOML))
+    projected = projected_board(
+        (issue,),
+        (),
+        (),
+        (),
+        board.BoardConfig(body_contract=board.BodyContractMode.BLOCK),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+    )
+
+    item = next(item for item in projected.items if item.number == 230)
+
+    assert item.contract_complete is True
+    assert item.contract.blocked_by is None
+
+
 def test_next_pulls_a_configured_projectionless_idea_with_refinement_step(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
