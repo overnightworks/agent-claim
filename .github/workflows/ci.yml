@@ -199,12 +199,10 @@ jobs:
                   reason = f"resolved to {resolved_key!r} instead"
               else:
                   return
-              message = f"SonarCloud refused to resolve project {key!r} for {scope}: {reason}"
-              if not os.environ.get("SONAR_TOKEN"):
-                  message += (
-                      " (no SONAR_TOKEN was sent; the project may have become private"
-                      " and this step then needs one)"
-                  )
+              message = (
+                  f"SonarCloud refused to resolve project {key!r} for {scope}: {reason} "
+                  "(no analysis exists for this scope, or the token cannot see this project)"
+              )
               print(message, file=sys.stderr)
               sys.exit(1)
 
