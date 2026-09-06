@@ -1075,7 +1075,7 @@ def _next_action_lines(action: board.NextAction) -> list[str]:
     if isinstance(action, board.CutSliceAction):
         return [
             f"cut_slice #{action.container.number}: {action.next_step}",
-            f'Next: agent-claim cut {action.container.number} --title "{action.next_step}"',
+            f'Next: agent-claim cut {action.container.number} --title "{action.cut_title}"',
         ]
     progress = action.container_progress
     return [

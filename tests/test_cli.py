@@ -3930,6 +3930,38 @@ def test_next_prints_a_cut_command_block_mode_accepts_for_a_valid_container(
     assert cut_exit_code == 0
 
 
+def test_next_prints_a_cut_command_block_mode_accepts_a_differing_next_line(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """#177: a block container whose own `next` line still names work in
+    its own words, while its first uncut `[[slice]]` entry carries a
+    different title, must still print a `cut` command that `cut` itself
+    accepts. Without `--row`, `cut` links exactly that first uncut entry and
+    refuses unless `--title` matches its title exactly (atelier-2, seven
+    live containers), so the printed command carries the entry's title,
+    never the `next` line's prose -- while the action line above it keeps
+    naming the container's own words."""
+    toml_text = (
+        'version = 1\nnow = "N"\nnext = "Weitere Aufgabe."\ndone_when = "D"\n'
+        '[[slice]]\nindex = 1\ntitle = "Scheibe 1"\n'
+    )
+    container = _block_cut_container_issue(toml_text)
+    _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
+    _write_block_pin(tmp_path)
+
+    exit_code = issue_claim.main(["--repo", "example/agent-claim", "next"])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert out.splitlines()[0] == f"cut_slice #{CUT_CONTAINER}: Weitere Aufgabe."
+    assert f'agent-claim cut {CUT_CONTAINER} --title "Scheibe 1"' in out
+
+    cut_exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
+    )
+    assert cut_exit_code == 0
+
+
 def test_claim_json_refusal_carries_refused_issue_and_checks(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -5819,83 +5851,105 @@ def test_next_names_a_cuttable_container_slice(
     )
 
 
-def test_next_prints_a_cut_command_that_cut_accepts_for_a_tableless_container(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
-) -> None:
-    """#151: `next`'s recommended `cut` command must never be one `cut`
-    itself refuses -- exactly what #122 hit on 06.09.2026, whose container
-    carried a `Next` line but no slice table."""
-    container = board.Issue(
-        183,
-        "Epic",
-        (),
-        complete_contract("Scheibe D"),
-        "2026-08-20T00:00:00Z",
-        "2026-08-20T00:00:00Z",
-        kind=board.ItemKind.CONTAINER,
-        children_closed=1,
-        children_total=1,
+# A `Next` line whose own prose never matches any slice-table row title used
+# below -- the shape #177 fixes: a container whose Next line and first uncut
+# row disagree.
+_DIFFERING_NEXT_LINE = "Weitere Aufgabe."
+
+
+@dataclass(frozen=True)
+class _CutRoundTripCase:
+    """One #151 round-trip scenario, over {container's own `Next` line still
+    names work} x {slice table carries an uncut row}: the `cut` command
+    `next` prints for `container_number` must be one `cut` itself accepts.
+    `expected_item_bodies`/`expected_output` take the freshly created child's
+    number, since only `cut` fixes that."""
+
+    case_id: str
+    container_number: int
+    body: str
+    expected_created_title: str
+    expected_item_bodies: Callable[[int], dict[int, str]]
+    expected_output: Callable[[int], str]
+
+
+def _no_uncut_row_case(
+    case_id: str, container_number: int, body: str, next_step: str
+) -> _CutRoundTripCase:
+    """When no uncut row exists (no table, or every row already linked),
+    `cut` always creates a child untied to the table, titled with the
+    container's own `Next` words."""
+    return _CutRoundTripCase(
+        case_id,
+        container_number,
+        body,
+        next_step,
+        lambda _child: {},
+        lambda child: f"CUT #{container_number} -> #{child}\n",
     )
-    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
-
-    next_exit_code = issue_claim.main(["--repo", "example/agent-claim", "next"])
-    assert next_exit_code == 0
-    command_line = capsys.readouterr().out.splitlines()[1]
-    cut_arguments = shlex.split(command_line.removeprefix("Next: agent-claim "))
-
-    cut_exit_code = issue_claim.main(["--repo", "example/agent-claim", *cut_arguments])
-
-    assert cut_exit_code == 0
-    child = client.next_created_child_number - 1
-    assert capsys.readouterr().out == f"CUT #183 -> #{child}\n"
 
 
-def test_next_prints_a_cut_command_that_cut_accepts_for_an_uncut_table_row(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
-) -> None:
-    """The table-backed twin of the test above: a container whose own `Next`
-    line is empty but whose slice table still carries an uncut row must also
-    print a `cut` command that `cut` itself accepts (#151)."""
-    container = board.Issue(
-        184,
-        "Epic",
-        (),
-        slice_table(("1", "Scheibe E", "—", "—")),
-        "2026-08-20T00:00:00Z",
-        "2026-08-20T00:00:00Z",
-        kind=board.ItemKind.CONTAINER,
-        children_closed=0,
-        children_total=0,
-    )
-    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
-
-    next_exit_code = issue_claim.main(["--repo", "example/agent-claim", "next"])
-    assert next_exit_code == 0
-    command_line = capsys.readouterr().out.splitlines()[1]
-    cut_arguments = shlex.split(command_line.removeprefix("Next: agent-claim "))
-
-    cut_exit_code = issue_claim.main(["--repo", "example/agent-claim", *cut_arguments])
-
-    assert cut_exit_code == 0
-    child = client.next_created_child_number - 1
-    assert client.item_bodies == {184: slice_table(("1", "Scheibe E", f"#{child}", "—"))}
-
-
-def test_next_prints_a_cut_command_that_cut_accepts_for_a_fully_linked_table(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
-) -> None:
-    """The remaining #151 gap: a container whose slice table has every row
-    already linked, but whose own `Next` line still names further work, must
-    not have its `next`-printed `cut` command refused for lacking a cuttable
-    row -- `cut` without `--row` creates an untied child instead, and the
-    container's own body stays untouched."""
-    container = board.Issue(
+_CUT_ROUND_TRIP_CASES = (
+    # next=yes, uncut=no (no table at all) -- exactly what #122 hit on
+    # 06.09.2026, whose container carried a `Next` line but no slice table.
+    _no_uncut_row_case("next_only_no_table", 183, complete_contract("Scheibe D"), "Scheibe D"),
+    # next=yes, uncut=no (every row already linked) -- the remaining #151
+    # gap: a resolved table must not block the `Next` line's own pathway.
+    _no_uncut_row_case(
+        "next_only_fully_linked_table",
         185,
-        "Epic",
-        (),
-        complete_contract("Weitere Aufgabe.")
+        complete_contract(_DIFFERING_NEXT_LINE)
         + "\n\n"
         + slice_table(("1", "Scheibe A", "#101", "—")),
+        _DIFFERING_NEXT_LINE,
+    ),
+    # next=no, uncut=yes -- the table-backed twin of the case above (#151).
+    _CutRoundTripCase(
+        "uncut_row_only",
+        184,
+        slice_table(("1", "Scheibe E", "—", "—")),
+        "Scheibe E",
+        lambda child: {184: slice_table(("1", "Scheibe E", f"#{child}", "—"))},
+        lambda child: f"CUT #184 row 1 -> #{child}\n",
+    ),
+    # next=yes, uncut=yes, and they disagree -- #177 itself: seven live
+    # atelier-2 containers where `next` printed the `Next` line's prose and
+    # `cut` refused it, because the row it actually links carries a
+    # different title.
+    _CutRoundTripCase(
+        "next_and_differing_uncut_row",
+        186,
+        complete_contract(_DIFFERING_NEXT_LINE)
+        + "\n\n"
+        + slice_table(("1", "Scheibe F", "—", "—")),
+        "Scheibe F",
+        lambda child: {
+            186: complete_contract(_DIFFERING_NEXT_LINE)
+            + "\n\n"
+            + slice_table(("1", "Scheibe F", f"#{child}", "—"))
+        },
+        lambda child: f"CUT #186 row 1 -> #{child}\n",
+    ),
+    # The remaining combination -- neither a `Next` line nor an uncut row --
+    # closes the container instead of cutting a slice, so it has no `cut`
+    # command to round-trip; `test_next_names_a_closeable_container` proves it.
+)
+
+
+@pytest.mark.parametrize("case", _CUT_ROUND_TRIP_CASES, ids=lambda case: case.case_id)
+def test_next_prints_a_cut_command_that_cut_accepts(
+    case: _CutRoundTripCase,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """#151's own invariant, completed by #177: whatever `cut` command
+    `next` prints for a childless container is one `cut` itself accepts."""
+    container = board.Issue(
+        case.container_number,
+        "Epic",
+        (),
+        case.body,
         "2026-08-20T00:00:00Z",
         "2026-08-20T00:00:00Z",
         kind=board.ItemKind.CONTAINER,
@@ -5914,10 +5968,88 @@ def test_next_prints_a_cut_command_that_cut_accepts_for_a_fully_linked_table(
     assert cut_exit_code == 0
     child = client.next_created_child_number - 1
     assert client.created_children == [
-        (185, "Weitere Aufgabe.", board.CHILD_SKELETON, board.ItemKind.TASK)
+        (
+            case.container_number,
+            case.expected_created_title,
+            board.CHILD_SKELETON,
+            board.ItemKind.TASK,
+        )
     ]
-    assert client.item_bodies == {}
-    assert capsys.readouterr().out == f"CUT #185 -> #{child}\n"
+    assert client.item_bodies == case.expected_item_bodies(child)
+    assert capsys.readouterr().out == case.expected_output(child)
+
+
+def test_next_prints_a_cut_command_that_cut_accepts_for_every_qualifying_container(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """#177 (independent counter-check, 06.09.2026): `next` only ever proves
+    the round-trip invariant for the single top-ranked container it names --
+    a container still holding an open child never reaches that check at all,
+    exactly this repository's own #122 today, whose `Next` line and first
+    uncut row already disagree, hidden only because #122 currently has an
+    open child. This walks every container the board carries, masked by an
+    open child or not, and proves each one's own printed `cut` command is
+    one `cut` itself accepts -- no second repository needed to show it."""
+    top_ranked = board.Issue(
+        130,
+        "Epic ranked first",
+        (),
+        complete_contract(_DIFFERING_NEXT_LINE),
+        "2026-08-20T00:00:00Z",
+        "2026-08-20T00:00:00Z",
+        kind=board.ItemKind.CONTAINER,
+        children_closed=1,
+        children_total=1,
+    )
+    masked_by_open_child = board.Issue(
+        122,
+        "Epic",
+        (),
+        complete_contract(_DIFFERING_NEXT_LINE)
+        + "\n\n"
+        + slice_table(("1", "Scheibe I", "—", "—")),
+        "2026-08-20T00:00:00Z",
+        "2026-08-20T00:00:00Z",
+        kind=board.ItemKind.CONTAINER,
+        children_closed=0,
+        children_total=1,
+    )
+    containers = (top_ranked, masked_by_open_child)
+    children = {122: (board.ChildItem(123, board.ChildState.OPEN),)}
+
+    projected = projected_board(
+        containers,
+        (),
+        (),
+        (),
+        board.BoardConfig(),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+        children=children,
+    )
+    top_action = board.next_action(projected)
+    assert isinstance(top_action, board.CutSliceAction)
+    assert top_action.container.number == 130  # the walk really does skip #122
+
+    masked_item = next(item for item in projected.items if item.number == 122)
+    masked_container = masked_item.container
+    assert masked_container is not None
+    uncut_by_container = {finding.item: finding for finding in projected.uncut}
+    masked_action = board._container_next_action(masked_item, masked_container, uncut_by_container)
+    assert isinstance(masked_action, board.CutSliceAction)
+    assert masked_action.next_step == _DIFFERING_NEXT_LINE
+    assert masked_action.cut_title == "Scheibe I"  # #177: not the `Next` line's own prose
+
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=containers)
+    client.children.update(children)
+    command_line = issue_claim._next_action_lines(masked_action)[1]
+    cut_arguments = shlex.split(command_line.removeprefix("Next: agent-claim "))
+
+    cut_exit_code = issue_claim.main(["--repo", "example/agent-claim", *cut_arguments])
+
+    assert cut_exit_code == 0
+    assert client.created_children == [
+        (122, "Scheibe I", board.CHILD_SKELETON, board.ItemKind.TASK)
+    ]
 
 
 def test_next_json_names_a_cuttable_container_slice(
