@@ -1940,7 +1940,9 @@ def has_further_work(next_line: str | None) -> bool:
     return next_line is not None and next_line.casefold() not in _NO_FURTHER_WORK_VALUES
 
 
-def _claim_by_issue(claims: tuple[protocol.ActiveClaim, ...]) -> dict[int, protocol.ActiveClaim]:
+def _claim_by_issue(
+    claims: tuple[protocol.LedgerActiveClaim, ...],
+) -> dict[int, protocol.LedgerActiveClaim]:
     return {
         claim.identity.issue: claim
         for claim in claims
@@ -2138,7 +2140,7 @@ class _BoardBuildContext:
     blockers: dict[int, tuple[IssueReference, ...]]
     freed_on: dict[int, datetime | None]
     unblocks: dict[int, int]
-    claims_by_issue: dict[int, protocol.ActiveClaim]
+    claims_by_issue: dict[int, protocol.LedgerActiveClaim]
     in_flight_references: frozenset[int]
     landed_references: frozenset[int]
     open_branches: frozenset[str]
@@ -2150,7 +2152,7 @@ class _BoardBuildContext:
 
 def _board_stage(
     issue: Issue,
-    claim: protocol.ActiveClaim | None,
+    claim: protocol.LedgerActiveClaim | None,
     *,
     in_flight_references: frozenset[int],
     landed_references: frozenset[int],
@@ -2167,7 +2169,7 @@ def _board_stage(
 
 
 def _claim_projection(
-    claim: protocol.ActiveClaim | None, observed_at: datetime
+    claim: protocol.LedgerActiveClaim | None, observed_at: datetime
 ) -> tuple[str | None, str | None, bool]:
     """The (active_claim, claim_age, claim_old) trio a `BoardItem` shows for `claim`."""
     if claim is None:
@@ -2343,7 +2345,7 @@ class BoardBuildInputs:
     issues: tuple[Issue, ...]
     open_pull_requests: tuple[PullRequest, ...]
     recent_merged_pull_requests: tuple[PullRequest, ...]
-    claims: tuple[protocol.ActiveClaim, ...]
+    claims: tuple[protocol.LedgerActiveClaim, ...]
     config: BoardConfig
     repository: str
     blocker_references: tuple[BlockerReference, ...] | None = None

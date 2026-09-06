@@ -99,7 +99,7 @@ class LaneIdentity:
     """A claim scoped to one issueless `docs/`/`fix/` lane.
 
     Carries no branch of its own: the lane name is owned entirely by the enclosing
-    `ActiveClaim`/`ClaimRequest.branch`, which every lane claim already has. A second
+    `LedgerActiveClaim`/`ClaimRequest.branch`, which every lane claim already has. A second
     branch-shaped field here would give the branch two owners that could drift apart.
     """
 
@@ -116,7 +116,7 @@ class ResourceHold:
 
 
 @dataclass(frozen=True)
-class ActiveClaim:
+class LedgerActiveClaim:
     """One claim id's current standing, derived from the whole ledger walk.
 
     `quarantined_by` is set when a later comment for this same claim id carried
@@ -146,7 +146,7 @@ class UnreadableClaim:
 
     A newer `agent-claim` wrote it; this reader fences the record itself and, when
     its `claim_id` matches a claim already active on the ledger, quarantines that
-    claim too (issue #136) by setting `ActiveClaim.quarantined_by` -- see there for
+    claim too (issue #136) by setting `LedgerActiveClaim.quarantined_by` -- see there for
     what quarantine refuses. `claim_id` is `None` when the field that would
     normally identify it is itself missing or malformed -- the comment is still
     named by `comment_url` in that case, and it quarantines nothing. Missing a
@@ -244,13 +244,13 @@ class LedgerSupersede:
     comment: IssueComment
 
 
-ClaimEvent = ActiveClaim | ClaimantRelease | OverrideRelease | ClaimRescope | LedgerSupersede
+ClaimEvent = LedgerActiveClaim | ClaimantRelease | OverrideRelease | ClaimRescope | LedgerSupersede
 
 
 class DuplicateClaimConflictError(ClaimError):
     """A duplicate claim id where reconcile refuses to pick a winner silently."""
 
-    def __init__(self, claim_id: str, superseded: ActiveClaim, survivor: ActiveClaim):
+    def __init__(self, claim_id: str, superseded: LedgerActiveClaim, survivor: LedgerActiveClaim):
         self.claim_id = claim_id
         self.superseded = superseded
         self.survivor = survivor
@@ -262,7 +262,7 @@ class DuplicateClaimConflictError(ClaimError):
 
 
 class LedgerSupersededError(ClaimError):
-    def __init__(self, successor_issue: int, claim: ActiveClaim):
+    def __init__(self, successor_issue: int, claim: LedgerActiveClaim):
         self.successor_issue = successor_issue
         self.claim = claim
         super().__init__(
@@ -696,7 +696,7 @@ def _required_resource_hold(payload: dict[str, object], comment: IssueComment) -
 
 def _parse_active_claim(
     payload: dict[str, object], comment: IssueComment, identity: ClaimIdentity, *, legacy: bool
-) -> ActiveClaim:
+) -> LedgerActiveClaim:
     expected = {"action", "agent", "base", "branch", "claim_id", "role", "scope"}
     if not legacy:
         expected.add(_identity_marker_key(identity))
@@ -724,7 +724,7 @@ def _parse_active_claim(
         _valid_resource_name(requested_resource, field=f"trusted comment {comment.url} resource")
         if "resource_value" in payload:
             resource = _required_resource_hold(payload, comment)
-    return ActiveClaim(
+    return LedgerActiveClaim(
         identity=identity,
         claim_id=claim_id,
         agent=agent,
@@ -915,8 +915,8 @@ def parse_claim_event(comment: IssueComment) -> ClaimEvent | None:
 
 def _apply_terminal_event(
     event: ClaimantRelease | OverrideRelease | LedgerSupersede,
-    active: dict[str, ActiveClaim],
-    acquired: dict[str, ActiveClaim],
+    active: dict[str, LedgerActiveClaim],
+    acquired: dict[str, LedgerActiveClaim],
 ) -> bool:
     """Validate and apply a terminal event against the claim it targets.
 
@@ -964,7 +964,7 @@ def _apply_terminal_event(
 class ClaimLedgerAggregate:
     """Non-raising result of one chronological walk over the ledger's claim events.
 
-    `occurrences` holds every ActiveClaim event seen for a claim id, in ledger order;
+    `occurrences` holds every LedgerActiveClaim event seen for a claim id, in ledger order;
     a duplicated id has more than one. `terminated_by`, when present for a claim id,
     holds every terminal-event comment `_apply_terminal_event` honored for it — a
     release retry or a coordinator override that lands after the claimant already
@@ -984,19 +984,19 @@ class ClaimLedgerAggregate:
     to this record instead of `None`.
     """
 
-    active: tuple[ActiveClaim, ...]
+    active: tuple[LedgerActiveClaim, ...]
     seen_claim_ids: frozenset[str]
     duplicate_claim_ids: tuple[str, ...]
-    occurrences: Mapping[str, tuple[ActiveClaim, ...]]
+    occurrences: Mapping[str, tuple[LedgerActiveClaim, ...]]
     terminated_by: Mapping[str, tuple[IssueComment, ...]]
     unreadable: tuple[UnreadableClaim, ...]
 
 
 def _record_claim_occurrence(
-    event: ActiveClaim,
-    active: dict[str, ActiveClaim],
-    acquired: dict[str, ActiveClaim],
-    occurrences: dict[str, list[ActiveClaim]],
+    event: LedgerActiveClaim,
+    active: dict[str, LedgerActiveClaim],
+    acquired: dict[str, LedgerActiveClaim],
+    occurrences: dict[str, list[LedgerActiveClaim]],
     duplicate_claim_ids: list[str],
 ) -> None:
     occurrences.setdefault(event.claim_id, []).append(event)
@@ -1009,7 +1009,9 @@ def _record_claim_occurrence(
 
 
 def _apply_claim_rescope_event(
-    event: ClaimRescope, active: dict[str, ActiveClaim], acquired: dict[str, ActiveClaim]
+    event: ClaimRescope,
+    active: dict[str, LedgerActiveClaim],
+    acquired: dict[str, LedgerActiveClaim],
 ) -> None:
     current = active.get(event.claim_id)
     if current is None:
@@ -1038,11 +1040,11 @@ def _apply_claim_rescope_event(
 
 
 def _quarantine_active_claims(
-    active: dict[str, ActiveClaim], unreadable: list[UnreadableClaim]
-) -> dict[str, ActiveClaim]:
+    active: dict[str, LedgerActiveClaim], unreadable: list[UnreadableClaim]
+) -> dict[str, LedgerActiveClaim]:
     """Attach the earliest matching `UnreadableClaim` to the active claim it names.
 
-    A quarantined claim id has no live `ActiveClaim` to attach to when the
+    A quarantined claim id has no live `LedgerActiveClaim` to attach to when the
     unreadable comment is itself the newer writer's `claim` (there was never a
     readable claim under that id); it only matters, and only changes anything
     here, when the id already names a claim this reader did parse -- e.g. a
@@ -1069,9 +1071,9 @@ def _aggregate_claim_events(comments: tuple[IssueComment, ...]) -> ClaimLedgerAg
     consume this single walk, so duplicate-claim-id detection and release status can
     never drift between two independently maintained parsers.
     """
-    active: dict[str, ActiveClaim] = {}
-    acquired: dict[str, ActiveClaim] = {}
-    occurrences: dict[str, list[ActiveClaim]] = {}
+    active: dict[str, LedgerActiveClaim] = {}
+    acquired: dict[str, LedgerActiveClaim] = {}
+    occurrences: dict[str, list[LedgerActiveClaim]] = {}
     terminated_by: dict[str, list[IssueComment]] = {}
     duplicate_claim_ids: list[str] = []
     unreadable: list[UnreadableClaim] = []
@@ -1084,7 +1086,7 @@ def _aggregate_claim_events(comments: tuple[IssueComment, ...]) -> ClaimLedgerAg
             continue
         if event is None:
             continue
-        if isinstance(event, ActiveClaim):
+        if isinstance(event, LedgerActiveClaim):
             _record_claim_occurrence(event, active, acquired, occurrences, duplicate_claim_ids)
             continue
         if isinstance(event, ClaimRescope):
@@ -1117,7 +1119,7 @@ def _aggregate_claim_events(comments: tuple[IssueComment, ...]) -> ClaimLedgerAg
 
 
 def _assign_resource_values(
-    derived: dict[str, ActiveClaim], first_occurrences: list[ActiveClaim], name: str
+    derived: dict[str, LedgerActiveClaim], first_occurrences: list[LedgerActiveClaim], name: str
 ) -> None:
     """Occupy `name`'s posted values, then fill auto intents with the next free integer."""
     intents = sorted(
@@ -1140,9 +1142,9 @@ def _assign_resource_values(
 
 
 def _group_active_holders(
-    derived: dict[str, ActiveClaim],
-) -> dict[tuple[str, int], list[ActiveClaim]]:
-    holders: dict[tuple[str, int], list[ActiveClaim]] = {}
+    derived: dict[str, LedgerActiveClaim],
+) -> dict[tuple[str, int], list[LedgerActiveClaim]]:
+    holders: dict[tuple[str, int], list[LedgerActiveClaim]] = {}
     for claim in derived.values():
         if claim.resource is not None:
             holders.setdefault((claim.resource.name, claim.resource.value), []).append(claim)
@@ -1150,7 +1152,7 @@ def _group_active_holders(
 
 
 def _strip_duplicate_holders(
-    derived: dict[str, ActiveClaim], holders: dict[tuple[str, int], list[ActiveClaim]]
+    derived: dict[str, LedgerActiveClaim], holders: dict[tuple[str, int], list[LedgerActiveClaim]]
 ) -> None:
     """Among claims that live for the same (name, value), keep only the earliest holder.
 
@@ -1171,9 +1173,9 @@ def _strip_duplicate_holders(
 
 
 def _apply_derived_resource_holds(
-    active: dict[str, ActiveClaim],
-    occurrences: Mapping[str, tuple[ActiveClaim, ...]],
-) -> dict[str, ActiveClaim]:
+    active: dict[str, LedgerActiveClaim],
+    occurrences: Mapping[str, tuple[LedgerActiveClaim, ...]],
+) -> dict[str, LedgerActiveClaim]:
     """Assign auto resource values from occupied first-occurrence intents.
 
     Walk first-occurrence intents for a name in ledger order. Explicit intents occupy
@@ -1203,7 +1205,7 @@ def _reject_duplicate_claim_ids(aggregate: ClaimLedgerAggregate) -> None:
         raise InvalidClaimMarkerError(f"claim id {aggregate.duplicate_claim_ids[0]!r} was reused")
 
 
-def active_claims(comments: tuple[IssueComment, ...]) -> tuple[ActiveClaim, ...]:
+def active_claims(comments: tuple[IssueComment, ...]) -> tuple[LedgerActiveClaim, ...]:
     aggregate = _aggregate_claim_events(comments)
     _reject_duplicate_claim_ids(aggregate)
     return aggregate.active
@@ -1261,7 +1263,7 @@ def _scopes_overlap(left: tuple[str, ...], right: tuple[str, ...]) -> bool:
 
 
 def _identity_conflicts(
-    left: ActiveClaim | ClaimRequest, right: ActiveClaim | ClaimRequest
+    left: LedgerActiveClaim | ClaimRequest, right: LedgerActiveClaim | ClaimRequest
 ) -> bool:
     """Two claims share an identity: same issue number, or same lane branch.
 
@@ -1277,7 +1279,9 @@ def _identity_conflicts(
             return False
 
 
-def claims_conflict(left: ActiveClaim | ClaimRequest, right: ActiveClaim | ClaimRequest) -> bool:
+def claims_conflict(
+    left: LedgerActiveClaim | ClaimRequest, right: LedgerActiveClaim | ClaimRequest
+) -> bool:
     """True when two claims share an issue or lane branch.
 
     Path overlap is advisory: it is a visible note, not a conflict.
@@ -1285,11 +1289,15 @@ def claims_conflict(left: ActiveClaim | ClaimRequest, right: ActiveClaim | Claim
     return _identity_conflicts(left, right)
 
 
-def claims_overlap(left: ActiveClaim | ClaimRequest, right: ActiveClaim | ClaimRequest) -> bool:
+def claims_overlap(
+    left: LedgerActiveClaim | ClaimRequest, right: LedgerActiveClaim | ClaimRequest
+) -> bool:
     return _scopes_overlap(left.scope, right.scope)
 
 
-def claims_holding_path(claims: tuple[ActiveClaim, ...], path: str) -> tuple[ActiveClaim, ...]:
+def claims_holding_path(
+    claims: tuple[LedgerActiveClaim, ...], path: str
+) -> tuple[LedgerActiveClaim, ...]:
     target = _valid_scope([path])
     if len(target) != 1:
         raise ClaimError("who requires a single repository-relative path")
@@ -1297,8 +1305,8 @@ def claims_holding_path(claims: tuple[ActiveClaim, ...], path: str) -> tuple[Act
 
 
 def blocking_claims(
-    claims: tuple[ActiveClaim, ...], candidate: ActiveClaim | ClaimRequest
-) -> tuple[ActiveClaim, ...]:
+    claims: tuple[LedgerActiveClaim, ...], candidate: LedgerActiveClaim | ClaimRequest
+) -> tuple[LedgerActiveClaim, ...]:
     return tuple(
         claim
         for claim in claims
@@ -1307,8 +1315,8 @@ def blocking_claims(
 
 
 def matching_claim_retry(
-    claims: tuple[ActiveClaim, ...], request: ClaimRequest
-) -> ActiveClaim | None:
+    claims: tuple[LedgerActiveClaim, ...], request: ClaimRequest
+) -> LedgerActiveClaim | None:
     """Return the live item claim an interrupted identical request may replay.
 
     Issueless lanes retain their existing one-claim-per-branch behavior: only
@@ -1331,8 +1339,8 @@ def matching_claim_retry(
 
 
 def overlapping_claims(
-    claims: tuple[ActiveClaim, ...], candidate: ActiveClaim | ClaimRequest
-) -> tuple[ActiveClaim, ...]:
+    claims: tuple[LedgerActiveClaim, ...], candidate: LedgerActiveClaim | ClaimRequest
+) -> tuple[LedgerActiveClaim, ...]:
     return tuple(
         claim
         for claim in claims
@@ -1341,8 +1349,8 @@ def overlapping_claims(
 
 
 def conflicting_claims(
-    claims: tuple[ActiveClaim, ...], candidate: ActiveClaim | ClaimRequest
-) -> tuple[ActiveClaim, ...]:
+    claims: tuple[LedgerActiveClaim, ...], candidate: LedgerActiveClaim | ClaimRequest
+) -> tuple[LedgerActiveClaim, ...]:
     """Path-overlapping live claims, excluding identity. Used as the advisory note."""
     return overlapping_claims(claims, candidate)
 
@@ -1350,12 +1358,12 @@ def conflicting_claims(
 IdentityKey = tuple[str, int | str]
 
 
-def _identity_key(claim: ActiveClaim) -> IdentityKey:
+def _identity_key(claim: LedgerActiveClaim) -> IdentityKey:
     """Hashable index key for one claim's identity: an issue number or a lane branch.
 
     `LaneIdentity` instances all compare equal to each other, so indexing by
     identity alone would merge every lane into one bucket; the branch already owned
-    by `ActiveClaim.branch` supplies the missing distinction without giving the
+    by `LedgerActiveClaim.branch` supplies the missing distinction without giving the
     lane name a second owner.
     """
     if isinstance(claim.identity, LaneIdentity):
@@ -1372,7 +1380,7 @@ class ClaimConflictIndex:
     descendant_paths: dict[tuple[str, ...], set[str]]
 
 
-def _claim_conflict_index(claims: tuple[ActiveClaim, ...]) -> ClaimConflictIndex:
+def _claim_conflict_index(claims: tuple[LedgerActiveClaim, ...]) -> ClaimConflictIndex:
     """Index identities and paths once for status conflict and overlap notes."""
     conflict_ids: set[str] = set()
     overlap_ids: set[str] = set()
@@ -1410,7 +1418,9 @@ def _claim_conflict_index(claims: tuple[ActiveClaim, ...]) -> ClaimConflictIndex
     )
 
 
-def _related_claim_ids(index: ClaimConflictIndex, selected: tuple[ActiveClaim, ...]) -> set[str]:
+def _related_claim_ids(
+    index: ClaimConflictIndex, selected: tuple[LedgerActiveClaim, ...]
+) -> set[str]:
     related = {claim.claim_id for claim in selected}
     for claim in selected:
         related.update(index.claims_by_identity[_identity_key(claim)])
@@ -1418,7 +1428,7 @@ def _related_claim_ids(index: ClaimConflictIndex, selected: tuple[ActiveClaim, .
     return related
 
 
-def _overlap_peer_ids(index: ClaimConflictIndex, claim: ActiveClaim) -> set[str]:
+def _overlap_peer_ids(index: ClaimConflictIndex, claim: LedgerActiveClaim) -> set[str]:
     related: set[str] = set()
     for path in claim.scope:
         parts = PurePosixPath(path).parts
@@ -1501,7 +1511,7 @@ def claim_comment(request: ClaimRequest) -> str:
 
 
 def _rescope_base_payload(
-    claim: ActiveClaim, scope: tuple[str, ...], validated_agent: str, validated_role: str
+    claim: LedgerActiveClaim, scope: tuple[str, ...], validated_agent: str, validated_role: str
 ) -> dict[str, object]:
     return {
         "action": "rescope",
@@ -1522,7 +1532,7 @@ def _rescope_whole_line(payload: dict[str, object]) -> str:
 
 
 def _rescope_comment_body(
-    claim: ActiveClaim,
+    claim: LedgerActiveClaim,
     validated_agent: str,
     validated_role: str,
     scope: tuple[str, ...],
@@ -1547,7 +1557,7 @@ def _rescope_comment_body(
 
 
 def rescope_comment(
-    claim: ActiveClaim,
+    claim: LedgerActiveClaim,
     scope: tuple[str, ...],
     agent: str,
     role: str,
@@ -1563,7 +1573,7 @@ def rescope_comment(
 
 
 def rescope_clear_whole_reason_comment(
-    claim: ActiveClaim, scope: tuple[str, ...], agent: str, role: str
+    claim: LedgerActiveClaim, scope: tuple[str, ...], agent: str, role: str
 ) -> str:
     """A rescope that also explicitly drops the claim's whole-reason back to
     unset -- the only way back, since an ordinary rescope's omitted `whole`
@@ -1579,7 +1589,7 @@ def rescope_clear_whole_reason_comment(
 
 
 def release_comment(
-    claim: ActiveClaim,
+    claim: LedgerActiveClaim,
     agent: str,
     role: str,
     reason: str,
@@ -1613,7 +1623,7 @@ def release_comment(
 
 
 def supersede_comment(
-    claim: ActiveClaim,
+    claim: LedgerActiveClaim,
     successor_issue: int,
     agent: str,
     role: str,
@@ -1651,7 +1661,7 @@ def supersede_comment(
     )
 
 
-def _neutralized_claim_body(claim_id: str, survivor: ActiveClaim) -> str:
+def _neutralized_claim_body(claim_id: str, survivor: LedgerActiveClaim) -> str:
     """Neutralize a duplicate claim-id event so it stops parsing as a claim marker.
 
     The edited body deliberately does not start with a claim marker prefix, so
@@ -1668,7 +1678,7 @@ def _neutralized_claim_body(claim_id: str, survivor: ActiveClaim) -> str:
     )
 
 
-def _active_projection(claim: ActiveClaim) -> str:
+def _active_projection(claim: LedgerActiveClaim) -> str:
     return _validated_comment(
         f"{_projection_marker()}\n"
         f"🔒 **Claimed** · {claim.agent} ({claim.role}) · `{claim.branch}`\n\n"
@@ -1682,11 +1692,11 @@ def _unclaimed_projection(ledger_url: str | None = None, reason: str | None = No
     return _validated_comment(f"{_projection_marker()}\n🔓 **Unclaimed**{detail}\n\n{ledger}")
 
 
-def _ledger_claims(client: ClaimReader) -> tuple[ActiveClaim, ...]:
+def _ledger_claims(client: ClaimReader) -> tuple[LedgerActiveClaim, ...]:
     return active_claims(client.list_protocol_candidates(LEDGER_ISSUE))
 
 
-def _issue_claim(claims: tuple[ActiveClaim, ...], issue: int) -> ActiveClaim | None:
+def _issue_claim(claims: tuple[LedgerActiveClaim, ...], issue: int) -> LedgerActiveClaim | None:
     matching = tuple(
         claim
         for claim in claims
@@ -1703,7 +1713,7 @@ def _issue_claim(claims: tuple[ActiveClaim, ...], issue: int) -> ActiveClaim | N
 def _apply_issue_projection(
     client: ClaimWriter,
     issue: int,
-    claim: ActiveClaim | None,
+    claim: LedgerActiveClaim | None,
     *,
     unclaimed_body: str | None = None,
 ) -> None:
@@ -1779,7 +1789,7 @@ def reconcile_all_labels(client: ClaimWriter) -> tuple[int, ...]:
 
 def _duplicate_lifecycles(
     aggregate: ClaimLedgerAggregate, claim_id: str
-) -> tuple[tuple[ActiveClaim, tuple[IssueComment, ...]], ...]:
+) -> tuple[tuple[LedgerActiveClaim, tuple[IssueComment, ...]], ...]:
     """Pair each occurrence of a duplicated claim id with every comment that honored
     its termination (a release retry or claimant-then-coordinator pair both land here).
 
@@ -1825,7 +1835,7 @@ def repair_duplicate_claims(client: ClaimWriter) -> tuple[DuplicateClaimRepair, 
     one unsafe conflict never leaves a different, otherwise-safe repair half-applied.
     """
     aggregate = _aggregate_claim_events(client.list_protocol_candidates(LEDGER_ISSUE))
-    plans: list[tuple[str, ActiveClaim, tuple[IssueComment, ...]]] = []
+    plans: list[tuple[str, LedgerActiveClaim, tuple[IssueComment, ...]]] = []
     for claim_id in aggregate.duplicate_claim_ids:
         lifecycles = _duplicate_lifecycles(aggregate, claim_id)
         survivor, _ = lifecycles[-1]
@@ -1869,8 +1879,8 @@ def _reconcile_identity(
 
 
 def _resource_holders(
-    claims: tuple[ActiveClaim, ...], hold: ResourceHold, *, except_id: str
-) -> tuple[ActiveClaim, ...]:
+    claims: tuple[LedgerActiveClaim, ...], hold: ResourceHold, *, except_id: str
+) -> tuple[LedgerActiveClaim, ...]:
     return tuple(
         claim
         for claim in claims
@@ -1898,7 +1908,7 @@ def _assigned_request(request: ClaimRequest) -> ClaimRequest:
     return replace(request, resource=name)
 
 
-def acquire_claim(client: ClaimWriter, request: ClaimRequest) -> ActiveClaim:
+def acquire_claim(client: ClaimWriter, request: ClaimRequest) -> LedgerActiveClaim:
     claimed, _observed = _acquire_claim_with_observed(client, request)
     return claimed
 
@@ -1913,7 +1923,9 @@ class ClaimPostedReconcileFailedError(ClaimError):
     failed on.
     """
 
-    def __init__(self, claim: ActiveClaim, observed: tuple[ActiveClaim, ...], error: Exception):
+    def __init__(
+        self, claim: LedgerActiveClaim, observed: tuple[LedgerActiveClaim, ...], error: Exception
+    ):
         self.claim = claim
         self.observed = observed
         self.reconcile_error = error
@@ -1939,7 +1951,7 @@ class CompensationFailedError(ClaimError):
 
     def __init__(
         self,
-        live_claim: ActiveClaim,
+        live_claim: LedgerActiveClaim,
         attempted_repair: str,
         cause: Exception,
         *,
@@ -2004,8 +2016,8 @@ CLAIM_RACE_LOST_REASON = "claim race lost"
 def _resolve_identity_race(
     client: ClaimWriter,
     request: ClaimRequest,
-    own: ActiveClaim,
-    observed: tuple[ActiveClaim, ...],
+    own: LedgerActiveClaim,
+    observed: tuple[LedgerActiveClaim, ...],
 ) -> None:
     identity_competitors = blocking_claims(observed, own)
     if not identity_competitors:
@@ -2031,8 +2043,8 @@ def _resolve_identity_race(
 def _resolve_resource_race(
     client: ClaimWriter,
     request: ClaimRequest,
-    own: ActiveClaim,
-    observed: tuple[ActiveClaim, ...],
+    own: LedgerActiveClaim,
+    observed: tuple[LedgerActiveClaim, ...],
 ) -> None:
     if request.resource is None:
         return
@@ -2065,7 +2077,7 @@ def _resolve_resource_race(
     )
 
 
-def _claim_race_lost_repair_command(claim: ActiveClaim) -> str:
+def _claim_race_lost_repair_command(claim: LedgerActiveClaim) -> str:
     """The one manual repair that always works after a lost race (issue #136):
     a `claim`/`rescope` retry would itself be refused by the very unreadable
     comment that caused the race, but releasing this reader's own live claim is
@@ -2098,7 +2110,7 @@ def _claim_race_lost_repair_command(claim: ActiveClaim) -> str:
     )
 
 
-def _claim_race_lost_repair_hint(claim: ActiveClaim) -> str | None:
+def _claim_race_lost_repair_hint(claim: LedgerActiveClaim) -> str | None:
     """Non-executable note `_claim_race_lost_repair_command` alone cannot cover,
     or `None` when the command needs none.
 
@@ -2120,7 +2132,7 @@ def _as_hints(*hints: str | None) -> tuple[str, ...]:
 def _resolve_unreadable_claim_race(
     client: ClaimWriter,
     request: ClaimRequest,
-    own: ActiveClaim,
+    own: LedgerActiveClaim,
     post_aggregate: ClaimLedgerAggregate,
 ) -> None:
     """Post-mutation race (issue #136 finding 2): the pre-post check already
@@ -2151,7 +2163,7 @@ def _resolve_unreadable_claim_race(
 
 def _acquire_claim_with_observed(
     client: ClaimWriter, request: ClaimRequest
-) -> tuple[ActiveClaim, tuple[ActiveClaim, ...]]:
+) -> tuple[LedgerActiveClaim, tuple[LedgerActiveClaim, ...]]:
     """`acquire_claim`, plus the active claims its own post-mutation race check already read.
 
     The caller's advisory "touches" note (`conflicting_claims`) needs exactly
@@ -2212,9 +2224,9 @@ def _combined_scope(
 def _observe_rescoped_claim(
     client: ClaimReader,
     identity: ClaimIdentity,
-    selected: ActiveClaim,
+    selected: LedgerActiveClaim,
     expected_scope: tuple[str, ...],
-) -> tuple[ClaimLedgerAggregate, ActiveClaim]:
+) -> tuple[ClaimLedgerAggregate, LedgerActiveClaim]:
     aggregate = _aggregate_claim_events(client.list_protocol_candidates(LEDGER_ISSUE))
     _reject_duplicate_claim_ids(aggregate)
     own = next((claim for claim in aggregate.active if claim.claim_id == selected.claim_id), None)
@@ -2241,8 +2253,8 @@ class _ClaimLookup:
 
 
 def _selected_claim(
-    standing: tuple[ActiveClaim, ...], lookup: _ClaimLookup, *, action: str
-) -> ActiveClaim:
+    standing: tuple[LedgerActiveClaim, ...], lookup: _ClaimLookup, *, action: str
+) -> LedgerActiveClaim:
     if lookup.claim_id is None:
         if not lookup.branch:
             raise ClaimUnavailableError(
@@ -2269,13 +2281,13 @@ def _selected_claim(
 
 
 def _select_rescope_claim(
-    claims: tuple[ActiveClaim, ...],
+    claims: tuple[LedgerActiveClaim, ...],
     identity: ClaimIdentity,
     agent: str,
     claim_id: str | None,
     *,
     branch: str | None,
-) -> ActiveClaim:
+) -> LedgerActiveClaim:
     standing = _claims_for_identity(claims, identity, branch)
     if not standing:
         raise ClaimUnavailableError(
@@ -2293,7 +2305,7 @@ def _select_rescope_claim(
     return selected
 
 
-def _rescope_reclaim_hint(selected: ActiveClaim) -> str:
+def _rescope_reclaim_hint(selected: LedgerActiveClaim) -> str:
     """Non-executable note for `CompensationFailedError`'s rescope race: the
     repair is a release, which drops the claim entirely, so re-claiming
     `selected`'s pre-race scope -- and whole reason, if it had one -- is a
@@ -2309,8 +2321,8 @@ def _rescope_reclaim_hint(selected: ActiveClaim) -> str:
 
 def _resolve_unreadable_rescope_race(
     client: ClaimWriter,
-    selected: ActiveClaim,
-    own: ActiveClaim,
+    selected: LedgerActiveClaim,
+    own: LedgerActiveClaim,
     post_aggregate: ClaimLedgerAggregate,
 ) -> None:
     """Post-mutation race (issue #136 finding 2): the pre-post check already
@@ -2374,7 +2386,7 @@ class RescopeRequest:
     whole_reason: str | None = None
 
 
-def rescope_claim(client: ClaimWriter, request: RescopeRequest) -> ActiveClaim:
+def rescope_claim(client: ClaimWriter, request: RescopeRequest) -> LedgerActiveClaim:
     if not request.add and not request.drop:
         raise ClaimUnavailableError("rescope requires --add or --drop")
     add_scope = _valid_scope(list(request.add)) if request.add else ()
@@ -2409,8 +2421,8 @@ def _require_coordinator_override(role: str | None) -> None:
 
 
 def _claims_for_identity(
-    claims: tuple[ActiveClaim, ...], identity: ClaimIdentity, branch: str | None
-) -> tuple[ActiveClaim, ...]:
+    claims: tuple[LedgerActiveClaim, ...], identity: ClaimIdentity, branch: str | None
+) -> tuple[LedgerActiveClaim, ...]:
     """Restrict standing claims to the one issue or lane `identity` names.
 
     An issue identity already carries its number, so no branch is needed. A lane
@@ -2447,14 +2459,14 @@ class ReleaseContext:
     coordinator_override: bool = False
 
 
-def release_claim(client: ClaimWriter, context: ReleaseContext) -> ActiveClaim:
+def release_claim(client: ClaimWriter, context: ReleaseContext) -> LedgerActiveClaim:
     """Release a live claim.
 
     A quarantined claim (issue #136) ordinarily refuses release, since this
     reader cannot trust what it thinks it knows about a claim a later unknown
     field also touched. A `coordinator_override` is the one documented
     exception: it may release a quarantined claim too -- the returned
-    `ActiveClaim` still carries `quarantined_by`, so a caller (`_cmd_release`)
+    `LedgerActiveClaim` still carries `quarantined_by`, so a caller (`_cmd_release`)
     can print the refusal it bypassed as a warning rather than losing it
     silently.
     """
@@ -2509,7 +2521,7 @@ class SupersedeRequest:
     claim_id: str
 
 
-def supersede_ledger(client: ClaimWriter, request: SupersedeRequest) -> ActiveClaim:
+def supersede_ledger(client: ClaimWriter, request: SupersedeRequest) -> LedgerActiveClaim:
     if request.role != "coordinator":
         raise ClaimUnavailableError("ledger supersede requires --role coordinator")
     if request.successor_issue <= LEDGER_ISSUE:

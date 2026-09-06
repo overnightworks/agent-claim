@@ -19,7 +19,7 @@ AGENT_CLAIM_AGENT_ENV = checkout.AGENT_CLAIM_AGENT_ENV
 CLAUDE_SESSION_ID_ENV = checkout.CLAUDE_SESSION_ID_ENV
 GROK_SESSION_ID_ENV = checkout.GROK_SESSION_ID_ENV
 MAX_COMMENT_BYTES = protocol.MAX_COMMENT_BYTES
-ActiveClaim = protocol.ActiveClaim
+LedgerActiveClaim = protocol.LedgerActiveClaim
 ClaimError = protocol.ClaimError
 ClaimRequest = protocol.ClaimRequest
 ClaimUnavailableError = protocol.ClaimUnavailableError
@@ -107,7 +107,7 @@ def _resolved_identity(issue: int | None, branch: str) -> protocol.ClaimIdentity
     return protocol.LaneIdentity()
 
 
-def _claim_subject(claim: protocol.ActiveClaim) -> str:
+def _claim_subject(claim: protocol.LedgerActiveClaim) -> str:
     return (
         f"lane {claim.branch}"
         if isinstance(claim.identity, protocol.LaneIdentity)
@@ -115,12 +115,12 @@ def _claim_subject(claim: protocol.ActiveClaim) -> str:
     )
 
 
-def _claim_age_fields(claim: protocol.ActiveClaim, now: datetime) -> tuple[str, bool]:
+def _claim_age_fields(claim: protocol.LedgerActiveClaim, now: datetime) -> tuple[str, bool]:
     age = board.claim_age(claim.comment.created_at, now)
     return board.format_claim_age(age), board.claim_is_old(age)
 
 
-def _claim_age_suffix(claim: protocol.ActiveClaim, now: datetime) -> str:
+def _claim_age_suffix(claim: protocol.LedgerActiveClaim, now: datetime) -> str:
     rendered, old = _claim_age_fields(claim, now)
     return f" {rendered} old" if old else f" {rendered}"
 
@@ -172,7 +172,7 @@ def _reject_wide_scope(
     return n, total, share
 
 
-def _touch_json(claim: protocol.ActiveClaim) -> dict[str, object]:
+def _touch_json(claim: protocol.LedgerActiveClaim) -> dict[str, object]:
     return {
         **_identity_json(claim.identity),
         "claim_id": claim.claim_id,
@@ -181,7 +181,7 @@ def _touch_json(claim: protocol.ActiveClaim) -> dict[str, object]:
     }
 
 
-def _touch_summary(touches: tuple[protocol.ActiveClaim, ...]) -> str:
+def _touch_summary(touches: tuple[protocol.LedgerActiveClaim, ...]) -> str:
     if not touches:
         return "overlaps no other open claims"
     return "overlaps " + ", ".join(
@@ -189,7 +189,7 @@ def _touch_summary(touches: tuple[protocol.ActiveClaim, ...]) -> str:
     )
 
 
-def _claim_cost_line(n: int, total: int, touches: tuple[protocol.ActiveClaim, ...]) -> str:
+def _claim_cost_line(n: int, total: int, touches: tuple[protocol.LedgerActiveClaim, ...]) -> str:
     percent = 0 if total == 0 else round(100 * n / total)
     return f"{n} of {total} versioned files ({percent}%); {_touch_summary(touches)}"
 
@@ -224,12 +224,12 @@ def _request(arguments: argparse.Namespace) -> protocol.ClaimRequest:
     parsed = protocol.parse_claim_event(synthetic)
     # `payload["action"]` is hardcoded to "claim" two lines above, and
     # `parse_claim_event`'s "claim" branch unconditionally returns
-    # `_parse_active_claim`'s result -- typed `ActiveClaim`, never another
+    # `_parse_active_claim`'s result -- typed `LedgerActiveClaim`, never another
     # member of the wider `ClaimEvent` union it declares for its other four
     # actions. A malformed payload fails loud from inside that parse instead
     # of coming back as some other event type, so this narrows a guarantee
     # the callee's own return type already gives, not a real runtime outcome.
-    parsed = cast(protocol.ActiveClaim, parsed)
+    parsed = cast(protocol.LedgerActiveClaim, parsed)
     whole_reason = _optional_whole_reason(arguments)
     resource = getattr(arguments, "resource", None)
     if resource is not None:
@@ -479,8 +479,8 @@ def _identity_json(identity: protocol.ClaimIdentity) -> dict[str, object]:
 
 
 def _status_claims(
-    claims: tuple[protocol.ActiveClaim, ...], issue: int | None
-) -> tuple[tuple[protocol.ActiveClaim, ...], protocol.ClaimConflictIndex]:
+    claims: tuple[protocol.LedgerActiveClaim, ...], issue: int | None
+) -> tuple[tuple[protocol.LedgerActiveClaim, ...], protocol.ClaimConflictIndex]:
     selected = tuple(
         claim
         for claim in claims
@@ -499,14 +499,14 @@ def _status_claims(
     return related, index
 
 
-def _resource_fields(claim: protocol.ActiveClaim) -> dict[str, object]:
+def _resource_fields(claim: protocol.LedgerActiveClaim) -> dict[str, object]:
     if claim.resource is None:
         return {"resource": None, "resource_value": None}
     return {"resource": claim.resource.name, "resource_value": claim.resource.value}
 
 
 def _overlap_subjects(
-    claims_by_id: dict[str, protocol.ActiveClaim], peer_ids: set[str]
+    claims_by_id: dict[str, protocol.LedgerActiveClaim], peer_ids: set[str]
 ) -> list[dict[str, object]]:
     return [
         {
@@ -519,7 +519,9 @@ def _overlap_subjects(
     ]
 
 
-def _overlap_note(claims_by_id: dict[str, protocol.ActiveClaim], peer_ids: set[str]) -> str | None:
+def _overlap_note(
+    claims_by_id: dict[str, protocol.LedgerActiveClaim], peer_ids: set[str]
+) -> str | None:
     peers = [claims_by_id[claim_id] for claim_id in sorted(peer_ids) if claim_id in claims_by_id]
     if not peers:
         return None
@@ -534,8 +536,8 @@ def _print_unreadable_claim(record: protocol.UnreadableClaim) -> None:
 
 
 def _print_claim_status_lines(
-    claim: protocol.ActiveClaim,
-    claims_by_id: dict[str, protocol.ActiveClaim],
+    claim: protocol.LedgerActiveClaim,
+    claims_by_id: dict[str, protocol.LedgerActiveClaim],
     index: protocol.ClaimConflictIndex,
     observed_at: datetime,
 ) -> None:
@@ -557,8 +559,8 @@ def _print_claim_status_lines(
 
 
 def _print_related_claims(
-    claims: tuple[protocol.ActiveClaim, ...],
-    related: tuple[protocol.ActiveClaim, ...],
+    claims: tuple[protocol.LedgerActiveClaim, ...],
+    related: tuple[protocol.LedgerActiveClaim, ...],
     index: protocol.ClaimConflictIndex,
     observed_at: datetime,
 ) -> int:
@@ -569,7 +571,7 @@ def _print_related_claims(
 
 
 def _status(
-    claims: tuple[protocol.ActiveClaim, ...],
+    claims: tuple[protocol.LedgerActiveClaim, ...],
     issue: int | None,
     now: datetime | None = None,
     *,
@@ -598,7 +600,7 @@ def _unreadable_json(record: protocol.UnreadableClaim) -> dict[str, object]:
 
 
 def _status_json(
-    claims: tuple[protocol.ActiveClaim, ...],
+    claims: tuple[protocol.LedgerActiveClaim, ...],
     issue: int | None,
     ledger: int,
     now: datetime | None = None,
@@ -644,7 +646,7 @@ def _status_json(
     return 2 if state == "CONFLICT" else 0
 
 
-def _who(claims: tuple[protocol.ActiveClaim, ...], path: str) -> None:
+def _who(claims: tuple[protocol.LedgerActiveClaim, ...], path: str) -> None:
     holders = protocol.claims_holding_path(claims, path)
     if not holders:
         print(f"UNCLAIMED {path}")
@@ -663,7 +665,7 @@ def _who(claims: tuple[protocol.ActiveClaim, ...], path: str) -> None:
         )
 
 
-def _who_json(claims: tuple[protocol.ActiveClaim, ...], path: str, ledger: int) -> None:
+def _who_json(claims: tuple[protocol.LedgerActiveClaim, ...], path: str, ledger: int) -> None:
     holders = protocol.claims_holding_path(claims, path)
     state = "UNCLAIMED" if not holders else "CLAIMED"
     payload = {
@@ -689,7 +691,7 @@ def _who_json(claims: tuple[protocol.ActiveClaim, ...], path: str, ledger: int) 
     print(json.dumps(payload))
 
 
-def _rescope_json(claimed: protocol.ActiveClaim) -> None:
+def _rescope_json(claimed: protocol.LedgerActiveClaim) -> None:
     print(
         json.dumps(
             {
@@ -716,10 +718,10 @@ class ScopeVersioning:
 
 
 def _claim_json(
-    claimed: protocol.ActiveClaim,
+    claimed: protocol.LedgerActiveClaim,
     *,
     versioning: ScopeVersioning,
-    touches: tuple[protocol.ActiveClaim, ...],
+    touches: tuple[protocol.LedgerActiveClaim, ...],
     checks: tuple[SliceCheck, ...],
 ) -> int:
     print(
@@ -746,7 +748,7 @@ def _claim_json(
 
 
 def _release_json(
-    released: protocol.ActiveClaim,
+    released: protocol.LedgerActiveClaim,
     agent: str,
     role: str | None,
     outcome: protocol.ReleaseOutcome,
@@ -883,7 +885,7 @@ def _load_board_config(client: forge.BoardSource, toplevel: Path) -> board.Board
 
 def _board(
     client: forge.BoardSource,
-    claims: tuple[protocol.ActiveClaim, ...],
+    claims: tuple[protocol.LedgerActiveClaim, ...],
     *,
     issues: tuple[board.Issue, ...] | None = None,
 ) -> board.Board:

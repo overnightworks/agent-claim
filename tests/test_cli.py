@@ -22,7 +22,6 @@ from agent_claim import __version__, board, checkout, discovery, forge, github, 
 from agent_claim import cli as issue_claim
 from agent_claim.cli import (
     MAX_COMMENT_BYTES,
-    ActiveClaim,
     ClaimantRelease,
     ClaimError,
     ClaimRequest,
@@ -33,6 +32,7 @@ from agent_claim.cli import (
     IssueComment,
     IssueIdentity,
     LaneIdentity,
+    LedgerActiveClaim,
     LedgerSupersede,
     LedgerSupersededError,
     _status,
@@ -396,7 +396,7 @@ def projected_board(
     issues: tuple[board.Issue, ...],
     open_pull_requests: tuple[board.PullRequest, ...],
     recent_merged_pull_requests: tuple[board.PullRequest, ...],
-    claims: tuple[ActiveClaim, ...],
+    claims: tuple[LedgerActiveClaim, ...],
     config: board.BoardConfig,
     *,
     repository: str = REPOSITORY,
@@ -7383,7 +7383,7 @@ def test_a_configured_idea_keeps_freeze_claim_and_blocker_reasons(
         claim
         for claim_request in claims
         if isinstance(
-            claim := parse_claim_event(comment(1, claim_comment(claim_request))), ActiveClaim
+            claim := parse_claim_event(comment(1, claim_comment(claim_request))), LedgerActiveClaim
         )
     )
     projected = projected_board(
@@ -7466,7 +7466,9 @@ def marker(payload: dict[str, object], *, legacy: bool = False, attributed: bool
     return body
 
 
-def release_event(claim: ActiveClaim, *, agent: str | None = None, role: str | None = None) -> str:
+def release_event(
+    claim: LedgerActiveClaim, *, agent: str | None = None, role: str | None = None
+) -> str:
     return release_comment(
         claim,
         agent or claim.agent,
@@ -7488,7 +7490,7 @@ def test_claim_marker_round_trips_visible_contract(
     body = claim_comment(request(lane=lane))
     parsed = parse_claim_event(comment(1, body))
 
-    assert isinstance(parsed, ActiveClaim)
+    assert isinstance(parsed, LedgerActiveClaim)
     assert parsed.identity == expected_identity
     assert parsed.claim_id == "claim-a"
     assert parsed.base == BASE
@@ -7593,7 +7595,7 @@ def test_marker_identity_discriminator_refuses_ambiguous_or_missing_keys(
 
 def test_protocol_parser_returns_action_specific_types() -> None:
     claimed = parse_claim_event(comment(1, claim_comment(request())))
-    assert isinstance(claimed, ActiveClaim)
+    assert isinstance(claimed, LedgerActiveClaim)
 
     released = parse_claim_event(comment(2, release_event(claimed)))
     assert isinstance(released, ClaimantRelease)
@@ -7602,7 +7604,7 @@ def test_protocol_parser_returns_action_specific_types() -> None:
 
 def test_untrusted_claim_and_release_markers_are_ignored() -> None:
     claimed = parse_claim_event(comment(1, claim_comment(request())))
-    assert isinstance(claimed, ActiveClaim)
+    assert isinstance(claimed, LedgerActiveClaim)
     release = release_event(claimed)
 
     comments = (
@@ -7699,7 +7701,7 @@ def test_outbound_comment_constructors_reject_controlled_identity_fields(
     invalid: str,
 ) -> None:
     claimed = parse_claim_event(comment(1, claim_comment(request())))
-    assert isinstance(claimed, ActiveClaim)
+    assert isinstance(claimed, LedgerActiveClaim)
 
     raised_argument_1 = replace(request(), agent=invalid)
     with pytest.raises(ClaimError, match="agent must be one bounded non-empty line"):
@@ -7724,7 +7726,7 @@ def test_outbound_comment_constructors_reject_controlled_identity_fields(
 )
 def test_outbound_comment_constructors_reject_controlled_reasons(invalid: str) -> None:
     claimed = parse_claim_event(comment(1, claim_comment(request())))
-    assert isinstance(claimed, ActiveClaim)
+    assert isinstance(claimed, LedgerActiveClaim)
 
     with pytest.raises(ClaimError, match="reason must be one bounded non-empty line"):
         release_comment(claimed, "Codex Sol", "builder", invalid)
@@ -7748,7 +7750,7 @@ def test_legacy_bootstrap_claim_is_read_only_when_marker_is_first_line() -> None
 
     parsed = parse_claim_event(comment(1, legacy))
 
-    assert isinstance(parsed, ActiveClaim)
+    assert isinstance(parsed, LedgerActiveClaim)
     assert parsed.identity == IssueIdentity(LEDGER_ISSUE)
     assert parsed.claim_id == "bootstrap"
 
@@ -7916,7 +7918,7 @@ def test_supersede_comment_requires_an_issue_identified_claim() -> None:
     `supersede_ledger` itself only ever calls it with an issue-identified
     claim already validated as the ledger's own."""
     lane_claim = parse_claim_event(comment(1, claim_comment(request(lane=True))))
-    assert isinstance(lane_claim, ActiveClaim)
+    assert isinstance(lane_claim, LedgerActiveClaim)
 
     with pytest.raises(ClaimError, match="ledger supersede requires an issue-identified claim"):
         protocol.supersede_comment(lane_claim, 170, "Fleet Coordinator", "coordinator", "reviewed")
@@ -8088,7 +8090,7 @@ def test_aggregation_fences_an_unknown_field_comment_instead_of_failing_the_ledg
 def test_an_unreadable_rescope_quarantines_its_still_readable_claim() -> None:
     """Finding 1 (issue #136): a claim posted normally, then rescoped by a newer
     writer whose rescope this reader cannot parse, stays active and readable --
-    but `ActiveClaim.quarantined_by` now names the rescope comment that fences it.
+    but `LedgerActiveClaim.quarantined_by` now names the rescope comment that fences it.
     This internal attachment is what `release`/`pr-check` key their refusal off of
     (exercised through the CLI below); a raw dataclass field is not something the
     CLI surfaces directly, so it is pinned here instead."""
@@ -8120,7 +8122,7 @@ def test_an_unreadable_rescope_quarantines_its_still_readable_claim() -> None:
 def test_release_must_come_from_original_claimant() -> None:
     claimed_body = claim_comment(request())
     claimed = parse_claim_event(comment(1, claimed_body))
-    assert isinstance(claimed, ActiveClaim)
+    assert isinstance(claimed, LedgerActiveClaim)
     foreign_release = release_event(claimed, agent="Other", role="builder")
 
     raised_argument_1 = comment(1, claimed_body)
@@ -8132,7 +8134,7 @@ def test_release_must_come_from_original_claimant() -> None:
 def test_coordinator_override_is_explicit_and_bound_to_claim_comment() -> None:
     claimed_body = claim_comment(request())
     claimed = parse_claim_event(comment(1, claimed_body))
-    assert isinstance(claimed, ActiveClaim)
+    assert isinstance(claimed, LedgerActiveClaim)
     override = release_comment(
         claimed,
         "Codex Commissioner",
@@ -8158,7 +8160,7 @@ def test_release_refuses_a_mismatched_identity() -> None:
     the wrong claim."""
     claimed_body = claim_comment(request(issue=71))
     claimed = parse_claim_event(comment(1, claimed_body))
-    assert isinstance(claimed, ActiveClaim)
+    assert isinstance(claimed, LedgerActiveClaim)
     wrong_identity_claim = replace(claimed, identity=IssueIdentity(72))
     released = release_event(wrong_identity_claim)
 
@@ -8171,7 +8173,7 @@ def test_release_refuses_a_mismatched_identity() -> None:
 def test_rescope_refuses_a_claim_id_rescoped_after_release() -> None:
     claimed_body = claim_comment(request())
     claimed = parse_claim_event(comment(1, claimed_body))
-    assert isinstance(claimed, ActiveClaim)
+    assert isinstance(claimed, LedgerActiveClaim)
     released = release_event(claimed)
     rescope = protocol.rescope_comment(claimed, ("src",), claimed.agent, claimed.role)
 
@@ -8185,7 +8187,7 @@ def test_rescope_refuses_a_claim_id_rescoped_after_release() -> None:
 def test_rescope_refuses_a_claim_id_never_acquired() -> None:
     claimed_body = claim_comment(request())
     claimed = parse_claim_event(comment(1, claimed_body))
-    assert isinstance(claimed, ActiveClaim)
+    assert isinstance(claimed, LedgerActiveClaim)
     rescope = protocol.rescope_comment(claimed, ("src",), claimed.agent, claimed.role)
 
     raised_argument_1 = comment(1, rescope)
@@ -8196,7 +8198,7 @@ def test_rescope_refuses_a_claim_id_never_acquired() -> None:
 def test_rescope_refuses_a_mismatched_identity() -> None:
     claimed_body = claim_comment(request(issue=71))
     claimed = parse_claim_event(comment(1, claimed_body))
-    assert isinstance(claimed, ActiveClaim)
+    assert isinstance(claimed, LedgerActiveClaim)
     wrong_identity_claim = replace(claimed, identity=IssueIdentity(72))
     rescope = protocol.rescope_comment(wrong_identity_claim, ("src",), claimed.agent, claimed.role)
 
@@ -8209,7 +8211,7 @@ def test_rescope_refuses_a_mismatched_identity() -> None:
 def test_rescope_refuses_an_agent_other_than_the_claimant() -> None:
     claimed_body = claim_comment(request())
     claimed = parse_claim_event(comment(1, claimed_body))
-    assert isinstance(claimed, ActiveClaim)
+    assert isinstance(claimed, LedgerActiveClaim)
     rescope = protocol.rescope_comment(claimed, ("src",), "Other Agent", claimed.role)
 
     raised_argument_1 = comment(1, claimed_body)
@@ -8224,7 +8226,7 @@ def test_active_claims_strict_reader_refuses_reused_claim_ids_and_orphan_release
     tolerant repair pass are allowed to treat a duplicate claim id as recoverable."""
     claimed_body = claim_comment(request())
     claimed = parse_claim_event(comment(1, claimed_body))
-    assert isinstance(claimed, ActiveClaim)
+    assert isinstance(claimed, LedgerActiveClaim)
     released = release_event(claimed)
 
     raised_argument_1 = comment(1, claimed_body)
@@ -8246,7 +8248,7 @@ def test_active_claims_strict_reader_refuses_reused_claim_ids_and_orphan_release
 def test_duplicate_claimant_releases_are_idempotent() -> None:
     claimed_body = claim_comment(request())
     claimed = parse_claim_event(comment(1, claimed_body))
-    assert isinstance(claimed, ActiveClaim)
+    assert isinstance(claimed, LedgerActiveClaim)
     first_release = release_comment(claimed, "Codex Sol", "builder", "landed")
     second_release = release_comment(claimed, "Codex Sol", "builder", "landed retry")
 
@@ -8268,7 +8270,7 @@ def test_claimant_and_coordinator_release_race_is_idempotent(
 ) -> None:
     claimed_body = claim_comment(request())
     claimed = parse_claim_event(comment(1, claimed_body))
-    assert isinstance(claimed, ActiveClaim)
+    assert isinstance(claimed, LedgerActiveClaim)
     claimant = release_comment(claimed, "Codex Sol", "builder", "landed")
     coordinator = release_comment(
         claimed,
@@ -8294,7 +8296,7 @@ def test_claimant_and_coordinator_release_race_is_idempotent(
 def test_supersede_atomically_terminates_the_only_ledger_claim() -> None:
     claimed_body = claim_comment(request(issue=LEDGER_ISSUE))
     claimed = parse_claim_event(comment(1, claimed_body))
-    assert isinstance(claimed, ActiveClaim)
+    assert isinstance(claimed, LedgerActiveClaim)
     frozen = supersede_comment(
         claimed,
         170,
@@ -8323,7 +8325,7 @@ def test_supersede_atomically_terminates_the_only_ledger_claim() -> None:
 def test_supersede_is_an_inert_rejected_event_while_another_lane_is_active() -> None:
     rollover_body = claim_comment(request(issue=LEDGER_ISSUE, scope=("docs",)))
     rollover = parse_claim_event(comment(1, rollover_body))
-    assert isinstance(rollover, ActiveClaim)
+    assert isinstance(rollover, LedgerActiveClaim)
     other = comment(
         2,
         claim_comment(request("other", issue=72, scope=("frontend",))),
@@ -8368,7 +8370,7 @@ def test_supersede_reraises_a_pre_existing_supersede_that_does_not_match_this_re
     -- it is a genuine conflict, and the original error must propagate."""
     claimed_body = claim_comment(request(issue=LEDGER_ISSUE))
     claimed = parse_claim_event(comment(1, claimed_body))
-    assert isinstance(claimed, ActiveClaim)
+    assert isinstance(claimed, LedgerActiveClaim)
     foreign_supersede = supersede_comment(
         claimed, 170, "Other Coordinator", "coordinator", "already superseded"
     )
@@ -8537,7 +8539,7 @@ def test_comma_joined_scope_marker_is_read_as_distinct_paths() -> None:
         )
     )
 
-    assert isinstance(parsed, ActiveClaim)
+    assert isinstance(parsed, LedgerActiveClaim)
     assert parsed.scope == (
         "docs/PRODUCT.md",
         "src/atelier2/adapters/dbos/run_transitions.py",
@@ -8593,7 +8595,7 @@ def test_comma_joined_scope_with_spaces_equals_repeated_entries() -> None:
         )
     )
 
-    assert isinstance(parsed, ActiveClaim)
+    assert isinstance(parsed, LedgerActiveClaim)
     assert parsed.scope == ("docs/PRODUCT.md", "src/widget.py")
 
 
@@ -8663,7 +8665,7 @@ def test_status_scope_index_never_rescans_scope_pairs(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    claims: list[ActiveClaim] = []
+    claims: list[LedgerActiveClaim] = []
     for claim_index in range(50):
         parsed = parse_claim_event(
             comment(
@@ -8680,7 +8682,7 @@ def test_status_scope_index_never_rescans_scope_pairs(
                 created_at="2026-08-21T00:00:00Z",
             )
         )
-        assert isinstance(parsed, ActiveClaim)
+        assert isinstance(parsed, LedgerActiveClaim)
         claims.append(parsed)
 
     def scope_pair_scan(*args, **kwargs):
@@ -8970,8 +8972,8 @@ def test_who_reports_the_claim_holding_a_path() -> None:
     second = parse_claim_event(
         comment(2, claim_comment(request("claim-b", issue=73, scope=("src/widget.py",))))
     )
-    assert isinstance(first, ActiveClaim)
-    assert isinstance(second, ActiveClaim)
+    assert isinstance(first, LedgerActiveClaim)
+    assert isinstance(second, LedgerActiveClaim)
     claims = (first, second)
 
     assert claims_holding_path(claims, "docs/PRODUCT.md") == (first,)
@@ -8981,7 +8983,7 @@ def test_who_reports_the_claim_holding_a_path() -> None:
 
 def test_who_reports_a_directory_claim_for_a_descendant_path() -> None:
     parent = parse_claim_event(comment(1, claim_comment(request(issue=72, scope=("docs",)))))
-    assert isinstance(parent, ActiveClaim)
+    assert isinstance(parent, LedgerActiveClaim)
 
     assert claims_holding_path((parent,), "docs/decisions/one.md") == (parent,)
 
@@ -9010,7 +9012,7 @@ def test_owning_issue_projection_uses_the_configured_ledger_number(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     claimed = parse_claim_event(comment(1, claim_comment(request(issue=72))))
-    assert isinstance(claimed, ActiveClaim)
+    assert isinstance(claimed, LedgerActiveClaim)
     monkeypatch.setattr(protocol, "LEDGER_ISSUE", 170)
 
     projection = issue_claim._active_projection(claimed)
@@ -9076,7 +9078,7 @@ def test_acquire_claim_refuses_reusing_an_active_claim_id_before_posting() -> No
 def test_acquire_claim_refuses_reusing_a_released_claim_id_before_posting() -> None:
     claimed_body = claim_comment(request("claim-a", issue=72))
     claimed = parse_claim_event(comment(1, claimed_body))
-    assert isinstance(claimed, ActiveClaim)
+    assert isinstance(claimed, LedgerActiveClaim)
     entries = [comment(1, claimed_body), comment(2, release_event(claimed))]
     client = FakeForge({LEDGER_ISSUE: list(entries)})
 
@@ -9158,7 +9160,7 @@ def unreadable_ledger_comment(identifier: int, claim_id: str = "claim-b") -> Iss
 
 def test_release_of_the_unreadable_claim_itself_is_refused() -> None:
     """Fail closed (issue #136): a claim comment this reader cannot parse never
-    becomes an `ActiveClaim`, so releasing its claim id hits the ordinary
+    becomes an `LedgerActiveClaim`, so releasing its claim id hits the ordinary
     no-active-claim refusal instead of trusting an unverified identity/agent/role.
     (`claim`/`rescope`'s own fail-closed refusal, and a quarantined claim's
     `release`/`pr-check` refusal, are exercised through the public CLI entry
@@ -9289,7 +9291,7 @@ def test_successor_adopts_old_projection_but_old_helper_cannot_mutate_it(
 
     monkeypatch.setattr(protocol, "LEDGER_ISSUE", 170)
     successor_body = issue_claim._active_projection(
-        ActiveClaim(
+        LedgerActiveClaim(
             IssueIdentity(72),
             "successor",
             "Codex Sol",
@@ -9500,7 +9502,7 @@ def test_release_claim_override_fails_before_ledger_without_the_coordinator_role
 def test_label_reconciliation_heals_claim_posted_during_release_remove() -> None:
     old_claim_body = claim_comment(request("old", issue=72, scope=("old",)))
     old_claim = parse_claim_event(comment(1, old_claim_body))
-    assert isinstance(old_claim, ActiveClaim)
+    assert isinstance(old_claim, LedgerActiveClaim)
     release_body = release_event(old_claim)
     new_claim_comment = comment(
         3,
@@ -9668,7 +9670,7 @@ def test_repair_duplicate_claims_only_auto_resolves_the_safe_cases(
 ) -> None:
     older_body = claim_comment(request("claim-a", older_agent, issue=72, scope=("old",)))
     older_claim = parse_claim_event(comment(1, older_body))
-    assert isinstance(older_claim, ActiveClaim)
+    assert isinstance(older_claim, LedgerActiveClaim)
     entries = [comment(1, older_body)]
     if release_before_reuse:
         entries.append(comment(2, release_event(older_claim)))
@@ -9712,7 +9714,7 @@ def test_repair_duplicate_claims_ignores_an_inert_ledger_supersede_as_a_release(
     even though it parses cleanly and names the right claim id."""
     original = comment(1, claim_comment(request("claim-a", "Codex Sol", issue=LEDGER_ISSUE)))
     original_claim = parse_claim_event(original)
-    assert isinstance(original_claim, ActiveClaim)
+    assert isinstance(original_claim, LedgerActiveClaim)
     other_active_claim = comment(2, claim_comment(request("other", "Codex Sol", issue=72)))
     inert_supersede = comment(
         3,
@@ -9736,7 +9738,7 @@ def test_repair_duplicate_claims_attributes_a_late_release_to_the_original_occur
     already-released repair apply, regardless of which agent posted the duplicate."""
     original = comment(1, claim_comment(request("claim-a", "Codex Sol", issue=72, scope=("old",))))
     original_claim = parse_claim_event(original)
-    assert isinstance(original_claim, ActiveClaim)
+    assert isinstance(original_claim, LedgerActiveClaim)
     duplicate = comment(2, claim_comment(request("claim-a", "Grok 4.6", issue=73, scope=("new",))))
     late_release = comment(3, release_event(original_claim))
     client = FakeForge({LEDGER_ISSUE: [original, duplicate, late_release]})
@@ -9783,7 +9785,7 @@ def test_repair_duplicate_claims_neutralizes_every_honored_terminal_comment(
     referencing a claim that repair just made invisible, and the ledger stays dead."""
     original = comment(1, claim_comment(request("claim-a", "Codex Sol", issue=72)))
     original_claim = parse_claim_event(original)
-    assert isinstance(original_claim, ActiveClaim)
+    assert isinstance(original_claim, LedgerActiveClaim)
     first_release = comment(2, release_event(original_claim))
     second_release = comment(3, second_release_body(original_claim))
     reused = comment(4, claim_comment(request("claim-a", "Grok 4.6", issue=73, scope=("fresh",))))
@@ -9866,7 +9868,7 @@ def test_repair_duplicate_claims_same_agent_cross_issue_keeps_only_the_newer_lan
 def test_stale_reconcile_removes_label_when_supersede_wins_midflight() -> None:
     claimed_body = claim_comment(request(issue=LEDGER_ISSUE))
     claimed = parse_claim_event(comment(1, claimed_body))
-    assert isinstance(claimed, ActiveClaim)
+    assert isinstance(claimed, LedgerActiveClaim)
     frozen = comment(
         2,
         supersede_comment(
@@ -9894,7 +9896,7 @@ def test_stale_reconcile_removes_label_when_supersede_wins_midflight() -> None:
 def test_old_reconcile_clears_only_its_generation_label_after_freeze() -> None:
     claimed_body = claim_comment(request(issue=LEDGER_ISSUE))
     claimed = parse_claim_event(comment(1, claimed_body))
-    assert isinstance(claimed, ActiveClaim)
+    assert isinstance(claimed, LedgerActiveClaim)
     frozen = supersede_comment(
         claimed,
         170,
@@ -9968,8 +9970,8 @@ def test_status_reports_repository_scope_overlaps_as_notes(
             claim_comment(request("claim-b", issue=73, scope=("shared/file.py",))),
         )
     )
-    assert isinstance(first, ActiveClaim)
-    assert isinstance(second, ActiveClaim)
+    assert isinstance(first, LedgerActiveClaim)
+    assert isinstance(second, LedgerActiveClaim)
 
     exit_code = _status((first, second), None)
 
@@ -9994,8 +9996,8 @@ def test_status_notes_a_scope_that_is_claimed_after_its_descendant(
     parent = parse_claim_event(
         comment(2, claim_comment(request("claim-b", issue=73, scope=("shared",))))
     )
-    assert isinstance(descendant, ActiveClaim)
-    assert isinstance(parent, ActiveClaim)
+    assert isinstance(descendant, LedgerActiveClaim)
+    assert isinstance(parent, LedgerActiveClaim)
 
     assert _status((descendant, parent), None) == 0
     rendered = capsys.readouterr().out
@@ -10792,7 +10794,7 @@ def test_github_projection_update_patches_one_comment_and_deletes_duplicates(
     client = GitHubForge(github._repository_id("example/agent-claim"), run=run)
     monkeypatch.setattr(client, "_projection_comments", lambda issue: (first, duplicate))
     body = issue_claim._active_projection(
-        ActiveClaim(
+        LedgerActiveClaim(
             IssueIdentity(72),
             "claim-a",
             "Codex Sol",
@@ -12083,7 +12085,7 @@ def test_cli_claim_omitted_role_posts_default_and_explicit_wins(
 
     assert claimed == 0
     posted = parse_claim_event(client.comments[LEDGER_ISSUE][0])
-    assert isinstance(posted, ActiveClaim)
+    assert isinstance(posted, LedgerActiveClaim)
     assert posted.role == role
 
 
@@ -12218,7 +12220,7 @@ def test_request_and_cli_claim_fill_agent_from_documented_else_chain(
     monkeypatch.setattr(discovery, "discover_ledger", lambda _client: LEDGER_ISSUE)
     assert issue_claim.main(["--repo", "example/agent-claim", *command]) == 0
     posted = parse_claim_event(client.comments[LEDGER_ISSUE][0])
-    assert isinstance(posted, ActiveClaim)
+    assert isinstance(posted, LedgerActiveClaim)
     assert posted.agent == agent
 
 
@@ -12345,7 +12347,7 @@ def test_cli_same_filled_agent_can_claim_and_release_without_flag(
 
     assert (claimed, released) == (0, 0)
     posted = parse_claim_event(client.comments[LEDGER_ISSUE][0])
-    assert isinstance(posted, ActiveClaim)
+    assert isinstance(posted, LedgerActiveClaim)
     assert posted.agent == "Grok session-1"
     assert active_claims(tuple(client.comments[LEDGER_ISSUE])) == ()
 
@@ -12634,7 +12636,7 @@ def test_cli_claim_omitted_base_and_branch_posts_filled_checkout(
     assert claimed == 0
     assert "CLAIMED issue #72" in capsys.readouterr().out
     posted = parse_claim_event(client.comments[LEDGER_ISSUE][0])
-    assert isinstance(posted, ActiveClaim)
+    assert isinstance(posted, LedgerActiveClaim)
     assert posted.base == BASE
     assert posted.branch == "codex/issue-72"
     assert posted.scope == ("src",)
@@ -12893,7 +12895,7 @@ def test_cli_reconcile_still_clears_stale_labels_when_ledger_is_frozen(
 ) -> None:
     claimed_body = claim_comment(request(issue=LEDGER_ISSUE))
     claimed = parse_claim_event(comment(1, claimed_body))
-    assert isinstance(claimed, ActiveClaim)
+    assert isinstance(claimed, LedgerActiveClaim)
     frozen_body = supersede_comment(
         claimed, 170, "Fleet Coordinator", "coordinator", "reviewed rollover ready"
     )
@@ -14462,7 +14464,7 @@ def test_cli_comma_joined_scope_is_stored_as_distinct_paths_and_overlaps(
 
     assert claimed == 0
     posted = parse_claim_event(client.comments[LEDGER_ISSUE][0])
-    assert isinstance(posted, ActiveClaim)
+    assert isinstance(posted, LedgerActiveClaim)
     assert posted.scope == (
         "docs/PRODUCT.md",
         "src/atelier2/adapters/dbos/run_transitions.py",
@@ -14549,8 +14551,8 @@ def test_cli_comma_joined_scope_flag_equals_repeated_scope_flags(
     assert (joined, repeated) == (0, 0)
     first = parse_claim_event(client.comments[LEDGER_ISSUE][0])
     second = parse_claim_event(repeated_client.comments[LEDGER_ISSUE][0])
-    assert isinstance(first, ActiveClaim)
-    assert isinstance(second, ActiveClaim)
+    assert isinstance(first, LedgerActiveClaim)
+    assert isinstance(second, LedgerActiveClaim)
     assert first.scope == second.scope == ("docs/PRODUCT.md", "src/widget.py")
 
 
@@ -15219,8 +15221,8 @@ def test_claim_cost_lists_an_overlapping_standing_claim_as_a_touch() -> None:
             ),
         )
     )
-    assert isinstance(standing, ActiveClaim)
-    assert isinstance(lane, ActiveClaim)
+    assert isinstance(standing, LedgerActiveClaim)
+    assert isinstance(lane, LedgerActiveClaim)
     overlapping = protocol.conflicting_claims(
         (standing, lane), request("challenger", issue=56, scope=("src/widget.py",))
     )
@@ -15311,7 +15313,7 @@ def test_claim_age_uses_the_claim_comment_not_a_later_rescope(
     claimed = request("mine", "Ada", issue=72, branch="codex/issue-72", scope=("src",))
     claim_event = comment(1, claim_comment(claimed), created_at="2026-08-20T23:30:00Z")
     parsed = parse_claim_event(claim_event)
-    assert isinstance(parsed, ActiveClaim)
+    assert isinstance(parsed, LedgerActiveClaim)
     rescope_event = comment(
         2,
         protocol.rescope_comment(parsed, ("src", "LICENSE"), "Ada", "builder"),
@@ -15334,7 +15336,7 @@ def test_rescope_whole_reason_lifecycle_none_reason_kept_then_cleared() -> None:
     `rescope_clear_whole_reason_comment` clears it back to unset."""
     claim_event = comment(1, claim_comment(request(issue=72, scope=("src",))))
     claimed = parse_claim_event(claim_event)
-    assert isinstance(claimed, ActiveClaim)
+    assert isinstance(claimed, LedgerActiveClaim)
     assert claimed.whole_reason is None
 
     set_reason_event = comment(
@@ -15768,7 +15770,7 @@ def test_cli_claim_accepts_three_named_paths_without_whole(
 
     assert status == 0
     posted = parse_claim_event(client.comments[LEDGER_ISSUE][0])
-    assert isinstance(posted, ActiveClaim)
+    assert isinstance(posted, LedgerActiveClaim)
     assert posted.scope == ("new_a.py", "new_b.py", "new_c.py")
     assert posted.whole_reason is None
 
@@ -15939,7 +15941,7 @@ def test_cli_claim_persists_whole_reason_and_status_and_who_show_it(
 
     assert status == 0
     posted = parse_claim_event(client.comments[LEDGER_ISSUE][0])
-    assert isinstance(posted, ActiveClaim)
+    assert isinstance(posted, LedgerActiveClaim)
     assert posted.whole_reason == reason
     assert f"- Whole: {reason}" in client.comments[LEDGER_ISSUE][0].body
 
@@ -15995,7 +15997,7 @@ def test_cli_claim_allows_a_directory_scope_with_whole(
 
     assert status == 0
     posted = parse_claim_event(client.comments[LEDGER_ISSUE][0])
-    assert isinstance(posted, ActiveClaim)
+    assert isinstance(posted, LedgerActiveClaim)
     assert posted.scope == ("docs",)
     assert posted.whole_reason == "rewrite the docs tree"
     assert "- Whole: rewrite the docs tree" in client.comments[LEDGER_ISSUE][0].body
@@ -16088,7 +16090,7 @@ def test_cli_claim_json_prints_acquired_claim_object(
         + "\n"
     )
     posted = parse_claim_event(client.comments[LEDGER_ISSUE][0])
-    assert isinstance(posted, ActiveClaim)
+    assert isinstance(posted, LedgerActiveClaim)
     assert posted.scope == ("src", "docs")
 
 
@@ -17355,7 +17357,7 @@ def test_cli_claim_resource_prints_the_allocated_value(
     assert payload["resource"] == "schema-hop"
     assert payload["resource_value"] == 1
     posted = parse_claim_event(client.comments[LEDGER_ISSUE][0])
-    assert isinstance(posted, ActiveClaim)
+    assert isinstance(posted, LedgerActiveClaim)
     assert posted.resource is None
     assert posted.requested_resource == "schema-hop"
     standing = active_claims(client.list_protocol_candidates(LEDGER_ISSUE))
@@ -18150,8 +18152,8 @@ def test_identity_conflict_still_marks_status_conflict(
             claim_comment(request("claim-b", "Grok 4.6", issue=72, scope=("src/b.py",))),
         )
     )
-    assert isinstance(first, ActiveClaim)
-    assert isinstance(second, ActiveClaim)
+    assert isinstance(first, LedgerActiveClaim)
+    assert isinstance(second, LedgerActiveClaim)
 
     assert _status((first, second), None) == 2
     rendered = capsys.readouterr().out
