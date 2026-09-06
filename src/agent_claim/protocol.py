@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import shlex
+import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from enum import StrEnum
@@ -2549,3 +2550,112 @@ def supersede_ledger(client: ClaimWriter, request: SupersedeRequest) -> ActiveCl
             return selected
         raise
     raise ClaimError("ledger supersede event was not observed after publication")
+
+
+# --- refs/aco/state: the claim-state tree (issue #164, slice C1) ----------
+#
+# `store.py` owns the git transport (ls-remote, fetch, plumbing, push,
+# retry); this module stays pure and owns only the tree's types and its
+# `schema.toml` codec. C1 writes and reads exactly one file, `schema.toml`;
+# `claims/`, `ids/`, and `resources/` are C2's `apply`.
+
+SUPPORTED_STATE_SCHEMA_VERSION = 1
+
+
+class UnsupportedStateSchemaError(ClaimError):
+    """`schema.toml` names a version this client does not speak."""
+
+
+class MalformedStateTreeError(ClaimError):
+    """The fetched state tree is not a well-formed `schema.toml`-only tree."""
+
+
+class StateLineageError(ClaimError):
+    """A worktree's own last-observed tip is not an ancestor of the fetched tip.
+
+    Distinct from `MalformedStateTreeError`: the tree itself may parse fine --
+    it is this client's history of the ref that no longer lines up, which
+    `git push --force` recovery (documented, never automatic) is the only
+    sanctioned way to cause.
+    """
+
+
+class PushRejectedError(ClaimError):
+    """The store's push boundary did not observably land the pushed commit.
+
+    Raised for an ordinary non-fast-forward rejection and for a lost response
+    after the remote actually advanced -- the retry loop in `store.py`
+    handles both by re-fetching and looking for its own `operation_id`
+    (criterion 3), so the two causes need no separate types.
+    """
+
+
+class ObjectId(str):
+    """A runtime-validated 40-character lowercase hex git object id.
+
+    A plain `NewType` would still accept any string at runtime; every value
+    that reaches here comes from parsing git's own output or an untrusted
+    fetch, so the validation belongs on construction, not on trust.
+    """
+
+    def __new__(cls, value: str) -> ObjectId:
+        if COMMIT_PATTERN.fullmatch(value) is None:
+            raise MalformedStateTreeError(f"not a git object id: {value!r}")
+        return super().__new__(cls, value)
+
+
+@dataclass(frozen=True)
+class ClaimState:
+    """The claim-state tree as observed at one `refs/aco/state` commit.
+
+    `tip` is `None` only for `EMPTY_STATE`, standing in for a ref that does
+    not exist yet. `parse_schema_toml` already refuses any `tip` whose schema
+    is not `SUPPORTED_STATE_SCHEMA_VERSION` before a `ClaimState` is ever
+    built, so C1 has no caller that needs the version carried on the value
+    itself; `claims`, `consumed_ids`, and `resources` are added in C2
+    alongside `apply`, which is expected to be schema's first real reader (a
+    compatibility window spanning more than one supported version).
+    """
+
+    tip: ObjectId | None
+
+
+EMPTY_STATE = ClaimState(tip=None)
+
+
+@dataclass(frozen=True)
+class OperationAlreadyApplied:
+    """The push-retry loop found this `operation_id` already on the fetched tip.
+
+    Not an error: a concurrent writer's push landed, so this client's own
+    request is already satisfied and must not be re-applied.
+    """
+
+    tip: ObjectId
+
+
+def serialize_empty_schema_toml() -> str:
+    """The only `schema.toml` content C1 ever writes."""
+    return f"version = {SUPPORTED_STATE_SCHEMA_VERSION}\n"
+
+
+def parse_schema_toml(content: str, *, tip: ObjectId) -> ClaimState:
+    """Parse one fetched commit's `schema.toml` blob into its `ClaimState`.
+
+    Raises `MalformedStateTreeError` for anything but exactly one integer
+    `version` key, and `UnsupportedStateSchemaError` for a version this
+    client does not speak -- kept distinct from a malformed tree because a
+    later, genuinely well-formed schema is a new cut, not a corrupt read.
+    """
+    try:
+        data = tomllib.loads(content)
+    except tomllib.TOMLDecodeError as error:
+        raise MalformedStateTreeError(f"malformed schema.toml at {tip}: {error}") from error
+    if set(data) != {"version"}:
+        raise MalformedStateTreeError(f"schema.toml at {tip} must contain exactly 'version'")
+    version = data["version"]
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise MalformedStateTreeError(f"schema.toml version must be an integer, got {version!r}")
+    if version != SUPPORTED_STATE_SCHEMA_VERSION:
+        raise UnsupportedStateSchemaError(f"unsupported state schema version {version}")
+    return ClaimState(tip=tip)
