@@ -880,12 +880,13 @@ class SliceTableFindings:
     landed, never a finding: `cut` only ever targets `cuttable`, and `board`
     only ever reports `cuttable`/`unlinkable`/`malformed` as uncut.
 
-    `has_table` is the one precondition `next`'s `cut_slice` action and `cut`
-    itself both consult (#151): `True` the moment `parse_slice_table` found
-    any table attempt at all, well-formed or not, `False` for a container
-    that carries no slice table whatsoever. `cut` tells the two apart --
-    a container with no table cuts its own `Next` line, untied to any row;
-    one with a table but nothing `cuttable` left is a hand-fix instead.
+    `has_table` is `True` the moment `parse_slice_table` found any table
+    attempt at all, well-formed or not, `False` for a container that carries
+    no slice table whatsoever (#151). `cut --row N` needs it: a named row can
+    only ever come from a table, so a tableless container refuses by name
+    instead of reporting a row that was never there. `cut` without `--row`
+    never consults it -- it links the first still-cuttable row when one
+    exists and otherwise creates an untied child, table or not.
     """
 
     cuttable: tuple[SliceTableRow, ...]
@@ -1753,10 +1754,9 @@ def next_action(board: Board) -> NextAction | None:
     qualifying row.
 
     Whichever branch fires, the printed command never carries `--row` (#151):
-    `SliceTableFindings.has_table` is the one board.py-owned precondition
-    `cut` itself consults to accept exactly this -- a tableless container
-    creates its child untied to any row, a tabled one uses its first
-    cuttable row.
+    `cut` without `--row` accepts every container `next` names here, linking
+    its first still-cuttable row when one exists and otherwise creating an
+    untied child -- table or not, uncut row or none left in it.
     """
     uncut_by_container = {finding.item: finding for finding in board.uncut}
     for item in board.items:

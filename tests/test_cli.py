@@ -2941,15 +2941,27 @@ def test_cut_refuses_a_container_that_already_has_a_parent(
     )
 
 
-def test_cut_refuses_when_no_cuttable_row_exists(
+def test_cut_refuses_a_row_when_no_cuttable_row_exists(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
+    """`--row N` names a row inside a table; a malformed-only table still
+    refuses it by name (#151: only a bare `cut`, without `--row`, falls back
+    to an untied child when nothing is cuttable)."""
     body = "| # | Scheibe | Item | Hängt ab von |\n|---|---|---|---|\n| x | Broken | — | — |\n"
     container = _cut_container_issue(body)
     client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
 
     exit_code = issue_claim.main(
-        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
+        [
+            "--repo",
+            "example/agent-claim",
+            "cut",
+            str(CUT_CONTAINER),
+            "--title",
+            "Scheibe 1",
+            "--row",
+            "1",
+        ]
     )
 
     assert exit_code == 2
@@ -2959,6 +2971,29 @@ def test_cut_refuses_when_no_cuttable_row_exists(
     )
     assert client.created_children == []
     assert client.item_bodies == {}
+
+
+def test_cut_creates_an_untied_child_when_a_malformed_table_has_no_cuttable_row(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """The bare-`cut` twin of the refusal above: without `--row`, a table
+    with nothing cuttable left -- malformed rows included -- creates an
+    untied child instead of refusing (#151)."""
+    body = "| # | Scheibe | Item | Hängt ab von |\n|---|---|---|---|\n| x | Broken | — | — |\n"
+    container = _cut_container_issue(body)
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
+    )
+
+    assert exit_code == 0
+    child = client.next_created_child_number - 1
+    assert client.created_children == [
+        (CUT_CONTAINER, "Scheibe 1", board.CHILD_SKELETON, board.ItemKind.TASK)
+    ]
+    assert client.item_bodies == {}
+    assert capsys.readouterr().out == f"CUT #{CUT_CONTAINER} -> #{child}\n"
 
 
 def test_cut_creates_an_untied_child_when_the_container_has_no_slice_table(
@@ -4809,6 +4844,45 @@ def test_next_prints_a_cut_command_that_cut_accepts_for_an_uncut_table_row(
     assert cut_exit_code == 0
     child = client.next_created_child_number - 1
     assert client.item_bodies == {184: slice_table(("1", "Scheibe E", f"#{child}", "—"))}
+
+
+def test_next_prints_a_cut_command_that_cut_accepts_for_a_fully_linked_table(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """The remaining #151 gap: a container whose slice table has every row
+    already linked, but whose own `Next` line still names further work, must
+    not have its `next`-printed `cut` command refused for lacking a cuttable
+    row -- `cut` without `--row` creates an untied child instead, and the
+    container's own body stays untouched."""
+    container = board.Issue(
+        185,
+        "Epic",
+        (),
+        complete_contract("Weitere Aufgabe.")
+        + "\n\n"
+        + slice_table(("1", "Scheibe A", "#101", "—")),
+        "2026-08-20T00:00:00Z",
+        "2026-08-20T00:00:00Z",
+        kind=board.ItemKind.CONTAINER,
+        children_closed=1,
+        children_total=1,
+    )
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
+
+    next_exit_code = issue_claim.main(["--repo", "example/agent-claim", "next"])
+    assert next_exit_code == 0
+    command_line = capsys.readouterr().out.splitlines()[1]
+    cut_arguments = shlex.split(command_line.removeprefix("Next: agent-claim "))
+
+    cut_exit_code = issue_claim.main(["--repo", "example/agent-claim", *cut_arguments])
+
+    assert cut_exit_code == 0
+    child = client.next_created_child_number - 1
+    assert client.created_children == [
+        (185, "Weitere Aufgabe.", board.CHILD_SKELETON, board.ItemKind.TASK)
+    ]
+    assert client.item_bodies == {}
+    assert capsys.readouterr().out == f"CUT #185 -> #{child}\n"
 
 
 def test_next_json_names_a_cuttable_container_slice(

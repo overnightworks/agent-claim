@@ -1811,26 +1811,23 @@ def _cut_target(client: forge.ForgeWriter, number: int) -> board.Issue:
 
 
 def _cut_row(target: board.Issue, row_number: int | None) -> board.SliceTableRow | None:
-    """The slice-table row `cut` dispatches -- `--row N`, or the first
-    cuttable row -- or `None` when `target` carries no slice table at all
-    (`SliceTableFindings.has_table`, #151's shared precondition), in which
-    case `cut` creates its child untied to any row instead of refusing a
-    command `next` just printed for it. `--row` on such a container still
-    refuses: it names a row in a table that does not exist.
+    """The slice-table row `cut` dispatches (#151): without `--row`, the
+    first still-cuttable row when one exists, else `None` -- `cut` then
+    creates an untied child, table or not, so a command `next` just printed
+    for `target` is never refused for lacking one. `--row N` requires a
+    table containing an uncut row `N` and refuses by name otherwise: no
+    slice table at all, or no row `N` left cuttable in it.
     """
     findings = board.slice_table_findings(target.body)
+    if row_number is None:
+        return findings.cuttable[0] if findings.cuttable else None
     if not findings.has_table:
-        if row_number is not None:
-            raise protocol.ClaimUnavailableError(
-                f"#{target.number} has no slice table; --row needs one to select a row from"
-            )
-        return None
-    if row_number is not None:
-        row = next(
-            (candidate for candidate in findings.cuttable if candidate.index == row_number), None
+        raise protocol.ClaimUnavailableError(
+            f"#{target.number} has no slice table; --row needs one to select a row from"
         )
-    else:
-        row = findings.cuttable[0] if findings.cuttable else None
+    row = next(
+        (candidate for candidate in findings.cuttable if candidate.index == row_number), None
+    )
     if row is None:
         raise protocol.ClaimUnavailableError(
             f"#{target.number} has no cuttable slice row; "
