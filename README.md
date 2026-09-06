@@ -295,8 +295,11 @@ contract, or is a configured projectionless idea; its text form also prints
 item body for the real paths — the `--json` form is unchanged beyond the
 always-present `action` field. `cut_slice`: a container with no open child
 still names work in its own `Next` line (`{"action": "cut_slice", "number",
-"title", "slice"}`); the head cuts that slice (`agent-claim cut <number>
---title "..."`) and dispatches it. `close_container`: a container with no
+"title", "slice", "cut_title"}`); `slice` is the container's own human step,
+`cut_title` is the exact title `cut` accepts (#177: the first uncut
+`[[slice]]` entry's title when one exists, else `slice`) — the head cuts
+that slice (`agent-claim cut <number> --title "<cut_title>"`) and dispatches
+it. `close_container`: a container with no
 open child and no further `Next` work (`{"action": "close_container",
 "number", "closed", "total"}`); the head closes it. A container is never
 itself the `work_item` target. Pulling is not dispatching, so unruled

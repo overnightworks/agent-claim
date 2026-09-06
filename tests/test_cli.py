@@ -3940,7 +3940,10 @@ def test_next_prints_a_cut_command_block_mode_accepts_a_differing_next_line(
     refuses unless `--title` matches its title exactly (atelier-2, seven
     live containers), so the printed command carries the entry's title,
     never the `next` line's prose -- while the action line above it keeps
-    naming the container's own words."""
+    naming the container's own words. `next --json` carries the same split
+    as two fields: `slice` is that human step, `cut_title` is the title
+    `cut` accepts -- a JSON consumer must build `--title` from `cut_title`,
+    never `slice` (the README used to say otherwise)."""
     toml_text = (
         'version = 1\nnow = "N"\nnext = "Weitere Aufgabe."\ndone_when = "D"\n'
         '[[slice]]\nindex = 1\ntitle = "Scheibe 1"\n'
@@ -3960,6 +3963,25 @@ def test_next_prints_a_cut_command_block_mode_accepts_a_differing_next_line(
         ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
     )
     assert cut_exit_code == 0
+    capsys.readouterr()  # discard the first cut's own "CUT #79 row 1 -> #N" line
+
+    json_exit_code = issue_claim.main(["--repo", "example/agent-claim", "next", "--json"])
+    assert json_exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["slice"] == "Weitere Aufgabe."
+    assert payload["cut_title"] == "Scheibe 1"
+
+    json_cut_exit_code = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "cut",
+            str(CUT_CONTAINER),
+            "--title",
+            payload["cut_title"],
+        ]
+    )
+    assert json_cut_exit_code == 0
 
 
 def test_claim_json_refusal_carries_refused_issue_and_checks(
@@ -6076,6 +6098,7 @@ def test_next_json_names_a_cuttable_container_slice(
     assert payload["number"] == 181
     assert payload["title"] == "Epic"
     assert payload["slice"] == "Scheibe C"
+    assert payload["cut_title"] == "Scheibe C"
 
 
 def test_next_names_a_closeable_container(

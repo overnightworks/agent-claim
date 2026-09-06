@@ -1023,6 +1023,7 @@ def _next_action_payload(action: board.NextAction) -> dict[str, object]:
             "number": action.container.number,
             "title": action.container.title,
             "slice": action.next_step,
+            "cut_title": action.cut_title,
         }
     return {
         "action": "close_container",
