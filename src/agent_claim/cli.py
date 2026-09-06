@@ -386,6 +386,19 @@ def _add_supersede_parser(commands: argparse._SubParsersAction) -> None:
     supersede.add_argument("--claim-id", required=True)
 
 
+def _add_cut_parser(commands: argparse._SubParsersAction) -> None:
+    cut = commands.add_parser("cut", help="create a container's next slice as a fresh child issue")
+    cut.add_argument("issue", type=int, help="the container to cut")
+    cut.add_argument("--title", required=True, help="the fresh child issue's title")
+    cut.add_argument(
+        "--row",
+        type=int,
+        metavar="N",
+        help="the slice table's # column value to cut; default is the first cuttable row",
+    )
+    cut.add_argument("--json", action="store_true")
+
+
 def _add_pull_request_check_parser(commands: argparse._SubParsersAction) -> None:
     pull_request_check = commands.add_parser(
         "pr-check",
@@ -415,6 +428,7 @@ _SUBPARSER_BUILDERS: tuple[Callable[[argparse._SubParsersAction], None], ...] = 
     _add_who_parser,
     _add_reconcile_parser,
     _add_supersede_parser,
+    _add_cut_parser,
     _add_pull_request_check_parser,
     _add_policy_parser,
     _add_protect_parser,
@@ -749,6 +763,30 @@ def _merged_pull_request_floor(issues: tuple[board.Issue, ...], now: datetime) -
     return min(_timestamp(issue.created_at) for issue in issues)
 
 
+# A container's children are their own `gh list_children` subprocess call;
+# an unbounded pool would spawn one worker per container on a large board.
+# This caps that fan-out -- a stable invariant of this executor, not
+# something an operator tunes. `_fetch_children` gives it a dedicated
+# executor sized to exactly this constant, so the cap holds regardless of
+# whether the three base board reads below have already finished.
+BOARD_CHILD_FETCH_CONCURRENCY = 4
+
+
+def _fetch_children(
+    client: forge.BoardSource, container_numbers: tuple[int, ...]
+) -> dict[int, tuple[board.ChildItem, ...]]:
+    """Every container's children, at most `BOARD_CHILD_FETCH_CONCURRENCY`
+    `gh` subprocesses at a time; excess containers queue behind it."""
+    if not container_numbers:
+        return {}
+    workers = min(len(container_numbers), BOARD_CHILD_FETCH_CONCURRENCY)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            number: pool.submit(client.list_children, number) for number in container_numbers
+        }
+        return {number: future.result() for number, future in futures.items()}
+
+
 def _board(
     client: forge.BoardSource,
     claims: tuple[protocol.ActiveClaim, ...],
@@ -761,13 +799,21 @@ def _board(
         issues = client.list_open_board_issues()
     since = _merged_pull_request_floor(issues, now)
     blockers = board.blocker_references(issues)
-    # Open and recently-merged pull requests are independent reads once
-    # `since` is known, so fetching them on separate threads instead of one
-    # after another overlaps their `gh` subprocess wait time.
+    container_numbers = tuple(
+        issue.number for issue in issues if issue.kind is board.ItemKind.CONTAINER
+    )
+    # Open and recently-merged pull requests, the blocker lookup, and each
+    # container's children are independent reads once `since` is known, so
+    # fetching them on separate threads instead of one after another overlaps
+    # their `gh` subprocess wait time. Children get their own executor
+    # (`_fetch_children`) so their concurrency stays capped at
+    # `BOARD_CHILD_FETCH_CONCURRENCY` even once these three base reads finish
+    # and free their own pool's workers.
     with ThreadPoolExecutor(max_workers=3) as pool:
         open_pull_requests = pool.submit(client.list_open_board_pull_requests)
         merged_pull_requests = pool.submit(client.list_recent_merged_board_pull_requests, since)
         blocker_references = pool.submit(client.list_board_blockers, blockers)
+        children = _fetch_children(client, container_numbers)
         pull_requests = (open_pull_requests.result(), merged_pull_requests.result())
     return board.build_board(
         board.BoardBuildInputs(
@@ -780,6 +826,7 @@ def _board(
             blocker_references=blocker_references.result(),
             now=now,
             trunk_landings=checkout.trunk_landing_times(),
+            children=children,
         )
     )
 
@@ -834,8 +881,40 @@ def _ruling_pull_hint(item: board.BoardItem) -> str | None:
     return f"vor {item.ruling_landings} Landungen geregelt, beim Ziehen neu refinen"
 
 
+def _next_action_payload(action: board.NextAction) -> dict[str, object]:
+    """The action-specific fields `_next_json` adds beyond `recovery`/`skipped`."""
+    if isinstance(action, board.WorkItemAction):
+        item = action.item
+        payload: dict[str, object] = {
+            "action": "work_item",
+            "number": item.number,
+            "score": item.score,
+            "title": item.title,
+            "next": item.next_step,
+            "ruling_landings": item.ruling_landings,
+            "ruling_old": item.ruling_old,
+        }
+        hint = _ruling_pull_hint(item)
+        if hint is not None:
+            payload["ruling_hint"] = hint
+        return payload
+    if isinstance(action, board.CutSliceAction):
+        return {
+            "action": "cut_slice",
+            "number": action.container.number,
+            "title": action.container.title,
+            "slice": action.next_step,
+        }
+    return {
+        "action": "close_container",
+        "number": action.container.number,
+        "closed": action.container_progress.closed,
+        "total": action.container_progress.total,
+    }
+
+
 def _next_json(
-    item: board.BoardItem | None,
+    action: board.NextAction | None,
     skipped: tuple[board.BoardItem, ...],
     recovery: tuple[board.BoardItem, ...],
 ) -> int:
@@ -853,26 +932,35 @@ def _next_json(
             for skipped_item in skipped
         ],
     }
-    if item is not None:
-        payload.update(
-            {
-                "number": item.number,
-                "score": item.score,
-                "title": item.title,
-                "next": item.next_step,
-                "ruling_landings": item.ruling_landings,
-                "ruling_old": item.ruling_old,
-            }
-        )
-        hint = _ruling_pull_hint(item)
-        if hint is not None:
-            payload["ruling_hint"] = hint
+    if action is not None:
+        payload.update(_next_action_payload(action))
     print(json.dumps(payload))
     return 0
 
 
+def _next_action_lines(action: board.NextAction) -> list[str]:
+    """The action-specific lines `_next` prints before `SKIPPED`."""
+    if isinstance(action, board.WorkItemAction):
+        item = action.item
+        lines = [f"#{item.number} score {item.score}: {item.title}", f"Next: {item.next_step}"]
+        hint = _ruling_pull_hint(item)
+        if hint is not None:
+            lines.append(hint)
+        return lines
+    if isinstance(action, board.CutSliceAction):
+        return [
+            f"cut_slice #{action.container.number}: {action.next_step}",
+            f'Next: agent-claim cut {action.container.number} --title "{action.next_step}"',
+        ]
+    progress = action.container_progress
+    return [
+        f"close_container #{action.container.number}: "
+        f"{progress.closed}/{progress.total} children closed, no Next work"
+    ]
+
+
 def _next(
-    item: board.BoardItem | None,
+    action: board.NextAction | None,
     skipped: tuple[board.BoardItem, ...],
     recovery: tuple[board.BoardItem, ...],
 ) -> int:
@@ -884,14 +972,7 @@ def _next(
             f"#{recovery_item.number}: {board.RECOVERY_STEP}" for recovery_item in recovery
         )
         lines.append("")
-    if item is None:
-        lines.append("No actionable item.")
-    else:
-        lines.append(f"#{item.number} score {item.score}: {item.title}")
-        lines.append(f"Next: {item.next_step}")
-        hint = _ruling_pull_hint(item)
-        if hint is not None:
-            lines.append(hint)
+    lines.extend(_next_action_lines(action) if action is not None else ["No actionable item."])
     if skipped:
         skipped_lines = (
             f"#{skipped_item.number}: {skipped_item.actionable_reason}" for skipped_item in skipped
@@ -999,8 +1080,9 @@ def _parent_checks(
 
 
 def _body_contract_checks(
-    contract: board.Contract, blocker_references: tuple[board.BlockerReference, ...]
+    item: board.BoardItem, blocker_references: tuple[board.BlockerReference, ...]
 ) -> tuple[SliceCheck, ...]:
+    contract = item.contract
     checks = [SliceCheck("error", "body-contract", defect.message) for defect in contract.defects]
     blocker_by_number = {reference.number: reference for reference in blocker_references}
     for blocker in contract.blocker_issues:
@@ -1022,6 +1104,15 @@ def _body_contract_checks(
                     issue=blocker,
                 )
             )
+    # Read the two atomic facts directly rather than `item.actionable_reason`:
+    # that reason is the *first* one `_actionable_reason` finds (frozen,
+    # claimed, blocked, then incomplete), so an item that is both blocked and
+    # incomplete would report only "blocked" there -- masking the incomplete
+    # body this check exists to name. A freshly `cut` child (an incomplete
+    # but defect-free skeleton) is refused here exactly as it is invisible to
+    # `next`, regardless of what else may also be true of it.
+    if not item.contract_complete and not item.projectionless_idea:
+        checks.append(SliceCheck("error", "body-incomplete", "body incomplete", issue=item.number))
     return tuple(checks)
 
 
@@ -1046,6 +1137,11 @@ def _slice_rule_checks(
     out_of_order = _out_of_order_check(projected, issue, out_of_order_reason)
     if out_of_order is not None:
         checks.append(out_of_order)
+    item = next((item for item in projected.items if item.number == issue), None)
+    if item is not None and item.kind is board.ItemKind.CONTAINER:
+        checks.append(
+            SliceCheck("error", "container", f"#{issue} is a container; claim a child", issue=issue)
+        )
     state, title, _body = _issue_reference_state(lookup.client, lookup.open_by_number, issue)
     if state is forge.ItemState.CLOSED:
         checks.append(SliceCheck("error", "closed-issue", f"issue #{issue} is closed", issue=issue))
@@ -1053,9 +1149,8 @@ def _slice_rule_checks(
         checks.append(
             SliceCheck("error", "missing-issue", f"issue #{issue} does not exist here", issue=issue)
         )
-    item = next((item for item in projected.items if item.number == issue), None)
     if item is not None:
-        checks.extend(_body_contract_checks(item.contract, projected.blocker_references))
+        checks.extend(_body_contract_checks(item, projected.blocker_references))
     if title is not None:
         parent_check = _parent_checks(lookup.client, lookup.repository, issue, title)
         if parent_check is not None:
@@ -1131,10 +1226,17 @@ def _no_item_defect(
 
 @dataclass(frozen=True)
 class _ParentRequirement:
-    """What an item's parent demands of the pull request that lands the item."""
+    """What an item's parent demands of the pull request that lands the item.
+
+    `last_child` says closing the parent is *permitted* -- this landing
+    closes the parent's one remaining open child; `closing_required` narrows
+    that to *required*, which holds only when the parent's own `Next` line
+    names no further work.
+    """
 
     reference: board.IssueReference
     closing_required: bool
+    last_child: bool
 
 
 def _parent_requirement(
@@ -1144,9 +1246,11 @@ def _parent_requirement(
 ) -> _ParentRequirement | board.ClassificationDefect | None:
     """The parent's demand, read from GitHub's sub-issue relation.
 
-    Closing a parent's last open child completes the parent, so that landing
-    closes the parent too. A parent keeping other open children stays open,
-    and must say what happens next.
+    Closing a parent's last open child completes the parent only when the
+    parent's own `Next` line names no further work; otherwise the container
+    keeps dispatching slices, and the landing may close the parent (its one
+    remaining child) but need not. A parent keeping other open children
+    stays open, and must say what happens next.
     """
     parent = client.parent_issue(item.number)
     if parent is None:
@@ -1156,18 +1260,30 @@ def _parent_requirement(
             f"has parent {parent.reference} in another repository, "
             "whose children this check cannot read"
         )
+    if parent.kind is not board.ItemKind.CONTAINER:
+        kind_text = parent.kind.value if parent.kind is not None else "unknown"
+        return board.ClassificationDefect(
+            f"has parent {parent.reference} of kind {kind_text}, which is not a "
+            "container; only a container holds children"
+        )
     remaining = tuple(
-        child for child in client.open_children(parent.reference.number) if child != item
+        child
+        for child in client.list_children(parent.reference.number)
+        if child.state is board.ChildState.OPEN and child.number != item.number
     )
     if not remaining:
-        return _ParentRequirement(parent.reference, True)
+        return _ParentRequirement(
+            parent.reference,
+            not board.has_further_work(board.parse_contract(parent.body).next),
+            True,
+        )
     if board.parse_contract(parent.body).next is None:
         children = "child" if len(remaining) == 1 else "children"
         return board.ClassificationDefect(
             f"leaves parent {parent.reference} open with {len(remaining)} other open "
             f"{children}, whose body carries no Next line"
         )
-    return _ParentRequirement(parent.reference, False)
+    return _ParentRequirement(parent.reference, False, False)
 
 
 def _closing_defect(
@@ -1180,18 +1296,18 @@ def _closing_defect(
     closing = board.closing_references(detail.body, repository)
     if item not in closing:
         return board.ClassificationDefect(f"carries no closing reference for its work item {item}")
-    completed_parent = (
-        {requirement.reference}
-        if requirement is not None and requirement.closing_required
-        else set()
-    )
-    missing_parent = completed_parent - closing
-    if missing_parent:
-        parent = next(iter(missing_parent))
+    if (
+        requirement is not None
+        and requirement.closing_required
+        and requirement.reference not in closing
+    ):
         return board.ClassificationDefect(
-            f"closes the last open child of parent {parent}; close the parent too"
+            f"closes the last open child of parent {requirement.reference}; close the parent too"
         )
-    besides = tuple(sorted(closing - {item} - completed_parent, key=str))
+    permitted_parent = (
+        {requirement.reference} if requirement is not None and requirement.last_child else set()
+    )
+    besides = tuple(sorted(closing - {item} - permitted_parent, key=str))
     if besides:
         named = ", ".join(str(reference) for reference in besides)
         return board.ClassificationDefect(
@@ -1496,20 +1612,31 @@ def _cmd_rulings(parsed: argparse.Namespace, session: _ReadSession) -> None:
     _rulings(projected, issues, as_json=parsed.json)
 
 
+def _next_action_container_number(action: board.NextAction | None) -> int | None:
+    """The container `action` targets, when it targets one -- excluded from
+    `SKIPPED` below since a container is always non-actionable itself."""
+    if isinstance(action, board.CutSliceAction | board.CloseContainerAction):
+        return action.container.number
+    return None
+
+
 def _cmd_next(parsed: argparse.Namespace, session: _ReadSession) -> int:
     comments = session.forge.list_protocol_candidates(protocol.LEDGER_ISSUE)
     projected = _board(session.forge, protocol.active_claims(comments))
-    item = board.highest_scored_actionable(projected)
-    skipped = _unworkable(projected)
+    action = board.next_action(projected)
+    chosen_container = _next_action_container_number(action)
+    skipped = tuple(item for item in _unworkable(projected) if item.number != chosen_container)
     recovery = projected.recovery
-    if item is None:
+    if action is None:
         if skipped or recovery:
             if parsed.json:
                 _next_json(None, skipped, recovery)
             else:
                 _next(None, skipped, recovery)
         return 3
-    return _next_json(item, skipped, recovery) if parsed.json else _next(item, skipped, recovery)
+    if parsed.json:
+        return _next_json(action, skipped, recovery)
+    return _next(action, skipped, recovery)
 
 
 def _cmd_who(parsed: argparse.Namespace, session: _ReadSession) -> None:
@@ -1659,6 +1786,93 @@ def _cmd_supersede(parsed: argparse.Namespace, session: _WriteSession) -> None:
     )
 
 
+def _cut_target(client: forge.ForgeWriter, number: int) -> board.Issue:
+    """The open container `cut` targets, or why it refuses before any write."""
+    open_issues = client.list_open_board_issues()
+    target = next((issue for issue in open_issues if issue.number == number), None)
+    if target is None:
+        raise protocol.ClaimUnavailableError(f"#{number} is not an open container")
+    if target.kind is not board.ItemKind.CONTAINER:
+        raise protocol.ClaimUnavailableError(f"#{number} is not a container")
+    parent = client.parent_issue(number)
+    if parent is not None:
+        raise protocol.ClaimUnavailableError(
+            f"#{number} is itself a child of {parent.reference}; "
+            "nested containers are not supported"
+        )
+    return target
+
+
+def _cut_row(target: board.Issue, row_number: int | None) -> board.SliceTableRow:
+    """The slice-table row `cut` dispatches -- `--row N`, or the first cuttable row."""
+    findings = board.slice_table_findings(target.body)
+    if row_number is not None:
+        row = next(
+            (candidate for candidate in findings.cuttable if candidate.index == row_number), None
+        )
+    else:
+        row = findings.cuttable[0] if findings.cuttable else None
+    if row is None:
+        raise protocol.ClaimUnavailableError(
+            f"#{target.number} has no cuttable slice row; "
+            f"{len(findings.malformed)} malformed rows need a hand fix"
+        )
+    return row
+
+
+def _link_created_child(
+    client: forge.ForgeWriter, container: int, new_body: str, child: int, row_index: int
+) -> None:
+    """Link the just-created `child` into `container`'s slice table.
+
+    Not atomic with `create_child` -- GitHub has no transaction across the
+    two writes. A failure here still leaves the created child behind, so it
+    raises the same `forge.ForgePartialChildCreationError` a failed relation
+    write inside `create_child` itself would -- one type, so `_cmd_cut`
+    renders one recovery message for either.
+    """
+    try:
+        client.update_item_body(container, new_body)
+    except protocol.ClaimError as error:
+        raise forge.ForgePartialChildCreationError(
+            child=child,
+            parent=container,
+            step=f"link it into #{container}'s slice table row {row_index}",
+            cause=error,
+        ) from error
+
+
+def _cmd_cut(parsed: argparse.Namespace, session: _WriteSession) -> int:
+    client = session.forge
+    number = int(parsed.issue)
+    for operation in (forge.ForgeOperation.CREATE_CHILD, forge.ForgeOperation.UPDATE_ITEM_BODY):
+        if client.capability(operation) is not forge.Capability.READ_WRITE:
+            raise protocol.ClaimUnavailableError(
+                f"this forge cannot {operation.value}; cut the slice by hand"
+            )
+    target = _cut_target(client, number)
+    row = _cut_row(target, parsed.row)
+    span = board.locate_slice_row(target.body, row.index)
+    if span is None:
+        raise protocol.ClaimUnavailableError(f"#{number}'s row {row.index} could not be located")
+    try:
+        child = client.create_child(
+            parent=number, title=parsed.title, body=board.CHILD_SKELETON, kind=board.ItemKind.TASK
+        )
+        new_body = board.link_slice_row(target.body, span, child)
+        _link_created_child(client, number, new_body, child, row.index)
+    except forge.ForgePartialChildCreationError as error:
+        raise protocol.ClaimUnavailableError(
+            f"created #{error.child} but failed to {error.step}: {error.cause}; "
+            "do not re-run -- finish it by hand"
+        ) from error
+    if parsed.json:
+        print(json.dumps({"container": number, "row": row.index, "child": child}))
+        return 0
+    print(f"CUT #{number} row {row.index} -> #{child}")
+    return 0
+
+
 def _cmd_reconcile(parsed: argparse.Namespace, session: _WriteSession) -> None:
     client = session.forge
     try:
@@ -1699,6 +1913,7 @@ _WRITE_HANDLERS: dict[str, Callable[[argparse.Namespace, _WriteSession], int | N
     "release": _cmd_release,
     "supersede": _cmd_supersede,
     "reconcile": _cmd_reconcile,
+    "cut": _cmd_cut,
 }
 
 

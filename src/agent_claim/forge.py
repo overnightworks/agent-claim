@@ -45,6 +45,27 @@ class ForgeMalformedResponseError(ForgeError):
     """The forge's response could not be parsed into the expected shape."""
 
 
+class ForgePartialChildCreationError(ForgeError):
+    """`cut` created `child` under `parent`, but `step` failed to finish
+    recording it there.
+
+    Not atomic across `create_child`'s own two writes (the issue and its
+    sub-issue relation), nor across `create_child` and the later slice-table
+    link: retrying either would risk a second child, so the caller recovers
+    `step` by hand instead and never re-runs `cut`. Raised by the GitHub
+    adapter when its own relation write fails, and reused by `cli._cmd_cut`
+    when the later slice-table link fails -- one type, so both failures are
+    recovered the same way.
+    """
+
+    def __init__(self, *, child: int, parent: int, step: str, cause: Exception) -> None:
+        self.child = child
+        self.parent = parent
+        self.step = step
+        self.cause = cause
+        super().__init__(f"created #{child} but failed to {step}: {cause}")
+
+
 @dataclass(frozen=True)
 class RepositoryId:
     """A repository's identity: the port owns this shape, an adapter owns its syntax."""
@@ -140,7 +161,7 @@ class ForgeOperation(StrEnum):
     ITEM_REFERENCE = "item_reference"
     LANDING = "landing"
     PARENT_ISSUE = "parent_issue"
-    OPEN_CHILDREN = "open_children"
+    LIST_CHILDREN = "list_children"
     DEFAULT_BRANCH = "default_branch"
     LIST_OPEN_BOARD_ISSUES = "list_open_board_issues"
     LIST_BOARD_BLOCKERS = "list_board_blockers"
@@ -152,11 +173,13 @@ class ForgeOperation(StrEnum):
     CREATE_ITEM = "create_item"
     LOCK_ITEM = "lock_item"
     CLOSE_ITEM = "close_item"
+    CREATE_CHILD = "create_child"
+    UPDATE_ITEM_BODY = "update_item_body"
 
 
 class BoardSource(Protocol):
     """The read surface `_board` actually calls: the repository identity and the
-    four board list operations, not every `ForgeReader` operation. Every
+    five board list operations, not every `ForgeReader` operation. Every
     `ForgeReader` already satisfies it structurally; a board-only fake needs
     nothing more.
     """
@@ -176,6 +199,8 @@ class BoardSource(Protocol):
         self, since: datetime
     ) -> tuple[board.PullRequest, ...]: ...
 
+    def list_children(self, number: int) -> tuple[board.ChildItem, ...]: ...
+
 
 class ForgeReader(protocol.ClaimReader, Protocol):
     @property
@@ -189,7 +214,7 @@ class ForgeReader(protocol.ClaimReader, Protocol):
 
     def parent_issue(self, number: int) -> board.ParentIssue | None: ...
 
-    def open_children(self, number: int) -> tuple[board.IssueReference, ...]: ...
+    def list_children(self, number: int) -> tuple[board.ChildItem, ...]: ...
 
     def default_branch(self) -> str: ...
 
@@ -222,3 +247,7 @@ class ForgeWriter(ForgeReader, protocol.ClaimWriter, Protocol):
     def lock_item(self, number: int) -> None: ...
 
     def close_item(self, number: int) -> None: ...
+
+    def create_child(self, *, parent: int, title: str, body: str, kind: board.ItemKind) -> int: ...
+
+    def update_item_body(self, number: int, body: str) -> None: ...

@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 import re
 import tomllib
-from dataclasses import asdict, dataclass, replace
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
@@ -129,6 +130,14 @@ _SLICE_TABLE_SEPARATOR_CELL_PATTERN = re.compile(r"^:?-+:?$")
 _SLICE_TABLE_INDEX_PATTERN = re.compile(r"^[1-9]\d*$", re.ASCII)
 _SLICE_TABLE_ITEM_LINK_PATTERN = re.compile(r"^#([1-9]\d*)$", re.ASCII)
 UNDISPATCHED_SLICE_CELL = "—"
+# `cut`'s fresh child: every contract section present, `Now`/`Next`/`Done
+# when` empty. `parse_contract` maps an empty section to `None`, so this
+# skeleton is `contract_complete=False` -- invisible to `next`, refused by
+# `claim` -- until the head fills it in. `Blocked by` is prefilled `nichts`
+# (NO_BLOCKERS): a fresh child names no blocker yet, and an empty `Blocked
+# by` value is itself a contract defect (`_validate_blocked_by`), which
+# would read as a malformed body rather than an unfinished one.
+CHILD_SKELETON = f"## Now\n\n## Next\n\n## Blocked by\n{NO_BLOCKERS}\n\n## Done when\n"
 # The three slice-title forms seen in atelier-2 (`#79`): a parenthetical
 # after the real title (`(#962 Scheibe 4)`, `(#962 slice 4)`) or a leading
 # German phrase (`Scheibe 4 von #962`).
@@ -142,6 +151,16 @@ _SLICE_TITLE_VON_PATTERN = re.compile(
 )
 
 
+class ItemKind(StrEnum):
+    """An item's kind, read from the forge's native issue type -- the one
+    owner for "is this a container" (decision record 0001 ruling D3, #112)."""
+
+    TASK = "task"
+    BUG = "bug"
+    FEATURE = "feature"
+    CONTAINER = "container"
+
+
 @dataclass(frozen=True)
 class Issue:
     number: int
@@ -150,12 +169,51 @@ class Issue:
     body: str
     created_at: str
     updated_at: str
+    kind: ItemKind | None = None
+    children_closed: int | None = None
+    children_total: int | None = None
 
 
 class BlockerState(StrEnum):
     OPEN = "open"
     CLOSED = "closed"
     MISSING = "missing"
+
+
+class ChildState(StrEnum):
+    """The two states a sub-issue can be in.
+
+    Not `BlockerState`: that owns a *referenced* issue, whose third state is
+    MISSING -- a state a sub-issue returned by the relation cannot have, and
+    which `ContainerProgress` must not be able to represent. The adapter
+    fails loud on any other state string, which is exactly what the parent's
+    open-children reading has always required: an unrecognized state must
+    never make a parent look childless.
+    """
+
+    OPEN = "open"
+    CLOSED = "closed"
+
+
+@dataclass(frozen=True)
+class ChildItem:
+    """One sub-issue, as the port returns it and as the board shows it.
+
+    `blocked_by` is empty at the port boundary -- the adapter cannot know it
+    -- and `build_board` fills it for open children from the board's own
+    contracts, with no extra request.
+    """
+
+    number: int
+    state: ChildState
+    blocked_by: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
+class ContainerProgress:
+    closed: int
+    total: int
+    open_children: tuple[ChildItem, ...]
 
 
 @dataclass(frozen=True)
@@ -192,6 +250,7 @@ class ParentIssue:
 
     reference: IssueReference
     body: str
+    kind: ItemKind | None = None
 
 
 class NoItemKind(StrEnum):
@@ -328,11 +387,16 @@ class BoardItem:
     number: int
     title: str
     labels: tuple[str, ...]
+    kind: ItemKind | None
     priority_category: int
     priority_bucket: str
+    priority_order: int
+    container: ContainerProgress | None
+    container_parent: int | None
     contract: Contract
     next_step: str | None
     contract_complete: bool
+    projectionless_idea: bool
     expectation_state: ExpectationState
     expectation_progress: ExpectationProgress
     ruling_landings: int | None
@@ -355,7 +419,10 @@ class BoardItem:
 
 @dataclass(frozen=True)
 class Board:
-    """`items`, and therefore `ready_now`, are ordered `(priority_category, -score, number)`.
+    """`items`, and therefore `ready_now`, are ordered by `board_rank`: critical
+    (a configured critical label or a Bug), then blocker, then a container's
+    completing last child, then the remaining labels and unlabelled --
+    tie-broken by score, critical label index, container, and number.
 
     `ready_now`, `stale`, and `recovery` are filters over `items`; filtering
     never reorders, so `ready_now[0]` is always `items`' first actionable row
@@ -370,6 +437,7 @@ class Board:
     ready_now: tuple[BoardItem, ...]
     stale: tuple[BoardItem, ...]
     recovery: tuple[BoardItem, ...]
+    uncut: tuple[UncutSlices, ...]
     blocker_references: tuple[BlockerReference, ...]
 
 
@@ -603,8 +671,12 @@ def _closing_fence_delimiter(line: str) -> tuple[str, int] | None:
     return run[0], len(run)
 
 
-def _live_text(body: str) -> str:
-    """The body's non-fenced lines, joined back in order — what GitHub renders as prose.
+def _live_line_entries(body: str) -> list[tuple[int, str]]:
+    """Every non-fenced line of `body`, paired with its original `splitlines()` index.
+
+    The one fence-walk both `_live_text` (which only needs the joined prose)
+    and `locate_slice_row` (which needs the original index to map a table
+    cell back to `body`'s real character offsets) read.
 
     Walks the body once carrying CommonMark fence state: a line opens a fence
     (an info string after the run is allowed, e.g. ` ```python `), and only a
@@ -623,22 +695,27 @@ def _live_text(body: str) -> str:
     form). A marker written there is read as live — visible on `board`/`next`
     and correctable by fencing it properly, never a silent divergence.
     """
-    live_lines: list[str] = []
+    entries: list[tuple[int, str]] = []
     fence_char: str | None = None
     fence_length = 0
-    for line in body.splitlines():
+    for index, line in enumerate(body.splitlines()):
         if fence_char is None:
             opening = _opening_fence_delimiter(line)
             if opening is not None:
                 fence_char, fence_length = opening
                 continue
-            live_lines.append(line)
+            entries.append((index, line))
             continue
         closing = _closing_fence_delimiter(line)
         if closing is not None and closing[0] == fence_char and closing[1] >= fence_length:
             fence_char, fence_length = None, 0
         # Still inside the fence (or just closed it): never scanned for a marker.
-    return "\n".join(live_lines)
+    return entries
+
+
+def _live_text(body: str) -> str:
+    """The body's non-fenced lines, joined back in order — what GitHub renders as prose."""
+    return "\n".join(line for _, line in _live_line_entries(body))
 
 
 def _table_row_cells(line: str) -> tuple[str, ...] | None:
@@ -655,6 +732,34 @@ def _table_row_cells(line: str) -> tuple[str, ...] | None:
     stripped = stripped.removesuffix("|")
     cells = tuple(cell.strip() for cell in stripped.split("|"))
     return cells or None
+
+
+def _row_cell_spans(line: str) -> tuple[tuple[int, int], ...] | None:
+    """Each pipe-delimited cell's character span in `line`, unstripped.
+
+    `_table_row_cells` returns the same cells stripped of surrounding
+    whitespace; this positions them back in `line` instead, so a caller can
+    replace exactly one cell's text (padding included) and leave every other
+    byte of the row untouched. Mirrors `_table_row_cells`'s optional
+    leading/trailing `|` handling exactly, so the same row yields the same
+    cells either way.
+    """
+    start = len(line) - len(line.lstrip())
+    end = len(line.rstrip())
+    if start >= end:
+        return None
+    if line[start] == "|":
+        start += 1
+    if end > start and line[end - 1] == "|":
+        end -= 1
+    if start > end:
+        return None
+    spans: list[tuple[int, int]] = []
+    cursor = start
+    for part in line[start:end].split("|"):
+        spans.append((cursor, cursor + len(part)))
+        cursor += len(part) + 1
+    return tuple(spans)
 
 
 def _is_slice_table_separator(line: str) -> bool:
@@ -760,6 +865,114 @@ def parse_slice_table(body: str) -> tuple[SliceTableEntry, ...]:
         row_entries, line_index = _slice_table_rows(lines, line_index + 2)
         entries.extend(row_entries)
     return tuple(entries)
+
+
+@dataclass(frozen=True)
+class SliceTableFindings:
+    """`parse_slice_table`'s entries, classified by what a builder does next.
+
+    A row whose `item_issue` is set (linking any issue, open or closed) is
+    landed, never a finding: `cut` only ever targets `cuttable`, and `board`
+    only ever reports `cuttable`/`unlinkable`/`malformed` as uncut.
+    """
+
+    cuttable: tuple[SliceTableRow, ...]
+    unlinkable: tuple[SliceTableRow, ...]
+    malformed: tuple[str, ...]
+
+
+def slice_table_findings(body: str) -> SliceTableFindings:
+    cuttable: list[SliceTableRow] = []
+    unlinkable: list[SliceTableRow] = []
+    malformed: list[str] = []
+    for entry in parse_slice_table(body):
+        if isinstance(entry, SliceTableRow):
+            if entry.item_cell == UNDISPATCHED_SLICE_CELL:
+                cuttable.append(entry)
+            elif entry.item_issue is None:
+                unlinkable.append(entry)
+        else:
+            malformed.append(entry.line)
+    return SliceTableFindings(tuple(cuttable), tuple(unlinkable), tuple(malformed))
+
+
+@dataclass(frozen=True)
+class UncutSlices:
+    """One item's undispatched slice-table findings, as `board` reports them."""
+
+    item: int
+    rows: tuple[str, ...]
+
+
+def _uncut_slices(issue_number: int, findings: SliceTableFindings) -> UncutSlices | None:
+    named = tuple(row.name for row in (*findings.cuttable, *findings.unlinkable))
+    rows = named + findings.malformed
+    return UncutSlices(issue_number, rows) if rows else None
+
+
+def _row_item_cell_span(
+    entries: list[tuple[int, str]],
+    raw_lines: list[str],
+    row_start: int,
+    row_entries: tuple[SliceTableEntry, ...],
+    row_index: int,
+) -> tuple[int, int] | None:
+    """`row_index`'s item-cell span among `row_entries`, given the caller
+    already confirmed it is present there -- `None` only when that row's own
+    line is not cell-shaped."""
+    for offset, entry in enumerate(row_entries):
+        if not (isinstance(entry, SliceTableRow) and entry.index == row_index):
+            continue
+        original_index, raw_line = entries[row_start + offset]
+        spans = _row_cell_spans(raw_line)
+        if spans is None or len(spans) != len(SLICE_TABLE_HEADER_CELLS):
+            return None
+        preceding = sum(len(raw) + 1 for raw in raw_lines[:original_index])
+        start, end = spans[2]
+        return preceding + start, preceding + end
+    return None
+
+
+def locate_slice_row(body: str, row_index: int) -> tuple[int, int] | None:
+    """The character span of slice-table row `row_index`'s item cell in
+    `body`, padding included -- so `link_slice_row` can replace exactly that
+    cell and leave every other byte untouched. `None` when no such row
+    exists (already cut, the index does not name a row, or the row's own
+    line is not cell-shaped).
+
+    Walks the same header/row scan `parse_slice_table` does, over
+    `_live_line_entries` instead of `_live_text` alone, so a fenced example
+    is skipped exactly as it always is, while each live line still carries
+    the original index needed to map back into `body`'s real offsets.
+    """
+    entries = _live_line_entries(body)
+    lines = [line for _, line in entries]
+    raw_lines = body.splitlines()
+    line_index = 0
+    while line_index < len(lines):
+        header = _slice_table_header_at(lines, line_index)
+        if header is None:
+            line_index += 1
+            continue
+        well_formed_header, has_separator = header
+        if not well_formed_header or not has_separator:
+            line_index += 1
+            continue
+        row_start = line_index + 2
+        row_entries, line_index = _slice_table_rows(lines, row_start)
+        row_present = any(
+            isinstance(entry, SliceTableRow) and entry.index == row_index for entry in row_entries
+        )
+        if row_present:
+            return _row_item_cell_span(entries, raw_lines, row_start, row_entries, row_index)
+    return None
+
+
+def link_slice_row(body: str, span: tuple[int, int], child: int) -> str:
+    """Rewrite the slice-table cell at `span` to link `child` -- pure,
+    changing only that cell and nothing else in `body`."""
+    start, end = span
+    return f"{body[:start]} #{child} {body[end:]}"
 
 
 def _issue_reference(match: re.Match[str], repository: str) -> IssueReference:
@@ -999,6 +1212,18 @@ def _single_concrete_next(value: str | None) -> bool:
     return len(lines) == 1 and lines[0].casefold() not in {"tbd", "todo", "unknown"}
 
 
+# Beside `NO_BLOCKERS`'s vocabulary for `Blocked by`, a container's `Next`
+# line has its own small set of "nothing left" spellings -- German and
+# English, ASCII only. `pr-check`'s last-child rule and `next`'s
+# cut_slice/close_container split both read a `Next` line the same way.
+_NO_FURTHER_WORK_VALUES = frozenset({"keiner", "keine", NO_BLOCKERS, "none", "-"})
+
+
+def has_further_work(next_line: str | None) -> bool:
+    """Whether a container's own `Next` line still names work to dispatch."""
+    return next_line is not None and next_line.casefold() not in _NO_FURTHER_WORK_VALUES
+
+
 def _claim_by_issue(claims: tuple[protocol.ActiveClaim, ...]) -> dict[int, protocol.ActiveClaim]:
     return {
         claim.identity.issue: claim
@@ -1017,18 +1242,59 @@ def _has_label(labels: tuple[str, ...], label: str | None) -> bool:
     return label is not None and any(item.casefold() == label.casefold() for item in labels)
 
 
+CRITICAL_CATEGORY = 0
+BLOCKER_CATEGORY = 1
+COMPLETION_CATEGORY = 2
+FIRST_LABEL_CATEGORY = 3
+
+
+@dataclass(frozen=True)
+class PriorityRank:
+    """Where one item sits in `board_rank`'s order: its category, the bucket
+    name `render` shows, and its order -- the configured label index inside
+    the critical category only, `0` everywhere else."""
+
+    category: int
+    bucket: str
+    order: int
+
+
 def _priority_bucket(
-    labels: tuple[str, ...], config: BoardConfig, unblocks_count: int
-) -> tuple[int, str]:
+    labels: tuple[str, ...],
+    config: BoardConfig,
+    unblocks_count: int,
+    *,
+    kind: ItemKind | None,
+    completes_container: bool,
+) -> PriorityRank:
+    """The one function that decides where an item sits.
+
+    Ladder, with the defaults `("security","data","ci","product","ux","cleanup")`
+    and `critical_span = 3`: the item's critical label or a Bug's native kind
+    (category 0, score-competing among themselves); a blocker (1); a
+    container's last open child once a sibling has closed (2, "completion" --
+    never above a critical item or a real blocker); the item's own
+    non-critical label (3+); unlabelled (last). A Bug carrying a non-critical
+    label still ranks critical -- only a Bug carrying no label at all reaches
+    this function's second branch.
+    """
     index = _priority_index(labels, config)
-    blocker_category = min(3, len(config.priority_labels))
-    if index is not None and index < blocker_category:
-        return index, config.priority_labels[index]
+    critical_span = min(3, len(config.priority_labels))
+    if index is not None and index < critical_span:
+        return PriorityRank(CRITICAL_CATEGORY, config.priority_labels[index], index)
+    if kind is ItemKind.BUG:
+        return PriorityRank(CRITICAL_CATEGORY, "bug", len(config.priority_labels))
     if unblocks_count:
-        return blocker_category, "blocker"
+        return PriorityRank(BLOCKER_CATEGORY, "blocker", 0)
+    if completes_container:
+        return PriorityRank(COMPLETION_CATEGORY, "last-child", 0)
     if index is not None:
-        return index + 1, config.priority_labels[index]
-    return len(config.priority_labels) + 1, "unlabelled"
+        return PriorityRank(
+            FIRST_LABEL_CATEGORY + index - critical_span, config.priority_labels[index], 0
+        )
+    return PriorityRank(
+        FIRST_LABEL_CATEGORY + len(config.priority_labels) - critical_span, "unlabelled", 0
+    )
 
 
 def _associated_issues(pull_requests: tuple[PullRequest, ...], repository: str) -> frozenset[int]:
@@ -1084,15 +1350,28 @@ def _touched_without_closing(pull_requests: tuple[PullRequest, ...]) -> frozense
     return frozenset(touched)
 
 
-def board_rank(item: BoardItem) -> tuple[int, int, int]:
+def board_rank(item: BoardItem) -> tuple[int, int, int, int, int]:
     """The one order `items`, `ready_now`, and every "is X ahead of Y" comparison share.
 
     `build_board` sorts by this key; any caller that needs to know whether
     one item outranks another — the out-of-order warning, for instance —
     reads this instead of re-deriving its own notion of "ahead", which is
     exactly how `board` and `next` fell out of agreement before.
+
+    `priority_order` only reorders inside the critical category (§2): a Bug
+    and a labelled critical item at equal score still resolve by label index
+    there, byte-for-byte as before this category was widened. `container_parent`
+    falls back to the item's own number, so outside the completion category
+    every group has exactly one member and the tuple degenerates to today's
+    number tie-break.
     """
-    return (item.priority_category, -item.score, item.number)
+    return (
+        item.priority_category,
+        -item.score,
+        item.priority_order,
+        item.container_parent if item.container_parent is not None else item.number,
+        item.number,
+    )
 
 
 def _validated_blocker_by_number(
@@ -1147,6 +1426,8 @@ class _BoardBuildContext:
     landed_references: frozenset[int]
     open_branches: frozenset[str]
     trunk_landings: tuple[datetime, ...]
+    container_progress: dict[int, ContainerProgress]
+    child_container: dict[int, int]
 
 
 def _board_stage(
@@ -1184,6 +1465,54 @@ def _board_score(stage: Stage, unblocks_count: int, single_next: bool) -> int:
     return score
 
 
+def _container_progress(
+    issue: Issue,
+    children: Mapping[int, tuple[ChildItem, ...]],
+    blockers: dict[int, tuple[int, ...]],
+) -> ContainerProgress | None:
+    """`issue`'s own container progress, or `None` when it isn't a container
+    the forge reports numbers for -- a container whose type support is
+    absent (no `kind`, no counts) is treated as an ordinary item, never
+    guessed at from a partial read.
+
+    The summary (`children_closed`/`children_total`) and the open-children
+    list come from two different reads (the issue page and `list_children`),
+    so they can disagree -- a stale summary, a paginated list that lost a
+    row. `closed == total` must mean no open child, and an open child must
+    mean `closed < total`; any other combination is a malformed board this
+    function never guesses through, since guessing would let `next` close a
+    container that still has work or `board` hide one that doesn't.
+    """
+    if (
+        issue.kind is not ItemKind.CONTAINER
+        or issue.children_closed is None
+        or issue.children_total is None
+    ):
+        return None
+    open_children = tuple(
+        replace(child, blocked_by=blockers.get(child.number, ()))
+        for child in children.get(issue.number, ())
+        if child.state is ChildState.OPEN
+    )
+    if bool(open_children) == (issue.children_closed == issue.children_total):
+        raise protocol.ClaimError(f"GitHub returned a malformed board container #{issue.number}")
+    return ContainerProgress(issue.children_closed, issue.children_total, open_children)
+
+
+def _completes_container(
+    issue_number: int,
+    child_container: dict[int, int],
+    container_progress: dict[int, ContainerProgress],
+) -> bool:
+    """Whether `issue_number` is the one open child left in its container,
+    once at least one sibling has already closed (the completion boost)."""
+    container_number = child_container.get(issue_number)
+    if container_number is None:
+        return False
+    progress = container_progress[container_number]
+    return progress.closed >= 1 and len(progress.open_children) == 1
+
+
 def _board_item(
     issue: Issue, context: _BoardBuildContext, config: BoardConfig, observed_at: datetime
 ) -> BoardItem:
@@ -1203,25 +1532,43 @@ def _board_item(
     projectionless_idea = contract.projectionless and _has_label(issue.labels, config.idea_label)
     next_step = IDEA_REFINEMENT_STEP if projectionless_idea else contract.next
     unblocks_count = context.unblocks[issue.number]
-    priority_category, priority_bucket = _priority_bucket(issue.labels, config, unblocks_count)
+    container_parent = context.child_container.get(issue.number)
+    completes_container = _completes_container(
+        issue.number, context.child_container, context.container_progress
+    )
+    rank = _priority_bucket(
+        issue.labels,
+        config,
+        unblocks_count,
+        kind=issue.kind,
+        completes_container=completes_container,
+    )
     active_claim, claim_age_text, claim_old = _claim_projection(claim, observed_at)
     open_blockers = context.blockers[issue.number]
     actionable_reason = _actionable_reason(
-        frozen_trigger=frozen,
-        active_claim=active_claim,
-        open_blockers=open_blockers,
-        contract_complete=contract.complete,
-        projectionless_idea=projectionless_idea,
+        _ActionabilityFacts(
+            kind=issue.kind,
+            frozen_trigger=frozen,
+            active_claim=active_claim,
+            open_blockers=open_blockers,
+            contract_complete=contract.complete,
+            projectionless_idea=projectionless_idea,
+        )
     )
     return BoardItem(
         number=issue.number,
         title=issue.title,
         labels=issue.labels,
-        priority_category=priority_category,
-        priority_bucket=priority_bucket,
+        kind=issue.kind,
+        priority_category=rank.category,
+        priority_bucket=rank.bucket,
+        priority_order=rank.order,
+        container=context.container_progress.get(issue.number),
+        container_parent=container_parent,
         contract=contract,
         next_step=next_step,
         contract_complete=contract.complete,
+        projectionless_idea=projectionless_idea,
         expectation_state=expectation_state(issue.body),
         expectation_progress=expectation_progress(issue.body),
         ruling_landings=ruling_landings,
@@ -1254,6 +1601,7 @@ class BoardBuildInputs:
     blocker_references: tuple[BlockerReference, ...] | None = None
     now: datetime | None = None
     trunk_landings: tuple[datetime, ...] = ()
+    children: Mapping[int, tuple[ChildItem, ...]] = field(default_factory=dict)
 
 
 def build_board(inputs: BoardBuildInputs) -> Board:
@@ -1278,6 +1626,16 @@ def build_board(inputs: BoardBuildInputs) -> Board:
         issue.number: sum(issue.number in other_blockers for other_blockers in blockers.values())
         for issue in issues
     }
+    container_progress = {
+        issue.number: progress
+        for issue in issues
+        if (progress := _container_progress(issue, inputs.children, blockers)) is not None
+    }
+    child_container = {
+        child.number: container_number
+        for container_number, progress in container_progress.items()
+        for child in progress.open_children
+    }
     context = _BoardBuildContext(
         contracts=contracts,
         blockers=blockers,
@@ -1292,12 +1650,23 @@ def build_board(inputs: BoardBuildInputs) -> Board:
         | _touched_without_closing(recent_merged_pull_requests),
         open_branches=frozenset(pr.head_ref_name for pr in open_pull_requests),
         trunk_landings=inputs.trunk_landings,
+        container_progress=container_progress,
+        child_container=child_container,
     )
     landed_work_items = declared_work_items(recent_merged_pull_requests, repository)
     ordered = tuple(
         sorted(
             (_board_item(issue, context, config, observed_at) for issue in issues),
             key=board_rank,
+        )
+    )
+    per_issue_findings = (
+        _uncut_slices(issue.number, slice_table_findings(issue.body)) for issue in issues
+    )
+    uncut = tuple(
+        sorted(
+            (finding for finding in per_issue_findings if finding is not None),
+            key=lambda finding: finding.item,
         )
     )
     return Board(
@@ -1313,6 +1682,7 @@ def build_board(inputs: BoardBuildInputs) -> Board:
             for item in ordered
             if item.number in landed_work_items and item.number != protocol.LEDGER_ISSUE
         ),
+        uncut=uncut,
         blocker_references=blocker_references,
     )
 
@@ -1321,13 +1691,73 @@ def highest_scored_actionable(board: Board) -> BoardItem | None:
     """The one item `next` recommends — always `board`'s own top row.
 
     `ready_now` is a filtered view of `items`, which `build_board` orders by
-    `(priority_category, -score, number)`; filtering preserves that order, so
-    its first element is `board`'s own top-ranked actionable row. Two
-    commands over one board must not disagree, so this reads that order
-    instead of maximizing score on its own — an unlabelled item with a
-    higher score must never outrank a human's priority label.
+    `board_rank`; filtering preserves that order, so its first element is
+    `board`'s own top-ranked actionable row. Two commands over one board must
+    not disagree, so this reads that order instead of maximizing score on its
+    own — an unlabelled item with a higher score must never outrank a human's
+    priority label.
     """
     return next(iter(board.ready_now), None)
+
+
+@dataclass(frozen=True)
+class WorkItemAction:
+    """Claim `item` -- today's `next` target, unchanged."""
+
+    item: BoardItem
+
+
+@dataclass(frozen=True)
+class CutSliceAction:
+    """`container` has no open child and still names work: cut `next_step`
+    (its own `Next` line) and dispatch the fresh slice."""
+
+    container: BoardItem
+    container_progress: ContainerProgress
+    next_step: str
+
+
+@dataclass(frozen=True)
+class CloseContainerAction:
+    """`container` has no open child and no further `Next` work: close it."""
+
+    container: BoardItem
+    container_progress: ContainerProgress
+
+
+NextAction = WorkItemAction | CutSliceAction | CloseContainerAction
+
+
+def next_action(board: Board) -> NextAction | None:
+    """The one action `next` recommends: the board's own top qualifying row.
+
+    Walks `items` in `board_rank` order -- the same order `board` shows --
+    and returns the first row that is either an actionable non-container
+    (`WorkItemAction`; a container is never actionable, so this branch never
+    fires for one) or a container with no open child (`CutSliceAction` when
+    its own `Next` line still names work or its slice table still carries an
+    uncut row, else `CloseContainerAction`). `_container_progress` already
+    fails loud on a container whose summary disagrees with its open-children
+    list, so "no open child" here reliably means every created child has
+    closed. Every other row -- blocked, claimed, incomplete, or a container
+    still holding an open child -- is skipped, never blocking a lower-ranked
+    qualifying row.
+    """
+    uncut_by_container = {finding.item: finding for finding in board.uncut}
+    for item in board.items:
+        if item.actionable:
+            return WorkItemAction(item)
+        container = item.container
+        if item.kind is not ItemKind.CONTAINER or container is None or container.open_children:
+            continue
+        next_line = item.contract.next
+        if next_line is not None and has_further_work(next_line):
+            return CutSliceAction(item, container, next_line)
+        uncut = uncut_by_container.get(item.number)
+        if uncut is not None:
+            return CutSliceAction(item, container, uncut.rows[0])
+        return CloseContainerAction(item, container)
+    return None
 
 
 def board_json(board: Board) -> str:
@@ -1342,11 +1772,20 @@ def board_json(board: Board) -> str:
     return json.dumps(payload, default=lambda value: value.value)
 
 
+def _kind_cell(item: BoardItem) -> str:
+    if item.kind is None:
+        return "-"
+    if item.container is not None:
+        return f"{item.kind.value} {item.container.closed}/{item.container.total}"
+    return item.kind.value
+
+
 def render(board: Board) -> str:
     rows = [
         (
             "SCORE",
             "ISSUE",
+            "KIND",
             "PRIORITY",
             "STAGE",
             "CONTRACT",
@@ -1365,6 +1804,7 @@ def render(board: Board) -> str:
             (
                 str(item.score),
                 f"#{item.number}",
+                _kind_cell(item),
                 item.priority_bucket,
                 item.stage.value,
                 _contract_summary(item.contract),
@@ -1390,9 +1830,37 @@ def render(board: Board) -> str:
     ready = ", ".join(f"#{item.number}" for item in board.ready_now) or "none"
     stale = ", ".join(f"#{item.number}" for item in board.stale) or "none"
     recovery = ", ".join(f"#{item.number}" for item in board.recovery) or "none"
+    containers = "\n".join(_container_lines(board)) or "none"
+    uncut = "\n".join(_uncut_line(finding) for finding in board.uncut) or "none"
     return (
         f"{table}\n\nREADY NOW\n{ready}\n\nSTALE\n{stale}\n\nRECOVERY ({RECOVERY_STEP})\n{recovery}"
+        f"\n\nCONTAINERS\n{containers}\n\nUNCUT\n{uncut}"
     )
+
+
+def _open_child_cell(child: ChildItem) -> str:
+    if not child.blocked_by:
+        return f"#{child.number}"
+    blockers = ", ".join(f"#{number}" for number in child.blocked_by)
+    return f"#{child.number} (blocked by {blockers})"
+
+
+def _container_line(number: int, container: ContainerProgress) -> str:
+    open_children = ", ".join(_open_child_cell(child) for child in container.open_children)
+    return f"#{number} {container.closed}/{container.total} closed; open: {open_children or 'none'}"
+
+
+def _container_lines(board: Board) -> list[str]:
+    return [
+        _container_line(item.number, item.container)
+        for item in board.items
+        if item.container is not None
+    ]
+
+
+def _uncut_line(finding: UncutSlices) -> str:
+    names = ", ".join(finding.rows)
+    return f"#{finding.item}: {len(finding.rows)} rows ({names})"
 
 
 def _contract_summary(contract: Contract) -> str:
@@ -1409,21 +1877,30 @@ def _contract_summary(contract: Contract) -> str:
     return ", ".join(present) or "-"
 
 
-def _actionable_reason(
-    *,
-    frozen_trigger: str | None,
-    active_claim: str | None,
-    open_blockers: tuple[int, ...],
-    contract_complete: bool,
-    projectionless_idea: bool,
-) -> str | None:
-    if frozen_trigger is not None:
-        return f"frozen: {frozen_trigger}"
-    if active_claim is not None:
+@dataclass(frozen=True)
+class _ActionabilityFacts:
+    """Everything `_actionable_reason` decides on -- one owner for why an
+    item cannot be claimed right now, bundled so the container rule sits
+    beside every other reason instead of a special case at each call site."""
+
+    kind: ItemKind | None
+    frozen_trigger: str | None
+    active_claim: str | None
+    open_blockers: tuple[int, ...]
+    contract_complete: bool
+    projectionless_idea: bool
+
+
+def _actionable_reason(facts: _ActionabilityFacts) -> str | None:
+    if facts.kind is ItemKind.CONTAINER:
+        return "container; claim a child"
+    if facts.frozen_trigger is not None:
+        return f"frozen: {facts.frozen_trigger}"
+    if facts.active_claim is not None:
         return "claimed"
-    if open_blockers:
-        return "blocked by " + ", ".join(f"#{number}" for number in open_blockers)
-    if not contract_complete and not projectionless_idea:
+    if facts.open_blockers:
+        return "blocked by " + ", ".join(f"#{number}" for number in facts.open_blockers)
+    if not facts.contract_complete and not facts.projectionless_idea:
         return "body incomplete"
     return None
 

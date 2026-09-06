@@ -65,6 +65,23 @@ API_ISSUE_STATES: dict[str, board.BlockerState] = {
     "open": board.BlockerState.OPEN,
     "closed": board.BlockerState.CLOSED,
 }
+# The organization's native issue types (decision record 0001 ruling D3):
+# casefolded so an org's own casing of the type name never matters. An
+# unrecognized type name maps to no kind at all -- never guessed from a
+# label -- so a repository whose org renames a type loses that item's
+# container/bug rules rather than silently misreading them.
+_ISSUE_TYPE_KINDS: dict[str, board.ItemKind] = {
+    "container": board.ItemKind.CONTAINER,
+    "bug": board.ItemKind.BUG,
+    "task": board.ItemKind.TASK,
+    "feature": board.ItemKind.FEATURE,
+}
+# The write-side names GitHub's issue-type API expects (`cut`'s
+# `create_child`) -- derived from the one read-side mapping above so the
+# type name has a single owner, capitalized the way GitHub itself names them.
+_ITEM_KIND_TYPE_NAMES: dict[board.ItemKind, str] = {
+    kind: name.capitalize() for name, kind in _ISSUE_TYPE_KINDS.items()
+}
 _LEDGER_ITEM_STATES: dict[str, forge.ItemState] = {
     "open": forge.ItemState.OPEN,
     "closed": forge.ItemState.CLOSED,
@@ -232,7 +249,7 @@ _READ_ONLY_OPERATIONS = (
     forge.ForgeOperation.ITEM_REFERENCE,
     forge.ForgeOperation.LANDING,
     forge.ForgeOperation.PARENT_ISSUE,
-    forge.ForgeOperation.OPEN_CHILDREN,
+    forge.ForgeOperation.LIST_CHILDREN,
     forge.ForgeOperation.DEFAULT_BRANCH,
     forge.ForgeOperation.LIST_OPEN_BOARD_ISSUES,
     forge.ForgeOperation.LIST_BOARD_BLOCKERS,
@@ -251,6 +268,8 @@ _READ_WRITE_OPERATIONS = (
     forge.ForgeOperation.CREATE_ITEM,
     forge.ForgeOperation.LOCK_ITEM,
     forge.ForgeOperation.CLOSE_ITEM,
+    forge.ForgeOperation.CREATE_CHILD,
+    forge.ForgeOperation.UPDATE_ITEM_BODY,
 )
 # The GitHub adapter never refuses an operation: every member answers
 # READ_ONLY or READ_WRITE, never UNSUPPORTED (decision record 0001 §2).
@@ -447,6 +466,26 @@ class GitHubForge:
             )
         return IssueComment(identifier, created_at, updated_at, body, association, url)
 
+    def _issue_kind(self, value: object) -> board.ItemKind | None:
+        return _ISSUE_TYPE_KINDS.get(value.casefold()) if isinstance(value, str) else None
+
+    def _valid_children_progress(self, closed: object, total: object) -> bool:
+        """`childrenClosed`/`childrenTotal` (`sub_issues_summary`) must arrive
+        both present or both absent -- `ContainerProgress` has no
+        representation for "closed known, total unknown", and inventing one
+        would let the board show a progress figure the forge never sent.
+        `None` for both is preserved as `None`: `0/0` is a real container
+        state, never a stand-in for "the forge said nothing"."""
+        if closed is None and total is None:
+            return True
+        if closed is None or total is None:
+            return False
+        if isinstance(closed, bool) or not isinstance(closed, int) or closed < 0:
+            return False
+        if isinstance(total, bool) or not isinstance(total, int) or total < 0:
+            return False
+        return closed <= total
+
     def _board_issue(self, value: object) -> board.Issue:
         if not isinstance(value, dict):
             raise forge.ForgeMalformedResponseError("GitHub returned a malformed board issue")
@@ -456,6 +495,9 @@ class GitHubForge:
         body = value.get("body")
         created_at = value.get("createdAt")
         updated_at = value.get("updatedAt")
+        kind_raw = value.get("kind")
+        children_closed = value.get("childrenClosed")
+        children_total = value.get("childrenTotal")
         if (
             isinstance(number, bool)
             or not isinstance(number, int)
@@ -468,9 +510,21 @@ class GitHubForge:
             or TIMESTAMP_PATTERN.fullmatch(created_at) is None
             or not isinstance(updated_at, str)
             or TIMESTAMP_PATTERN.fullmatch(updated_at) is None
+            or (kind_raw is not None and not isinstance(kind_raw, str))
+            or not self._valid_children_progress(children_closed, children_total)
         ):
             raise forge.ForgeMalformedResponseError("GitHub returned a malformed board issue")
-        return board.Issue(number, title, tuple(labels), body, created_at, updated_at)
+        return board.Issue(
+            number,
+            title,
+            tuple(labels),
+            body,
+            created_at,
+            updated_at,
+            self._issue_kind(kind_raw),
+            children_closed,
+            children_total,
+        )
 
     def _board_pull_request(self, value: object) -> board.PullRequest:
         if not isinstance(value, dict):
@@ -592,7 +646,8 @@ class GitHubForge:
                     "api",
                     f"repos/{self.repository}/issues/{number}/parent",
                     "--jq",
-                    '{number,repository:.repository_url,body:(.body // "")}',
+                    '{number,repository:.repository_url,body:(.body // ""),'
+                    "kind:(.type.name // null)}",
                 ]
             )
         except forge.ForgeNotFoundError:
@@ -603,18 +658,24 @@ class GitHubForge:
         values = self._json_lines(raw, "parent issue")
         if len(values) != 1 or not isinstance(values[0], dict):
             raise forge.ForgeMalformedResponseError("GitHub returned a malformed parent issue")
-        body = values[0].get("body")
-        if not isinstance(body, str):
+        value = values[0]
+        body = value.get("body")
+        kind_raw = value.get("kind")
+        if not isinstance(body, str) or (kind_raw is not None and not isinstance(kind_raw, str)):
             raise forge.ForgeMalformedResponseError("GitHub returned a malformed parent issue")
-        return board.ParentIssue(self._issue_reference(values[0], "parent issue"), body)
+        return board.ParentIssue(
+            self._issue_reference(value, "parent issue"), body, self._issue_kind(kind_raw)
+        )
 
-    def open_children(self, number: int) -> tuple[board.IssueReference, ...]:
-        """The parent's children GitHub still holds open.
+    def list_children(self, number: int) -> tuple[board.ChildItem, ...]:
+        """Every sub-issue GitHub records under `number`, open or closed.
 
         Every child's state is read here rather than filtered by `--jq`: a
         state this adapter does not understand would otherwise vanish and make
         a parent look childless, which is exactly the landing this check must
-        refuse.
+        refuse. A child recorded in another repository is refused outright --
+        `board.ChildItem` has no field to hold that fact honestly, and
+        containers and their children are same-repository only, for now.
         """
         raw = self._run(
             [
@@ -622,14 +683,18 @@ class GitHubForge:
                 "--paginate",
                 f"repos/{self.repository}/issues/{number}/sub_issues?per_page=100",
                 "--jq",
-                ".[] | {number,repository:.repository_url,state}",
+                ".[] | {number,repository:.repository_url,state,type:(.type.name // null)}",
             ]
         )
-        children: list[board.IssueReference] = []
+        children: list[board.ChildItem] = []
         for value in self._json_lines(raw, "sub-issue"):
             reference = self._issue_reference(value, "sub-issue")
-            if self._issue_state(value, "sub-issue") is board.BlockerState.OPEN:
-                children.append(reference)
+            if reference.repository != self.repository.path:
+                raise forge.ForgeMalformedResponseError(
+                    "GitHub returned a sub-issue from another repository"
+                )
+            state = self._issue_state(value, "sub-issue")
+            children.append(board.ChildItem(reference.number, board.ChildState(state.value)))
         return tuple(children)
 
     def default_branch(self) -> str:
@@ -652,7 +717,10 @@ class GitHubForge:
                     # its items are pull requests, filtered out below instead.
                     '.[] | {number,title,labels:(.labels | map(.name)),body:(.body // ""),'
                     "createdAt:.created_at,updatedAt:.updated_at,"
-                    'isPullRequest:has("pull_request")}'
+                    'isPullRequest:has("pull_request"),'
+                    "kind:(.type.name // null),"
+                    "childrenClosed:(.sub_issues_summary.completed // null),"
+                    "childrenTotal:(.sub_issues_summary.total // null)}"
                 ),
             ]
         )
@@ -1071,3 +1139,69 @@ class GitHubForge:
 
     def close_item(self, number: int) -> None:
         self._run(["issue", "close", str(number), "--repo", self.repository.path])
+
+    def create_child(self, *, parent: int, title: str, body: str, kind: board.ItemKind) -> int:
+        """Create a fresh issue of `kind` and record it as `parent`'s sub-issue.
+
+        Not atomic: GitHub has no transaction across the create and the
+        sub-issue POST. A failure in the relation POST raises
+        `forge.ForgePartialChildCreationError` naming the child that already
+        exists, so `cli._cmd_cut` can refuse with a hand-link instruction
+        instead of risking a second child on retry.
+        """
+        raw = self._run(
+            ["api", "--method", "POST", f"repos/{self.repository}/issues", "--input", "-"],
+            input_data=json.dumps(
+                {"title": title, "body": body, "type": _ITEM_KIND_TYPE_NAMES[kind]}
+            ).encode("utf-8"),
+        )
+        try:
+            created = json.loads(raw)
+        except json.JSONDecodeError as error:
+            raise forge.ForgeMalformedResponseError(
+                "GitHub returned invalid created-child JSON"
+            ) from error
+        identifier = created.get("id") if isinstance(created, dict) else None
+        number = created.get("number") if isinstance(created, dict) else None
+        if (
+            isinstance(identifier, bool)
+            or not isinstance(identifier, int)
+            or identifier < 1
+            or isinstance(number, bool)
+            or not isinstance(number, int)
+            or number < 1
+        ):
+            raise forge.ForgeMalformedResponseError("GitHub did not return a created child issue")
+        try:
+            self._run(
+                [
+                    "api",
+                    "--method",
+                    "POST",
+                    f"repos/{self.repository}/issues/{parent}/sub_issues",
+                    "--input",
+                    "-",
+                ],
+                input_data=json.dumps({"sub_issue_id": identifier}).encode("utf-8"),
+            )
+        except protocol.ClaimError as error:
+            raise forge.ForgePartialChildCreationError(
+                child=number,
+                parent=parent,
+                step=f"record #{number} as a sub-issue of #{parent}",
+                cause=error,
+            ) from error
+        return number
+
+    def update_item_body(self, number: int, body: str) -> None:
+        self._run(
+            [
+                "api",
+                "--method",
+                "PATCH",
+                f"repos/{self.repository}/issues/{number}",
+                "--input",
+                "-",
+            ],
+            input_data=json.dumps({"body": body}).encode("utf-8"),
+        )
