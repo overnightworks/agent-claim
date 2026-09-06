@@ -39,6 +39,8 @@ MAX_SCOPE_ENTRIES = 256
 MAX_SCOPE_PATH_LENGTH = 512
 WIDE_SCOPE_PATH_LIMIT = 3
 WIDE_SCOPE_SHARE_LIMIT = 0.25
+# A tiny repository must not trip the share condition.
+WIDE_SCOPE_SHARE_FLOOR = 12
 # The first printable ASCII code point (space) and DEL bound the control
 # characters a claim marker field, scope path, or outbound text may never
 # contain -- each is meant to read as a single printable line.
@@ -546,8 +548,9 @@ def wide_scope_trip(
     versioned_file_count: int,
 ) -> WideScopeTrip | None:
     """Which wide-scope condition fires first, in the rule's own priority
-    order -- more than three paths, then any directory, then more than a
-    quarter of versioned files -- or `None` when scope is not wide."""
+    order -- more than three paths, then any directory, then, once the
+    repository has at least `WIDE_SCOPE_SHARE_FLOOR` versioned files, more
+    than a quarter of them -- or `None` when scope is not wide."""
 
     def trip(reason: WideScopeReason) -> WideScopeTrip:
         return WideScopeTrip(
@@ -558,7 +561,7 @@ def wide_scope_trip(
         return trip(WideScopeReason.PATH_COUNT)
     if directories:
         return trip(WideScopeReason.DIRECTORY)
-    if versioned_file_count == 0:
+    if versioned_file_count < WIDE_SCOPE_SHARE_FLOOR:
         return None
     if covered_file_count / versioned_file_count > WIDE_SCOPE_SHARE_LIMIT:
         return trip(WideScopeReason.SHARE)

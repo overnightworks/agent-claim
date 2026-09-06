@@ -82,7 +82,8 @@ NEXT_PULL_DESCRIPTION = (
 )
 WHOLE_HELP = (
     "one sentence why this wide scope does not split; required for more than "
-    "three paths, any directory, or more than a quarter of versioned files"
+    "three paths, any directory, or, once the repository has at least twelve "
+    "versioned files, more than a quarter of them"
 )
 
 
