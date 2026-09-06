@@ -215,6 +215,9 @@ degenerates to plain number order at equal score. The same file may set one
 projection ranks normally, and `next` tells the head `Problem neu prüfen und
 Item verfeinern`. Once it has a complete contract, its own Next takes over;
 without the configured label, a projectionless item remains `body incomplete`.
+The same file's `body_contract` key pins how a work-item body itself is read
+(prose, the default, or the typed block below); `priority_labels` and
+`idea_label` mean the same thing in either mode.
 The board table's `FREED` column shows `YYYY-MM-DD (N d)` when every listed
 issue blocker has closed, using the latest such UTC closing date and whole days
 since then; it otherwise shows `-`. Every item in `board --json` carries the
@@ -289,13 +292,21 @@ nothing qualifies, but still prints at least `No actionable item.` (plus any
 `SKIPPED`/`RECOVERY` sections) in text, and `--json` still emits an object —
 `{"action": null, "recovery": [...], "skipped": [...]}` — never nothing.
 `claim` refuses work out of order when a higher-priority actionable item — the
-same order `board` and `next` use — is free, and refuses an item whose
-`Blocked by` still names at least one open issue (a pull request, or a closed
-or missing issue, does not count — those stay their own refusals below) with
-`#5 is blocked by #3 (open); pass --out-of-order REASON to claim it anyway`,
-naming every open blocker. Pass `--out-of-order REASON` to proceed
-deliberately in either case; it remains visible as a warning and preserves the
-reason in the claim comment.
+same order `board` and `next` use — is free. It also refuses a blocked item,
+one sentence per repository pin, then the same shared override in either mode:
+
+- Prose: `claim` refuses an item whose `Blocked by` still names at least one
+  open issue (a pull request, or a closed or missing issue, does not count —
+  those stay their own refusals below).
+- Block (`body_contract = "block"`, below): `claim` refuses an item that has
+  at least one open GitHub blocked-by dependency, including a foreign
+  `owner/repo#n`; a pull request or a closed same-repository dependency does
+  not count.
+- Shared: the message is `#5 is blocked by #3 (open); pass --out-of-order
+  REASON to claim it anyway` (a foreign entry renders as `owner/repo#n`),
+  naming every open blocker. Pass `--out-of-order REASON` to proceed
+  deliberately in either case; it remains visible as a warning and preserves
+  the reason in the claim comment.
 
 Before it writes a claim, `claim` also reads the pulled issue's live contract:
 `Now`, `Next`, `Blocked by`, and `Done when` each appear at most once outside
@@ -321,6 +332,127 @@ one left unclosed to the end of the body) is documentation, never a live
 marker — examples belong in a fence. A blockquoted `> Eingefroren bis: …`
 still freezes; this repo already quotes operator rulings, so a quoted freeze
 line reads as the freeze itself.
+
+## Typed body contract (`body_contract`)
+
+Everything above describes the default, `body_contract = "prose"`: the four
+regex-read `## Now`/`## Next`/`## Blocked by`/`## Done when` sections. A
+repository may instead set, in `.agent-claim/board.toml`:
+
+```toml
+body_contract = "block"
+```
+
+Under that pin, `board`, `next`, issue-mode `claim`, `cut`, `rulings`, and the
+parent-body part of `pr-check` read a work item's `Now`/`Next`/`Done when`,
+freeze, expectations, and undispatched slices from one typed `agent-claim`
+fenced TOML block instead — no regex, no German markers, no slice table. The
+claim ledger's own issue (`protocol.LEDGER_ISSUE`) is exempt and always read
+as prose: its body belongs to ledger discovery, never the work-item grammar.
+
+A fresh, unfilled item looks like this — the same four lines `cut` writes
+automatically for a dispatched child, and what a human pastes by hand into a
+`gh issue create` / operator-opened item:
+
+````
+```agent-claim
+version = 1
+now = ""
+next = ""
+done_when = ""
+```
+````
+
+The full schema:
+
+````
+```agent-claim
+version = 1
+now = "Current fact"
+next = "One concrete next action"
+done_when = "Observable terminal condition"
+
+frozen_until = { trigger = "named trigger", ruled_on = 2026-09-06 }
+
+[[expectation]]
+text = "An operator sentence"
+default = "later"
+
+[[expectation]]
+text = "A ruled operator sentence"
+ruling = "yes"
+ruled_on = 2026-09-06
+
+[[slice]]
+index = 4
+title = "Block contract in issue bodies"
+```
+````
+
+`version`, `now`, `next`, and `done_when` are required; `now`/`next`/`done_when`
+may be the empty string (an unfilled skeleton — incomplete, but still a valid
+block). `frozen_until`, `expectation`, and `slice` are optional; an explicit
+`slice = []` is a table intentionally left present but empty (it still counts
+as "has a table" for `cut --row`). Each `[[expectation]]` is either *proposed*
+(`default = "yes" | "no" | "later"`) or *ruled* (`ruling = "yes" | "no"` with a
+TOML date `ruled_on`) — never both, never neither. Per-slice files, done-when,
+and dependencies stay in the human prose beside the block; only a slice's
+`index` and `title` are typed. Schema and version tokens, and an expectation's
+`default`/`ruling` values, are protocol — always this exact English spelling;
+every other value (`now`/`next`/`done_when`, `frozen_until.trigger`,
+expectation `text`, slice `title`) is the operator's prose and is never
+parsed, exactly like prose mode. `next`'s own retained non-parsed vocabulary
+(`keiner | keine | nichts | none | -` for "no further work", plus `tbd | todo
+| unknown` for "not yet concrete") still applies to a block's `next` value.
+
+An item with no recognized `agent-claim` fence at all is **body legacy**; one
+with a recognized fence that is unclosed, duplicated, invalid TOML, or a
+schema violation is **body malformed: `<path>: <reason>`** (e.g. `body
+malformed: version: version must be exactly 1`). Both fail loud, by name, on
+`board`, `next` (`SKIPPED`), and `claim` (`body-legacy` / `body-contract`
+checks) — never a guess through the missing or broken block, and a container
+in either state is never proposed as `cut_slice` or `close_container`.
+
+**Blockers** come from GitHub's own issue-dependency relations, not a body
+line — `Blocked by:` prose beside the block is documentation only and changes
+nothing. An open same-repository dependency blocks exactly like a local
+`Blocked by` blocker; a foreign `owner/repo#n` blocks the same way and is
+named the same way (`blocked by owner/repo#n`, or `#3, owner/repo#n` mixed
+with a local one). A same-repository *closed* dependency does not block and
+lets `board`'s `FREED` column and `claim` proceed; a closed *foreign*
+dependency does not free an item on its own (foreign relations can only
+block, never free). Unlike prose, a same-repository pull-request dependency
+blocks or frees exactly like any other dependency — `blocker-is-a-PR` is a
+prose-only check. **Parentage stays on sub-issues** in both modes; it never
+passes through the body.
+
+**`cut`** writes and reads the block the same way it writes and reads the
+prose slice table: without `--row` it links the first `[[slice]]` entry when
+one exists and otherwise creates an untied child (table or not); `--row N`
+selects entry `N` and requires `--title` to equal that entry's own `title`
+exactly, refusing before any write on a mismatch. `cut` removes only the
+selected entry (`slice = []` after removing the last one) and preserves every
+other byte of the body, including CRLF line endings, exactly. The two refusal
+strings are shared with prose/#151: `#N has no slice table; --row needs one
+to select a row from`, and `#N has no cuttable slice row; 0 malformed rows
+need a hand fix` (block mode cannot itself produce malformed rows; the
+string is kept so both modes read the same way).
+
+**Migration is a hand edit, not a command.** There is no migration command,
+module, or receipt: one reviewed AI session per repository transcribes each
+open item's current prose into a block (refusing, by name, anything it
+cannot derive rather than inventing it) and keeps the existing prose in place
+— GitHub's own edit history is the undo. Forge dependencies are added to
+reproduce existing `Blocked by` relations before the pin lands; parentage
+needs no migration since it already lives on sub-issues. **Upgrade every
+active `agent-claim` installation to a release containing this contract
+before a repository sets `body_contract = "block"`** — an older client either
+does not know the key (and keeps reading prose blindly) or, once every open
+item carries a block, would otherwise see a repository it cannot coordinate
+on correctly. From the pin onward, every hand-created issue (`gh issue
+create`, an operator-opened item) must carry a valid block — the four-line
+skeleton above — or it is `body legacy`; only `cut` writes that skeleton
+automatically.
 
 ## Cutting a container's next slice
 

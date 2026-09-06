@@ -58,7 +58,14 @@ only shape whose cross-key invariant does not rest on an unverified server capab
 **A typed fenced TOML block replaces regex prose in item bodies.** One `agent-claim` fenced
 region parsed by `tomllib`. **Keys are protocol and are always English; values are the
 operator's prose and are never parsed.** This retires the German markers, the slice table,
-and both malformed-input defect classes.
+and both malformed-input defect classes. Issue #150 (step 4) draws that line concretely:
+human projection (`now`/`next`/`done_when`), freeze, expectation `text`, and slice `title`
+are prose; `version` and an expectation's `default`/`ruling` values are protocol tokens. A
+prose ruled marker's optional justification tail (`*(geregelt: ja — …)*`) is folded into that
+expectation's `text` at hand-migration transcription — no separate provenance key. `next`
+keeps its retained non-parsed vocabulary (`keiner | keine | nichts | none | -`, owned by
+`has_further_work`, plus `tbd | todo | unknown` concreteness) as the explicit exception to
+"values are never parsed", in both prose and block bodies.
 
 **Blockers and parentage live on the forge's structured relations where the pinned storage
 configuration says so.** Capabilities *validate* the pin; they never *choose* the owner. The
@@ -72,8 +79,9 @@ capability. Forge failures are typed (`ForgeUnsupported`, `ForgePermissionDenied
 `ForgeNotFound`, `ForgeTransient`, `ForgeMalformedResponse`) instead of substring-matched.
 
 **Configuration stays in `.agent-claim/board.toml`,** extended only with settings that have a
-caller today: the pinned storage strategy, the pinned body contract, and a canonical-remote
-override. Renaming the file is rejected — it would cost a migration to buy a better name.
+caller today: the pinned body contract (`body_contract`, issue #150) and a canonical-remote
+override. The separately reserved state-storage strategy remains unnamed until step 5 has a
+caller. Renaming the file is rejected — it would cost a migration to buy a better name.
 
 ## 3. Rejected alternatives
 
@@ -121,12 +129,16 @@ plan review must satisfy. The direction in §2 is ruled; these are not.
    GitLab adapter: a preflight covering custom-ref create, fetch, fast-forward update,
    concurrent rejection, non-fast-forward rejection, absence, permission failure, and nested
    namespace URLs.
-8. **Migration that loses nothing and fences old clients.** The slice-table parser must
-   survive until the body migration has consumed it, not be deleted a slice earlier. The body
-   migration must be lossless and resumable, and must refuse — by name — any legacy slice or
-   expectation whose required fields cannot be derived rather than invent them. And v0.9.0
-   silently ignores unknown `board.toml` keys, so a pinned config alone does not fence it:
-   the state cut needs a tombstone the *old* client reads and refuses on.
+8. **Migration that loses nothing and fences old clients.** Resolved for the item body by
+   issue #150 as hand migration, not a command: one reviewed AI session per repository
+   transcribes body values and structured relations, refuses anything not derivable rather
+   than inventing it, and retains the existing prose during rollout — GitHub's own edit
+   history is the undo, so no migration command, module, or receipt is added. The prose
+   ruled-marker justification tail is derivable as `text` (item 1 above), not refused. The
+   slice-table parser survives until every supported repository is pinned and validated (D5).
+   The old-client tombstone remains open for step 5: v0.9.0 silently ignores unknown
+   `board.toml` keys, so a pinned config alone does not fence it; the state cut needs a
+   tombstone the *old* client reads and refuses on.
 9. **A complete `Landing` candidate.** The proposed
    `Landing(number, merged_at, work_item, head_branch, merge_commit)` cannot carry #108's
    `pr-check` and merged-release verification contract, which also reads an author, PR body
@@ -140,9 +152,13 @@ plan review must satisfy. The direction in §2 is ruled; these are not.
     validates nothing); immutable collections inside the frozen state; item created/updated
     timestamps the board needs; a body-update operation the migration needs; a
     provider-neutral kind mapping — `idea_label` is still a competing owner of kind;
-    `RuledExpectation.default` with a typed `yes | no | later`; and a typed failure for a
-    malformed or unsupported state-tree schema, distinct from a stale rejection and from
-    ambiguous push completion.
+    a typed failure for a malformed or unsupported state-tree schema, distinct from a stale
+    rejection and from ambiguous push completion. The item-body portion of this criterion is
+    resolved by issue #150 (step 4): each expectation is an exclusive union, `default: yes |
+    no | later` (proposed) *or* `ruling: yes | no` with `ruled_on` (ruled), never both and
+    never neither — the typed `RuledExpectation.default` gap above is this union. The
+    state-model remainder (the transition-carried resource intent, the runtime-validating OID
+    type, immutable frozen-state collections, and the rest of this list) stays open for step 5.
 11. **GitHub custom-ref probe re-run — satisfied for GitHub.** The live re-run of the
     custom-ref push/fetch/CAS probe against GitHub — create-if-absent, fast-forward update,
     non-fast-forward rejection, concurrent rejection, and delete — landed 05.09.2026 (results
@@ -165,9 +181,12 @@ As ruled by the round-2 counter-check. Strictly sequential.
    pure extraction against the current call set, with no behaviour change, and it must
    already satisfy criterion 9. Criterion 11's live GitHub custom-ref probe is satisfied
    (re-run 05.09.2026, results on #131).
-4. **One body and relation migration** — the typed block, blockers and parentage from
-   structured relations, and the conversion command, in one slice. Blockers never pass
-   through the body on GitHub.
+4. **One body and relation migration (issue #150)** — the typed reader/writer, the
+   `body_contract` pin, the bounded dependency reader, loud legacy/malformed findings, and a
+   per-repository hand migration (D6), in one slice; no conversion command, module, or
+   receipt. Blockers never pass through the body on GitHub; parentage remains on sub-issues.
+   This resolves the item-body portion of criterion 10; step 5 still resolves the state-model
+   remainder.
 5. **One state-ref cut** — claim, rescope, both release outcomes, coordinator override, stale
    takeover, resource allocation and `protect`, together. It must import active claims, claim
    ids and every consumed released allocation value, and fence v0.9 clients (criterion 8).
@@ -225,3 +244,4 @@ Recorded verbatim.
 | D3 | Item kind is the native issue type, including an organization-level `Container` type on GitHub. Ruled 05.09.2026: the organization type `Container` (id 859945696) now exists next to Task, Bug, Feature; containers #103, #114, #122 carry it | It is the clean one-owner mechanism. GitLab Free cannot create a custom `Container` type, so its adapter maps item kind read-only there |
 | D4 | Wide-scope thresholds are protocol constants, not configuration | No caller for repository-specific thresholds, and configuration would let two fleets in one repository disagree on what "too wide" means |
 | D5 | The migration machinery is deleted in the first release after every supported repository is proven migrated and old clients are fenced | Release distance does not decide safety; the proof does. A fixed "next release" is right only if that proof already exists |
+| D6 | One reviewed AI session per repository performs the body/relation hand migration (issue #150); the typed reader and the real CLI validate its result; GitHub's edit history is the undo. Does not repeal D1 or step 6, which concern later state-transition receipts | A migration command or module would be machinery with one caller and one run per repository — the hand-reviewed edit plus the existing typed reader already proves it without adding that surface |
