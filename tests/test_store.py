@@ -11,12 +11,18 @@ from __future__ import annotations
 
 import subprocess
 import threading
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
+# `test_cli.py`'s own ledger-onboarding double, reused for the ledger half of
+# `bootstrap` rather than duplicated, so both test files exercise
+# `bootstrap_ledger` against one maintained fake.
+from test_cli import FakeForge
+
 from agent_claim import cli as issue_claim
-from agent_claim import process, protocol, store
+from agent_claim import github, process, protocol, store
 
 # Syntactically valid but locally unresolvable object ids, for tests that
 # exercise a failure path where the actual value never reaches an assertion.
@@ -35,6 +41,19 @@ def _git_identity(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GIT_AUTHOR_EMAIL", "test@example.com")
     monkeypatch.setenv("GIT_COMMITTER_NAME", "Test")
     monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@example.com")
+
+
+@pytest.fixture(autouse=True)
+def _restore_ledger_global() -> Iterator[None]:
+    """`protocol.configure_ledger` binds a process-wide global; the CLI
+    `bootstrap` tests below call it through `issue_claim.main` with whatever
+    ledger number the fake forge assigned, which would otherwise leak past
+    this test and corrupt another test file's assumption about
+    `protocol.LEDGER_ISSUE` for the rest of the session.
+    """
+    previous = protocol.LEDGER_ISSUE
+    yield
+    protocol.LEDGER_ISSUE = previous
 
 
 def _git(*arguments: str, cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -508,20 +527,26 @@ def test_serialize_and_parse_schema_toml_round_trip() -> None:
     assert parsed == protocol.ClaimState(tip=tip)
 
 
-def test_cli_bootstrap_creates_and_reports_the_state_ref(
+def test_cli_bootstrap_creates_both_a_ledger_and_a_state_ref_from_scratch(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     bare_remote: Path,
     worktree: Path,
 ) -> None:
+    """A fresh repository has neither a ledger nor `refs/aco/state`.
+    `bootstrap` must still create both, in that order, until the state-ref
+    cut (issue #164 slice C2) retires the ledger half for good."""
+    client = FakeForge()
+    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
     _git("remote", "add", "origin", str(bare_remote), cwd=worktree)
     monkeypatch.chdir(worktree)
 
-    status = issue_claim.main(["bootstrap"])
+    status = issue_claim.main(["--repo", "example/agent-claim", "bootstrap"])
 
     assert status == 0
-    printed = capsys.readouterr().out.strip()
-    assert printed == _state_ref_oid(bare_remote)
+    created_ledger = next(iter(client.ledger_items)).number
+    lines = capsys.readouterr().out.splitlines()
+    assert lines == [f"LEDGER #{created_ledger}", _state_ref_oid(bare_remote)]
 
 
 def test_cli_bootstrap_is_idempotent_on_a_second_run(
@@ -530,15 +555,17 @@ def test_cli_bootstrap_is_idempotent_on_a_second_run(
     bare_remote: Path,
     worktree: Path,
 ) -> None:
+    client = FakeForge()
+    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
     _git("remote", "add", "origin", str(bare_remote), cwd=worktree)
     monkeypatch.chdir(worktree)
-    issue_claim.main(["bootstrap"])
-    first_oid = capsys.readouterr().out.strip()
+    issue_claim.main(["--repo", "example/agent-claim", "bootstrap"])
+    first_output = capsys.readouterr().out
 
-    status = issue_claim.main(["bootstrap"])
+    status = issue_claim.main(["--repo", "example/agent-claim", "bootstrap"])
 
     assert status == 0
-    assert capsys.readouterr().out.strip() == first_oid
+    assert capsys.readouterr().out == first_output
 
 
 def test_read_schema_blob_fails_loud_when_the_tree_is_unresolvable(worktree: Path) -> None:

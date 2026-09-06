@@ -134,18 +134,53 @@ def test_untrusted_exact_and_arbitrary_markers_have_no_authority() -> None:
     )
 
     assert issue_claim.discover_ledger(client) == 2
+    assert issue_claim.bootstrap_ledger(client) == 2
     states_by_number = {item.number: item.state for item in client.ledger_items}
     assert states_by_number[1] is forge.ItemState.OPEN
     assert states_by_number[3] is forge.ItemState.OPEN
 
 
-def test_discovery_ignores_an_untrusted_unlocked_marker() -> None:
+def test_bootstrap_repairs_trusted_legacy_marker_and_closes_later_duplicate() -> None:
+    client = FakeForge(ledger_items=[ledger_item(2, locked=False), ledger_item(3)])
+
+    assert issue_claim.bootstrap_ledger(client) == 2
+    items_by_number = {item.number: item for item in client.ledger_items}
+    assert items_by_number[2].locked
+    assert items_by_number[3].state is forge.ItemState.CLOSED
+    assert 2 in client.ledger_labelled_issues
+    assert issue_claim.LEDGER_LABEL in client.other_labels
+    assert claim_label(2) in client.other_labels
+
+
+def test_bootstrap_creates_and_locks_a_ledger_when_none_exists() -> None:
+    client = FakeForge()
+
+    created = issue_claim.bootstrap_ledger(client)
+
+    assert created > 0
+    items_by_number = {item.number: item for item in client.ledger_items}
+    assert items_by_number[created].locked
+    assert items_by_number[created].body.startswith(issue_claim.LEDGER_BODY_MARKER)
+
+
+def test_bootstrap_ignores_an_untrusted_unlocked_marker() -> None:
     client = FakeForge(
         ledger_items=[ledger_item(1, locked=False, author_is_trusted=False), ledger_item(2)]
     )
     assert issue_claim.discover_ledger(client) == 2
+    assert issue_claim.bootstrap_ledger(client) == 2
     items_by_number = {item.number: item for item in client.ledger_items}
     assert not items_by_number[1].locked
+
+
+def test_bootstrap_refuses_other_machine_coordination_contract() -> None:
+    client = FakeForge(ledger_items=[ledger_item(4, body="<!-- another-claim-ledger:v1 -->")])
+    with pytest.raises(ClaimError) as excinfo:
+        issue_claim.bootstrap_ledger(client)
+    assert str(excinfo.value) == (
+        "another coordination contract exists on issue(s) [4]; refusing to compete"
+    )
+    assert len(client.ledger_items) == 1
 
 
 def test_discovery_finds_a_labelled_ledger_without_scanning_open_issues() -> None:
@@ -221,6 +256,15 @@ def test_discovery_ignores_a_landing_pull_request_carrying_the_ledger_marker() -
     ledger issue but must never be mistaken for one."""
     client = FakeForge(ledger_items=[ledger_item(3, is_landing=True), ledger_item(5)])
     assert issue_claim.discover_ledger(client) == 5
+
+
+def test_bootstrap_fails_loud_when_the_created_ledger_does_not_reappear() -> None:
+    """An eventual-consistency gap -- the freshly created ledger issue not yet
+    visible to the very next listing -- must fail loud rather than claim a
+    trusted candidate that was never actually observed."""
+    client = _VanishingLedgerForge()
+    with pytest.raises(ClaimError, match="did not expose a trusted ledger candidate"):
+        issue_claim.bootstrap_ledger(client)
 
 
 def comment(
@@ -762,6 +806,17 @@ class ReaderOnlyForge(FakeForge):
         pytest.fail("a read-only command must never update an item body")
 
 
+class _VanishingLedgerForge(FakeForge):
+    """A `FakeForge` whose freshly created ledger issue never reappears in a
+    following `list_items()` -- simulating a read-after-write consistency gap
+    on the forge side."""
+
+    def create_item(self, *, title: str, body: str) -> int:
+        number = super().create_item(title=title, body=body)
+        self.ledger_items = [item for item in self.ledger_items if item.number != number]
+        return number
+
+
 def test_forge_operation_exhaustiveness_matches_the_declared_reader_and_writer_methods() -> None:
     """Every `ForgeOperation` member names a `ForgeReader`/`ForgeWriter` method and
     nothing else; the count is pinned so a new operation cannot be added without
@@ -772,7 +827,7 @@ def test_forge_operation_exhaustiveness_matches_the_declared_reader_and_writer_m
         if not name.startswith("_") and name not in {"repository", "capability", "requests"}
     }
     assert {operation.value for operation in forge.ForgeOperation} == declared_methods
-    assert len(forge.ForgeOperation) == 22
+    assert len(forge.ForgeOperation) == 26
     assert set(github.GITHUB_CAPABILITIES) == set(forge.ForgeOperation)
     assert forge.Capability.UNSUPPORTED not in github.GITHUB_CAPABILITIES.values()
 
@@ -1088,6 +1143,103 @@ def test_github_adapter_fails_loud_when_a_board_pull_request_is_not_an_object() 
 
     with pytest.raises(ClaimError, match="malformed board pull request"):
         client.list_open_board_pull_requests()
+
+
+def test_github_adapter_ensures_a_label_definition() -> None:
+    observed: list[list[str]] = []
+
+    def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
+        observed.append(arguments)
+        return ""
+
+    client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
+
+    client.ensure_label("agent-claim:ledger", colour="6f42c1", description="canonical ledger")
+
+    assert observed == [
+        [
+            "label",
+            "create",
+            "agent-claim:ledger",
+            "--repo",
+            REPOSITORY,
+            "--color",
+            "6f42c1",
+            "--description",
+            "canonical ledger",
+            "--force",
+        ]
+    ]
+
+
+def test_github_adapter_creates_an_item_and_returns_its_number() -> None:
+    observed: list[tuple[list[str], bytes | None]] = []
+
+    def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
+        observed.append((arguments, input_data))
+        return json.dumps({"number": 42})
+
+    client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
+
+    assert client.create_item(title="Agent claim ledger", body="body text") == 42
+    assert observed == [
+        (
+            ["api", "--method", "POST", f"repos/{REPOSITORY}/issues", "--input", "-"],
+            json.dumps({"title": "Agent claim ledger", "body": "body text"}).encode("utf-8"),
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("raw", "match"),
+    [
+        pytest.param("not json", "invalid created-ledger JSON", id="invalid-json"),
+        pytest.param(json.dumps({}), "did not return a created ledger number", id="missing-number"),
+        pytest.param(
+            json.dumps({"number": True}),
+            "did not return a created ledger number",
+            id="number-is-a-bool",
+        ),
+        pytest.param(
+            json.dumps({"number": 0}), "did not return a created ledger number", id="non-positive"
+        ),
+    ],
+)
+def test_github_adapter_fails_loud_on_a_malformed_created_ledger(raw: str, match: str) -> None:
+    client = GitHubForge(
+        github._repository_id(REPOSITORY), run=lambda arguments, input_data=None: raw
+    )
+
+    with pytest.raises(ClaimError, match=match):
+        client.create_item(title="Agent claim ledger", body="body text")
+
+
+def test_github_adapter_locks_an_item() -> None:
+    observed: list[list[str]] = []
+
+    def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
+        observed.append(arguments)
+        return ""
+
+    client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
+
+    client.lock_item(11)
+
+    assert observed == [["api", "--method", "PUT", f"repos/{REPOSITORY}/issues/11/lock"]]
+
+
+def test_github_adapter_closes_an_item() -> None:
+    observed: list[list[str]] = []
+
+    def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
+        observed.append(arguments)
+        return ""
+
+    client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
+
+    client.close_item(11)
+
+    assert observed == [["issue", "close", "11", "--repo", REPOSITORY]]
 
 
 def test_github_adapter_neutralizes_a_claim_comment() -> None:
@@ -9833,7 +9985,7 @@ def test_github_adapter_capability_reads_the_declared_table() -> None:
     client = GitHubForge(github._repository_id("example/agent-claim"))
 
     assert client.capability(forge.ForgeOperation.LIST_ITEMS) is forge.Capability.READ_ONLY
-    assert client.capability(forge.ForgeOperation.CREATE_CHILD) is forge.Capability.READ_WRITE
+    assert client.capability(forge.ForgeOperation.CREATE_ITEM) is forge.Capability.READ_WRITE
 
 
 def test_github_adapter_item_reference_reads_state_title_and_body() -> None:

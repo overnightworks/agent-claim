@@ -46,6 +46,7 @@ _unclaimed_projection = protocol._unclaimed_projection
 _validate_checkout = checkout._validate_checkout
 acquire_claim = protocol.acquire_claim
 active_claims = protocol.active_claims
+bootstrap_ledger = discovery.bootstrap_ledger
 claim_comment = protocol.claim_comment
 claim_label = protocol.claim_label
 claims_conflict = protocol.claims_conflict
@@ -2310,26 +2311,33 @@ def _release_branch_for(parsed: argparse.Namespace) -> str | None:
     )
 
 
-def _bootstrap_state() -> int:
-    """Create or adopt `refs/aco/state`, the store's sole production caller.
+def _bootstrap_state(forge_handle: forge.ForgeWriter) -> int:
+    """Adopt or create this repository's locked ledger, then create or adopt
+    `refs/aco/state`, printing each in turn.
 
-    Pure git transport against this checkout's canonical remote: unlike
-    every other command, this never touches GitHub, so it needs neither
-    `--repo` nor a ledger.
+    Two onboarding paths in one command until the state-ref cut (issue #164
+    slice C2) deletes the ledger outright: today, a repository with neither
+    still needs a ledger (every other command reads and writes it) as well as
+    the state ref `store` will eventually replace it with. The ledger half is
+    the last production caller of `discovery.bootstrap_ledger`; the state-ref
+    half is `store`'s sole production caller.
     """
+    ledger = discovery.bootstrap_ledger(forge_handle)
+    protocol.configure_ledger(ledger)
+    print(f"LEDGER #{ledger}")
     oid = store.bootstrap(worktree=Path.cwd())
     print(oid)
     return 0
 
 
 def _dispatch(parsed: argparse.Namespace) -> int:
-    if parsed.command == "bootstrap":
-        return _bootstrap_state()
     if parsed.command in {"claim", "release", "rescope"}:
         parsed.agent = checkout._resolved_agent(parsed.agent)
     release_branch = _release_branch_for(parsed) if parsed.command == "release" else None
     repository = github.discover_repository(parsed.repo, remote_url=checkout.origin_remote_url)
     forge_handle = github.GitHubForge(repository)
+    if parsed.command == "bootstrap":
+        return _bootstrap_state(forge_handle)
     ledger = discovery.discover_ledger(forge_handle)
     if ledger is None:
         raise protocol.ClaimUnavailableError(

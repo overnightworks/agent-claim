@@ -266,6 +266,10 @@ _READ_WRITE_OPERATIONS = (
     forge.ForgeOperation.REMOVE_LABEL,
     forge.ForgeOperation.UPSERT_PROJECTION,
     forge.ForgeOperation.NEUTRALIZE_CLAIM_COMMENT,
+    forge.ForgeOperation.ENSURE_LABEL,
+    forge.ForgeOperation.CREATE_ITEM,
+    forge.ForgeOperation.LOCK_ITEM,
+    forge.ForgeOperation.CLOSE_ITEM,
     forge.ForgeOperation.CREATE_CHILD,
     forge.ForgeOperation.UPDATE_ITEM_BODY,
 )
@@ -1183,6 +1187,48 @@ class GitHubForge:
         if count < 0:
             raise forge.ForgeMalformedResponseError("GitHub returned a malformed open-issue count")
         return count
+
+    def ensure_label(self, name: str, *, colour: str, description: str) -> None:
+        self._run(
+            [
+                "label",
+                "create",
+                name,
+                "--repo",
+                self.repository.path,
+                "--color",
+                colour,
+                "--description",
+                description,
+                "--force",
+            ]
+        )
+
+    def create_item(self, *, title: str, body: str) -> int:
+        raw = self._run(
+            ["api", "--method", "POST", f"repos/{self.repository}/issues", "--input", "-"],
+            input_data=json.dumps({"title": title, "body": body}).encode("utf-8"),
+        )
+        try:
+            created = json.loads(raw)
+        except json.JSONDecodeError as error:
+            raise forge.ForgeMalformedResponseError(
+                "GitHub returned invalid created-ledger JSON"
+            ) from error
+        if (
+            not isinstance(created, dict)
+            or isinstance(created.get("number"), bool)
+            or not isinstance(created.get("number"), int)
+            or created["number"] < 1
+        ):
+            raise forge.ForgeMalformedResponseError("GitHub did not return a created ledger number")
+        return created["number"]
+
+    def lock_item(self, number: int) -> None:
+        self._run(["api", "--method", "PUT", f"repos/{self.repository}/issues/{number}/lock"])
+
+    def close_item(self, number: int) -> None:
+        self._run(["issue", "close", str(number), "--repo", self.repository.path])
 
     def create_child(self, *, parent: int, title: str, body: str, kind: board.ItemKind) -> int:
         """Create a fresh issue of `kind` and record it as `parent`'s sub-issue.
