@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import re
+import runpy
 import shlex
 import subprocess
 import sys
@@ -1842,6 +1843,12 @@ def test_next_pulls_an_unruled_item_and_names_only_unworkable_ones_as_skipped(
         pytest.param("None", (), (), id="none"),
         pytest.param(
             "#9",
+            (board.BlockerReference(9, board.BlockerState.MISSING, False),),
+            (),
+            id="missing-blocker",
+        ),
+        pytest.param(
+            "#9",
             (
                 board.BlockerReference(
                     9,
@@ -2629,6 +2636,41 @@ def test_cut_refuses_a_non_container(
 
     assert exit_code == 2
     assert f"ERROR: #{CUT_CONTAINER} is not a container" in capsys.readouterr().err
+
+
+def test_cut_refuses_a_number_that_names_no_open_issue(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    _configured_board_client(monkeypatch, tmp_path, open_issues=())
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
+    )
+
+    assert exit_code == 2
+    assert f"ERROR: #{CUT_CONTAINER} is not an open container" in capsys.readouterr().err
+
+
+def test_cut_refuses_when_the_row_cannot_be_located(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """`_cut_row` selects the row and `board.locate_slice_row` re-locates its
+    span through a mirrored parse of the same body (#79); cut must refuse
+    before any write rather than link a child into a guessed location if
+    those two ever disagreed."""
+    body = slice_table(("1", "Scheibe 1", "—", "—"))
+    container = _cut_container_issue(body)
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
+    monkeypatch.setattr(board, "locate_slice_row", lambda _body, _row_index: None)
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
+    )
+
+    assert exit_code == 2
+    assert f"ERROR: #{CUT_CONTAINER}'s row 1 could not be located" in capsys.readouterr().err
+    assert client.created_children == []
+    assert client.item_bodies == {}
 
 
 def test_cut_refuses_a_container_that_already_has_a_parent(
@@ -4710,6 +4752,12 @@ def test_next_keeps_an_unlabelled_projectionless_item_skipped_with_an_active_ide
 
     assert issue_claim.main(["--repo", "example/agent-claim", "next"]) == 3
     assert capsys.readouterr().out == "No actionable item.\n\nSKIPPED\n#10: body incomplete\n"
+
+    assert issue_claim.main(["--repo", "example/agent-claim", "next", "--json"]) == 3
+    assert json.loads(capsys.readouterr().out) == {
+        "recovery": [],
+        "skipped": [{"number": 10, "reason": "body incomplete"}],
+    }
 
 
 def test_next_keeps_a_vision_labelled_projectionless_item_incomplete_without_configuration(
@@ -9269,6 +9317,21 @@ def test_cli_reconcile_still_clears_stale_labels_when_ledger_is_frozen(
     assert client.labels == set()
 
 
+def test_cli_bootstrap_creates_and_prints_the_ledger(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    client = FakeForge()
+    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
+
+    status = issue_claim.main(["--repo", "example/agent-claim", "bootstrap"])
+
+    assert status == 0
+    created = next(iter(client.ledger_items)).number
+    assert capsys.readouterr().out == f"LEDGER #{created}\n"
+    assert issue_claim.LEDGER_LABEL in client.other_labels
+
+
 def test_cli_status_empty_ledger_prints_ledger_then_unclaimed_repository(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -9330,6 +9393,20 @@ def test_cli_status_after_claim_prints_ledger_then_claimed(
         "branch=codex/issue-72 claim=cli-claim 0h 0m\n"
         "  src\n"
     )
+
+
+def test_cli_status_prints_the_resource_line_for_an_allocated_hold(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    client = _claims_client(
+        request("hop-1", "Ada", issue=72, scope=("src",), resource="schema-hop", resource_value=1)
+    )
+    _patch_status_cli(monkeypatch, client)
+
+    status = issue_claim.main(["--repo", "example/agent-claim", "status", "72"])
+
+    assert status == 0
+    assert "  resource schema-hop=1\n" in capsys.readouterr().out
 
 
 def test_cli_lane_claim_status_and_release_round_trip_without_issue_number(
@@ -9420,6 +9497,23 @@ def test_cli_lane_mode_refuses_a_non_conventional_branch(
     assert "'docs/'" in captured.err
     assert "'fix/'" in captured.err
     assert client.comments == {}
+
+
+def test_cli_release_requires_a_non_empty_current_branch_without_an_issue(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _set_agent_identity_env(monkeypatch, {"AGENT_CLAIM_AGENT": "Codex Sol"})
+    client = FakeForge()
+    _patch_status_cli(monkeypatch, client)
+    monkeypatch.setattr(checkout, "_git_output", lambda arguments: "")
+
+    status = issue_claim.main(
+        ["--repo", "example/agent-claim", "release", "--abandoned", "stopped"]
+    )
+
+    assert status == 2
+    assert "lane release requires a non-empty current branch" in capsys.readouterr().err
 
 
 def test_cli_status_overlapping_protocol_comments_print_ledger_then_notes(
@@ -9591,6 +9685,36 @@ def test_cli_claim_refuses_while_an_unreadable_claim_stands(
     assert "ERROR: claim refused: claim 'claim-b'" in captured.err
     assert "unknown fields: surprise" in captured.err
     assert active_claims(tuple(client.comments[LEDGER_ISSUE])) == ()
+
+
+def test_cli_rescope_requires_a_non_empty_current_branch(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Rescope always operates on the checked-out worktree's own claim, so a
+    detached or branchless checkout must refuse even when an issue number is
+    also given -- unlike release, it never falls back to the issue alone."""
+    client = FakeForge()
+    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
+    monkeypatch.setattr(discovery, "discover_ledger", lambda _client: LEDGER_ISSUE)
+    git_values = _git_checkout(branch="")
+    monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
+
+    status = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "rescope",
+            "72",
+            "--agent",
+            "Ada",
+            "--add",
+            "src/new.py",
+        ]
+    )
+
+    assert status == 2
+    assert "non-empty current branch" in capsys.readouterr().err
 
 
 def test_cli_rescope_refuses_while_an_unreadable_claim_stands(
@@ -10408,6 +10532,29 @@ def test_cli_status_json_issue_on_overlap_prints_related_claimed_object(
         )
         + "\n"
     )
+
+
+def test_cli_status_json_reports_conflict_state_for_duplicate_issue_claims(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Two live claims on the same issue are a genuine conflict (same identity),
+    unlike the merely path-overlapping claims on different issues above --
+    both the top-level state and each claim's own state must say so."""
+    client = _claims_client(
+        request("claim-a", "Ada", issue=72, scope=("src/a.py",)),
+        request("claim-b", "Grok 4.6", issue=72, scope=("src/b.py",)),
+    )
+    _patch_status_cli(monkeypatch, client)
+
+    status = issue_claim.main(["--repo", "example/agent-claim", "status", "72", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert status == 2
+    assert payload["state"] == "CONFLICT"
+    assert {claim["claim_id"]: claim["state"] for claim in payload["claims"]} == {
+        "claim-a": "CONFLICT",
+        "claim-b": "CONFLICT",
+    }
 
 
 def test_cli_status_json_without_ledger_errors_and_prints_no_stdout(
@@ -11311,6 +11458,43 @@ def test_cli_claim_touches_stay_empty_beside_a_disjoint_standing_claim(
 
     assert status == 0
     assert payload["touches"] == []
+
+
+def test_cli_claim_json_lists_an_overlapping_standing_claim_as_a_touch(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    client = _claims_client(request("claim-a", "Ada", issue=73, scope=("src",)))
+    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
+    monkeypatch.setattr(discovery, "discover_ledger", lambda _client: LEDGER_ISSUE)
+    monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
+    monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+
+    status = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "claim",
+            "72",
+            "--agent",
+            "Ada",
+            "--base",
+            BASE,
+            "--branch",
+            "codex/issue-72",
+            "--scope",
+            "src/work.py",
+            "--claim-id",
+            "overlapping",
+            "--json",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert status == 0
+    assert payload["touches"] == [
+        {"issue": 73, "lane": None, "claim_id": "claim-a", "agent": "Ada", "scope": ["src"]}
+    ]
 
 
 def test_claim_cost_lists_an_overlapping_standing_claim_as_a_touch() -> None:
@@ -12410,6 +12594,30 @@ def test_cli_policy_print_emits_the_locked_loader_without_github(
     assert captured.err == ""
     assert list(home.iterdir()) == []
     assert list(work.iterdir()) == []
+
+
+def test_cli_module_entry_point_exits_with_mains_return_code(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`python -m agent_claim.cli` and the installed console script run the
+    `if __name__ == "__main__":` guard, not `main()` as a library call --
+    exercise that guard directly rather than only ever calling `main()`."""
+    home = tmp_path / "home"
+    work = tmp_path / "work"
+    home.mkdir()
+    work.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(work)
+    forbid_github_for_policy(monkeypatch)
+    monkeypatch.setattr(sys, "argv", ["agent-claim", "policy", "--print"])
+
+    with pytest.warns(RuntimeWarning, match="agent_claim.cli"), pytest.raises(SystemExit) as exited:
+        runpy.run_module("agent_claim.cli", run_name="__main__")
+
+    assert exited.value.code == 0
+    assert capsys.readouterr().out.startswith("<!-- agent-claim-policy:v1 -->\n")
 
 
 def test_cli_policy_without_print_is_an_argparse_error(

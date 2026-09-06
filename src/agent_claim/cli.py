@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 from . import __version__, board, checkout, discovery, forge, github, protocol
 
@@ -211,8 +212,14 @@ def _request(arguments: argparse.Namespace) -> protocol.ClaimRequest:
         "https://github.com/local/request",
     )
     parsed = protocol.parse_claim_event(synthetic)
-    if not isinstance(parsed, protocol.ActiveClaim):
-        raise protocol.ClaimError("claim request did not produce a marker")
+    # `payload["action"]` is hardcoded to "claim" two lines above, and
+    # `parse_claim_event`'s "claim" branch unconditionally returns
+    # `_parse_active_claim`'s result -- typed `ActiveClaim`, never another
+    # member of the wider `ClaimEvent` union it declares for its other four
+    # actions. A malformed payload fails loud from inside that parse instead
+    # of coming back as some other event type, so this narrows a guarantee
+    # the callee's own return type already gives, not a real runtime outcome.
+    parsed = cast(protocol.ActiveClaim, parsed)
     whole_reason = _optional_whole_reason(arguments)
     resource = getattr(arguments, "resource", None)
     if resource is not None:
