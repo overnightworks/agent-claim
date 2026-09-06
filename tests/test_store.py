@@ -848,6 +848,72 @@ def _issue_claim_intent(
     return protocol.ClaimIntent(**fields)  # type: ignore[arg-type]
 
 
+def test_committer_date_reads_the_commit_that_introduced_a_claim(
+    bare_remote: Path, worktree: Path
+) -> None:
+    tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
+
+    date = store.committer_date(worktree=worktree, tip=tip, commit=tip)
+
+    assert date.tzinfo is not None
+
+
+def test_committer_date_refuses_a_commit_that_is_not_an_ancestor_of_the_tip(
+    bare_remote: Path, worktree: Path
+) -> None:
+    tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    orphan_tree = store._write_empty_state_tree(worktree)
+    orphan_commit = store._commit_tree(
+        worktree, tree_oid=orphan_tree, parent=None, message="unrelated root commit\n"
+    )
+
+    with pytest.raises(protocol.StateLineageError, match="is not an ancestor"):
+        store.committer_date(worktree=worktree, tip=tip, commit=orphan_commit)
+
+
+def test_committer_date_fails_loud_when_the_commit_is_unresolvable(worktree: Path) -> None:
+    with pytest.raises(protocol.StateLineageError):
+        store.committer_date(
+            worktree=worktree, tip=_PLACEHOLDER_TIP, commit=_UNRESOLVABLE_OBJECT_ID
+        )
+
+
+def _fake_git_log_result(
+    monkeypatch: pytest.MonkeyPatch, *, exit_status: int, stdout: bytes
+) -> None:
+    """Let every real git subprocess run except `log`, which returns a fixed
+    result -- isolates `committer_date`'s date-read/parse steps from its
+    ancestry check, which a real `merge-base` call still proves."""
+    real_run_captured = process.run_captured
+
+    def fake_run_captured(arguments: list[str]) -> process.CapturedResult:
+        if "log" in arguments:
+            return process.CapturedResult(exit_status=exit_status, stdout=stdout, stderr=b"")
+        return real_run_captured(arguments)
+
+    monkeypatch.setattr(store.process, "run_captured", fake_run_captured)
+
+
+def test_committer_date_fails_loud_when_the_log_read_fails(
+    monkeypatch: pytest.MonkeyPatch, bare_remote: Path, worktree: Path
+) -> None:
+    tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    _fake_git_log_result(monkeypatch, exit_status=1, stdout=b"")
+
+    with pytest.raises(protocol.ClaimError, match="cannot read the committer date"):
+        store.committer_date(worktree=worktree, tip=tip, commit=tip)
+
+
+def test_committer_date_fails_loud_on_a_malformed_date(
+    monkeypatch: pytest.MonkeyPatch, bare_remote: Path, worktree: Path
+) -> None:
+    tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    _fake_git_log_result(monkeypatch, exit_status=0, stdout=b"not-a-date\n")
+
+    with pytest.raises(protocol.ClaimError, match="malformed committer date"):
+        store.committer_date(worktree=worktree, tip=tip, commit=tip)
+
+
 def test_commit_transition_and_fetch_state_round_trip_a_claim_with_a_resource(
     bare_remote: Path, worktree: Path
 ) -> None:

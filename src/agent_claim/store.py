@@ -22,6 +22,7 @@ import uuid
 from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
 from typing import Protocol
@@ -206,6 +207,30 @@ def _check_lineage(worktree: Path, tip: ObjectId) -> None:
             f"{STATE_REF} moved from {previous} to {tip} without {previous} as an "
             "ancestor of the new tip; the ref may have been rewritten"
         )
+
+
+def committer_date(*, worktree: Path, tip: ObjectId, commit: ObjectId) -> datetime:
+    """The committer date of `commit`, e.g. a live claim's `opened_commit`.
+
+    Refuses with `StateLineageError` when `commit` is not an ancestor of the
+    already-fetched `tip` (§1 "Status age..."): a claim's age display reads
+    real history, it never guesses across a lineage break the way a stale
+    ledger timestamp could.
+    """
+    ancestry = _run_git(worktree, ["merge-base", "--is-ancestor", str(commit), str(tip)])
+    if ancestry.exit_status != 0:
+        raise StateLineageError(
+            f"{commit} is not an ancestor of {tip}; the ref may have been rewritten"
+        )
+    result = _run_git(worktree, ["log", "-1", "--format=%cI", str(commit)])
+    if result.exit_status != 0:
+        raise ClaimError(f"cannot read the committer date for {commit}")
+    raw = result.stdout.decode().strip()
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError as error:
+        raise ClaimError(f"git returned a malformed committer date for {commit}") from error
+    return parsed.astimezone(UTC)
 
 
 def _ls_remote_state(worktree: Path, remote: str) -> ObjectId | None:
