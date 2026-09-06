@@ -910,6 +910,29 @@ def _uncut_slices(issue_number: int, findings: SliceTableFindings) -> UncutSlice
     return UncutSlices(issue_number, rows) if rows else None
 
 
+def _row_item_cell_span(
+    entries: list[tuple[int, str]],
+    raw_lines: list[str],
+    row_start: int,
+    row_entries: tuple[SliceTableEntry, ...],
+    row_index: int,
+) -> tuple[int, int] | None:
+    """`row_index`'s item-cell span among `row_entries`, given the caller
+    already confirmed it is present there -- `None` only when that row's own
+    line is not cell-shaped."""
+    for offset, entry in enumerate(row_entries):
+        if not (isinstance(entry, SliceTableRow) and entry.index == row_index):
+            continue
+        original_index, raw_line = entries[row_start + offset]
+        spans = _row_cell_spans(raw_line)
+        if spans is None or len(spans) != len(SLICE_TABLE_HEADER_CELLS):
+            return None
+        preceding = sum(len(raw) + 1 for raw in raw_lines[:original_index])
+        start, end = spans[2]
+        return preceding + start, preceding + end
+    return None
+
+
 def locate_slice_row(body: str, row_index: int) -> tuple[int, int] | None:
     """The character span of slice-table row `row_index`'s item cell in
     `body`, padding included -- so `link_slice_row` can replace exactly that
@@ -937,15 +960,11 @@ def locate_slice_row(body: str, row_index: int) -> tuple[int, int] | None:
             continue
         row_start = line_index + 2
         row_entries, line_index = _slice_table_rows(lines, row_start)
-        for offset, entry in enumerate(row_entries):
-            if isinstance(entry, SliceTableRow) and entry.index == row_index:
-                original_index, raw_line = entries[row_start + offset]
-                spans = _row_cell_spans(raw_line)
-                if spans is None or len(spans) != len(SLICE_TABLE_HEADER_CELLS):
-                    return None
-                preceding = sum(len(raw) + 1 for raw in raw_lines[:original_index])
-                start, end = spans[2]
-                return preceding + start, preceding + end
+        row_present = any(
+            isinstance(entry, SliceTableRow) and entry.index == row_index for entry in row_entries
+        )
+        if row_present:
+            return _row_item_cell_span(entries, raw_lines, row_start, row_entries, row_index)
     return None
 
 
@@ -1641,14 +1660,12 @@ def build_board(inputs: BoardBuildInputs) -> Board:
             key=board_rank,
         )
     )
+    per_issue_findings = (
+        _uncut_slices(issue.number, slice_table_findings(issue.body)) for issue in issues
+    )
     uncut = tuple(
         sorted(
-            (
-                finding
-                for issue in issues
-                if (finding := _uncut_slices(issue.number, slice_table_findings(issue.body)))
-                is not None
-            ),
+            (finding for finding in per_issue_findings if finding is not None),
             key=lambda finding: finding.item,
         )
     )

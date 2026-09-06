@@ -4150,6 +4150,9 @@ def test_container_progress_raises_when_an_open_child_contradicts_a_closed_summa
         children_closed=2,
         children_total=2,
     )
+    raised_argument_1 = board.BoardConfig()
+    raised_argument_2 = datetime(2026, 8, 21, tzinfo=UTC)
+    raised_argument_3 = {190: (board.ChildItem(191, board.ChildState.OPEN),)}
 
     with pytest.raises(protocol.ClaimError, match=r"malformed board container #190"):
         projected_board(
@@ -4157,9 +4160,9 @@ def test_container_progress_raises_when_an_open_child_contradicts_a_closed_summa
             (),
             (),
             (),
-            board.BoardConfig(),
-            now=datetime(2026, 8, 21, tzinfo=UTC),
-            children={190: (board.ChildItem(191, board.ChildState.OPEN),)},
+            raised_argument_1,
+            now=raised_argument_2,
+            children=raised_argument_3,
         )
 
 
@@ -4175,11 +4178,11 @@ def test_container_progress_raises_when_no_open_child_contradicts_an_unclosed_su
         children_closed=1,
         children_total=2,
     )
+    raised_argument_1 = board.BoardConfig()
+    raised_argument_2 = datetime(2026, 8, 21, tzinfo=UTC)
 
     with pytest.raises(protocol.ClaimError, match=r"malformed board container #191"):
-        projected_board(
-            (container,), (), (), (), board.BoardConfig(), now=datetime(2026, 8, 21, tzinfo=UTC)
-        )
+        projected_board((container,), (), (), (), raised_argument_1, now=raised_argument_2)
 
 
 def test_board_json_and_render_report_an_uncut_slice_table_row() -> None:
