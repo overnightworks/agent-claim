@@ -10619,6 +10619,19 @@ def test_origin_remote_url_reads_the_git_config(monkeypatch: pytest.MonkeyPatch)
     assert calls == [["config", "--get", "remote.origin.url"]]
 
 
+def test_remote_url_reads_any_named_remote(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+
+    def git(arguments: list[str]) -> str:
+        calls.append(arguments)
+        return "git@github.com:owner/repository.git"
+
+    monkeypatch.setattr(checkout, "_git_output", git)
+
+    assert checkout.remote_url("upstream") == "git@github.com:owner/repository.git"
+    assert calls == [["config", "--get", "remote.upstream.url"]]
+
+
 def test_fake_and_github_adapters_expose_only_common_protocol_candidates() -> None:
     trusted = comment(1, claim_comment(request()))
     prose = comment(2, "ordinary prose")

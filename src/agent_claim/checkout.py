@@ -31,10 +31,23 @@ def _git_output(arguments: list[str]) -> str:
     return result.stdout.decode().strip()
 
 
+def remote_url(remote: str) -> str:
+    """One named remote's URL.
+
+    Generalizes `origin_remote_url` (issue #176, §2): the store's
+    `canonical_remote` is a separate, independently configured axis from
+    `origin` (the GitHub-repository-discovery fallback below) -- almost
+    always the same remote in practice, but not the same concept, so a
+    caller comparing a forge target against the canonical remote's own URL
+    needs to name that remote explicitly rather than assuming `origin`.
+    """
+    return _git_output(["config", "--get", f"remote.{remote}.url"])
+
+
 def origin_remote_url() -> str:
     """The checkout's `origin` remote, for the GitHub-remote fallback in
     `github.discover_repository` when `gh` cannot itself resolve a repository."""
-    return _git_output(["config", "--get", "remote.origin.url"])
+    return remote_url("origin")
 
 
 def versioned_paths() -> tuple[str, ...]:
