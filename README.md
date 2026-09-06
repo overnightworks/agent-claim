@@ -83,9 +83,14 @@ the same as `--scope a --scope b`; each path is stored and compared
 separately, including when an older ledger comment still has one comma-joined
 string. A scope is wide when it declares more than three paths, any directory,
 or more than a quarter of versioned files. Named new paths count; children of
-containers are never exempt. Wide scopes need `--whole "<one sentence why it
-does not split>"`; the sentence lands in the claim record and `status`/`who`
-show it. `--allow-directory` is removed: pass `--whole` instead. Live claims
+containers are never exempt. The refusal names the one condition that
+tripped, with its numbers, instead of restating the whole rule: `scope is
+wide: 4 paths exceeds three; pass --whole REASON`, `scope is wide: 1
+directory in scope (docs); pass --whole REASON`, or `scope is wide: 2 paths
+of 4 versioned files (50 %) exceeds a quarter; pass --whole REASON`. Wide
+scopes need `--whole "<one sentence why it does not split>"`; the sentence
+lands in the claim record and `status`/`who` show it. `--allow-directory` is
+removed: pass `--whole` instead. Live claims
 are advisory: they say who works where and do not refuse path overlap. Two
 lanes may claim the same
 directory or the same file; `claim` and `status` print the overlap as a note.
@@ -232,10 +237,16 @@ item or a real blocker.
 `board` also ends with an `UNCUT` section naming, per item, the slice-table
 rows (`#79`'s grammar) that are not yet linked to a dispatched child — an
 undispatched (`—`) row, or one whose item cell is neither the marker nor a
-well-formed `#n` link — as `#<item>: N rows (name, name, …)`; a row linking any
-issue (open or closed) is landed, never uncut. `board --json` carries the same
-findings under the top-level `uncut` list (`item`, `rows`). This is a finding,
-never a status column: a landed row simply leaves the list.
+well-formed `#n` link — by row index, as `#<item>: rows N, N, … uncut`; a row
+linking any issue (open or closed) is landed, never uncut. A malformed row
+(the wrong column count, or a non-integer `#` cell) is named by its `#` cell
+and reason instead, e.g. `row "B": index must be a positive integer`,
+appended to the same line. **`board --json`'s `uncut` contract changed**: the
+top-level `uncut` list still carries `item`, but `rows` is now a list of
+`{"index", "title"}` objects (was a list of bare name strings) and a new
+`malformed` list carries each malformed row's `line`, `id_cell`, and
+`reason`. This is a finding, never a status column: a landed row simply
+leaves the list.
 
 `board` prints a `RECOVERY (close or re-project)` section after `STALE`,
 followed by the `CONTAINERS` and `UNCUT` sections above; `next` names recovery
@@ -252,24 +263,31 @@ issue number. An empty list succeeds.
 
 Use `agent-claim next` (or `agent-claim next --json`) to name the board's
 top-ranked qualifying row — the same `board_rank` order `board` shows.
-`next --json` carries an `action` field naming one of three
-shapes. `work_item` (unchanged): the row is open, free, unblocked, not frozen,
-and has a complete Now/Next/Blocked by/Done when contract, or is a configured
-projectionless idea. `cut_slice`: a container with no open child still names
-work in its own `Next` line (`{"action": "cut_slice", "number", "title",
-"slice"}`); the head cuts that slice (`agent-claim cut <number> --title
-"..."`) and dispatches it. `close_container`: a container with no open child
-and no further `Next` work (`{"action": "close_container", "number", "closed",
-"total"}`); the head closes it. A container is never itself the `work_item`
-target. Pulling is not dispatching, so unruled expectations never withhold a
-`work_item`; the pulled item carries `Erwartungen ungeregelt, beim Ziehen
-zuerst refinen` instead, and an item ruled long ago carries `vor N Landungen
-geregelt, beim Ziehen neu refinen` (both as the JSON `ruling_hint`). Items that
-genuinely cannot be worked — claimed, blocked by an open issue, frozen, or
-without a complete contract when they are not a configured projectionless idea
-— are named with that reason under `SKIPPED` (also in the JSON `skipped`
-list; a container chosen as the `next` action is never also listed there), and
-`next` exits 3 when nothing qualifies.
+`next --json` always carries an `action` field, naming one of three shapes
+or `null` when nothing qualifies. `work_item`: the row is open, free,
+unblocked, not frozen, and has a complete Now/Next/Blocked by/Done when
+contract, or is a configured projectionless idea; its text form also prints
+`Run: agent-claim claim <n> --scope <paths>` (the literal placeholder
+`<paths>`, since the scope cannot be derived) and a line pointing at the
+item body for the real paths — the `--json` form is unchanged beyond the
+always-present `action` field. `cut_slice`: a container with no open child
+still names work in its own `Next` line (`{"action": "cut_slice", "number",
+"title", "slice"}`); the head cuts that slice (`agent-claim cut <number>
+--title "..."`) and dispatches it. `close_container`: a container with no
+open child and no further `Next` work (`{"action": "close_container",
+"number", "closed", "total"}`); the head closes it. A container is never
+itself the `work_item` target. Pulling is not dispatching, so unruled
+expectations never withhold a `work_item`; the pulled item carries
+`Erwartungen ungeregelt, beim Ziehen zuerst refinen` instead, and an item
+ruled long ago carries `vor N Landungen geregelt, beim Ziehen neu refinen`
+(both as the JSON `ruling_hint`). Items that genuinely cannot be worked —
+claimed, blocked by an open issue, frozen, or without a complete contract
+when they are not a configured projectionless idea — are named with that
+reason under `SKIPPED` (also in the JSON `skipped` list; a container chosen
+as the `next` action is never also listed there). `next` exits 3 when
+nothing qualifies, but still prints at least `No actionable item.` (plus any
+`SKIPPED`/`RECOVERY` sections) in text, and `--json` still emits an object —
+`{"action": null, "recovery": [...], "skipped": [...]}` — never nothing.
 `claim` refuses work out of order when a higher-priority actionable item — the
 same order `board` and `next` use — is free, and refuses an item whose
 `Blocked by` still names at least one open issue (a pull request, or a closed
@@ -283,9 +301,11 @@ Before it writes a claim, `claim` also reads the pulled issue's live contract:
 `Now`, `Next`, `Blocked by`, and `Done when` each appear at most once outside
 fenced code examples. `Blocked by` is exactly `nichts` or a comma-separated
 `#N` list such as `#62, #75`; every listed issue must be open. `claim` also
-refuses with `body incomplete` when any of the four sections is empty, unless
-the issue is a configured projectionless idea (above) — the same rule `board`
-already applies to `actionable`, so a freshly `cut` child (its
+refuses with `#<n> body incomplete: <missing sections>` (body order, e.g.
+`#150 body incomplete: Now, Done when`) when any of the four sections is
+empty, unless the issue is a configured projectionless idea (above) — the
+same rule `board` already applies to `actionable` (whose own short
+`body incomplete` form is unchanged), so a freshly `cut` child (its
 `board.CHILD_SKELETON` body has every section present but empty) is refused
 until the head fills it in. The check does not limit body size or inspect
 references in `Next`, and `release` stays available even when the body's
@@ -320,8 +340,13 @@ no slice table at all — only a numbered `Next` line, as #122 carried on
 still names further work both cut this way, the container's body left exactly
 as it was. `next` never prints `--row`, so a command it prints for a
 container is always one `cut` accepts. `--row N` requires a table containing
-an uncut row `N` and refuses by name otherwise: no slice table at all, or no
-row `N` left cuttable in it.
+an uncut row `N` and refuses by name otherwise: no slice table at all, `N`
+already linked (`#122 row 4 is already cut (#150); cuttable rows: 5, 6, 7`),
+no row left uncut anywhere in the table (`#122 has no uncut row; rows 4-7
+are cut`), or no row `N` left cuttable for any other reason, in which case
+any malformed rows are named by their `#` cell and reason instead of only
+counted (`#79 has no cuttable slice row; row "B": index must be a positive
+integer`).
 
 Every refusal precedes every write. `cut` refuses when the forge cannot
 create a child issue or update an item body (`capability()` answers anything
