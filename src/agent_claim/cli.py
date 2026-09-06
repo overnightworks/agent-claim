@@ -84,10 +84,6 @@ WHOLE_HELP = (
     "one sentence why this wide scope does not split; required for more than "
     "three paths, any directory, or more than a quarter of versioned files"
 )
-WIDE_SCOPE_REFUSAL = (
-    "scope is wide: more than three paths, a directory, or more than a quarter "
-    "of versioned files; pass --whole REASON"
-)
 
 
 def _resolved_identity(issue: int | None, branch: str) -> protocol.ClaimIdentity:
@@ -142,6 +138,24 @@ def _optional_whole_reason(arguments: argparse.Namespace) -> str | None:
     return protocol._outbound_text(raw, "whole reason", maximum=512)
 
 
+def _wide_scope_condition(trip: protocol.WideScopeTrip) -> str:
+    """The tripped condition in words, with the numbers it was judged
+    against -- what the refusal names instead of restating the whole rule."""
+    if trip.reason is protocol.WideScopeReason.PATH_COUNT:
+        return f"{trip.path_count} paths exceeds three"
+    if trip.reason is protocol.WideScopeReason.DIRECTORY:
+        noun = "directory" if len(trip.directories) == 1 else "directories"
+        return f"{len(trip.directories)} {noun} in scope ({', '.join(trip.directories)})"
+    covered, total = trip.covered_file_count, trip.versioned_file_count
+    percent = round(100 * covered / total)
+    path_word = "path" if covered == 1 else "paths"
+    return f"{covered} {path_word} of {total} versioned files ({percent} %) exceeds a quarter"
+
+
+def _wide_scope_refusal(trip: protocol.WideScopeTrip) -> str:
+    return f"scope is wide: {_wide_scope_condition(trip)}; pass --whole REASON"
+
+
 def _reject_wide_scope(
     scope: tuple[str, ...],
     versioned: tuple[str, ...],
@@ -149,16 +163,11 @@ def _reject_wide_scope(
 ) -> tuple[int, int, float]:
     n, total, share = _scope_cost(versioned, scope)
     directories = checkout._scope_directories(scope)
-    if (
-        protocol.scope_is_wide(
-            scope,
-            directories=directories,
-            covered_file_count=n,
-            versioned_file_count=total,
-        )
-        and whole_reason is None
-    ):
-        raise protocol.ClaimError(WIDE_SCOPE_REFUSAL)
+    trip = protocol.wide_scope_trip(
+        scope, directories=directories, covered_file_count=n, versioned_file_count=total
+    )
+    if trip is not None and whole_reason is None:
+        raise protocol.ClaimError(_wide_scope_refusal(trip))
     return n, total, share
 
 

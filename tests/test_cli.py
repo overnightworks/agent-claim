@@ -12725,6 +12725,44 @@ def test_cli_claim_refuses_a_directory_scope_without_whole(
     assert LEDGER_ISSUE not in client.comments
 
 
+def test_cli_claim_wide_scope_refusal_names_the_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A directory-tripped refusal names the directory, not the whole rule."""
+    client = FakeForge()
+    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
+    monkeypatch.setattr(discovery, "discover_ledger", lambda _client: LEDGER_ISSUE)
+    monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
+    monkeypatch.setattr(
+        checkout, "_scope_directories", lambda paths: tuple(p for p in paths if p == "docs")
+    )
+
+    status = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "claim",
+            "72",
+            "--agent",
+            "Ada",
+            "--base",
+            BASE,
+            "--branch",
+            "codex/issue-72",
+            "--scope",
+            "docs",
+            "--claim-id",
+            "named-directory",
+        ]
+    )
+
+    assert status == 2
+    assert capsys.readouterr().err == (
+        "ERROR: scope is wide: 1 directory in scope (docs); pass --whole REASON\n"
+    )
+
+
 def test_cli_claim_refuses_a_directory_plus_child_scope_without_whole(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -12876,6 +12914,46 @@ def test_cli_claim_share_above_a_quarter_requires_whole(
     assert "scope is wide" in captured.err
     assert "--whole" in captured.err
     assert LEDGER_ISSUE not in client.comments
+
+
+def test_cli_claim_wide_scope_refusal_names_the_share(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A share-tripped refusal names the covered/versioned counts and the
+    percentage, not the whole rule."""
+    client = FakeForge()
+    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
+    monkeypatch.setattr(discovery, "discover_ledger", lambda _client: LEDGER_ISSUE)
+    monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
+    monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+
+    status = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "claim",
+            "72",
+            "--agent",
+            "Ada",
+            "--base",
+            BASE,
+            "--branch",
+            "codex/issue-72",
+            "--scope",
+            "LICENSE",
+            "--scope",
+            "README.md",
+            "--claim-id",
+            "named-share",
+        ]
+    )
+
+    assert status == 2
+    assert capsys.readouterr().err == (
+        "ERROR: scope is wide: 2 paths of 4 versioned files (50 %) exceeds a quarter; "
+        "pass --whole REASON\n"
+    )
 
 
 def test_cli_claim_share_above_a_quarter_succeeds_with_whole(
@@ -13556,6 +13634,28 @@ def test_scope_is_wide_for_more_than_three_paths_any_directory_or_a_share_above_
     )
 
 
+def test_wide_scope_trip_names_the_condition_in_the_rule_s_priority_order() -> None:
+    """`scope_is_wide` is `wide_scope_trip(...) is not None` -- one rule, one
+    owner -- and a path-count trip outranks a directory trip that would also
+    fire, exactly as `scope_is_wide` already prioritizes them."""
+    four = ("a.py", "b.py", "c.py", "d.py")
+    assert protocol.wide_scope_trip(
+        four, directories=("a.py",), covered_file_count=4, versioned_file_count=20
+    ) == protocol.WideScopeTrip(protocol.WideScopeReason.PATH_COUNT, 4, ("a.py",), 4, 20)
+    assert protocol.wide_scope_trip(
+        ("docs",), directories=("docs",), covered_file_count=1, versioned_file_count=20
+    ) == protocol.WideScopeTrip(protocol.WideScopeReason.DIRECTORY, 1, ("docs",), 1, 20)
+    assert protocol.wide_scope_trip(
+        ("a.py", "b.py"), directories=(), covered_file_count=2, versioned_file_count=4
+    ) == protocol.WideScopeTrip(protocol.WideScopeReason.SHARE, 2, (), 2, 4)
+    assert (
+        protocol.wide_scope_trip(
+            ("a.py",), directories=(), covered_file_count=1, versioned_file_count=4
+        )
+        is None
+    )
+
+
 def test_cli_claim_accepts_three_named_paths_without_whole(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -13636,6 +13736,49 @@ def test_cli_claim_refuses_four_named_paths_without_whole(
     assert "scope is wide" in captured.err
     assert "--whole" in captured.err
     assert LEDGER_ISSUE not in client.comments
+
+
+def test_cli_claim_wide_scope_refusal_names_the_path_count(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A path-count-tripped refusal names the count and the limit, not the
+    whole rule."""
+    client = FakeForge()
+    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
+    monkeypatch.setattr(discovery, "discover_ledger", lambda _client: LEDGER_ISSUE)
+    monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
+    monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+
+    status = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "claim",
+            "72",
+            "--agent",
+            "Ada",
+            "--base",
+            BASE,
+            "--branch",
+            "codex/issue-72",
+            "--scope",
+            "new_a.py",
+            "--scope",
+            "new_b.py",
+            "--scope",
+            "new_c.py",
+            "--scope",
+            "new_d.py",
+            "--claim-id",
+            "named-path-count",
+        ]
+    )
+
+    assert status == 2
+    assert capsys.readouterr().err == (
+        "ERROR: scope is wide: 4 paths exceeds three; pass --whole REASON\n"
+    )
 
 
 def test_cli_rescope_widening_to_four_paths_refuses_without_whole(
