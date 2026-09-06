@@ -184,12 +184,13 @@ jobs:
                   )
                   sys.exit(1)
 
-          def resolve_component(key: str) -> None:
-              component = fetch_json(
-                  f"https://sonarcloud.io/api/navigation/component?component={key}"
+          def resolve_component(key: str, scope: str) -> None:
+              measures = fetch_json(
+                  "https://sonarcloud.io/api/measures/component"
+                  f"?component={key}&metricKeys=violations&{scope}"
               )
-              errors = component.get("errors")
-              resolved_key = component.get("key")
+              errors = measures.get("errors")
+              resolved_key = measures.get("component", {}).get("key")
               if errors:
                   reason = errors[0]["msg"]
               elif resolved_key is None:
@@ -198,10 +199,14 @@ jobs:
                   reason = f"resolved to {resolved_key!r} instead"
               else:
                   return
-              print(f"SonarCloud refused to resolve project {key!r}: {reason}", file=sys.stderr)
+              message = (
+                  f"SonarCloud refused to resolve project {key!r} for {scope}: {reason} "
+                  "(no analysis exists for this scope, or the token cannot see this project)"
+              )
+              print(message, file=sys.stderr)
               sys.exit(1)
 
-          resolve_component(component_key)
+          resolve_component(component_key, scope_query)
 
           def fetch_page(page: int) -> dict:
               url = (
@@ -228,4 +233,6 @@ jobs:
           if total > 0:
               print(f"{total} open SonarCloud finding(s) on new code", file=sys.stderr)
               sys.exit(1)
+
+          print(f"SonarCloud clean for {component_key!r} ({scope_query}): {total} open finding(s)")
           PYTHON
