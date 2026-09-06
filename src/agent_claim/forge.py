@@ -45,6 +45,27 @@ class ForgeMalformedResponseError(ForgeError):
     """The forge's response could not be parsed into the expected shape."""
 
 
+class ForgePartialChildCreationError(ForgeError):
+    """`cut` created `child` under `parent`, but `step` failed to finish
+    recording it there.
+
+    Not atomic across `create_child`'s own two writes (the issue and its
+    sub-issue relation), nor across `create_child` and the later slice-table
+    link: retrying either would risk a second child, so the caller recovers
+    `step` by hand instead and never re-runs `cut`. Raised by the GitHub
+    adapter when its own relation write fails, and reused by `cli._cmd_cut`
+    when the later slice-table link fails -- one type, so both failures are
+    recovered the same way.
+    """
+
+    def __init__(self, *, child: int, parent: int, step: str, cause: Exception) -> None:
+        self.child = child
+        self.parent = parent
+        self.step = step
+        self.cause = cause
+        super().__init__(f"created #{child} but failed to {step}: {cause}")
+
+
 @dataclass(frozen=True)
 class RepositoryId:
     """A repository's identity: the port owns this shape, an adapter owns its syntax."""

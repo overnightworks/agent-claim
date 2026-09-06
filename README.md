@@ -198,9 +198,14 @@ The target defaults to the repository of the current checkout;
 for another GitHub repository run `agent-claim --repo FlexOr2/atelier-2 board`.
 The current checkout may set `priority_labels` as an ordered non-empty list in
 `.agent-claim/board.toml`; absent configuration uses `security`, `data`, `ci`,
-`product`, `ux`, then `cleanup`. The first three configured labels are primary
-buckets, followed by items that unblock other work, then the remaining labels;
-stage and Next bonuses sort only within a bucket. The same file may set one
+`product`, `ux`, then `cleanup`. `board_rank` orders every item on five fields:
+category, then score, then the critical label's index, then container, then
+issue number. Category is critical (the first three configured labels or a
+Bug, competing by score among each other — see the `KIND` paragraph below)
+first, then a blocker, then a container's completing last child, then the
+remaining configured labels, then unlabelled; the label index only ever
+tie-breaks inside the critical category, so every other category still
+degenerates to plain number order at equal score. The same file may set one
 `idea_label`; an item carrying that label with no Now/Next/Blocked by/Done when
 projection ranks normally, and `next` tells the head `Problem neu prüfen und
 Item verfeinern`. Once it has a complete contract, its own Next takes over;
@@ -213,18 +218,16 @@ nonnegative integer or `null`).
 
 An item's `KIND` column (`task`, `bug`, `feature`, `container`, or `-` when the
 forge reports no native issue type) comes from GitHub's issue type, never a
-label. A Bug ranks alongside the first three configured priority labels
-("critical") rather than taking the plain text-only penalty, so a fresh bug
-outranks an unlabelled or product-labelled epic on its first day; among
-critical items a labelled item still ties-breaks ahead of an unlabelled bug at
-equal score. A `container`-kinded issue shows its sub-issue progress —
-`board`'s `KIND` cell and a trailing `CONTAINERS` section (`#122 2/3 closed;
-open: #112 (blocked by #136)`); `board --json` carries the same figures under
-each item's `container` (`closed`, `total`, `open_children`). A container is
-never itself actionable — its `board`/`next` reason reads `container; claim a
-child` — and its own last open child (once at least one sibling has closed)
-ranks above ordinary work, though never above a critical item or a real
-blocker.
+label; a Bug counts as critical exactly like the first three configured
+labels, per the ranking paragraph above. A `container`-kinded issue shows its
+sub-issue progress — `board`'s `KIND` cell (`container 2/3`) and a trailing
+`CONTAINERS` section (`#122 2/3 closed; open: #112 (blocked by #136)`);
+`board --json` carries the same figures under each item's `container`
+(`closed`, `total`, `open_children`) and its parent under `container_parent`.
+A container is never itself actionable — its `board`/`next` reason reads
+`container; claim a child` — and its own last open child (once at least one
+sibling has closed) ranks above ordinary work, though never above a critical
+item or a real blocker.
 
 `board` also ends with an `UNCUT` section naming, per item, the slice-table
 rows (`#79`'s grammar) that are not yet linked to a dispatched child — an
@@ -234,8 +237,9 @@ issue (open or closed) is landed, never uncut. `board --json` carries the same
 findings under the top-level `uncut` list (`item`, `rows`). This is a finding,
 never a status column: a landed row simply leaves the list.
 
-`board` ends with a `RECOVERY (close or re-project)` section, and `next` names
-those items first with that step: open issues that a merged pull request already
+`board` prints a `RECOVERY (close or re-project)` section after `STALE`,
+followed by the `CONTAINERS` and `UNCUT` sections above; `next` names recovery
+items first with that step: open issues that a merged pull request already
 declared as its `Work-Item:` — the landing happened, the bookkeeping did not. It
 is keyed on that typed line, never on an issue's update time, and never names
 the ledger issue. `next --json` carries the same items under `recovery`.
@@ -247,8 +251,8 @@ priority category and score first, then fewer open expectation lines and the
 issue number. An empty list succeeds.
 
 Use `agent-claim next` (or `agent-claim next --json`) to name the board's
-top-ranked qualifying row — the same bucket-then-score-then-number order
-`board` shows. `next --json` carries an `action` field naming one of three
+top-ranked qualifying row — the same `board_rank` order `board` shows.
+`next --json` carries an `action` field naming one of three
 shapes. `work_item` (unchanged): the row is open, free, unblocked, not frozen,
 and has a complete Now/Next/Blocked by/Done when contract, or is a configured
 projectionless idea. `cut_slice`: a container with no open child still names
@@ -274,9 +278,14 @@ in the claim comment.
 Before it writes a claim, `claim` also reads the pulled issue's live contract:
 `Now`, `Next`, `Blocked by`, and `Done when` each appear at most once outside
 fenced code examples. `Blocked by` is exactly `nichts` or a comma-separated
-`#N` list such as `#62, #75`; every listed issue must be open. The check does
-not limit body size or inspect references in `Next`, and `release` stays
-available even when the body's contract has since become invalid.
+`#N` list such as `#62, #75`; every listed issue must be open. `claim` also
+refuses with `body incomplete` when any of the four sections is empty, unless
+the issue is a configured projectionless idea (above) — the same rule `board`
+already applies to `actionable`, so a freshly `cut` child (its
+`board.CHILD_SKELETON` body has every section present but empty) is refused
+until the head fills it in. The check does not limit body size or inspect
+references in `Next`, and `release` stays available even when the body's
+contract has since become invalid.
 
 A body line `Eingefroren bis: <trigger in one sentence> (Operator, DD.MM.YYYY)`
 freezes an issue: it drops out of `next` and the higher-priority refusal check
@@ -307,10 +316,11 @@ itself a child of another issue (nested containers are not supported); and
 when no cuttable slice-table row exists — `--row N` selects a specific row (a
 `board`-reported `uncut` finding's own `#` column value), or the first
 cuttable row by default; a row already linked to any issue, or one whose item
-cell is malformed, is never a target. The two writes are not atomic — GitHub
-has no transaction across them — so a failure after the child issue exists
-names the created child and instructs a hand link, explicitly warning against
-a re-run, which would create a second child.
+cell is malformed, is never a target. None of the three writes are atomic with
+each other — nor is the child issue's creation atomic with its own sub-issue
+relation write inside `create_child` — so a failure at any point after the
+child issue exists names the created child and the step that failed, and
+instructs a hand fix rather than a re-run, which would create a second child.
 
 ## Issueless lane claims
 

@@ -763,6 +763,14 @@ def _merged_pull_request_floor(issues: tuple[board.Issue, ...], now: datetime) -
     return min(_timestamp(issue.created_at) for issue in issues)
 
 
+# A container's children are their own `gh list_children` subprocess call;
+# an unbounded pool would spawn one worker per container on a large board.
+# This caps that fan-out -- a stable invariant of this executor, not
+# something an operator tunes -- while excess containers simply queue behind
+# it, same as the fixed base workers below.
+BOARD_CHILD_FETCH_CONCURRENCY = 4
+
+
 def _board(
     client: forge.BoardSource,
     claims: tuple[protocol.ActiveClaim, ...],
@@ -782,7 +790,8 @@ def _board(
     # container's children are independent reads once `since` is known, so
     # fetching them on separate threads instead of one after another overlaps
     # their `gh` subprocess wait time.
-    with ThreadPoolExecutor(max_workers=3 + len(container_numbers)) as pool:
+    child_fetch_workers = min(len(container_numbers), BOARD_CHILD_FETCH_CONCURRENCY)
+    with ThreadPoolExecutor(max_workers=3 + child_fetch_workers) as pool:
         open_pull_requests = pool.submit(client.list_open_board_pull_requests)
         merged_pull_requests = pool.submit(client.list_recent_merged_board_pull_requests, since)
         blocker_references = pool.submit(client.list_board_blockers, blockers)
@@ -925,12 +934,12 @@ def _next_action_lines(action: board.NextAction) -> list[str]:
         return lines
     if isinstance(action, board.CutSliceAction):
         return [
-            f"#{action.container.number} cut_slice: {action.next_step}",
+            f"cut_slice #{action.container.number}: {action.next_step}",
             f'Next: agent-claim cut {action.container.number} --title "{action.next_step}"',
         ]
     progress = action.container_progress
     return [
-        f"#{action.container.number} close_container: "
+        f"close_container #{action.container.number}: "
         f"{progress.closed}/{progress.total} children closed, no Next work"
     ]
 
@@ -1056,8 +1065,9 @@ def _parent_checks(
 
 
 def _body_contract_checks(
-    contract: board.Contract, blocker_references: tuple[board.BlockerReference, ...]
+    item: board.BoardItem, blocker_references: tuple[board.BlockerReference, ...]
 ) -> tuple[SliceCheck, ...]:
+    contract = item.contract
     checks = [SliceCheck("error", "body-contract", defect.message) for defect in contract.defects]
     blocker_by_number = {reference.number: reference for reference in blocker_references}
     for blocker in contract.blocker_issues:
@@ -1079,6 +1089,12 @@ def _body_contract_checks(
                     issue=blocker,
                 )
             )
+    # `board`'s own `_actionable_reason` already owns "complete or a configured
+    # projectionless idea"; `claim` reuses that one verdict instead of
+    # re-deriving it, so a freshly `cut` child (an incomplete but defect-free
+    # skeleton) is refused here exactly as it is invisible to `next`.
+    if item.actionable_reason == "body incomplete":
+        checks.append(SliceCheck("error", "body-incomplete", "body incomplete", issue=item.number))
     return tuple(checks)
 
 
@@ -1116,7 +1132,7 @@ def _slice_rule_checks(
             SliceCheck("error", "missing-issue", f"issue #{issue} does not exist here", issue=issue)
         )
     if item is not None:
-        checks.extend(_body_contract_checks(item.contract, projected.blocker_references))
+        checks.extend(_body_contract_checks(item, projected.blocker_references))
     if title is not None:
         parent_check = _parent_checks(lookup.client, lookup.repository, issue, title)
         if parent_check is not None:
@@ -1792,16 +1808,19 @@ def _link_created_child(
     """Link the just-created `child` into `container`'s slice table.
 
     Not atomic with `create_child` -- GitHub has no transaction across the
-    two writes. A failure here still leaves the created child behind, so the
-    refusal names it and instructs a hand link rather than a re-run, which
-    would create a second child.
+    two writes. A failure here still leaves the created child behind, so it
+    raises the same `forge.ForgePartialChildCreationError` a failed relation
+    write inside `create_child` itself would -- one type, so `_cmd_cut`
+    renders one recovery message for either.
     """
     try:
         client.update_item_body(container, new_body)
     except protocol.ClaimError as error:
-        raise protocol.ClaimUnavailableError(
-            f"created #{child} but failed to link it into #{container}'s slice table row "
-            f"{row_index}: {error}; do not re-run -- link #{child} into that row by hand"
+        raise forge.ForgePartialChildCreationError(
+            child=child,
+            parent=container,
+            step=f"link it into #{container}'s slice table row {row_index}",
+            cause=error,
         ) from error
 
 
@@ -1818,11 +1837,17 @@ def _cmd_cut(parsed: argparse.Namespace, session: _WriteSession) -> int:
     span = board.locate_slice_row(target.body, row.index)
     if span is None:
         raise protocol.ClaimUnavailableError(f"#{number}'s row {row.index} could not be located")
-    child = client.create_child(
-        parent=number, title=parsed.title, body=board.CHILD_SKELETON, kind=board.ItemKind.TASK
-    )
-    new_body = board.link_slice_row(target.body, span, child)
-    _link_created_child(client, number, new_body, child, row.index)
+    try:
+        child = client.create_child(
+            parent=number, title=parsed.title, body=board.CHILD_SKELETON, kind=board.ItemKind.TASK
+        )
+        new_body = board.link_slice_row(target.body, span, child)
+        _link_created_child(client, number, new_body, child, row.index)
+    except forge.ForgePartialChildCreationError as error:
+        raise protocol.ClaimUnavailableError(
+            f"created #{error.child} but failed to {error.step}: {error.cause}; "
+            "do not re-run -- finish it by hand"
+        ) from error
     if parsed.json:
         print(json.dumps({"container": number, "row": row.index, "child": child}))
         return 0

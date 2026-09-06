@@ -1144,9 +1144,10 @@ class GitHubForge:
         """Create a fresh issue of `kind` and record it as `parent`'s sub-issue.
 
         Not atomic: GitHub has no transaction across the create and the
-        sub-issue POST, nor within the create itself. `cli._cmd_cut` names
-        the created child and refuses a hand-link instruction on failure
-        after this point, rather than risking a second child on retry.
+        sub-issue POST. A failure in the relation POST raises
+        `forge.ForgePartialChildCreationError` naming the child that already
+        exists, so `cli._cmd_cut` can refuse with a hand-link instruction
+        instead of risking a second child on retry.
         """
         raw = self._run(
             ["api", "--method", "POST", f"repos/{self.repository}/issues", "--input", "-"],
@@ -1171,17 +1172,25 @@ class GitHubForge:
             or number < 1
         ):
             raise forge.ForgeMalformedResponseError("GitHub did not return a created child issue")
-        self._run(
-            [
-                "api",
-                "--method",
-                "POST",
-                f"repos/{self.repository}/issues/{parent}/sub_issues",
-                "--input",
-                "-",
-            ],
-            input_data=json.dumps({"sub_issue_id": identifier}).encode("utf-8"),
-        )
+        try:
+            self._run(
+                [
+                    "api",
+                    "--method",
+                    "POST",
+                    f"repos/{self.repository}/issues/{parent}/sub_issues",
+                    "--input",
+                    "-",
+                ],
+                input_data=json.dumps({"sub_issue_id": identifier}).encode("utf-8"),
+            )
+        except protocol.ClaimError as error:
+            raise forge.ForgePartialChildCreationError(
+                child=number,
+                parent=parent,
+                step=f"record #{number} as a sub-issue of #{parent}",
+                cause=error,
+            ) from error
         return number
 
     def update_item_body(self, number: int, body: str) -> None:

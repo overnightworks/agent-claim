@@ -418,7 +418,10 @@ class BoardItem:
 
 @dataclass(frozen=True)
 class Board:
-    """`items`, and therefore `ready_now`, are ordered `(priority_category, -score, number)`.
+    """`items`, and therefore `ready_now`, are ordered by `board_rank`: critical
+    (a configured critical label or a Bug), then blocker, then a container's
+    completing last child, then the remaining labels and unlabelled --
+    tie-broken by score, critical label index, container, and number.
 
     `ready_now`, `stale`, and `recovery` are filters over `items`; filtering
     never reorders, so `ready_now[0]` is always `items`' first actionable row
@@ -1450,7 +1453,16 @@ def _container_progress(
     """`issue`'s own container progress, or `None` when it isn't a container
     the forge reports numbers for -- a container whose type support is
     absent (no `kind`, no counts) is treated as an ordinary item, never
-    guessed at from a partial read."""
+    guessed at from a partial read.
+
+    The summary (`children_closed`/`children_total`) and the open-children
+    list come from two different reads (the issue page and `list_children`),
+    so they can disagree -- a stale summary, a paginated list that lost a
+    row. `closed == total` must mean no open child, and an open child must
+    mean `closed < total`; any other combination is a malformed board this
+    function never guesses through, since guessing would let `next` close a
+    container that still has work or `board` hide one that doesn't.
+    """
     if (
         issue.kind is not ItemKind.CONTAINER
         or issue.children_closed is None
@@ -1462,6 +1474,8 @@ def _container_progress(
         for child in children.get(issue.number, ())
         if child.state is ChildState.OPEN
     )
+    if bool(open_children) == (issue.children_closed == issue.children_total):
+        raise protocol.ClaimError(f"GitHub returned a malformed board container #{issue.number}")
     return ContainerProgress(issue.children_closed, issue.children_total, open_children)
 
 
@@ -1658,11 +1672,11 @@ def highest_scored_actionable(board: Board) -> BoardItem | None:
     """The one item `next` recommends — always `board`'s own top row.
 
     `ready_now` is a filtered view of `items`, which `build_board` orders by
-    `(priority_category, -score, number)`; filtering preserves that order, so
-    its first element is `board`'s own top-ranked actionable row. Two
-    commands over one board must not disagree, so this reads that order
-    instead of maximizing score on its own — an unlabelled item with a
-    higher score must never outrank a human's priority label.
+    `board_rank`; filtering preserves that order, so its first element is
+    `board`'s own top-ranked actionable row. Two commands over one board must
+    not disagree, so this reads that order instead of maximizing score on its
+    own — an unlabelled item with a higher score must never outrank a human's
+    priority label.
     """
     return next(iter(board.ready_now), None)
 
@@ -1702,10 +1716,15 @@ def next_action(board: Board) -> NextAction | None:
     and returns the first row that is either an actionable non-container
     (`WorkItemAction`; a container is never actionable, so this branch never
     fires for one) or a container with no open child (`CutSliceAction` when
-    its own `Next` line still names work, else `CloseContainerAction`). Every
-    other row -- blocked, claimed, incomplete, or a container still holding
-    an open child -- is skipped, never blocking a lower-ranked qualifying row.
+    its own `Next` line still names work or its slice table still carries an
+    uncut row, else `CloseContainerAction`). `_container_progress` already
+    fails loud on a container whose summary disagrees with its open-children
+    list, so "no open child" here reliably means every created child has
+    closed. Every other row -- blocked, claimed, incomplete, or a container
+    still holding an open child -- is skipped, never blocking a lower-ranked
+    qualifying row.
     """
+    uncut_by_container = {finding.item: finding for finding in board.uncut}
     for item in board.items:
         if item.actionable:
             return WorkItemAction(item)
@@ -1715,6 +1734,9 @@ def next_action(board: Board) -> NextAction | None:
         next_line = item.contract.next
         if next_line is not None and has_further_work(next_line):
             return CutSliceAction(item, container, next_line)
+        uncut = uncut_by_container.get(item.number)
+        if uncut is not None:
+            return CutSliceAction(item, container, uncut.rows[0])
         return CloseContainerAction(item, container)
     return None
 
@@ -1729,6 +1751,14 @@ def board_json(board: Board) -> str:
                 None if freed_on is None else freed_on.astimezone(UTC).date().isoformat()
             )
     return json.dumps(payload, default=lambda value: value.value)
+
+
+def _kind_cell(item: BoardItem) -> str:
+    if item.kind is None:
+        return "-"
+    if item.container is not None:
+        return f"{item.kind.value} {item.container.closed}/{item.container.total}"
+    return item.kind.value
 
 
 def render(board: Board) -> str:
@@ -1755,7 +1785,7 @@ def render(board: Board) -> str:
             (
                 str(item.score),
                 f"#{item.number}",
-                item.kind.value if item.kind is not None else "-",
+                _kind_cell(item),
                 item.priority_bucket,
                 item.stage.value,
                 _contract_summary(item.contract),
