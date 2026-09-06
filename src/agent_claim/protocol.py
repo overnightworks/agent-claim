@@ -11,7 +11,7 @@ from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import PurePosixPath, PureWindowsPath
 from types import MappingProxyType
-from typing import Protocol
+from typing import Protocol, TypeVar
 
 CLAIM_LABEL_PREFIX = "agent-claim:active:"
 # The protocol core is configured by discovery/bootstrap before every CLI action.
@@ -1262,9 +1262,34 @@ def _scopes_overlap(left: tuple[str, ...], right: tuple[str, ...]) -> bool:
     )
 
 
-def _identity_conflicts(
-    left: LedgerActiveClaim | ClaimRequest, right: LedgerActiveClaim | ClaimRequest
-) -> bool:
+class ScopedClaim(Protocol):
+    """The structural shape the conflict/overlap helpers need.
+
+    Satisfied by both the ledger's `LedgerActiveClaim`/`ClaimRequest` pair and
+    the store's `ActiveClaim`/`ClaimIntent` pair (issue #176, slice C2), so
+    one set of pure functions serves both instead of a nominal union that
+    would grow every time a new claim-shaped record is added. Read-only
+    properties, not plain attributes: a frozen dataclass field is itself
+    read-only, and `claim_id` varies covariantly (`str` here, `ClaimId` on
+    the store's records) between the two implementations this protocol
+    covers.
+    """
+
+    @property
+    def identity(self) -> ClaimIdentity: ...
+    @property
+    def claim_id(self) -> str: ...
+    @property
+    def agent(self) -> str: ...
+    @property
+    def role(self) -> str: ...
+    @property
+    def branch(self) -> str: ...
+    @property
+    def scope(self) -> tuple[str, ...]: ...
+
+
+def _identity_conflicts(left: ScopedClaim, right: ScopedClaim) -> bool:
     """Two claims share an identity: same issue number, or same lane branch.
 
     A lane claim and an issue claim never share an identity by themselves — only
@@ -1279,9 +1304,7 @@ def _identity_conflicts(
             return False
 
 
-def claims_conflict(
-    left: LedgerActiveClaim | ClaimRequest, right: LedgerActiveClaim | ClaimRequest
-) -> bool:
+def claims_conflict(left: ScopedClaim, right: ScopedClaim) -> bool:
     """True when two claims share an issue or lane branch.
 
     Path overlap is advisory: it is a visible note, not a conflict.
@@ -1289,9 +1312,7 @@ def claims_conflict(
     return _identity_conflicts(left, right)
 
 
-def claims_overlap(
-    left: LedgerActiveClaim | ClaimRequest, right: LedgerActiveClaim | ClaimRequest
-) -> bool:
+def claims_overlap(left: ScopedClaim, right: ScopedClaim) -> bool:
     return _scopes_overlap(left.scope, right.scope)
 
 
@@ -1304,9 +1325,12 @@ def claims_holding_path(
     return tuple(claim for claim in claims if _scopes_overlap(claim.scope, target))
 
 
+_ScopedClaimT = TypeVar("_ScopedClaimT", bound=ScopedClaim)
+
+
 def blocking_claims(
-    claims: tuple[LedgerActiveClaim, ...], candidate: LedgerActiveClaim | ClaimRequest
-) -> tuple[LedgerActiveClaim, ...]:
+    claims: tuple[_ScopedClaimT, ...], candidate: ScopedClaim
+) -> tuple[_ScopedClaimT, ...]:
     return tuple(
         claim
         for claim in claims
@@ -1339,8 +1363,8 @@ def matching_claim_retry(
 
 
 def overlapping_claims(
-    claims: tuple[LedgerActiveClaim, ...], candidate: LedgerActiveClaim | ClaimRequest
-) -> tuple[LedgerActiveClaim, ...]:
+    claims: tuple[_ScopedClaimT, ...], candidate: ScopedClaim
+) -> tuple[_ScopedClaimT, ...]:
     return tuple(
         claim
         for claim in claims
@@ -1349,8 +1373,8 @@ def overlapping_claims(
 
 
 def conflicting_claims(
-    claims: tuple[LedgerActiveClaim, ...], candidate: LedgerActiveClaim | ClaimRequest
-) -> tuple[LedgerActiveClaim, ...]:
+    claims: tuple[_ScopedClaimT, ...], candidate: ScopedClaim
+) -> tuple[_ScopedClaimT, ...]:
     """Path-overlapping live claims, excluding identity. Used as the advisory note."""
     return overlapping_claims(claims, candidate)
 
