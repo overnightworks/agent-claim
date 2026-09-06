@@ -850,6 +850,22 @@ def _validated_dependencies(
     return validated
 
 
+def _resolve_toplevel() -> Path:
+    """The checkout's toplevel, for every command that resolves the
+    repository's board configuration (#150). Without a working tree the
+    command cannot know the `body_contract` pin -- it would otherwise have to
+    guess a default and could silently read a `block`-pinned repository's
+    bodies with the prose grammar, so it refuses instead (#178)."""
+    try:
+        return Path(checkout._git_output(["rev-parse", "--show-toplevel"]))
+    except protocol.ClaimError as error:
+        raise protocol.ClaimUnavailableError(
+            "this command reads the repository's body contract from "
+            ".agent-claim/board.toml and needs a checkout (a shallow one is "
+            f"enough): {error}"
+        ) from error
+
+
 def _load_board_config(client: forge.BoardSource, toplevel: Path) -> board.BoardConfig:
     """The repository's board configuration, with its `body_contract` pin
     validated against what `client` can actually do (#150 §3): `block`
@@ -872,8 +888,7 @@ def _board(
     issues: tuple[board.Issue, ...] | None = None,
 ) -> board.Board:
     now = datetime.now(UTC)
-    toplevel = Path(checkout._git_output(["rev-parse", "--show-toplevel"]))
-    config = _load_board_config(client, toplevel)
+    config = _load_board_config(client, _resolve_toplevel())
     if issues is None:
         issues = client.list_open_board_issues()
     since = _merged_pull_request_floor(issues, now)
@@ -1770,8 +1785,7 @@ def _rescope_command(parsed: argparse.Namespace) -> protocol.RescopeRequest:
 
 def _cmd_pull_request_check(parsed: argparse.Namespace, session: _ReadSession) -> int:
     pull_request_number = int(parsed.pr)
-    toplevel = Path(checkout._git_output(["rev-parse", "--show-toplevel"]))
-    config = _load_board_config(session.forge, toplevel)
+    config = _load_board_config(session.forge, _resolve_toplevel())
     return _pull_request_check(
         session.forge, session.forge.repository.path, pull_request_number, config.body_contract
     )
@@ -2243,8 +2257,7 @@ def _cmd_cut(parsed: argparse.Namespace, session: _WriteSession) -> int:
             raise protocol.ClaimUnavailableError(
                 f"this forge cannot {operation.value}; cut the slice by hand"
             )
-    toplevel = Path(checkout._git_output(["rev-parse", "--show-toplevel"]))
-    config = _load_board_config(client, toplevel)
+    config = _load_board_config(client, _resolve_toplevel())
     target = _cut_target(client, number)
     if config.body_contract is board.BodyContractMode.BLOCK:
         return _cmd_cut_block(client, target, parsed)
