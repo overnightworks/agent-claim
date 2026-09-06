@@ -6,6 +6,7 @@ import re
 import shlex
 import subprocess
 import sys
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
@@ -7756,6 +7757,140 @@ def test_bounded_command_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
         )
     assert str(excinfo.value) == "timeout probe timed out"
     assert recorded["process"].poll() is not None
+
+
+def test_bounded_command_times_out_against_a_child_that_already_exited(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A deadline already passed by the time I/O is awaited must fail loud even
+    when the child happened to finish first -- stopping an already-exited
+    process is then a safe no-op, never a second signal or a raised error."""
+    recorded: dict[str, subprocess.Popen[bytes]] = {}
+    original_popen = subprocess.Popen
+
+    def start(
+        command: list[str],
+        *,
+        stdin: int | None = None,
+        stdout: int | None = None,
+        stderr: int | None = None,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.Popen[bytes]:
+        spawned = original_popen(command, stdin=stdin, stdout=stdout, stderr=stderr, env=env)
+        recorded["process"] = spawned
+        return spawned
+
+    call_count = {"n": 0}
+    real_monotonic = time.monotonic
+
+    def already_past_deadline() -> float:
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return 0.0
+        # Give the quick-exiting child real time to finish before the code
+        # under test checks whether the deadline has passed, even on a
+        # heavily loaded machine.
+        time.sleep(1.0)
+        return real_monotonic() + 10_000
+
+    monkeypatch.setattr(subprocess, "Popen", start)
+    monkeypatch.setattr(process.time, "monotonic", already_past_deadline)
+
+    with pytest.raises(ClaimError, match="timed out"):
+        github._bounded_command([sys.executable, "-c", "pass"], purpose="expired probe")
+
+    assert recorded["process"].poll() is not None
+
+
+def test_bounded_command_kills_a_child_that_ignores_termination(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorded: dict[str, subprocess.Popen[bytes]] = {}
+    original_popen = subprocess.Popen
+
+    def start(
+        command: list[str],
+        *,
+        stdin: int | None = None,
+        stdout: int | None = None,
+        stderr: int | None = None,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.Popen[bytes]:
+        spawned = original_popen(command, stdin=stdin, stdout=stdout, stderr=stderr, env=env)
+        recorded["process"] = spawned
+        return spawned
+
+    monkeypatch.setattr(subprocess, "Popen", start)
+    # Long enough that the child has certainly installed its SIGTERM handler
+    # before this deadline fires, even on a heavily loaded machine -- a
+    # shorter budget only proves how fast the machine is, not this behavior.
+    monkeypatch.setattr(github, "GH_TIMEOUT_SECONDS", 1.0)
+    with pytest.raises(ClaimError, match="timed out"):
+        github._bounded_command(
+            [
+                sys.executable,
+                "-c",
+                "import signal, time\n"
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                "time.sleep(30)",
+            ],
+            purpose="stubborn child probe",
+        )
+    assert recorded["process"].poll() is not None
+
+
+def test_bounded_command_treats_a_broken_input_pipe_as_fully_sent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stdin write that raises `BrokenPipeError` -- the child closed its read
+    end without consuming the input -- must not fail the whole exchange: the
+    write is treated as fully sent and output collection continues."""
+
+    def broken_write(_file_descriptor: int, data: bytes) -> int:
+        raise BrokenPipeError(32, "Broken pipe")
+
+    monkeypatch.setattr(process.os, "write", broken_write)
+
+    observed = github._bounded_command(
+        [sys.executable, "-c", "print('done')"],
+        purpose="broken pipe probe",
+        input_data=b"unread input",
+    )
+    assert observed == "done"
+
+
+def test_bounded_command_reaps_the_child_when_the_selector_fails_to_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A selector that cannot close itself on the way out must not mask the
+    command's own result -- reaping swallows that failure."""
+    real_selector_class = process.selectors.DefaultSelector
+
+    class CloseFailingSelector:
+        def __init__(self) -> None:
+            self._inner = real_selector_class()
+
+        def register(self, fileobj, events, data=None):
+            return self._inner.register(fileobj, events, data)
+
+        def unregister(self, fileobj):
+            return self._inner.unregister(fileobj)
+
+        def get_map(self):
+            return self._inner.get_map()
+
+        def select(self, timeout=None):
+            return self._inner.select(timeout)
+
+        def close(self) -> None:
+            raise OSError(5, "close failed")
+
+    monkeypatch.setattr(process.selectors, "DefaultSelector", CloseFailingSelector)
+
+    observed = github._bounded_command(
+        [sys.executable, "-c", "print('ok')"], purpose="close failure probe"
+    )
+    assert observed == "ok"
 
 
 def test_bounded_command_stops_a_child_that_hangs_after_closing_output(
