@@ -935,6 +935,7 @@ def _next_json(
     recovery: tuple[board.BoardItem, ...],
 ) -> int:
     payload: dict[str, object] = {
+        "action": None,
         "recovery": [
             {
                 "number": recovery_item.number,
@@ -958,7 +959,12 @@ def _next_action_lines(action: board.NextAction) -> list[str]:
     """The action-specific lines `_next` prints before `SKIPPED`."""
     if isinstance(action, board.WorkItemAction):
         item = action.item
-        lines = [f"#{item.number} score {item.score}: {item.title}", f"Next: {item.next_step}"]
+        lines = [
+            f"#{item.number} score {item.score}: {item.title}",
+            f"Next: {item.next_step}",
+            f"Run: agent-claim claim {item.number} --scope <paths>",
+            "<paths> cannot be derived; take the files to claim from the item body.",
+        ]
         hint = _ruling_pull_hint(item)
         if hint is not None:
             lines.append(hint)
@@ -1670,11 +1676,10 @@ def _cmd_next(parsed: argparse.Namespace, session: _ReadSession) -> int:
     skipped = tuple(item for item in _unworkable(projected) if item.number != chosen_container)
     recovery = projected.recovery
     if action is None:
-        if skipped or recovery:
-            if parsed.json:
-                _next_json(None, skipped, recovery)
-            else:
-                _next(None, skipped, recovery)
+        if parsed.json:
+            _next_json(None, skipped, recovery)
+        else:
+            _next(None, skipped, recovery)
         return 3
     if parsed.json:
         return _next_json(action, skipped, recovery)

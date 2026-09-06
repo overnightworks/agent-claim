@@ -1820,7 +1820,10 @@ def _stub_issue_reference(
             (),
             ("next",),
             0,
-            "#11 score 10: Top work\nNext: Claim #11.\n\nSKIPPED\n#12: blocked by #11\n",
+            "#11 score 10: Top work\nNext: Claim #11.\n"
+            "Run: agent-claim claim 11 --scope <paths>\n"
+            "<paths> cannot be derived; take the files to claim from the item body.\n"
+            "\nSKIPPED\n#12: blocked by #11\n",
             id="names_the_highest_scored_actionable_item",
         ),
         pytest.param(
@@ -1869,8 +1872,27 @@ def _stub_issue_reference(
             (),
             ("next",),
             0,
-            "#9 score 10: Open blocker\nNext: Claim #9.\n\nSKIPPED\n#10: blocked by #9\n",
+            "#9 score 10: Open blocker\nNext: Claim #9.\n"
+            "Run: agent-claim claim 9 --scope <paths>\n"
+            "<paths> cannot be derived; take the files to claim from the item body.\n"
+            "\nSKIPPED\n#10: blocked by #9\n",
             id="excludes_items_with_open_blockers",
+        ),
+        pytest.param(
+            (),
+            (),
+            ("next",),
+            3,
+            "No actionable item.\n",
+            id="prints_no_actionable_item_on_a_fully_empty_board",
+        ),
+        pytest.param(
+            (),
+            (),
+            ("next", "--json"),
+            3,
+            {"action": None, "recovery": [], "skipped": []},
+            id="emits_action_null_on_a_fully_empty_board",
         ),
     ],
 )
@@ -1903,7 +1925,10 @@ def test_next_reports_the_highest_scored_actionable_item(
 
 
 PULLED_WITH_REFINING_FIRST = (
-    "#10 score -10: Work\nNext: Claim #10.\nErwartungen ungeregelt, beim Ziehen zuerst refinen\n"
+    "#10 score -10: Work\nNext: Claim #10.\n"
+    "Run: agent-claim claim 10 --scope <paths>\n"
+    "<paths> cannot be derived; take the files to claim from the item body.\n"
+    "Erwartungen ungeregelt, beim Ziehen zuerst refinen\n"
 )
 
 
@@ -1914,7 +1939,9 @@ PULLED_WITH_REFINING_FIRST = (
             "",
             board.ExpectationState.NONE,
             0,
-            "#10 score -10: Work\nNext: Claim #10.\n",
+            "#10 score -10: Work\nNext: Claim #10.\n"
+            "Run: agent-claim claim 10 --scope <paths>\n"
+            "<paths> cannot be derived; take the files to claim from the item body.\n",
             id="no_expectation_block_remains_actionable",
         ),
         pytest.param(
@@ -1945,7 +1972,9 @@ PULLED_WITH_REFINING_FIRST = (
             ),
             board.ExpectationState.RULED,
             0,
-            "#10 score -10: Work\nNext: Claim #10.\n",
+            "#10 score -10: Work\nNext: Claim #10.\n"
+            "Run: agent-claim claim 10 --scope <paths>\n"
+            "<paths> cannot be derived; take the files to claim from the item body.\n",
             id="fully_ruled_expectations_remain_actionable",
         ),
         pytest.param(
@@ -2020,6 +2049,8 @@ def test_next_pulls_an_unruled_item_and_names_only_unworkable_ones_as_skipped(
     assert capsys.readouterr().out == (
         "#11 score 10: Needs rulings\n"
         "Next: Claim #11.\n"
+        "Run: agent-claim claim 11 --scope <paths>\n"
+        "<paths> cannot be derived; take the files to claim from the item body.\n"
         "Erwartungen ungeregelt, beim Ziehen zuerst refinen\n"
         "\n"
         "SKIPPED\n"
@@ -4055,6 +4086,8 @@ def test_next_skips_a_frozen_item_and_names_it_as_such(
     assert capsys.readouterr().out == (
         "#10 score -10: Lower work\n"
         "Next: Claim #10.\n"
+        "Run: agent-claim claim 10 --scope <paths>\n"
+        "<paths> cannot be derived; take the files to claim from the item body.\n"
         "\n"
         "SKIPPED\n"
         "#301: frozen: eine zweite Maschine bekommt einen Grund\n"
@@ -5496,6 +5529,8 @@ def test_next_pulls_a_configured_projectionless_idea_with_refinement_step(
     assert issue_claim.main(["--repo", "example/agent-claim", "next"]) == 0
     assert capsys.readouterr().out == (
         "#10 score -20: Operator idea\nNext: Problem neu prüfen und Item verfeinern\n"
+        "Run: agent-claim claim 10 --scope <paths>\n"
+        "<paths> cannot be derived; take the files to claim from the item body.\n"
     )
 
     assert issue_claim.main(["--repo", "example/agent-claim", "next", "--json"]) == 0
@@ -5526,6 +5561,7 @@ def test_next_keeps_an_unlabelled_projectionless_item_skipped_with_an_active_ide
 
     assert issue_claim.main(["--repo", "example/agent-claim", "next", "--json"]) == 3
     assert json.loads(capsys.readouterr().out) == {
+        "action": None,
         "recovery": [],
         "skipped": [{"number": 10, "reason": "body incomplete"}],
     }
@@ -5557,6 +5593,8 @@ def test_next_keeps_a_configured_idea_with_a_complete_projection_own_next(
     assert issue_claim.main(["--repo", "example/agent-claim", "next"]) == 0
     assert capsys.readouterr().out == (
         "#10 score -10: Refined idea\nNext: Build the chosen direction.\n"
+        "Run: agent-claim claim 10 --scope <paths>\n"
+        "<paths> cannot be derived; take the files to claim from the item body.\n"
     )
 
 
@@ -16125,6 +16163,8 @@ def test_next_names_an_old_ruling_when_the_item_is_pulled(
     assert capsys.readouterr().out == (
         "#10 score -10: Work\n"
         "Next: Claim #10.\n"
+        "Run: agent-claim claim 10 --scope <paths>\n"
+        "<paths> cannot be derived; take the files to claim from the item body.\n"
         "vor 10 Landungen geregelt, beim Ziehen neu refinen\n"
     )
 
