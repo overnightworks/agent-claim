@@ -217,6 +217,22 @@ def test_discovery_fetch_failure_propagates_loudly_without_bootstrap_advice() ->
     assert "bootstrap" not in str(excinfo.value)
 
 
+def test_discovery_ignores_a_landing_pull_request_carrying_the_ledger_marker() -> None:
+    """A merged/landing pull request can carry the same first-line marker as a
+    ledger issue but must never be mistaken for one."""
+    client = FakeForge(ledger_items=[ledger_item(3, is_landing=True), ledger_item(5)])
+    assert issue_claim.discover_ledger(client) == 5
+
+
+def test_bootstrap_fails_loud_when_the_created_ledger_does_not_reappear() -> None:
+    """An eventual-consistency gap -- the freshly created ledger issue not yet
+    visible to the very next listing -- must fail loud rather than claim a
+    trusted candidate that was never actually observed."""
+    client = _VanishingLedgerForge()
+    with pytest.raises(ClaimError, match="did not expose a trusted ledger candidate"):
+        issue_claim.bootstrap_ledger(client)
+
+
 def comment(
     identifier: int,
     body: str,
@@ -718,6 +734,17 @@ class ReaderOnlyForge(FakeForge):
 
     def update_item_body(self, number: int, body: str) -> None:
         pytest.fail("a read-only command must never update an item body")
+
+
+class _VanishingLedgerForge(FakeForge):
+    """A `FakeForge` whose freshly created ledger issue never reappears in a
+    following `list_items()` -- simulating a read-after-write consistency gap
+    on the forge side."""
+
+    def create_item(self, *, title: str, body: str) -> int:
+        number = super().create_item(title=title, body=body)
+        self.ledger_items = [item for item in self.ledger_items if item.number != number]
+        return number
 
 
 def test_forge_operation_exhaustiveness_matches_the_declared_reader_and_writer_methods() -> None:
