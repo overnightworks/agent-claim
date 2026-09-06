@@ -392,6 +392,11 @@ class BoardConfig:
     priority_labels: tuple[str, ...] = DEFAULT_PRIORITY_LABELS
     idea_label: str | None = None
     body_contract: BodyContractMode = BodyContractMode.PROSE
+    # The remote `refs/aco/state` lives on (issue #176, §1); every store and
+    # import refusal is phrased in its terms. The store's own default is
+    # already "origin" (`store.DEFAULT_CANONICAL_REMOTE`) -- this is the one
+    # place a repository overrides it.
+    canonical_remote: str = "origin"
 
 
 @dataclass(frozen=True)
@@ -559,7 +564,20 @@ def load_config(path: Path = CONFIG_PATH) -> BoardConfig:
         raise protocol.ClaimError(
             f"board configuration {path} body_contract must be prose or block"
         )
-    return BoardConfig(priority_labels, idea_label, body_contract)
+    canonical_remote_raw = raw.get("canonical_remote")
+    if canonical_remote_raw is None:
+        canonical_remote = "origin"
+    elif (
+        isinstance(canonical_remote_raw, str)
+        and canonical_remote_raw.strip() == canonical_remote_raw
+        and canonical_remote_raw
+    ):
+        canonical_remote = canonical_remote_raw
+    else:
+        raise protocol.ClaimError(
+            f"board configuration {path} canonical_remote must be a non-empty remote name"
+        )
+    return BoardConfig(priority_labels, idea_label, body_contract, canonical_remote)
 
 
 def _contract_field_value(
