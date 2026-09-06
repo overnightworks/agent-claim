@@ -282,7 +282,7 @@ def test_fetch_state_reads_via_fetch_head_without_creating_a_local_ref(
         pytest.param(
             {"schema.toml": b"version = 1\n", "extra.txt": b"stray\n"},
             protocol.MalformedStateTreeError,
-            "must contain exactly schema.toml",
+            "unknown entries",
             id="extra-file",
         ),
         pytest.param(
@@ -570,12 +570,12 @@ def test_cli_bootstrap_is_idempotent_on_a_second_run(
     assert capsys.readouterr().out == first_output
 
 
-def test_read_schema_blob_fails_loud_when_the_tree_is_unresolvable(worktree: Path) -> None:
+def test_list_tree_fails_loud_when_the_tree_is_unresolvable(worktree: Path) -> None:
     with pytest.raises(protocol.MalformedStateTreeError, match="cannot list the state tree"):
-        store._read_schema_blob(worktree, _UNRESOLVABLE_OBJECT_ID, tip=_PLACEHOLDER_TIP)
+        store._list_tree(worktree, _UNRESOLVABLE_OBJECT_ID, tip=_PLACEHOLDER_TIP, context="state")
 
 
-def test_read_schema_blob_fails_loud_when_schema_toml_is_not_a_blob(worktree: Path) -> None:
+def test_read_schema_toml_fails_loud_when_schema_toml_is_not_a_blob(worktree: Path) -> None:
     inner_blob = (
         subprocess.run(
             ["git", "-C", str(worktree), "hash-object", "-w", "--stdin"],
@@ -587,14 +587,16 @@ def test_read_schema_blob_fails_loud_when_schema_toml_is_not_a_blob(worktree: Pa
         .strip()
     )
     inner_tree = _raw_tree(worktree, [("100644", "blob", inner_blob, "x")])
-    outer_tree_oid = _raw_tree(worktree, [("040000", "tree", inner_tree, "schema.toml")])
-    outer_tree = protocol.ObjectId(outer_tree_oid)
+    outer_tree_oid = protocol.ObjectId(
+        _raw_tree(worktree, [("040000", "tree", inner_tree, "schema.toml")])
+    )
+    top_entries = store._list_tree(worktree, outer_tree_oid, tip=_PLACEHOLDER_TIP, context="state")
 
     with pytest.raises(protocol.MalformedStateTreeError, match="is not a blob"):
-        store._read_schema_blob(worktree, outer_tree, tip=_PLACEHOLDER_TIP)
+        store._read_schema_toml(worktree, top_entries, tip=_PLACEHOLDER_TIP)
 
 
-def test_read_schema_blob_fails_loud_when_the_blob_is_unresolvable(worktree: Path) -> None:
+def test_read_schema_toml_fails_loud_when_the_blob_is_unresolvable(worktree: Path) -> None:
     # `git mktree` itself refuses a fabricated oid, so the dangling reference
     # this exercises is built the only way one can occur against a real
     # object database: reference a real blob, then remove its loose object,
@@ -612,9 +614,10 @@ def test_read_schema_blob_fails_loud_when_the_blob_is_unresolvable(worktree: Pat
     tree = protocol.ObjectId(_raw_tree(worktree, [("100644", "blob", blob_oid, "schema.toml")]))
     loose_object = worktree / ".git" / "objects" / blob_oid[:2] / blob_oid[2:]
     loose_object.unlink()
+    top_entries = store._list_tree(worktree, tree, tip=_PLACEHOLDER_TIP, context="state")
 
     with pytest.raises(protocol.MalformedStateTreeError, match=r"cannot read schema\.toml blob"):
-        store._read_schema_blob(worktree, tree, tip=_PLACEHOLDER_TIP)
+        store._read_schema_toml(worktree, top_entries, tip=_PLACEHOLDER_TIP)
 
 
 def test_write_lineage_stamp_cleans_up_its_temp_file_on_failure(
@@ -708,6 +711,221 @@ def test_commit_tree_fails_loud_on_an_unresolvable_tree(worktree: Path) -> None:
         )
 
 
+# --- `commit_transition`: `apply` wired to the real git transport ----------
+
+
+def _issue_claim_intent(
+    issue: int, *, claim_id: str = "a1", operation_id: str = "op-1", **overrides: object
+) -> protocol.ClaimIntent:
+    fields: dict[str, object] = {
+        "identity": protocol.IssueIdentity(issue),
+        "agent": "Ada",
+        "role": "builder",
+        "base": protocol.ObjectId("c" * 40),
+        "branch": f"claude/issue-{issue}-cut",
+        "scope": (f"src/issue-{issue}.py",),
+        "claim_id": protocol.ClaimId(claim_id),
+        "operation_id": operation_id,
+    }
+    fields.update(overrides)
+    return protocol.ClaimIntent(**fields)  # type: ignore[arg-type]
+
+
+def test_commit_transition_and_fetch_state_round_trip_a_claim_with_a_resource(
+    bare_remote: Path, worktree: Path
+) -> None:
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    intent = _issue_claim_intent(42, resource_name="display")
+
+    result = store.commit_transition(
+        worktree=worktree, remote=str(bare_remote), subject="claim issue 42", intent=intent
+    )
+
+    refetched = store.fetch_state(worktree=worktree, remote=str(bare_remote))
+    assert refetched == result
+    assert refetched.claims["issue-42"].agent == "Ada"
+    assert refetched.claims["issue-42"].resource == protocol.ResourceHold("display", 1)
+    assert refetched.consumed_ids == frozenset({protocol.ClaimId("a1")})
+    assert refetched.resources["display"].occupied == (1,)
+
+
+def test_commit_transition_rescope_and_release_round_trip(
+    bare_remote: Path, worktree: Path
+) -> None:
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    store.commit_transition(
+        worktree=worktree,
+        remote=str(bare_remote),
+        subject="claim issue 42",
+        intent=_issue_claim_intent(42),
+    )
+    rescope = protocol.RescopeIntent(
+        claim_id=protocol.ClaimId("a1"),
+        agent="Ada",
+        role="builder",
+        scope=("README.md",),
+        operation_id="op-2",
+    )
+    store.commit_transition(
+        worktree=worktree, remote=str(bare_remote), subject="rescope issue 42", intent=rescope
+    )
+
+    rescoped = store.fetch_state(worktree=worktree, remote=str(bare_remote))
+    assert rescoped.claims["issue-42"].scope == ("README.md",)
+
+    release = protocol.ReleaseIntent(
+        claim_id=protocol.ClaimId("a1"),
+        agent="Ada",
+        role="builder",
+        outcome=protocol.AbandonedRelease("done"),
+        operation_id="op-3",
+    )
+    store.commit_transition(
+        worktree=worktree, remote=str(bare_remote), subject="release issue 42", intent=release
+    )
+
+    released = store.fetch_state(worktree=worktree, remote=str(bare_remote))
+    assert "issue-42" not in released.claims
+    assert protocol.ClaimId("a1") in released.consumed_ids
+
+
+def test_commit_transition_a_local_two_racer_claim_on_different_keys_both_land(
+    bare_remote: Path, worktree: Path
+) -> None:
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+
+    store.commit_transition(
+        worktree=worktree,
+        remote=str(bare_remote),
+        subject="claim issue 1",
+        intent=_issue_claim_intent(1),
+    )
+    store.commit_transition(
+        worktree=worktree,
+        remote=str(bare_remote),
+        subject="claim issue 2",
+        intent=_issue_claim_intent(2, claim_id="a2", operation_id="op-2"),
+    )
+
+    state = store.fetch_state(worktree=worktree, remote=str(bare_remote))
+    assert set(state.claims) == {"issue-1", "issue-2"}
+
+
+def test_commit_transition_same_key_second_racer_names_the_holder(
+    bare_remote: Path, worktree: Path
+) -> None:
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    store.commit_transition(
+        worktree=worktree,
+        remote=str(bare_remote),
+        subject="claim issue 42",
+        intent=_issue_claim_intent(42),
+    )
+
+    with pytest.raises(protocol.ClaimUnavailableError, match="is claimed by Ada"):
+        store.commit_transition(
+            worktree=worktree,
+            remote=str(bare_remote),
+            subject="claim issue 42",
+            intent=_issue_claim_intent(42, agent="Grace", claim_id="a2", operation_id="op-2"),
+        )
+
+
+def test_commit_transition_a_different_key_loser_that_exhausts_retries_names_no_holder(
+    bare_remote: Path, worktree: Path
+) -> None:
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    transport = _AlwaysRejectingTransport()
+
+    with pytest.raises(protocol.ClaimUnavailableError, match="moved 32 times; retry the command"):
+        store.commit_transition(
+            worktree=worktree,
+            remote=str(bare_remote),
+            subject="claim issue 42",
+            intent=_issue_claim_intent(42),
+            transport=transport,
+        )
+
+
+def test_commit_transition_lost_response_does_not_apply_twice(
+    bare_remote: Path, worktree: Path
+) -> None:
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    transport = _AcceptThenRaiseTransport()
+    intent = _issue_claim_intent(42)
+
+    result = store.commit_transition(
+        worktree=worktree,
+        remote=str(bare_remote),
+        subject="claim issue 42",
+        intent=intent,
+        transport=transport,
+    )
+
+    assert transport.calls == 1
+    assert result.claims["issue-42"].claim_id == "a1"
+    log = subprocess.run(
+        ["git", "--git-dir", str(bare_remote), "rev-list", "--count", store.STATE_REF],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    # The bootstrap commit, plus this one claim commit -- never a duplicate
+    # second commit for the same operation_id.
+    assert log.stdout.strip() == "2"
+
+
+def test_commit_transition_ten_thread_contention_lands_every_distinct_key(
+    tmp_path: Path, bare_remote: Path
+) -> None:
+    """Criterion 3 contention (C2): ten threads, a barrier, no sleeps,
+    against a local bare repo, bound at 30 seconds."""
+    main_repo = tmp_path / "main"
+    main_repo.mkdir()
+    _git("init", "-b", "main", cwd=main_repo)
+    (main_repo / "README").write_text("placeholder\n")
+    _git("add", "README", cwd=main_repo)
+    _git("commit", "-m", "initial", cwd=main_repo)
+    store.bootstrap(worktree=main_repo, remote=str(bare_remote))
+
+    issue_numbers = range(1, 11)
+    worktrees: dict[int, Path] = {}
+    for issue in issue_numbers:
+        linked = tmp_path / f"linked-{issue}"
+        _git("worktree", "add", "-b", f"lane-{issue}", str(linked), cwd=main_repo)
+        worktrees[issue] = linked
+
+    barrier = threading.Barrier(10)
+    errors: list[BaseException] = []
+
+    def claim(issue: int, linked_worktree: Path) -> None:
+        barrier.wait()
+        try:
+            store.commit_transition(
+                worktree=linked_worktree,
+                remote=str(bare_remote),
+                subject=f"claim issue {issue}",
+                intent=_issue_claim_intent(
+                    issue, claim_id=f"a{issue}", operation_id=f"op-{issue:03d}"
+                ),
+            )
+        except BaseException as error:
+            errors.append(error)
+
+    threads = [
+        threading.Thread(target=claim, args=(issue, linked)) for issue, linked in worktrees.items()
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+        assert not thread.is_alive()
+
+    assert errors == []
+    state = store.fetch_state(worktree=main_repo, remote=str(bare_remote))
+    assert set(state.claims) == {f"issue-{issue}" for issue in issue_numbers}
+
+
 # --- `apply`, the claim-key codec, and the claim/resource TOML codecs ------
 #
 # Pure logic (issue #176, slice C2): no git subprocess needed, so these
@@ -754,7 +972,7 @@ def _claim_intent(
 def test_apply_claim_intent_adds_a_live_claim_and_consumes_its_id() -> None:
     state = protocol.apply(_STATE_WITH_TIP, _claim_intent())
 
-    claim = state.claims["a1"]
+    claim = state.claims["issue-42"]
     assert claim.identity == protocol.IssueIdentity(42)
     assert claim.agent == "Ada"
     assert claim.role == "builder"
@@ -821,7 +1039,7 @@ def test_apply_rescope_intent_replaces_scope_and_preserves_opened_commit() -> No
 
     rescoped = protocol.apply(claimed, rescope)
 
-    claim = rescoped.claims["a1"]
+    claim = rescoped.claims["issue-42"]
     assert claim.scope == ("README.md",)
     assert claim.opened_commit == _TIP
     assert rescoped.consumed_ids == claimed.consumed_ids
@@ -867,7 +1085,7 @@ def test_apply_rescope_intent_can_clear_the_whole_reason() -> None:
 
     cleared = protocol.apply(claimed, clear)
 
-    assert cleared.claims["a1"].whole_reason is None
+    assert cleared.claims["issue-42"].whole_reason is None
 
 
 def test_apply_rescope_intent_keeps_the_whole_reason_when_omitted() -> None:
@@ -882,7 +1100,7 @@ def test_apply_rescope_intent_keeps_the_whole_reason_when_omitted() -> None:
 
     rescoped = protocol.apply(claimed, rescope)
 
-    assert rescoped.claims["a1"].whole_reason == "repo-wide rename"
+    assert rescoped.claims["issue-42"].whole_reason == "repo-wide rename"
 
 
 @pytest.mark.parametrize(
@@ -904,7 +1122,7 @@ def test_apply_release_intent_removes_the_claim(outcome: protocol.ReleaseOutcome
 
     released = protocol.apply(claimed, release)
 
-    assert "a1" not in released.claims
+    assert "issue-42" not in released.claims
     assert protocol.ClaimId("a1") in released.consumed_ids
 
 
@@ -948,7 +1166,7 @@ def test_apply_release_intent_allows_a_coordinator_override() -> None:
 
     released = protocol.apply(claimed, release)
 
-    assert "a1" not in released.claims
+    assert "issue-42" not in released.claims
 
 
 def test_apply_release_intent_refuses_a_coordinator_override_without_coordinator_role() -> None:
@@ -978,8 +1196,8 @@ def test_apply_claim_intent_assigns_the_least_free_auto_resource_value() -> None
         ),
     )
 
-    assert first.claims["a1"].resource == protocol.ResourceHold("display", 1)
-    assert second.claims["a2"].resource == protocol.ResourceHold("display", 2)
+    assert first.claims["issue-42"].resource == protocol.ResourceHold("display", 1)
+    assert second.claims["issue-43"].resource == protocol.ResourceHold("display", 2)
     assert second.resources["display"].occupied == (1, 2)
 
 
@@ -1021,7 +1239,7 @@ def test_apply_claim_intent_never_reuses_a_released_auto_resource_value() -> Non
         released, _claim_intent(claim_id="a2", operation_id="op-3", resource_name="display")
     )
 
-    assert reclaimed.claims["a2"].resource == protocol.ResourceHold("display", 2)
+    assert reclaimed.claims["issue-42"].resource == protocol.ResourceHold("display", 2)
     assert reclaimed.resources["display"].occupied == (1, 2)
 
 
@@ -1067,8 +1285,8 @@ def test_stale_takeover_is_release_then_claim_and_does_not_reuse_the_occupied_in
         _claim_intent(claim_id="a3", operation_id="op-3", agent="Grace", resource_name="display"),
     )
 
-    assert "a1" not in retaken.claims
-    assert retaken.claims["a3"].resource == protocol.ResourceHold("display", 2)
+    assert retaken.claims["issue-42"].claim_id == "a3"
+    assert retaken.claims["issue-42"].resource == protocol.ResourceHold("display", 2)
 
 
 def test_apply_resource_value_requires_a_resource_name() -> None:

@@ -2969,6 +2969,21 @@ def _resolved_resource(
     return ResourceHold(name, value), ResourceRecord(name, tuple(sorted(occupied | {value})))
 
 
+def _live_claim_by_id(state: ClaimState, claim_id: ClaimId) -> tuple[str, ActiveClaim] | None:
+    """The `(tree key, claim)` pair for `claim_id`, or `None`.
+
+    `ClaimState.claims` is keyed by the claim-key codec (`issue-42`,
+    `lane-...`), not by `claim_id` -- at most one claim is ever live per
+    identity (an identity conflict refuses a second), so this linear scan
+    over the (small, live-claims-only) mapping is the one place that still
+    needs to go from a bare `claim_id`, which is all `RescopeIntent` and
+    `ReleaseIntent` carry, back to its tree key.
+    """
+    return next(
+        ((key, claim) for key, claim in state.claims.items() if claim.claim_id == claim_id), None
+    )
+
+
 def _apply_claim_intent(state: ClaimState, intent: ClaimIntent) -> ClaimState:
     if state.tip is None:
         # The one command allowed to turn `EMPTY_STATE` into real content is
@@ -2980,9 +2995,9 @@ def _apply_claim_intent(state: ClaimState, intent: ClaimIntent) -> ClaimState:
             "the claim state ref does not exist yet; run bootstrap before claim, "
             "rescope, or release"
         )
-    live = state.claims.get(intent.claim_id)
+    live = _live_claim_by_id(state, intent.claim_id)
     if intent.claim_id in state.consumed_ids:
-        if live is not None and _claim_matches_intent(live, intent):
+        if live is not None and _claim_matches_intent(live[1], intent):
             return state
         raise ClaimUnavailableError(
             f"claim id {intent.claim_id!r} is already on this ledger, active or "
@@ -3009,7 +3024,7 @@ def _apply_claim_intent(state: ClaimState, intent: ClaimIntent) -> ClaimState:
         resource=resource,
         whole_reason=intent.whole_reason,
     )
-    new_claims = {**state.claims, intent.claim_id: new_claim}
+    new_claims = {**state.claims, claim_key(intent.identity, intent.branch): new_claim}
     new_resources = dict(state.resources)
     if resource_record is not None:
         new_resources[resource_record.name] = resource_record
@@ -3022,9 +3037,10 @@ def _apply_claim_intent(state: ClaimState, intent: ClaimIntent) -> ClaimState:
 
 
 def _apply_rescope_intent(state: ClaimState, intent: RescopeIntent) -> ClaimState:
-    current = state.claims.get(intent.claim_id)
-    if current is None:
+    found = _live_claim_by_id(state, intent.claim_id)
+    if found is None:
         raise ClaimUnavailableError(f"claim id {intent.claim_id!r} has no active claim to rescope")
+    key, current = found
     if ActingIdentity(current.agent, current.role) != ActingIdentity(intent.agent, intent.role):
         raise ClaimUnavailableError("only the original claimant may rescope")
     if intent.clear_whole_reason:
@@ -3034,14 +3050,15 @@ def _apply_rescope_intent(state: ClaimState, intent: RescopeIntent) -> ClaimStat
     else:
         whole_reason = current.whole_reason
     new_claim = replace(current, scope=intent.scope, whole_reason=whole_reason)
-    new_claims = {**state.claims, intent.claim_id: new_claim}
+    new_claims = {**state.claims, key: new_claim}
     return replace(state, claims=MappingProxyType(new_claims))
 
 
 def _apply_release_intent(state: ClaimState, intent: ReleaseIntent) -> ClaimState:
-    current = state.claims.get(intent.claim_id)
-    if current is None:
+    found = _live_claim_by_id(state, intent.claim_id)
+    if found is None:
         raise ClaimUnavailableError(f"claim id {intent.claim_id!r} has no active claim to release")
+    key, current = found
     if intent.coordinator_override:
         if intent.role != COORDINATOR_ROLE:
             raise ClaimUnavailableError("a coordinator override requires role coordinator")
@@ -3050,7 +3067,7 @@ def _apply_release_intent(state: ClaimState, intent: ReleaseIntent) -> ClaimStat
             "only the original claimant may release; use an explicit coordinator override"
         )
     new_claims = {
-        claim_id: claim for claim_id, claim in state.claims.items() if claim_id != intent.claim_id
+        existing_key: claim for existing_key, claim in state.claims.items() if existing_key != key
     }
     return replace(state, claims=MappingProxyType(new_claims))
 

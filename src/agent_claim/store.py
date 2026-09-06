@@ -19,28 +19,57 @@ from __future__ import annotations
 import os
 import tempfile
 import uuid
+from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Protocol
 
 from . import process
 from .protocol import (
+    CLAIM_ID_PATTERN,
     EMPTY_STATE,
+    ActiveClaim,
     ClaimError,
+    ClaimId,
+    ClaimIntent,
     ClaimState,
+    ClaimTransitionIntent,
     ClaimUnavailableError,
     MalformedStateTreeError,
     ObjectId,
     OperationAlreadyApplied,
     PushRejectedError,
+    ReleaseIntent,
+    RescopeIntent,
+    ResourceRecord,
     StateLineageError,
+    apply,
+    parse_claim_toml,
+    parse_resource_toml,
     parse_schema_toml,
+    serialize_claim_toml,
     serialize_empty_schema_toml,
+    serialize_resource_toml,
 )
 
 STATE_REF = "refs/aco/state"
 DEFAULT_CANONICAL_REMOTE = "origin"
+CLAIMS_DIRECTORY = "claims"
+IDS_DIRECTORY = "ids"
+RESOURCES_DIRECTORY = "resources"
+_STATE_TOP_LEVEL_NAMES = frozenset(
+    {"schema.toml", CLAIMS_DIRECTORY, IDS_DIRECTORY, RESOURCES_DIRECTORY}
+)
+
+# The transition each intent type carries, for the commit message trailer
+# (§1 "Commit message"): `intent: claim` / `rescope` / `release`.
+_INTENT_LABELS: dict[type[ClaimTransitionIntent], str] = {
+    ClaimIntent: "claim",
+    RescopeIntent: "rescope",
+    ReleaseIntent: "release",
+}
 
 # `git ls-remote --exit-code` (git(1)): 2 is "no matching refs" -- the only
 # outcome this store ever reads as `EMPTY_STATE` (criterion 6). 128 is the
@@ -48,9 +77,14 @@ DEFAULT_CANONICAL_REMOTE = "origin"
 _LS_REMOTE_EXIT_NO_MATCH = 2
 
 # Internal bound on the push-retry loop below (criterion 3's seam). Distinct
-# from the 32-attempt claim-contention policy that owns `apply`'s retries in
-# C2: this loop only ever contends over a bootstrap-empty-tree commit.
+# from `_MAX_TRANSITION_ATTEMPTS`: this loop only ever contends over
+# `bootstrap`'s fixed empty-tree commit, a narrower race than a live claim.
 _MAX_PUSH_ATTEMPTS = 8
+
+# Retry exhaustion for a live claim/rescope/release transition (criterion 5):
+# 32 attempts, then `ClaimUnavailableError("... moved 32 times; retry the
+# command")` -- never "held by X" for a different-key loser.
+_MAX_TRANSITION_ATTEMPTS = 32
 
 # The fallback detail every git-transport failure message falls back to when
 # git's own stderr/stdout carried nothing readable.
@@ -224,33 +258,125 @@ def _tree_oid(worktree: Path, tip: ObjectId) -> ObjectId:
     return ObjectId(result.stdout.decode().strip())
 
 
-def _read_schema_blob(worktree: Path, tree_oid: ObjectId, *, tip: ObjectId) -> str:
+def _list_tree(
+    worktree: Path, tree_oid: ObjectId, *, tip: ObjectId, context: str
+) -> dict[str, tuple[str, str]]:
+    """`{name: (kind, oid)}` for one tree's direct entries."""
     listing = _run_git(worktree, ["ls-tree", str(tree_oid)])
     if listing.exit_status != 0:
-        raise MalformedStateTreeError(f"cannot list the state tree {tree_oid} at {tip}")
+        raise MalformedStateTreeError(f"cannot list the {context} tree {tree_oid} at {tip}")
     entries: dict[str, tuple[str, str]] = {}
     for line in listing.stdout.decode().splitlines():
         mode_type, _, name = line.partition("\t")
-        _mode, kind, blob_oid = mode_type.split(" ")
-        entries[name] = (kind, blob_oid)
-    if set(entries) != {"schema.toml"}:
-        raise MalformedStateTreeError(
-            f"state tree {tree_oid} at {tip} must contain exactly schema.toml, "
-            f"found {sorted(entries)}"
-        )
-    kind, blob_oid = entries["schema.toml"]
-    if kind != "blob":
-        raise MalformedStateTreeError(f"schema.toml at {tree_oid} is not a blob")
-    content = _run_git(worktree, ["cat-file", "-p", blob_oid])
+        _mode, kind, oid = mode_type.split(" ")
+        entries[name] = (kind, oid)
+    return entries
+
+
+def _read_blob(worktree: Path, oid: str, *, tip: ObjectId, context: str) -> str:
+    content = _run_git(worktree, ["cat-file", "-p", oid])
     if content.exit_status != 0:
-        raise MalformedStateTreeError(f"cannot read schema.toml blob {blob_oid} at {tip}")
+        raise MalformedStateTreeError(f"cannot read {context} blob {oid} at {tip}")
     return content.stdout.decode()
 
 
+def _read_schema_toml(
+    worktree: Path, top_entries: dict[str, tuple[str, str]], *, tip: ObjectId
+) -> str:
+    if "schema.toml" not in top_entries:
+        raise MalformedStateTreeError(f"state tree at {tip} is missing schema.toml")
+    kind, blob_oid = top_entries["schema.toml"]
+    if kind != "blob":
+        raise MalformedStateTreeError(f"schema.toml at {tip} is not a blob")
+    return _read_blob(worktree, blob_oid, tip=tip, context="schema.toml")
+
+
+def _subtree_oid(
+    top_entries: dict[str, tuple[str, str]], name: str, *, tip: ObjectId
+) -> ObjectId | None:
+    if name not in top_entries:
+        return None
+    kind, oid = top_entries[name]
+    if kind != "tree":
+        raise MalformedStateTreeError(f"{name} at {tip} is not a directory")
+    return ObjectId(oid)
+
+
+def _parse_claims_subtree(
+    worktree: Path, oid: ObjectId | None, *, tip: ObjectId
+) -> Mapping[str, ActiveClaim]:
+    if oid is None:
+        return MappingProxyType({})
+    claims: dict[str, ActiveClaim] = {}
+    listing = _list_tree(worktree, oid, tip=tip, context=CLAIMS_DIRECTORY)
+    for name, (kind, blob_oid) in listing.items():
+        if kind != "blob" or not name.endswith(".toml"):
+            raise MalformedStateTreeError(f"{CLAIMS_DIRECTORY}/{name} at {tip} is not a claim file")
+        key = name.removesuffix(".toml")
+        content = _read_blob(worktree, blob_oid, tip=tip, context=f"{CLAIMS_DIRECTORY}/{name}")
+        claims[key] = parse_claim_toml(content, key=key, tip=tip)
+    return MappingProxyType(claims)
+
+
+def _parse_ids_subtree(
+    worktree: Path, oid: ObjectId | None, *, tip: ObjectId
+) -> frozenset[ClaimId]:
+    if oid is None:
+        return frozenset()
+    consumed: set[ClaimId] = set()
+    listing = _list_tree(worktree, oid, tip=tip, context=IDS_DIRECTORY)
+    for name, (kind, _blob_oid) in listing.items():
+        if kind != "blob" or CLAIM_ID_PATTERN.fullmatch(name) is None:
+            raise MalformedStateTreeError(f"{IDS_DIRECTORY}/{name} at {tip} is not a claim id")
+        consumed.add(ClaimId(name))
+    return frozenset(consumed)
+
+
+def _parse_resources_subtree(
+    worktree: Path, oid: ObjectId | None, *, tip: ObjectId
+) -> Mapping[str, ResourceRecord]:
+    if oid is None:
+        return MappingProxyType({})
+    resources: dict[str, ResourceRecord] = {}
+    for name, (kind, blob_oid) in _list_tree(
+        worktree, oid, tip=tip, context=RESOURCES_DIRECTORY
+    ).items():
+        if kind != "blob" or not name.endswith(".toml"):
+            raise MalformedStateTreeError(
+                f"{RESOURCES_DIRECTORY}/{name} at {tip} is not a resource file"
+            )
+        resource_name = name.removesuffix(".toml")
+        content = _read_blob(worktree, blob_oid, tip=tip, context=f"{RESOURCES_DIRECTORY}/{name}")
+        resources[resource_name] = parse_resource_toml(content, name=resource_name, tip=tip)
+    return MappingProxyType(resources)
+
+
 def _parse_state_tree(worktree: Path, tip: ObjectId) -> ClaimState:
+    """Parse the full state tree at `tip`: `schema.toml` plus whichever of
+    `claims/`, `ids/`, `resources/` are present (issue #176, slice C2).
+
+    A defect anywhere fails the whole read loud (ruling 9c): a commit is the
+    unit a writer writes, so a broken tree is corrupt state, never a single
+    quarantinable claim.
+    """
     tree_oid = _tree_oid(worktree, tip)
-    raw_schema = _read_schema_blob(worktree, tree_oid, tip=tip)
-    return parse_schema_toml(raw_schema, tip=tip)
+    top_entries = _list_tree(worktree, tree_oid, tip=tip, context="state")
+    unknown = set(top_entries) - _STATE_TOP_LEVEL_NAMES
+    if unknown:
+        raise MalformedStateTreeError(f"state tree at {tip} has unknown entries: {sorted(unknown)}")
+    parse_schema_toml(_read_schema_toml(worktree, top_entries, tip=tip), tip=tip)
+    return ClaimState(
+        tip=tip,
+        claims=_parse_claims_subtree(
+            worktree, _subtree_oid(top_entries, CLAIMS_DIRECTORY, tip=tip), tip=tip
+        ),
+        consumed_ids=_parse_ids_subtree(
+            worktree, _subtree_oid(top_entries, IDS_DIRECTORY, tip=tip), tip=tip
+        ),
+        resources=_parse_resources_subtree(
+            worktree, _subtree_oid(top_entries, RESOURCES_DIRECTORY, tip=tip), tip=tip
+        ),
+    )
 
 
 def fetch_state(*, worktree: Path, remote: str = DEFAULT_CANONICAL_REMOTE) -> ClaimState:
@@ -362,13 +488,149 @@ def push_tree(
     raise ClaimUnavailableError(f"{STATE_REF} moved {_MAX_PUSH_ATTEMPTS} times; retry the command")
 
 
-def _write_empty_state_tree(worktree: Path) -> ObjectId:
-    schema_toml = serialize_empty_schema_toml().encode()
-    blob_oid = _run_git_with_input(
-        worktree, ["hash-object", "-w", "--stdin"], input_data=schema_toml
+def _write_blob(worktree: Path, content: str) -> ObjectId:
+    return ObjectId(
+        _run_git_with_input(worktree, ["hash-object", "-w", "--stdin"], input_data=content.encode())
     )
-    mktree_input = f"100644 blob {blob_oid}\tschema.toml\n".encode()
-    return ObjectId(_run_git_with_input(worktree, ["mktree"], input_data=mktree_input))
+
+
+def _empty_blob_oid(worktree: Path) -> ObjectId:
+    return ObjectId(_run_git_with_input(worktree, ["hash-object", "-w", "--stdin"], input_data=b""))
+
+
+# `(mode, kind, oid, name)`, git's own `ls-tree`/`mktree` entry shape.
+_TreeEntry = tuple[str, str, ObjectId, str]
+
+
+def _mktree(worktree: Path, entries: list[_TreeEntry]) -> ObjectId:
+    ordered = sorted(entries, key=lambda entry: entry[3])
+    mktree_input = "".join(f"{mode} {kind} {oid}\t{name}\n" for mode, kind, oid, name in ordered)
+    return ObjectId(_run_git_with_input(worktree, ["mktree"], input_data=mktree_input.encode()))
+
+
+def _write_claims_subtree(worktree: Path, claims: Mapping[str, ActiveClaim]) -> ObjectId:
+    return _mktree(
+        worktree,
+        [
+            ("100644", "blob", _write_blob(worktree, serialize_claim_toml(claim)), f"{key}.toml")
+            for key, claim in claims.items()
+        ],
+    )
+
+
+def _write_ids_subtree(worktree: Path, consumed_ids: frozenset[ClaimId]) -> ObjectId:
+    empty_blob = _empty_blob_oid(worktree)
+    return _mktree(
+        worktree, [("100644", "blob", empty_blob, claim_id) for claim_id in consumed_ids]
+    )
+
+
+def _write_resources_subtree(worktree: Path, resources: Mapping[str, ResourceRecord]) -> ObjectId:
+    return _mktree(
+        worktree,
+        [
+            (
+                "100644",
+                "blob",
+                _write_blob(worktree, serialize_resource_toml(record)),
+                f"{name}.toml",
+            )
+            for name, record in resources.items()
+        ],
+    )
+
+
+def _write_state_tree(worktree: Path, state: ClaimState) -> ObjectId:
+    """Serialize `state` into a full git tree: `schema.toml` always, plus
+    `claims/`, `ids/`, `resources/` only while non-empty -- C1's `bootstrap`
+    writes only `schema.toml`; these subtrees appear the first time `apply`
+    puts something in them (§1)."""
+    schema_blob = _write_blob(worktree, serialize_empty_schema_toml())
+    top_entries: list[_TreeEntry] = [("100644", "blob", schema_blob, "schema.toml")]
+    if state.claims:
+        top_entries.append(
+            ("040000", "tree", _write_claims_subtree(worktree, state.claims), CLAIMS_DIRECTORY)
+        )
+    if state.consumed_ids:
+        top_entries.append(
+            ("040000", "tree", _write_ids_subtree(worktree, state.consumed_ids), IDS_DIRECTORY)
+        )
+    if state.resources:
+        top_entries.append(
+            (
+                "040000",
+                "tree",
+                _write_resources_subtree(worktree, state.resources),
+                RESOURCES_DIRECTORY,
+            )
+        )
+    return _mktree(worktree, top_entries)
+
+
+def _transition_message(subject: str, intent: ClaimTransitionIntent) -> str:
+    return (
+        f"{subject}\n\n"
+        f"operation_id: {intent.operation_id}\n"
+        f"claim_id: {intent.claim_id}\n"
+        f"intent: {_INTENT_LABELS[type(intent)]}\n"
+    )
+
+
+def commit_transition(
+    *,
+    worktree: Path,
+    subject: str,
+    intent: ClaimTransitionIntent,
+    remote: str = DEFAULT_CANONICAL_REMOTE,
+    transport: PushTransport | None = None,
+) -> ClaimState:
+    """Fetch, apply, and push one claim/rescope/release transition (issue
+    #176, slice C2): the production caller of `protocol.apply`.
+
+    Unlike `push_tree`'s fixed bootstrap tree, a transition's result depends
+    on the state it is applied to, so every retry attempt re-fetches and
+    re-applies `intent` to the fresh observed state instead of reusing a
+    stale tree -- the same seam (criterion 3), generalized.
+    """
+    transport = transport or GitPushTransport()
+    observed = fetch_state(worktree=worktree, remote=remote)
+    for _attempt in range(_MAX_TRANSITION_ATTEMPTS):
+        new_state = apply(observed, intent)
+        new_commit = _commit_tree(
+            worktree,
+            tree_oid=_write_state_tree(worktree, new_state),
+            parent=observed.tip,
+            message=_transition_message(subject, intent),
+        )
+        try:
+            transport.push(worktree=worktree, remote=remote, ref=STATE_REF, new_oid=new_commit)
+        except PushRejectedError:
+            refreshed = fetch_state(worktree=worktree, remote=remote)
+            if refreshed.tip is not None:
+                found = _find_operation_id(
+                    worktree,
+                    since=observed.tip,
+                    until=refreshed.tip,
+                    operation_id=intent.operation_id,
+                )
+                if found is not None:
+                    return refreshed
+            observed = refreshed
+            continue
+        _write_lineage_stamp(worktree, new_commit)
+        return ClaimState(
+            tip=new_commit,
+            claims=new_state.claims,
+            consumed_ids=new_state.consumed_ids,
+            resources=new_state.resources,
+        )
+    raise ClaimUnavailableError(
+        f"{STATE_REF} moved {_MAX_TRANSITION_ATTEMPTS} times; retry the command"
+    )
+
+
+def _write_empty_state_tree(worktree: Path) -> ObjectId:
+    return _write_state_tree(worktree, EMPTY_STATE)
 
 
 def bootstrap(
