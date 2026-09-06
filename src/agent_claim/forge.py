@@ -165,6 +165,7 @@ class ForgeOperation(StrEnum):
     DEFAULT_BRANCH = "default_branch"
     LIST_OPEN_BOARD_ISSUES = "list_open_board_issues"
     LIST_BOARD_BLOCKERS = "list_board_blockers"
+    LIST_BOARD_DEPENDENCIES = "list_board_dependencies"
     LIST_OPEN_BOARD_PULL_REQUESTS = "list_open_board_pull_requests"
     LIST_RECENT_MERGED_BOARD_PULL_REQUESTS = "list_recent_merged_board_pull_requests"
     LIST_ITEMS = "list_items"
@@ -178,20 +179,24 @@ class ForgeOperation(StrEnum):
 
 
 class BoardSource(Protocol):
-    """The read surface `_board` actually calls: the repository identity and the
-    five board list operations, not every `ForgeReader` operation. Every
-    `ForgeReader` already satisfies it structurally; a board-only fake needs
-    nothing more.
+    """The read surface `_board` actually calls: the repository identity, its
+    capability answers, and the board list operations, not every
+    `ForgeReader` operation. Every `ForgeReader` already satisfies it
+    structurally; a board-only fake needs nothing more.
     """
 
     @property
     def repository(self) -> RepositoryId: ...
+
+    def capability(self, operation: ForgeOperation) -> Capability: ...
 
     def list_open_board_issues(self) -> tuple[board.Issue, ...]: ...
 
     def list_board_blockers(
         self, numbers: frozenset[int]
     ) -> tuple[board.BlockerReference, ...]: ...
+
+    def list_board_dependencies(self, number: int) -> tuple[board.IssueDependency, ...]: ...
 
     def list_open_board_pull_requests(self) -> tuple[board.PullRequest, ...]: ...
 
@@ -223,6 +228,8 @@ class ForgeReader(protocol.ClaimReader, Protocol):
     def list_board_blockers(
         self, numbers: frozenset[int]
     ) -> tuple[board.BlockerReference, ...]: ...
+
+    def list_board_dependencies(self, number: int) -> tuple[board.IssueDependency, ...]: ...
 
     def list_open_board_pull_requests(self) -> tuple[board.PullRequest, ...]: ...
 

@@ -183,6 +183,7 @@ class Issue:
     kind: ItemKind | None = None
     children_closed: int | None = None
     children_total: int | None = None
+    blocked_by_count: int = 0
 
 
 class BlockerState(StrEnum):
@@ -217,7 +218,7 @@ class ChildItem:
 
     number: int
     state: ChildState
-    blocked_by: tuple[int, ...] = ()
+    blocked_by: tuple[int | str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -253,6 +254,37 @@ class IssueReference:
 
     def __str__(self) -> str:
         return f"{self.repository}#{self.number}"
+
+
+@dataclass(frozen=True)
+class IssueDependency:
+    """One `blocked_by` relation GitHub itself records for an issue (#150) --
+    same- or foreign-repository, open or closed, issue or pull request. The
+    board reads these instead of a `Blocked by:` body section once a
+    repository is pinned to `body_contract = "block"`."""
+
+    reference: IssueReference
+    state: BlockerState
+    is_pull_request: bool
+    closed_at: datetime | None = None
+
+
+def open_blocker_label(blocker: int | str) -> str:
+    """How one entry of `BoardItem.open_blockers` (or `ChildItem.blocked_by`)
+    is named: a same-repository blocker is its bare local number, `#n`; a
+    foreign one is already the qualified `owner/repo#n` string
+    (`IssueReference.__str__`) and is shown unchanged -- never a second `#`
+    in front of it."""
+    return f"#{blocker}" if isinstance(blocker, int) else blocker
+
+
+def _blocker_sort_key(blocker: int | str) -> tuple[int, int, str, int]:
+    """Local integers first, ascending by number; foreign strings after
+    them, ascending by `(repository, number)` (#150 §6)."""
+    if isinstance(blocker, int):
+        return (0, blocker, "", 0)
+    repository, _, number = blocker.rpartition("#")
+    return (1, 0, repository, int(number))
 
 
 @dataclass(frozen=True)
@@ -445,7 +477,7 @@ class BoardItem:
     ruling_landings: int | None
     ruling_old: bool | None
     frozen_trigger: str | None
-    open_blockers: tuple[int, ...]
+    open_blockers: tuple[int | str, ...]
     freed_on: datetime | None
     freed_days: int | None
     stage: Stage
@@ -1705,6 +1737,39 @@ def _freed_on(contract: Contract, blockers: dict[int, BlockerReference]) -> date
     )
 
 
+def _open_dependency_blockers(
+    dependencies: tuple[IssueDependency, ...], repository: str
+) -> tuple[int | str, ...]:
+    """Block mode's `open_blockers` (#150 §6): every open dependency, same-
+    or foreign-repository -- unlike prose, a same-repository pull-request
+    dependency blocks like any other (`blocker-is-a-PR` is prose-only)."""
+    labels = (
+        dependency.reference.number
+        if dependency.reference.repository == repository
+        else str(dependency.reference)
+        for dependency in dependencies
+        if dependency.state is BlockerState.OPEN
+    )
+    return tuple(sorted(labels, key=_blocker_sort_key))
+
+
+def _dependency_freed_on(
+    dependencies: tuple[IssueDependency, ...], repository: str
+) -> datetime | None:
+    """Block mode's `freed_on` (#150 §6): only same-repository dependencies
+    can free an item -- a foreign dependency, open or closed, is dropped
+    here and never blocks freedom on its own repository being unreachable."""
+    local = tuple(
+        dependency for dependency in dependencies if dependency.reference.repository == repository
+    )
+    if not local or any(dependency.state is not BlockerState.CLOSED for dependency in local):
+        return None
+    return max(
+        (dependency.closed_at for dependency in local if dependency.closed_at is not None),
+        default=None,
+    )
+
+
 def claim_age(created_at: str, now: datetime) -> timedelta:
     return now.astimezone(UTC) - _timestamp(created_at)
 
@@ -1951,7 +2016,7 @@ class _BoardBuildContext:
 
     contracts: dict[int, Contract]
     parsed_bodies: dict[int, ParsedBody]
-    blockers: dict[int, tuple[int, ...]]
+    blockers: dict[int, tuple[int | str, ...]]
     freed_on: dict[int, datetime | None]
     unblocks: dict[int, int]
     claims_by_issue: dict[int, protocol.ActiveClaim]
@@ -2001,7 +2066,7 @@ def _board_score(stage: Stage, unblocks_count: int, single_next: bool) -> int:
 def _container_progress(
     issue: Issue,
     children: Mapping[int, tuple[ChildItem, ...]],
-    blockers: dict[int, tuple[int, ...]],
+    blockers: dict[int, tuple[int | str, ...]],
 ) -> ContainerProgress | None:
     """`issue`'s own container progress, or `None` when it isn't a container
     the forge reports numbers for -- a container whose type support is
@@ -2164,6 +2229,7 @@ class BoardBuildInputs:
     now: datetime | None = None
     trunk_landings: tuple[datetime, ...] = ()
     children: Mapping[int, tuple[ChildItem, ...]] = field(default_factory=dict)
+    dependencies: Mapping[int, tuple[IssueDependency, ...]] = field(default_factory=dict)
 
 
 def build_board(inputs: BoardBuildInputs) -> Board:
@@ -2177,15 +2243,15 @@ def build_board(inputs: BoardBuildInputs) -> Board:
     # repository's pin (#150): its body belongs to ledger discovery, not the
     # work-item grammar, so it is always read as prose regardless of
     # `body_contract`, and never reports body legacy/malformed.
-    parsed_bodies = {
-        issue.number: parse_body(
-            issue.body,
+    modes = {
+        issue.number: (
             BodyContractMode.PROSE
             if issue.number == protocol.LEDGER_ISSUE
-            else config.body_contract,
+            else config.body_contract
         )
         for issue in issues
     }
+    parsed_bodies = {issue.number: parse_body(issue.body, modes[issue.number]) for issue in issues}
     contracts = {number: parsed.contract for number, parsed in parsed_bodies.items()}
     blocker_by_number, blocker_references = _validated_blocker_by_number(
         issues, open_pull_requests, contracts, inputs.blocker_references
@@ -2194,8 +2260,13 @@ def build_board(inputs: BoardBuildInputs) -> Board:
         issue.number: _with_blocker_defects(contracts[issue.number], blocker_by_number)
         for issue in issues
     }
-    blockers = {
-        issue.number: _open_blockers(contracts[issue.number], blocker_by_number) for issue in issues
+    blockers: dict[int, tuple[int | str, ...]] = {
+        issue.number: (
+            _open_blockers(contracts[issue.number], blocker_by_number)
+            if modes[issue.number] is BodyContractMode.PROSE
+            else _open_dependency_blockers(inputs.dependencies.get(issue.number, ()), repository)
+        )
+        for issue in issues
     }
     unblocks = {
         issue.number: sum(issue.number in other_blockers for other_blockers in blockers.values())
@@ -2216,7 +2287,12 @@ def build_board(inputs: BoardBuildInputs) -> Board:
         parsed_bodies=parsed_bodies,
         blockers=blockers,
         freed_on={
-            issue.number: _freed_on(contracts[issue.number], blocker_by_number) for issue in issues
+            issue.number: (
+                _freed_on(contracts[issue.number], blocker_by_number)
+                if modes[issue.number] is BodyContractMode.PROSE
+                else _dependency_freed_on(inputs.dependencies.get(issue.number, ()), repository)
+            )
+            for issue in issues
         },
         unblocks=unblocks,
         claims_by_issue=_claim_by_issue(inputs.claims),
@@ -2413,7 +2489,7 @@ def render(board: Board) -> str:
                 _freed_cell(item),
                 _claim_cell(item),
                 "yes" if item.actionable else f"no: {item.actionable_reason}",
-                ",".join(f"#{number}" for number in item.open_blockers) or "-",
+                ",".join(open_blocker_label(number) for number in item.open_blockers) or "-",
                 str(item.unblocks_count),
                 item.title,
             )
@@ -2439,7 +2515,7 @@ def render(board: Board) -> str:
 def _open_child_cell(child: ChildItem) -> str:
     if not child.blocked_by:
         return f"#{child.number}"
-    blockers = ", ".join(f"#{number}" for number in child.blocked_by)
+    blockers = ", ".join(open_blocker_label(number) for number in child.blocked_by)
     return f"#{child.number} (blocked by {blockers})"
 
 
@@ -2486,7 +2562,7 @@ class _ActionabilityFacts:
     kind: ItemKind | None
     frozen_trigger: str | None
     active_claim: str | None
-    open_blockers: tuple[int, ...]
+    open_blockers: tuple[int | str, ...]
     contract_complete: bool
     projectionless_idea: bool
     read_state: BodyReadState = BodyReadState.VALID
@@ -2518,7 +2594,9 @@ def _claim_or_completeness_reason(facts: _ActionabilityFacts) -> str | None:
     if facts.active_claim is not None:
         return "claimed"
     if facts.open_blockers:
-        return "blocked by " + ", ".join(f"#{number}" for number in facts.open_blockers)
+        return "blocked by " + ", ".join(
+            open_blocker_label(number) for number in facts.open_blockers
+        )
     if not facts.contract_complete and not facts.projectionless_idea:
         return "body incomplete"
     return None

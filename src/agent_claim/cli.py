@@ -803,6 +803,62 @@ def _fetch_children(
         return {number: future.result() for number, future in futures.items()}
 
 
+def _fetch_dependencies(
+    client: forge.BoardSource, issue_numbers: tuple[int, ...]
+) -> dict[int, tuple[board.IssueDependency, ...]]:
+    """Every named issue's `blocked_by` dependencies (#150), at most
+    `BOARD_CHILD_FETCH_CONCURRENCY` `gh` subprocesses at a time -- run only
+    after `_board`'s base reads and children wave have already finished, so
+    peak concurrent `gh` subprocesses never exceeds today's 3+4."""
+    if not issue_numbers:
+        return {}
+    workers = min(len(issue_numbers), BOARD_CHILD_FETCH_CONCURRENCY)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            number: pool.submit(client.list_board_dependencies, number) for number in issue_numbers
+        }
+        return {number: future.result() for number, future in futures.items()}
+
+
+def _validated_dependencies(
+    issues: tuple[board.Issue, ...], fetched: dict[int, tuple[board.IssueDependency, ...]]
+) -> dict[int, tuple[board.IssueDependency, ...]]:
+    """`fetched`, keyed by exactly the positive-`blocked_by_count` issues,
+    each list checked against its own listing count (#150 §6): a length
+    mismatch or a duplicated dependency is the same class of malformed
+    forge response as a disagreeing container summary -- named loud rather
+    than guessed through."""
+    validated: dict[int, tuple[board.IssueDependency, ...]] = {}
+    for issue in issues:
+        if issue.blocked_by_count <= 0:
+            continue
+        dependencies = fetched.get(issue.number, ())
+        distinct = {dependency.reference for dependency in dependencies}
+        length = len(dependencies)
+        if length != issue.blocked_by_count or len(distinct) != length:
+            raise forge.ForgeMalformedResponseError(
+                f"GitHub returned a malformed board blocked-by list for #{issue.number}: "
+                f"listing total_blocked_by={issue.blocked_by_count}, detail length={length}"
+            )
+        validated[issue.number] = dependencies
+    return validated
+
+
+def _load_board_config(client: forge.BoardSource, toplevel: Path) -> board.BoardConfig:
+    """The repository's board configuration, with its `body_contract` pin
+    validated against what `client` can actually do (#150 §3): `block`
+    requires `list_board_dependencies` at read-only or better."""
+    config = board.load_config(toplevel / board.CONFIG_PATH)
+    if config.body_contract is board.BodyContractMode.BLOCK and (
+        client.capability(forge.ForgeOperation.LIST_BOARD_DEPENDENCIES)
+        is forge.Capability.UNSUPPORTED
+    ):
+        raise protocol.ClaimError(
+            "board body_contract 'block' requires forge operation list_board_dependencies"
+        )
+    return config
+
+
 def _board(
     client: forge.BoardSource,
     claims: tuple[protocol.ActiveClaim, ...],
@@ -811,38 +867,56 @@ def _board(
 ) -> board.Board:
     now = datetime.now(UTC)
     toplevel = Path(checkout._git_output(["rev-parse", "--show-toplevel"]))
+    config = _load_board_config(client, toplevel)
     if issues is None:
         issues = client.list_open_board_issues()
     since = _merged_pull_request_floor(issues, now)
-    blockers = board.blocker_references(issues)
     container_numbers = tuple(
         issue.number for issue in issues if issue.kind is board.ItemKind.CONTAINER
     )
-    # Open and recently-merged pull requests, the blocker lookup, and each
-    # container's children are independent reads once `since` is known, so
-    # fetching them on separate threads instead of one after another overlaps
-    # their `gh` subprocess wait time. Children get their own executor
-    # (`_fetch_children`) so their concurrency stays capped at
+    prose = config.body_contract is board.BodyContractMode.PROSE
+    # Open and recently-merged pull requests, the prose blocker lookup, and
+    # each container's children are independent reads once `since` is known,
+    # so fetching them on separate threads instead of one after another
+    # overlaps their `gh` subprocess wait time. Children get their own
+    # executor (`_fetch_children`) so their concurrency stays capped at
     # `BOARD_CHILD_FETCH_CONCURRENCY` even once these three base reads finish
-    # and free their own pool's workers.
+    # and free their own pool's workers. Block mode never calls
+    # `list_board_blockers`; its dependency wave runs afterward instead (below),
+    # so peak concurrent `gh` subprocesses stays at today's 3+4, then at most 4.
     with ThreadPoolExecutor(max_workers=3) as pool:
         open_pull_requests = pool.submit(client.list_open_board_pull_requests)
         merged_pull_requests = pool.submit(client.list_recent_merged_board_pull_requests, since)
-        blocker_references = pool.submit(client.list_board_blockers, blockers)
+        blocker_references = (
+            pool.submit(client.list_board_blockers, board.blocker_references(issues))
+            if prose
+            else None
+        )
         children = _fetch_children(client, container_numbers)
         pull_requests = (open_pull_requests.result(), merged_pull_requests.result())
+    dependencies = (
+        {}
+        if prose
+        else _validated_dependencies(
+            issues,
+            _fetch_dependencies(
+                client, tuple(issue.number for issue in issues if issue.blocked_by_count > 0)
+            ),
+        )
+    )
     return board.build_board(
         board.BoardBuildInputs(
             issues=issues,
             open_pull_requests=pull_requests[0],
             recent_merged_pull_requests=pull_requests[1],
             claims=claims,
-            config=board.load_config(toplevel / ".agent-claim" / "board.toml"),
+            config=config,
             repository=client.repository.path,
-            blocker_references=blocker_references.result(),
+            blocker_references=(() if blocker_references is None else blocker_references.result()),
             now=now,
             trunk_landings=checkout.trunk_landing_times(),
             children=children,
+            dependencies=dependencies,
         )
     )
 
@@ -1085,7 +1159,7 @@ def _blocked_check(
 ) -> SliceCheck | None:
     if item is None or not item.open_blockers:
         return None
-    blockers = ", ".join(f"#{number}" for number in item.open_blockers)
+    blockers = ", ".join(board.open_blocker_label(number) for number in item.open_blockers)
     return SliceCheck(
         "warning" if out_of_order_reason is not None else "error",
         "blocked",

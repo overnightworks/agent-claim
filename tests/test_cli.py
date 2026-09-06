@@ -8,6 +8,7 @@ import runpy
 import shlex
 import subprocess
 import sys
+import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
@@ -384,6 +385,7 @@ def projected_board(
     now: datetime | None = None,
     trunk_landings: tuple[datetime, ...] = (),
     children: Mapping[int, tuple[board.ChildItem, ...]] = MappingProxyType({}),
+    dependencies: Mapping[int, tuple[board.IssueDependency, ...]] = MappingProxyType({}),
 ) -> board.Board:
     """`board.build_board` for scenarios that do not turn on which repository is projected."""
     return board.build_board(
@@ -398,6 +400,7 @@ def projected_board(
             now=now,
             trunk_landings=trunk_landings,
             children=children,
+            dependencies=dependencies,
         )
     )
 
@@ -434,6 +437,7 @@ class FakeForge:
     board_open_pull_requests: tuple[board.PullRequest, ...] = ()
     board_merged_pull_requests: tuple[board.PullRequest, ...] = ()
     board_blocker_references: tuple[board.BlockerReference, ...] | None = None
+    board_dependencies: dict[int, tuple[board.IssueDependency, ...]] = field(default_factory=dict)
     repository: forge.RepositoryId = field(
         default_factory=lambda: github._repository_id(REPOSITORY)
     )
@@ -628,6 +632,9 @@ class FakeForge:
             for number in sorted(numbers)
         )
 
+    def list_board_dependencies(self, number: int) -> tuple[board.IssueDependency, ...]:
+        return self.board_dependencies.get(number, ())
+
     def list_open_board_pull_requests(self) -> tuple[board.PullRequest, ...]:
         return self.board_open_pull_requests
 
@@ -771,7 +778,7 @@ def test_forge_operation_exhaustiveness_matches_the_declared_reader_and_writer_m
         if not name.startswith("_") and name not in {"repository", "capability"}
     }
     assert {operation.value for operation in forge.ForgeOperation} == declared_methods
-    assert len(forge.ForgeOperation) == 25
+    assert len(forge.ForgeOperation) == 26
     assert set(github.GITHUB_CAPABILITIES) == set(forge.ForgeOperation)
     assert forge.Capability.UNSUPPORTED not in github.GITHUB_CAPABILITIES.values()
 
@@ -953,6 +960,7 @@ def raw_board_issue(**overrides: object) -> dict[str, object]:
         "kind": None,
         "childrenClosed": None,
         "childrenTotal": None,
+        "blockedByCount": 0,
     }
     base.update(overrides)
     return base
@@ -1351,6 +1359,7 @@ def _board_fixture_environment(monkeypatch: pytest.MonkeyPatch) -> list[list[str
             ),
             "createdAt": "2026-08-10T00:00:00Z",
             "updatedAt": "2026-08-20T00:00:00Z",
+            "blockedByCount": 0,
         },
         {
             "number": 11,
@@ -1362,6 +1371,7 @@ def _board_fixture_environment(monkeypatch: pytest.MonkeyPatch) -> list[list[str
             ),
             "createdAt": "2026-08-12T00:00:00Z",
             "updatedAt": "2026-08-20T00:00:00Z",
+            "blockedByCount": 0,
         },
         {
             "number": 12,
@@ -1370,6 +1380,7 @@ def _board_fixture_environment(monkeypatch: pytest.MonkeyPatch) -> list[list[str
             "body": "Unstructured notes.",
             "createdAt": "2026-08-01T00:00:00Z",
             "updatedAt": "2026-08-10T00:00:00Z",
+            "blockedByCount": 0,
         },
         {
             "number": 13,
@@ -1381,6 +1392,7 @@ def _board_fixture_environment(monkeypatch: pytest.MonkeyPatch) -> list[list[str
             ),
             "createdAt": "2026-08-02T00:00:00Z",
             "updatedAt": "2026-08-19T00:00:00Z",
+            "blockedByCount": 0,
         },
         {
             "number": 14,
@@ -1389,6 +1401,7 @@ def _board_fixture_environment(monkeypatch: pytest.MonkeyPatch) -> list[list[str
             "body": "Unstructured notes.",
             "createdAt": "2026-08-02T00:00:00Z",
             "updatedAt": "2026-08-20T00:00:00Z",
+            "blockedByCount": 0,
         },
     ]
     open_prs_json = [
@@ -4263,6 +4276,12 @@ def test_board_reads_priority_configuration_from_the_checkout_root(
     class BoardClient:
         repository = github._repository_id(REPOSITORY)
 
+        def capability(self, operation: forge.ForgeOperation) -> forge.Capability:
+            return github.GITHUB_CAPABILITIES[operation]
+
+        def list_board_dependencies(self, number: int) -> tuple[board.IssueDependency, ...]:
+            return ()
+
         def list_open_board_issues(self) -> tuple[board.Issue, ...]:
             return (
                 board.Issue(
@@ -5546,6 +5565,12 @@ def test_board_queries_merged_pull_requests_back_to_the_oldest_open_issue(
     class BoardClient:
         repository = github._repository_id(REPOSITORY)
 
+        def capability(self, operation: forge.ForgeOperation) -> forge.Capability:
+            return github.GITHUB_CAPABILITIES[operation]
+
+        def list_board_dependencies(self, number: int) -> tuple[board.IssueDependency, ...]:
+            return ()
+
         def list_open_board_issues(self) -> tuple[board.Issue, ...]:
             return (old_epic, recent_issue)
 
@@ -5587,6 +5612,12 @@ def test_board_loads_each_distinct_blocker_once(
 
     class BoardClient:
         repository = github._repository_id(REPOSITORY)
+
+        def capability(self, operation: forge.ForgeOperation) -> forge.Capability:
+            return github.GITHUB_CAPABILITIES[operation]
+
+        def list_board_dependencies(self, number: int) -> tuple[board.IssueDependency, ...]:
+            return ()
 
         def list_open_board_issues(self) -> tuple[board.Issue, ...]:
             return (first, second)
@@ -5637,6 +5668,12 @@ def test_board_fetches_children_only_for_container_kinded_issues(
 
     class BoardClient:
         repository = github._repository_id(REPOSITORY)
+
+        def capability(self, operation: forge.ForgeOperation) -> forge.Capability:
+            return github.GITHUB_CAPABILITIES[operation]
+
+        def list_board_dependencies(self, number: int) -> tuple[board.IssueDependency, ...]:
+            return ()
 
         def list_open_board_issues(self) -> tuple[board.Issue, ...]:
             return (container, plain)
@@ -6037,6 +6074,249 @@ def test_a_complete_block_item_is_body_complete_with_no_blocked_by_projection() 
 
     assert item.contract_complete is True
     assert item.contract.blocked_by is None
+
+
+def block_dependency(
+    number: int,
+    *,
+    repository: str = REPOSITORY,
+    state: board.BlockerState = board.BlockerState.OPEN,
+    is_pull_request: bool = False,
+    closed_at: datetime | None = None,
+) -> board.IssueDependency:
+    return board.IssueDependency(
+        board.IssueReference(repository, number), state, is_pull_request, closed_at
+    )
+
+
+def test_board_reports_open_local_and_foreign_dependencies_as_blockers() -> None:
+    issue = board_issue(300, "Depends on two", agent_claim_body(MINIMAL_BLOCK_TOML))
+    dependencies = {
+        300: (
+            block_dependency(3),
+            block_dependency(7, repository="overnightworks/other-repo"),
+        )
+    }
+    projected = projected_board(
+        (issue,),
+        (),
+        (),
+        (),
+        board.BoardConfig(body_contract=board.BodyContractMode.BLOCK),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+        dependencies=dependencies,
+    )
+
+    item = next(item for item in projected.items if item.number == 300)
+
+    assert item.open_blockers == (3, "overnightworks/other-repo#7")
+    assert item.actionable_reason == "blocked by #3, overnightworks/other-repo#7"
+
+
+def test_board_shows_freed_from_a_sole_closed_local_dependency_and_claim_reaches_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A complete block item whose sole dependency is closed passes body
+    checks and reaches claim mutation (#150 §6/§10)."""
+    issue = board_issue(301, "Freed by a closed dependency", agent_claim_body(MINIMAL_BLOCK_TOML))
+    dependencies = {
+        301: (
+            block_dependency(
+                151, state=board.BlockerState.CLOSED, closed_at=datetime(2026, 8, 20, tzinfo=UTC)
+            ),
+        )
+    }
+    projected = projected_board(
+        (issue,),
+        (),
+        (),
+        (),
+        board.BoardConfig(body_contract=board.BodyContractMode.BLOCK),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+        dependencies=dependencies,
+    )
+
+    item = next(item for item in projected.items if item.number == 301)
+
+    assert item.open_blockers == ()
+    assert item.freed_on == datetime(2026, 8, 20, tzinfo=UTC)
+    assert item.actionable is True
+
+
+def test_board_never_frees_on_a_closed_foreign_dependency_alone() -> None:
+    issue = board_issue(302, "Foreign-only", agent_claim_body(MINIMAL_BLOCK_TOML))
+    dependencies = {
+        302: (
+            block_dependency(
+                9,
+                repository="overnightworks/other-repo",
+                state=board.BlockerState.CLOSED,
+                closed_at=datetime(2026, 8, 20, tzinfo=UTC),
+            ),
+        )
+    }
+    projected = projected_board(
+        (issue,),
+        (),
+        (),
+        (),
+        board.BoardConfig(body_contract=board.BodyContractMode.BLOCK),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+        dependencies=dependencies,
+    )
+
+    item = next(item for item in projected.items if item.number == 302)
+
+    assert item.freed_on is None
+    assert item.open_blockers == ()
+
+
+def test_board_treats_a_same_repository_pull_request_dependency_like_any_other() -> None:
+    """Block mode has no `blocker-is-a-PR` check (prose-only): a same-
+    repository PR dependency follows its own open/closed state."""
+    issue = board_issue(303, "PR blocker", agent_claim_body(MINIMAL_BLOCK_TOML))
+    dependencies = {303: (block_dependency(88, is_pull_request=True),)}
+    projected = projected_board(
+        (issue,),
+        (),
+        (),
+        (),
+        board.BoardConfig(body_contract=board.BodyContractMode.BLOCK),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+        dependencies=dependencies,
+    )
+
+    item = next(item for item in projected.items if item.number == 303)
+
+    assert item.open_blockers == (88,)
+
+
+def test_blocked_check_reports_a_foreign_dependency_and_the_out_of_order_warning() -> None:
+    issue = board_issue(304, "Foreign blocked", agent_claim_body(MINIMAL_BLOCK_TOML))
+    dependencies = {304: (block_dependency(9, repository="overnightworks/other-repo"),)}
+    projected = projected_board(
+        (issue,),
+        (),
+        (),
+        (),
+        board.BoardConfig(body_contract=board.BodyContractMode.BLOCK),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+        dependencies=dependencies,
+    )
+    item = next(item for item in projected.items if item.number == 304)
+
+    error_check = issue_claim._blocked_check(item, None)
+    assert error_check == issue_claim.SliceCheck(
+        "error",
+        "blocked",
+        "#304 is blocked by overnightworks/other-repo#9 (open); "
+        "pass --out-of-order REASON to claim it anyway",
+        issue=304,
+    )
+    warning_check = issue_claim._blocked_check(item, "reason")
+    assert warning_check is not None
+    assert warning_check.level == "warning"
+
+
+@dataclass
+class _MinimalBoardSource:
+    """The smallest real `forge.BoardSource` -- every read empty, `capability`
+    and the dependency fetch injectable -- for tests that exercise exactly
+    one of `_load_board_config`/`_fetch_dependencies` in isolation."""
+
+    repository: forge.RepositoryId = field(
+        default_factory=lambda: github._repository_id(REPOSITORY)
+    )
+    capability_result: forge.Capability = forge.Capability.READ_ONLY
+    dependencies_fetcher: Callable[[int], tuple[board.IssueDependency, ...]] = lambda _number: ()
+
+    def capability(self, operation: forge.ForgeOperation) -> forge.Capability:
+        del operation
+        return self.capability_result
+
+    def list_open_board_issues(self) -> tuple[board.Issue, ...]:
+        return ()
+
+    def list_board_blockers(self, numbers: frozenset[int]) -> tuple[board.BlockerReference, ...]:
+        del numbers
+        return ()
+
+    def list_board_dependencies(self, number: int) -> tuple[board.IssueDependency, ...]:
+        return self.dependencies_fetcher(number)
+
+    def list_open_board_pull_requests(self) -> tuple[board.PullRequest, ...]:
+        return ()
+
+    def list_recent_merged_board_pull_requests(
+        self, since: datetime
+    ) -> tuple[board.PullRequest, ...]:
+        del since
+        return ()
+
+    def list_children(self, number: int) -> tuple[board.ChildItem, ...]:
+        del number
+        return ()
+
+
+def test_load_board_config_refuses_a_block_pin_the_forge_cannot_support(tmp_path: Path) -> None:
+    (tmp_path / ".agent-claim").mkdir()
+    (tmp_path / ".agent-claim" / "board.toml").write_text('body_contract = "block"\n')
+
+    client = _MinimalBoardSource(capability_result=forge.Capability.UNSUPPORTED)
+
+    with pytest.raises(ClaimError, match="list_board_dependencies"):
+        issue_claim._load_board_config(client, tmp_path)
+
+
+def test_fetch_dependencies_bounds_concurrency_at_the_shared_constant() -> None:
+    concurrency = issue_claim.BOARD_CHILD_FETCH_CONCURRENCY
+    release = threading.Barrier(concurrency)
+    active = 0
+    peak = 0
+    lock = threading.Lock()
+    exceeded = threading.Event()
+
+    def fetch(number: int) -> tuple[board.IssueDependency, ...]:
+        nonlocal active, peak
+        del number
+        with lock:
+            active += 1
+            peak = max(peak, active)
+            if active > concurrency:
+                exceeded.set()
+        release.wait(timeout=5)
+        with lock:
+            active -= 1
+        return ()
+
+    client = _MinimalBoardSource(dependencies_fetcher=fetch)
+
+    issue_claim._fetch_dependencies(client, tuple(range(concurrency * 2)))
+
+    assert not exceeded.is_set()
+    assert peak == concurrency
+
+
+def test_validated_dependencies_refuses_a_length_mismatch() -> None:
+    issue = board_issue(305, "Length mismatch", agent_claim_body(MINIMAL_BLOCK_TOML))
+    issue = replace(issue, blocked_by_count=2)
+    fetched = {305: (block_dependency(1),)}
+
+    with pytest.raises(
+        forge.ForgeMalformedResponseError,
+        match=r"malformed board blocked-by list for #305: listing total_blocked_by=2, "
+        r"detail length=1",
+    ):
+        issue_claim._validated_dependencies((issue,), fetched)
+
+
+def test_validated_dependencies_refuses_a_duplicate_dependency() -> None:
+    issue = board_issue(306, "Duplicate", agent_claim_body(MINIMAL_BLOCK_TOML))
+    issue = replace(issue, blocked_by_count=2)
+    fetched = {306: (block_dependency(1), block_dependency(1))}
+
+    with pytest.raises(forge.ForgeMalformedResponseError, match="malformed board blocked-by list"):
+        issue_claim._validated_dependencies((issue,), fetched)
 
 
 def test_next_pulls_a_configured_projectionless_idea_with_refinement_step(
@@ -9088,6 +9368,96 @@ def test_github_board_blocker_fails_loud_on_an_uncalendared_closed_timestamp() -
     raised_argument_1 = frozenset({86})
     with pytest.raises(ClaimError, match="malformed board blocker"):
         client.list_board_blockers(raised_argument_1)
+
+
+def test_github_reads_board_dependencies_local_and_foreign(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[list[str]] = []
+
+    def run(arguments: list[str]) -> str:
+        observed.append(arguments)
+        rows = [
+            {
+                "number": 151,
+                "state": "closed",
+                "closedAt": "2026-09-05T00:00:00Z",
+                "repository": "example/agent-claim",
+                "isPullRequest": False,
+            },
+            {
+                "number": 7,
+                "state": "open",
+                "closedAt": None,
+                "repository": "overnightworks/other-repo",
+                "isPullRequest": False,
+            },
+        ]
+        return "\n".join(json.dumps(row) for row in rows)
+
+    client = GitHubForge(github._repository_id("example/agent-claim"), run=run)
+
+    assert client.list_board_dependencies(150) == (
+        board.IssueDependency(
+            board.IssueReference("example/agent-claim", 151),
+            board.BlockerState.CLOSED,
+            False,
+            datetime(2026, 9, 5, tzinfo=UTC),
+        ),
+        board.IssueDependency(
+            board.IssueReference("overnightworks/other-repo", 7),
+            board.BlockerState.OPEN,
+            False,
+            None,
+        ),
+    )
+    assert observed == [
+        [
+            "api",
+            "--paginate",
+            "repos/example/agent-claim/issues/150/dependencies/blocked_by?per_page=100",
+            "--jq",
+            ".[] | {number,state,closedAt:.closed_at,repository:.repository.full_name,"
+            'isPullRequest:has("pull_request")}',
+        ]
+    ]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param(json.dumps(["not-a-dict"]), id="not-a-dict"),
+        pytest.param(
+            json.dumps(
+                {
+                    "number": 151,
+                    "state": "open",
+                    "closedAt": None,
+                    "repository": "not a repo",
+                    "isPullRequest": False,
+                }
+            ),
+            id="malformed-repository",
+        ),
+        pytest.param(
+            json.dumps(
+                {
+                    "number": 151,
+                    "state": "closed",
+                    "closedAt": None,
+                    "repository": "example/agent-claim",
+                    "isPullRequest": False,
+                }
+            ),
+            id="closed-without-timestamp",
+        ),
+    ],
+)
+def test_github_board_dependency_fails_loud_on_a_malformed_shape(raw: str) -> None:
+    client = GitHubForge(github._repository_id("example/agent-claim"), run=lambda _arguments: raw)
+
+    with pytest.raises(ClaimError, match="malformed board blocked-by dependency"):
+        client.list_board_dependencies(150)
 
 
 def _comment_row(identifier: int, body: str = "ordinary prose") -> dict[str, object]:
