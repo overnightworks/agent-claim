@@ -1693,8 +1693,7 @@ def _hook_path(tool_input: dict[str, object]) -> str | None:
     return None
 
 
-def _protect_relative_path(raw_path: str) -> str | None:
-    toplevel = Path(checkout._git_output(["rev-parse", "--show-toplevel"])).resolve()
+def _protect_relative_path(raw_path: str, *, toplevel: Path) -> str | None:
     candidate = Path(raw_path)
     if not candidate.is_absolute():
         candidate = Path.cwd() / candidate
@@ -1725,14 +1724,19 @@ def _protect_checkout_refusal(branch: str) -> str | None:
     return None
 
 
-def _protect_ledger_verdict(
-    forge_handle: forge.ForgeReader, agent: str, branch: str, relative: str
-) -> int:
-    ledger = discovery.discover_ledger(forge_handle)
-    if ledger is None:
-        return _hook_deny("claim first")
-    protocol.configure_ledger(ledger)
-    for claim in protocol._ledger_claims(forge_handle):
+def _protect_store_verdict(agent: str, branch: str, relative: str, canonical_remote: str) -> int:
+    """`protect`'s live snapshot (issue #176, §1): one fetch, no positive cache
+    (D2) -- allow only when this session's agent and branch hold a scope
+    overlapping the tool path. Every store read failure (unreachable, auth,
+    malformed tree, lineage break) denies with the same named text (Erwartung
+    8) instead of the generic 'claim first', which would send the agent
+    toward a command that cannot fix a transient fetch failure.
+    """
+    try:
+        state = store.fetch_state(worktree=Path.cwd(), remote=canonical_remote)
+    except protocol.ClaimError as error:
+        return _hook_deny(f"cannot reach {store.STATE_REF}: {error}")
+    for claim in state.claims.values():
         if (
             claim.agent == agent
             and claim.branch == branch
@@ -1751,13 +1755,14 @@ def _protect_write(repository: str | None, payload: dict[str, object]) -> int:
     refusal = _protect_checkout_refusal(branch)
     if refusal is not None:
         return _hook_deny(refusal)
-    relative = _protect_relative_path(raw_path)
+    toplevel = Path(checkout._git_output(["rev-parse", "--show-toplevel"])).resolve()
+    relative = _protect_relative_path(raw_path, toplevel=toplevel)
     if relative is None:
         return _hook_deny(PATH_REQUIRED)
-    forge_handle = github.GitHubForge(
-        github.discover_repository(repository, remote_url=checkout.origin_remote_url)
-    )
-    return _protect_ledger_verdict(forge_handle, agent, branch, relative)
+    config = board.load_config(toplevel / board.CONFIG_PATH)
+    forge_target = github.discover_repository(repository, remote_url=checkout.origin_remote_url)
+    _refuse_canonical_remote_mismatch(forge_target, config.canonical_remote)
+    return _protect_store_verdict(agent, branch, relative, config.canonical_remote)
 
 
 def _protect(repository: str | None) -> int:

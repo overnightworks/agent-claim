@@ -18,7 +18,17 @@ from types import MappingProxyType
 
 import pytest
 
-from agent_claim import __version__, board, checkout, discovery, forge, github, process, protocol
+from agent_claim import (
+    __version__,
+    board,
+    checkout,
+    discovery,
+    forge,
+    github,
+    process,
+    protocol,
+    store,
+)
 from agent_claim import cli as issue_claim
 from agent_claim.cli import (
     MAX_COMMENT_BYTES,
@@ -16550,6 +16560,9 @@ def _protect_git_values(
         ("rev-parse", "--git-dir"): str(work / ".git" / "worktrees" / "issue-72"),
         ("rev-parse", "--git-common-dir"): str(work / ".git"),
         ("rev-parse", "--show-toplevel"): str(work.resolve()),
+        # The canonical-remote comparison (issue #176, Erwartung 6) reads this
+        # to confirm the fake forge target (REPOSITORY) matches it.
+        ("config", "--get", "remote.origin.url"): f"git@github.com:{REPOSITORY}.git",
     }
     if overrides:
         values.update(overrides)
@@ -16573,6 +16586,34 @@ def _patch_protect_git(
     monkeypatch.setattr(checkout, "_git_output", git)
 
 
+def _protect_active_claim(
+    agent: str,
+    *,
+    scope: tuple[str, ...] = ("src",),
+    branch: str = "codex/issue-72-claims",
+    lane: bool = False,
+    issue: int = 72,
+) -> protocol.ActiveClaim:
+    identity: protocol.ClaimIdentity = (
+        protocol.LaneIdentity() if lane else protocol.IssueIdentity(issue)
+    )
+    return protocol.ActiveClaim(
+        identity=identity,
+        claim_id=protocol.ClaimId("cli-claim"),
+        agent=agent,
+        role="builder",
+        base=protocol.ObjectId(BASE),
+        branch=branch,
+        scope=scope,
+        opened_commit=protocol.ObjectId(BASE),
+    )
+
+
+def _protect_state_with_claim(claim: protocol.ActiveClaim) -> protocol.ClaimState:
+    key = protocol.claim_key(claim.identity, claim.branch)
+    return protocol.ClaimState(tip=protocol.ObjectId(BASE), claims={key: claim})
+
+
 def _patch_protect_claim(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -16580,28 +16621,21 @@ def _patch_protect_claim(
     scope: tuple[str, ...] = ("src",),
     branch: str = "codex/issue-72-claims",
     lane: bool = False,
-) -> FakeForge:
-    """The client is a `ReaderOnlyForge`: `protect` reads live claims and never
-    writes, so every test built on this helper is also proof of that.
+) -> None:
+    """Fake the store's fetched state with one live claim (issue #176):
+    `protect` only ever reads `store.fetch_state`, so faking that boundary
+    directly -- rather than a ledger comment `protect` no longer looks at --
+    is the whole test double a `protect` test needs.
     """
-    claimed = comment(
-        1,
-        claim_comment(
-            replace(
-                request("cli-claim", agent, issue=72, lane=lane, scope=scope),
-                branch=branch,
-            )
-        ),
+    state = _protect_state_with_claim(
+        _protect_active_claim(agent, scope=scope, branch=branch, lane=lane)
     )
-    client = ReaderOnlyForge({LEDGER_ISSUE: [claimed]}, {72})
-    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
-    monkeypatch.setattr(discovery, "discover_ledger", lambda _client: LEDGER_ISSUE)
-    return client
+    monkeypatch.setattr(store, "fetch_state", lambda *, worktree, remote: state)
 
 
 def _forbid_protect_git_github_and_identity(monkeypatch: pytest.MonkeyPatch) -> None:
     def unused(*args, **kwargs):
-        pytest.fail("this protect path must not use identity, git, or GitHub")
+        pytest.fail("this protect path must not use identity, git, GitHub, or the store")
 
     monkeypatch.setattr(checkout, "_resolved_agent", unused)
     monkeypatch.setattr(checkout, "_git_output", unused)
@@ -16609,6 +16643,7 @@ def _forbid_protect_git_github_and_identity(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(github, "discover_repository", unused)
     monkeypatch.setattr(discovery, "discover_ledger", unused)
     monkeypatch.setattr(protocol, "configure_ledger", unused)
+    monkeypatch.setattr(store, "fetch_state", unused)
 
 
 def _protect_main(monkeypatch: pytest.MonkeyPatch, payload: object) -> int:
@@ -16632,7 +16667,7 @@ def _assert_protect_decision(
     assert payload == {"decision": "deny", "reason": reason}
 
 
-def test_protect_allowed_write_resolves_identity_then_git_then_github(
+def test_protect_allowed_write_resolves_identity_then_git_then_store(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -16658,27 +16693,13 @@ def test_protect_allowed_write_resolves_identity_then_git_then_github(
 
     monkeypatch.setattr(checkout, "_git_output", git)
 
-    claimed = comment(
-        1,
-        claim_comment(
-            replace(
-                request("cli-claim", "Grok sess-1", issue=72, scope=("src",)),
-                branch="codex/issue-72-claims",
-            )
-        ),
-    )
-    client = ReaderOnlyForge({LEDGER_ISSUE: [claimed]}, {72})
+    state = _protect_state_with_claim(_protect_active_claim("Grok sess-1"))
 
-    def github_forge(repository: object) -> ReaderOnlyForge:
-        calls.append("github")
-        return client
+    def fake_fetch_state(*, worktree: Path, remote: str) -> protocol.ClaimState:
+        calls.append("store")
+        return state
 
-    def discover_ledger(_client: object) -> int:
-        calls.append("github")
-        return LEDGER_ISSUE
-
-    monkeypatch.setattr(github, "GitHubForge", github_forge)
-    monkeypatch.setattr(discovery, "discover_ledger", discover_ledger)
+    monkeypatch.setattr(store, "fetch_state", fake_fetch_state)
 
     assert (
         _protect_main(
@@ -16688,7 +16709,7 @@ def test_protect_allowed_write_resolves_identity_then_git_then_github(
         == 0
     )
     _assert_protect_decision(capsys, decision="allow")
-    assert calls == ["identity", "git", "git", "git", "git", "github", "github"]
+    assert calls == ["identity", "git", "git", "git", "git", "git", "store"]
 
 
 @pytest.mark.parametrize(
@@ -16838,7 +16859,7 @@ def test_protect_dirty_worktree_still_allows_covered_write(
     _assert_protect_decision(capsys, decision="allow")
 
 
-def test_protect_missing_ledger_denies_claim_first_without_configure(
+def test_protect_no_matching_claim_denies_claim_first(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -16847,13 +16868,8 @@ def test_protect_missing_ledger_denies_claim_first_without_configure(
     work = tmp_path / "work"
     _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
     _patch_protect_git(monkeypatch, work)
-    monkeypatch.setattr(github, "GitHubForge", lambda repository: FakeForge())
-    monkeypatch.setattr(discovery, "discover_ledger", lambda _client: None)
-
-    def unused_configure(issue: int) -> None:
-        pytest.fail("missing ledger must not configure_ledger")
-
-    monkeypatch.setattr(protocol, "configure_ledger", unused_configure)
+    state = protocol.ClaimState(tip=protocol.ObjectId(BASE))
+    monkeypatch.setattr(store, "fetch_state", lambda *, worktree, remote: state)
 
     assert (
         _protect_main(
@@ -17050,21 +17066,24 @@ def test_protect_non_overlapping_scope_denies_claim_first(
     _assert_protect_decision(capsys, decision="deny", reason="claim first")
 
 
-def test_protect_ledger_error_denies_json_without_error_prefix(
+def test_protect_claim_error_from_write_path_denies_json_without_error_prefix(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    """A `ClaimError` raised before the store is ever reached (here, resolving
+    the forge target) denies with its own bare text -- only a failure inside
+    `store.fetch_state` itself gets the 'cannot reach refs/aco/state' wrapping
+    (see the dedicated store-refusal tests below)."""
     _isolate_protect_home(monkeypatch, tmp_path)
     work = tmp_path / "work"
     _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
     _patch_protect_git(monkeypatch, work)
-    monkeypatch.setattr(github, "GitHubForge", lambda repository: FakeForge())
 
-    def failed(_client):
+    def failed(*_args: object, **_kwargs: object) -> forge.RepositoryId:
         raise ClaimError("adapter failed")
 
-    monkeypatch.setattr(discovery, "discover_ledger", failed)
+    monkeypatch.setattr(github, "discover_repository", failed)
 
     assert (
         _protect_main(
@@ -17088,12 +17107,11 @@ def test_protect_non_claim_error_from_write_path_denies_json_without_traceback(
     work = tmp_path / "work"
     _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
     _patch_protect_git(monkeypatch, work)
-    monkeypatch.setattr(github, "GitHubForge", lambda repository: FakeForge())
 
-    def crashed(_client):
+    def crashed(*_args: object, **_kwargs: object) -> forge.RepositoryId:
         raise RuntimeError("write path crashed")
 
-    monkeypatch.setattr(discovery, "discover_ledger", crashed)
+    monkeypatch.setattr(github, "discover_repository", crashed)
 
     assert (
         _protect_main(
@@ -17109,6 +17127,50 @@ def test_protect_non_claim_error_from_write_path_denies_json_without_traceback(
         "decision": "deny",
         "reason": "write path crashed",
     }
+
+
+@pytest.mark.parametrize(
+    ("failure", "match"),
+    [
+        pytest.param(
+            protocol.ClaimError("auth or transport failure"),
+            "auth or transport failure",
+            id="unreachable",
+        ),
+        pytest.param(protocol.MalformedStateTreeError("bad tree"), "bad tree", id="malformed"),
+        pytest.param(protocol.StateLineageError("rewritten"), "rewritten", id="lineage"),
+        pytest.param(protocol.ClaimError("cannot fetch"), "cannot fetch", id="fetch-failure"),
+    ],
+)
+def test_protect_maps_every_store_error_to_cannot_reach_the_state_ref(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    failure: protocol.ClaimError,
+    match: str,
+) -> None:
+    _isolate_protect_home(monkeypatch, tmp_path)
+    work = tmp_path / "work"
+    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    _patch_protect_git(monkeypatch, work)
+
+    def fake_fetch_state(*, worktree: Path, remote: str) -> protocol.ClaimState:
+        raise failure
+
+    monkeypatch.setattr(store, "fetch_state", fake_fetch_state)
+
+    assert (
+        _protect_main(
+            monkeypatch,
+            {"toolName": "write", "toolInput": {"path": "src/widget.py"}},
+        )
+        == 2
+    )
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["decision"] == "deny"
+    assert payload["reason"].startswith(f"cannot reach {store.STATE_REF}: ")
+    assert match in payload["reason"]
 
 
 def test_two_lanes_may_claim_the_same_file() -> None:
