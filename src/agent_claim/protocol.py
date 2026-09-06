@@ -1382,7 +1382,7 @@ def conflicting_claims(
 IdentityKey = tuple[str, int | str]
 
 
-def _identity_key(claim: LedgerActiveClaim) -> IdentityKey:
+def _identity_key(claim: ScopedClaim) -> IdentityKey:
     """Hashable index key for one claim's identity: an issue number or a lane branch.
 
     `LaneIdentity` instances all compare equal to each other, so indexing by
@@ -1404,7 +1404,7 @@ class ClaimConflictIndex:
     descendant_paths: dict[tuple[str, ...], set[str]]
 
 
-def _claim_conflict_index(claims: tuple[LedgerActiveClaim, ...]) -> ClaimConflictIndex:
+def _claim_conflict_index(claims: tuple[ScopedClaim, ...]) -> ClaimConflictIndex:
     """Index identities and paths once for status conflict and overlap notes."""
     conflict_ids: set[str] = set()
     overlap_ids: set[str] = set()
@@ -1443,7 +1443,7 @@ def _claim_conflict_index(claims: tuple[LedgerActiveClaim, ...]) -> ClaimConflic
 
 
 def _related_claim_ids(
-    index: ClaimConflictIndex, selected: tuple[LedgerActiveClaim, ...]
+    index: ClaimConflictIndex, selected: tuple[ScopedClaim, ...]
 ) -> set[str]:
     related = {claim.claim_id for claim in selected}
     for claim in selected:
@@ -1452,7 +1452,7 @@ def _related_claim_ids(
     return related
 
 
-def _overlap_peer_ids(index: ClaimConflictIndex, claim: LedgerActiveClaim) -> set[str]:
+def _overlap_peer_ids(index: ClaimConflictIndex, claim: ScopedClaim) -> set[str]:
     related: set[str] = set()
     for path in claim.scope:
         parts = PurePosixPath(path).parts
