@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import re
+import runpy
 import shlex
 import subprocess
 import sys
@@ -73,6 +75,18 @@ def ledger_item(
     is_landing: bool = False,
 ) -> forge.LedgerItem:
     return forge.LedgerItem(number, state, locked, body, author_is_trusted, is_landing)
+
+
+@pytest.mark.parametrize("bad_issue", [0, -1, True])
+def test_configure_ledger_requires_a_positive_integer(bad_issue: int) -> None:
+    with pytest.raises(ClaimError, match="ledger issue must be a positive integer"):
+        protocol.configure_ledger(bad_issue)
+
+
+@pytest.mark.parametrize("bad_issue", [0, -1, True])
+def test_issue_identity_requires_a_positive_integer(bad_issue: int) -> None:
+    with pytest.raises(ClaimError, match="issue identity must be a positive integer"):
+        protocol.IssueIdentity(bad_issue)
 
 
 def test_discovery_requires_a_locked_canonical_marker() -> None:
@@ -215,6 +229,22 @@ def test_discovery_fetch_failure_propagates_loudly_without_bootstrap_advice() ->
     with pytest.raises(ClaimError) as excinfo:
         issue_claim.discover_ledger(client)
     assert "bootstrap" not in str(excinfo.value)
+
+
+def test_discovery_ignores_a_landing_pull_request_carrying_the_ledger_marker() -> None:
+    """A merged/landing pull request can carry the same first-line marker as a
+    ledger issue but must never be mistaken for one."""
+    client = FakeForge(ledger_items=[ledger_item(3, is_landing=True), ledger_item(5)])
+    assert issue_claim.discover_ledger(client) == 5
+
+
+def test_bootstrap_fails_loud_when_the_created_ledger_does_not_reappear() -> None:
+    """An eventual-consistency gap -- the freshly created ledger issue not yet
+    visible to the very next listing -- must fail loud rather than claim a
+    trusted candidate that was never actually observed."""
+    client = _VanishingLedgerForge()
+    with pytest.raises(ClaimError, match="did not expose a trusted ledger candidate"):
+        issue_claim.bootstrap_ledger(client)
 
 
 def comment(
@@ -720,6 +750,17 @@ class ReaderOnlyForge(FakeForge):
         pytest.fail("a read-only command must never update an item body")
 
 
+class _VanishingLedgerForge(FakeForge):
+    """A `FakeForge` whose freshly created ledger issue never reappears in a
+    following `list_items()` -- simulating a read-after-write consistency gap
+    on the forge side."""
+
+    def create_item(self, *, title: str, body: str) -> int:
+        number = super().create_item(title=title, body=body)
+        self.ledger_items = [item for item in self.ledger_items if item.number != number]
+        return number
+
+
 def test_forge_operation_exhaustiveness_matches_the_declared_reader_and_writer_methods() -> None:
     """Every `ForgeOperation` member names a `ForgeReader`/`ForgeWriter` method and
     nothing else; the count is pinned so a new operation cannot be added without
@@ -788,6 +829,34 @@ def test_github_adapter_lists_items_with_state_and_label_filters() -> None:
 
 
 @pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param(json.dumps("not-a-dict"), id="not-a-dict"),
+        pytest.param(json.dumps({"number": True}), id="number-is-a-bool"),
+        pytest.param(json.dumps({"number": 9, "state": "unknown"}), id="unknown-state"),
+        pytest.param(
+            json.dumps(
+                {
+                    "number": 9,
+                    "state": "open",
+                    "locked": "yes",
+                    "body": "b",
+                    "author_association": "OWNER",
+                    "is_landing": False,
+                }
+            ),
+            id="locked-not-a-bool",
+        ),
+    ],
+)
+def test_github_adapter_fails_loud_on_a_malformed_ledger_item(raw: str) -> None:
+    client = GitHubForge(github._repository_id(REPOSITORY), run=lambda arguments: raw)
+
+    with pytest.raises(ClaimError, match="malformed ledger issue"):
+        client.list_items()
+
+
+@pytest.mark.parametrize(
     ("total_items", "expected_pages_fetched", "expect_absence_confirmed"),
     [
         pytest.param(99, 1, True, id="99-items-one-page-confirms-absence"),
@@ -849,6 +918,20 @@ def test_github_adapter_reads_the_open_item_count() -> None:
 
     assert client.open_item_count() == 7
     assert observed == [["api", f"repos/{REPOSITORY}", "--jq", ".open_issues_count"]]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param("not-a-number", id="unparsable"),
+        pytest.param("-1", id="negative"),
+    ],
+)
+def test_github_adapter_fails_loud_on_a_malformed_open_item_count(raw: str) -> None:
+    client = GitHubForge(github._repository_id(REPOSITORY), run=lambda arguments: raw)
+
+    with pytest.raises(ClaimError, match="malformed open-issue count"):
+        client.open_item_count()
 
 
 def board_issue_page_client(*rows: dict[str, object]) -> GitHubForge:
@@ -918,6 +1001,8 @@ def test_github_adapter_reads_a_container_with_zero_children_as_a_real_state() -
         pytest.param({"childrenClosed": 3, "childrenTotal": 2}, id="closed-exceeds-total"),
         pytest.param({"childrenClosed": True, "childrenTotal": 2}, id="closed-is-a-bool"),
         pytest.param({"kind": 5}, id="kind-not-a-string"),
+        pytest.param({"childrenClosed": 2, "childrenTotal": True}, id="total-is-a-bool"),
+        pytest.param({"childrenClosed": 2, "childrenTotal": -1}, id="total-negative"),
     ],
 )
 def test_github_adapter_fails_loud_on_a_malformed_board_issue(
@@ -927,6 +1012,80 @@ def test_github_adapter_fails_loud_on_a_malformed_board_issue(
 
     with pytest.raises(ClaimError, match="malformed board issue"):
         client.list_open_board_issues()
+
+
+def test_github_adapter_fails_loud_when_a_board_issue_is_not_an_object() -> None:
+    client = GitHubForge(
+        github._repository_id(REPOSITORY), run=lambda arguments, input_data=None: '"not an object"'
+    )
+
+    with pytest.raises(ClaimError, match="malformed board issue"):
+        client.list_open_board_issues()
+
+
+def raw_board_pull_request(**overrides: object) -> dict[str, object]:
+    base: dict[str, object] = {
+        "number": 62,
+        "title": "Fixes #10",
+        "body": "Ship it.",
+        "headRefName": "codex/issue-10",
+        "mergedAt": None,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_github_adapter_reads_an_open_board_pull_request() -> None:
+    client = GitHubForge(
+        github._repository_id(REPOSITORY),
+        run=lambda arguments, input_data=None: json.dumps(raw_board_pull_request()),
+    )
+
+    assert client.list_open_board_pull_requests() == (
+        board.PullRequest(62, "Fixes #10", "Ship it.", "codex/issue-10", None),
+    )
+
+
+def test_github_adapter_reads_a_board_pull_request_with_no_body_as_empty() -> None:
+    client = GitHubForge(
+        github._repository_id(REPOSITORY),
+        run=lambda arguments, input_data=None: json.dumps(raw_board_pull_request(body=None)),
+    )
+
+    assert client.list_open_board_pull_requests()[0].body == ""
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        pytest.param({"number": True}, id="number-is-a-bool"),
+        pytest.param({"number": 0}, id="number-not-positive"),
+        pytest.param({"title": 5}, id="title-not-text"),
+        pytest.param({"body": 5}, id="body-not-text"),
+        pytest.param({"headRefName": None}, id="head-ref-missing"),
+        pytest.param({"mergedAt": 5}, id="merged-at-not-text"),
+        pytest.param({"mergedAt": "yesterday"}, id="merged-at-unparsable-shape"),
+    ],
+)
+def test_github_adapter_fails_loud_on_a_malformed_board_pull_request(
+    overrides: dict[str, object],
+) -> None:
+    client = GitHubForge(
+        github._repository_id(REPOSITORY),
+        run=lambda arguments, input_data=None: json.dumps(raw_board_pull_request(**overrides)),
+    )
+
+    with pytest.raises(ClaimError, match="malformed board pull request"):
+        client.list_open_board_pull_requests()
+
+
+def test_github_adapter_fails_loud_when_a_board_pull_request_is_not_an_object() -> None:
+    client = GitHubForge(
+        github._repository_id(REPOSITORY), run=lambda arguments, input_data=None: '"not an object"'
+    )
+
+    with pytest.raises(ClaimError, match="malformed board pull request"):
+        client.list_open_board_pull_requests()
 
 
 def test_github_adapter_ensures_a_label_definition() -> None:
@@ -974,6 +1133,30 @@ def test_github_adapter_creates_an_item_and_returns_its_number() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    ("raw", "match"),
+    [
+        pytest.param("not json", "invalid created-ledger JSON", id="invalid-json"),
+        pytest.param(json.dumps({}), "did not return a created ledger number", id="missing-number"),
+        pytest.param(
+            json.dumps({"number": True}),
+            "did not return a created ledger number",
+            id="number-is-a-bool",
+        ),
+        pytest.param(
+            json.dumps({"number": 0}), "did not return a created ledger number", id="non-positive"
+        ),
+    ],
+)
+def test_github_adapter_fails_loud_on_a_malformed_created_ledger(raw: str, match: str) -> None:
+    client = GitHubForge(
+        github._repository_id(REPOSITORY), run=lambda arguments, input_data=None: raw
+    )
+
+    with pytest.raises(ClaimError, match=match):
+        client.create_item(title="Agent claim ledger", body="body text")
+
+
 def test_github_adapter_locks_an_item() -> None:
     observed: list[list[str]] = []
 
@@ -1000,6 +1183,52 @@ def test_github_adapter_closes_an_item() -> None:
     client.close_item(11)
 
     assert observed == [["issue", "close", "11", "--repo", REPOSITORY]]
+
+
+def test_github_adapter_neutralizes_a_claim_comment() -> None:
+    observed: list[tuple[list[str], bytes | None]] = []
+
+    def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
+        observed.append((arguments, input_data))
+        return ""
+
+    client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
+
+    client.neutralize_claim_comment(5, "new body")
+
+    assert observed == [
+        (
+            [
+                "api",
+                "--method",
+                "PATCH",
+                f"repos/{REPOSITORY}/issues/comments/5",
+                "--input",
+                "-",
+            ],
+            json.dumps({"body": "new body"}).encode("utf-8"),
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("operation", "flag"),
+    [
+        pytest.param("add_label", "--add-label", id="add-label"),
+        pytest.param("remove_label", "--remove-label", id="remove-label"),
+    ],
+)
+def test_github_adapter_edits_an_issue_label(operation: str, flag: str) -> None:
+    observed: list[list[str]] = []
+
+    def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
+        observed.append(arguments)
+        return ""
+
+    client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
+    getattr(client, operation)(10, "agent-claim:active")
+
+    assert observed == [["issue", "edit", "10", "--repo", REPOSITORY, flag, "agent-claim:active"]]
 
 
 def test_github_adapter_creates_a_child_and_links_it_as_a_sub_issue() -> None:
@@ -1276,6 +1505,18 @@ def test_board_renders_fixture_as_text_without_github_writes(
     assert merged_days == {
         day.isoformat() for day in github._query_days(date(2026, 8, 1), date(2026, 8, 21))
     }
+
+
+def test_recent_merged_pull_requests_refuses_a_window_that_ends_before_it_starts() -> None:
+    """A fixed far-future `since` -- never `datetime.now(UTC)`-relative -- so
+    this stays deterministic regardless of when the suite runs: a real-clock
+    window could cross UTC midnight between this line and the production
+    code's own `datetime.now(UTC)` call, sometimes closing the window and
+    falling through to a real, unfaked `gh` call instead of raising."""
+    client = GitHubForge(github._repository_id("example/agent-claim"))
+    raised_argument_1 = datetime(2099, 1, 1, tzinfo=UTC)
+    with pytest.raises(ClaimError, match="merged pull request window ends before it starts"):
+        client.list_recent_merged_board_pull_requests(raised_argument_1)
 
 
 def test_board_projects_fixture_json_without_github_writes(
@@ -1812,6 +2053,12 @@ def test_next_pulls_an_unruled_item_and_names_only_unworkable_ones_as_skipped(
         pytest.param("codex/issue-90-claim-gate", (), (), id="branch"),
         pytest.param("PR #62", (), (), id="pull-request"),
         pytest.param("None", (), (), id="none"),
+        pytest.param(
+            "#9",
+            (board.BlockerReference(9, board.BlockerState.MISSING, False),),
+            (),
+            id="missing-blocker",
+        ),
         pytest.param(
             "#9",
             (
@@ -2519,6 +2766,41 @@ def test_claim_names_an_incomplete_body_even_when_the_item_is_also_blocked(
     assert "body-incomplete" in {check["check"] for check in payload["checks"]}
 
 
+def test_claim_reports_incomplete_body_when_blocked_by_itself_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """A contract missing its own "Blocked by" section has no blocker to
+    check at all -- `Contract.blocker_issues` reads that absence as "none
+    named", not a crash -- so only the incompleteness itself is reported."""
+    issue = board_issue(
+        51, "Dependent", "## Now\nWork.\n\n## Next\nDo it.\n\n## Done when\nMerged."
+    )
+    _configured_board_client(monkeypatch, tmp_path, open_issues=(issue,))
+    monkeypatch.setattr(
+        issue_claim, "_request", lambda _arguments: request(issue=51, scope=("src/work.py",))
+    )
+
+    exit_code = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "claim",
+            "51",
+            "--agent",
+            "Codex Sol",
+            "--scope",
+            "src/work.py",
+            "--json",
+        ]
+    )
+
+    assert exit_code == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert "body-incomplete" in {check["check"] for check in payload["checks"]}
+
+
 CUT_CONTAINER = 79
 
 
@@ -2601,6 +2883,41 @@ def test_cut_refuses_a_non_container(
 
     assert exit_code == 2
     assert f"ERROR: #{CUT_CONTAINER} is not a container" in capsys.readouterr().err
+
+
+def test_cut_refuses_a_number_that_names_no_open_issue(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    _configured_board_client(monkeypatch, tmp_path, open_issues=())
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
+    )
+
+    assert exit_code == 2
+    assert f"ERROR: #{CUT_CONTAINER} is not an open container" in capsys.readouterr().err
+
+
+def test_cut_refuses_when_the_row_cannot_be_located(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """`_cut_row` selects the row and `board.locate_slice_row` re-locates its
+    span through a mirrored parse of the same body (#79); cut must refuse
+    before any write rather than link a child into a guessed location if
+    those two ever disagreed."""
+    body = slice_table(("1", "Scheibe 1", "—", "—"))
+    container = _cut_container_issue(body)
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
+    monkeypatch.setattr(board, "locate_slice_row", lambda _body, _row_index: None)
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
+    )
+
+    assert exit_code == 2
+    assert f"ERROR: #{CUT_CONTAINER}'s row 1 could not be located" in capsys.readouterr().err
+    assert client.created_children == []
+    assert client.item_bodies == {}
 
 
 def test_cut_refuses_a_container_that_already_has_a_parent(
@@ -2940,10 +3257,57 @@ def test_locate_slice_row_returns_none_for_an_absent_row_index() -> None:
     assert board.locate_slice_row(body, 2) is None
 
 
+def test_locate_slice_row_skips_ordinary_prose_and_a_near_miss_header() -> None:
+    """Scanning for the real table must step past an ordinary line (no header
+    match at all) and a near-miss header (looks like an attempt but is
+    missing columns) without mistaking either for the genuine table."""
+    body = (
+        "Some ordinary prose line before the table.\n\n"
+        "| # | Scheibe |\n"
+        "|---|---|\n\n" + slice_table(("1", "Real slice", "—", "—"))
+    )
+
+    span = board.locate_slice_row(body, 1)
+
+    assert span is not None
+    assert body[span[0] : span[1]] == " — "
+
+
 def test_locate_slice_row_skips_a_fenced_example() -> None:
     fenced = "```markdown\n" + slice_table(("1", "Example slice", "—", "—")) + "```\n"
 
     assert board.locate_slice_row(fenced, 1) is None
+
+
+@pytest.mark.parametrize(
+    ("body", "match"),
+    [
+        pytest.param(
+            "no expectation heading here at all\n",
+            "ruled expectations have no readable date",
+            id="no-heading",
+        ),
+        pytest.param(
+            "## Erwartungen 31.02.2026\n", r"invalid date 31\.02\.2026", id="invalid-calendar-date"
+        ),
+    ],
+)
+def test_parse_ruling_date_fails_loud_on_a_malformed_body(body: str, match: str) -> None:
+    with pytest.raises(ClaimError, match=match):
+        board.parse_ruling_date(body)
+
+
+@pytest.mark.parametrize(
+    "raw_timestamp",
+    [
+        pytest.param("not-a-timestamp", id="unparsable"),
+        pytest.param("2026-08-20T00:00:00", id="missing-offset"),
+    ],
+)
+def test_claim_age_fails_loud_on_a_malformed_github_timestamp(raw_timestamp: str) -> None:
+    raised_argument_1 = datetime(2026, 8, 21, tzinfo=UTC)
+    with pytest.raises(ClaimError, match="GitHub returned a malformed board timestamp"):
+        board.claim_age(raw_timestamp, raised_argument_1)
 
 
 def test_child_skeleton_is_an_incomplete_contract_with_no_defects() -> None:
@@ -3746,6 +4110,30 @@ def test_board_reports_when_the_last_stale_blocker_closed() -> None:
     assert item["freed_days"] == 2
 
 
+def test_build_board_refuses_when_github_omits_a_referenced_blocker() -> None:
+    """A contract names a blocker, but the blocker snapshot GitHub actually
+    returned does not include it at all -- never silently treat that as
+    "no blocker", since that would let a slice through its own blocked-by
+    gate."""
+    dependent = board_issue(51, "Dependent", complete_contract("Ship it.", blocked_by="#9"))
+
+    raised_argument_1 = board.BoardConfig()
+    with pytest.raises(ClaimError, match="GitHub did not return blocker #9"):
+        projected_board((dependent,), (), (), (), raised_argument_1, blocker_references=())
+
+
+def test_build_board_refuses_a_closed_blocker_missing_closed_at() -> None:
+    """A blocker GitHub reports closed but without a `closed_at` cannot be
+    dated for the freed-on note; that is a malformed response, not a
+    freshly-closed blocker with no timestamp yet."""
+    dependent = board_issue(51, "Dependent", complete_contract("Ship it.", blocked_by="#9"))
+    blockers = (board.BlockerReference(9, board.BlockerState.CLOSED, False),)
+
+    raised_argument_1 = board.BoardConfig()
+    with pytest.raises(ClaimError, match="GitHub did not return closed_at for blocker #9"):
+        projected_board((dependent,), (), (), (), raised_argument_1, blocker_references=blockers)
+
+
 def test_board_text_and_json_show_freed_on_and_freed_days() -> None:
     freed = board_issue(20, "Freed", complete_contract("Ship it.", blocked_by="#10"))
     blocked = board_issue(21, "Blocked", complete_contract("Ship it.", blocked_by="#11"))
@@ -4028,6 +4416,56 @@ def test_board_shows_container_progress_and_refuses_it_as_actionable() -> None:
     assert child_json["kind"] is None
     assert child_json["container_parent"] == 120
     assert child_json["priority_order"] == 0
+
+
+def test_board_shows_a_container_child_blocked_by_another_open_issue() -> None:
+    """An open container child can itself be blocked; the container's own
+    open-children note must show that, not just the bare child number."""
+    container = board.Issue(
+        120,
+        "Container",
+        (),
+        "",
+        "2026-08-20T00:00:00Z",
+        "2026-08-20T00:00:00Z",
+        kind=board.ItemKind.CONTAINER,
+        children_closed=0,
+        children_total=1,
+    )
+    blocker = board_issue(130, "Blocker", complete_contract("Ship it."))
+    open_child = board_issue(121, "Open child", complete_contract("Ship it.", blocked_by="#130"))
+
+    projected = projected_board(
+        (container, blocker, open_child),
+        (),
+        (),
+        (),
+        board.BoardConfig(),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+        children={120: (board.ChildItem(121, board.ChildState.OPEN),)},
+    )
+
+    assert "#120 0/1 closed; open: #121 (blocked by #130)" in board.render(projected)
+
+
+def test_board_kind_cell_shows_a_plain_kind_for_a_non_container_item() -> None:
+    """`_kind_cell` names a real kind (task/bug/feature) plainly, without the
+    container's "closed/total" progress suffix that only a container gets."""
+    task = board.Issue(
+        90,
+        "Fix the thing",
+        (),
+        "",
+        "2026-08-20T00:00:00Z",
+        "2026-08-20T00:00:00Z",
+        kind=board.ItemKind.TASK,
+    )
+
+    projected = projected_board((task,), (), (), (), board.BoardConfig())
+
+    header, row = board.render(projected).splitlines()[:2]
+    kind_start = header.index("KIND")
+    assert row[kind_start:].startswith("task")
 
 
 def test_board_json_carries_a_nonzero_priority_order_for_a_critical_label() -> None:
@@ -4633,6 +5071,14 @@ def test_board_configuration_requires_unique_ordered_labels(tmp_path: Path) -> N
         board.load_config(config_path)
 
 
+def test_board_configuration_fails_loud_on_unparsable_toml(tmp_path: Path) -> None:
+    config_path = tmp_path / "board.toml"
+    config_path.write_text("this is not valid toml =\n")
+
+    with pytest.raises(ClaimError, match=f"cannot read board configuration {config_path}"):
+        board.load_config(config_path)
+
+
 def test_board_configuration_reads_and_validates_the_idea_label(tmp_path: Path) -> None:
     config_path = tmp_path / "board.toml"
     config_path.write_text('priority_labels = ["ux", "security"]\nidea_label = "idea"\n')
@@ -4682,6 +5128,12 @@ def test_next_keeps_an_unlabelled_projectionless_item_skipped_with_an_active_ide
 
     assert issue_claim.main(["--repo", "example/agent-claim", "next"]) == 3
     assert capsys.readouterr().out == "No actionable item.\n\nSKIPPED\n#10: body incomplete\n"
+
+    assert issue_claim.main(["--repo", "example/agent-claim", "next", "--json"]) == 3
+    assert json.loads(capsys.readouterr().out) == {
+        "recovery": [],
+        "skipped": [{"number": 10, "reason": "body incomplete"}],
+    }
 
 
 def test_next_keeps_a_vision_labelled_projectionless_item_incomplete_without_configuration(
@@ -4857,6 +5309,50 @@ def test_claim_marker_round_trips_visible_contract(
     assert parsed.scope == ("docs/COORDINATION.md", "scripts/issue_claim.py")
     assert "Agent: Codex Sol (builder)" in body
     assert "Auto-Runner" in body
+
+
+@pytest.mark.parametrize(
+    ("body", "match"),
+    [
+        pytest.param(f"{protocol.MARKER_PREFIX}{{}}", "unterminated claim marker", id="no-suffix"),
+        pytest.param(
+            f"{protocol.MARKER_PREFIX}not-json{protocol.MARKER_SUFFIX}",
+            "invalid claim JSON",
+            id="invalid-json",
+        ),
+        pytest.param(
+            f"{protocol.MARKER_PREFIX}[1,2,3]{protocol.MARKER_SUFFIX}",
+            "claim payload must be an object",
+            id="payload-not-an-object",
+        ),
+    ],
+)
+def test_marker_payload_fails_loud_on_a_malformed_marker(body: str, match: str) -> None:
+    raised_argument_1 = comment(1, body)
+    with pytest.raises(InvalidClaimMarkerError, match=match):
+        parse_claim_event(raised_argument_1)
+
+
+def test_required_text_refuses_a_non_string_marker_field() -> None:
+    payload = _valid_claim_payload(claim_id=123)
+    raised_argument_1 = comment(1, marker(payload))
+    with pytest.raises(InvalidClaimMarkerError, match="claim marker field 'claim_id' must be text"):
+        parse_claim_event(raised_argument_1)
+
+
+def test_outbound_text_refuses_a_non_string_field() -> None:
+    # `replace`'s `**changes` is typed `Any` in the standard library -- the
+    # one boundary this malformed, non-`str` `agent` can enter through
+    # without a field-by-field type lie.
+    raised_argument_1 = replace(request(), agent=123)
+    with pytest.raises(ClaimError, match="agent must be text"):
+        claim_comment(raised_argument_1)
+
+
+def test_outbound_resource_name_refuses_an_invalid_name() -> None:
+    raised_argument_1 = request(resource="not valid!")
+    with pytest.raises(ClaimError, match="resource is not a resource name"):
+        claim_comment(raised_argument_1)
 
 
 def _marker_payload_keys(body: str) -> frozenset[str]:
@@ -5070,6 +5566,87 @@ def test_legacy_bootstrap_claim_is_read_only_when_marker_is_first_line() -> None
     assert parsed.claim_id == "bootstrap"
 
 
+def test_parse_claim_event_refuses_an_unknown_action() -> None:
+    raised_argument_1 = comment(1, marker({"action": "bogus"}))
+    with pytest.raises(InvalidClaimMarkerError, match="has unknown action 'bogus'"):
+        parse_claim_event(raised_argument_1)
+
+
+def test_parse_claim_event_refuses_a_legacy_marker_using_a_v2_only_action() -> None:
+    raised_argument_1 = comment(1, marker({"action": "rescope"}, legacy=True))
+    with pytest.raises(
+        InvalidClaimMarkerError, match="legacy claim markers cannot use this action"
+    ):
+        parse_claim_event(raised_argument_1)
+
+
+def _valid_override_release_payload(**overrides: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "action": "override_release",
+        "agent": "Fleet Coordinator",
+        "claim_comment_id": 5,
+        "claim_id": "claim-a",
+        "issue": 71,
+        "reason": "reviewed rollover ready",
+        "role": "coordinator",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _valid_supersede_payload(**overrides: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "action": "supersede",
+        "agent": "Fleet Coordinator",
+        "claim_comment_id": 5,
+        "claim_id": "claim-a",
+        "issue": 71,
+        "reason": "rollover",
+        "role": "coordinator",
+        "successor_issue": 170,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_override_release_requires_coordinator_role() -> None:
+    payload = _valid_override_release_payload(role="builder")
+    raised_argument_1 = comment(1, marker(payload))
+    with pytest.raises(InvalidClaimMarkerError, match="override releases require coordinator role"):
+        parse_claim_event(raised_argument_1)
+
+
+def test_ledger_supersede_requires_coordinator_role() -> None:
+    payload = _valid_supersede_payload(role="builder")
+    raised_argument_1 = comment(1, marker(payload))
+    with pytest.raises(InvalidClaimMarkerError, match="ledger supersede requires coordinator role"):
+        parse_claim_event(raised_argument_1)
+
+
+@pytest.mark.parametrize(
+    ("payload_builder", "match"),
+    [
+        pytest.param(
+            _valid_override_release_payload,
+            "override releases requires a positive claim comment id",
+            id="override-release",
+        ),
+        pytest.param(
+            _valid_supersede_payload,
+            "ledger supersede requires a positive claim comment id",
+            id="ledger-supersede",
+        ),
+    ],
+)
+def test_required_comment_id_rejects_a_non_positive_value(
+    payload_builder: Callable[..., dict[str, object]], match: str
+) -> None:
+    payload = payload_builder(claim_comment_id=0)
+    raised_argument_1 = comment(1, marker(payload))
+    with pytest.raises(InvalidClaimMarkerError, match=match):
+        parse_claim_event(raised_argument_1)
+
+
 def test_legacy_marker_fails_loud_with_a_clear_message_before_ledger_is_configured(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5137,6 +5714,27 @@ def test_invalid_branch_and_private_or_noncanonical_scope_fail_loud(
         parse_claim_event(raised_argument_1)
 
 
+def test_claim_comment_refuses_a_nul_byte_in_its_rendered_body() -> None:
+    """A NUL byte can only arrive through a field `claim_comment` does not itself
+    sanitize -- `scope` entries flow straight into the rendered body, so this is
+    the one field that reaches `_validated_comment`'s NUL-byte guard unfiltered."""
+    raised_argument_1 = request(scope=("src/new.py\x00",))
+    with pytest.raises(ClaimError, match="contains a NUL byte"):
+        claim_comment(raised_argument_1)
+
+
+def test_supersede_comment_requires_an_issue_identified_claim() -> None:
+    """Guardrail (Entschieden #6): supersede stays ledger-issue-only, never a
+    lane -- reachable directly on this writer helper even though
+    `supersede_ledger` itself only ever calls it with an issue-identified
+    claim already validated as the ledger's own."""
+    lane_claim = parse_claim_event(comment(1, claim_comment(request(lane=True))))
+    assert isinstance(lane_claim, ActiveClaim)
+
+    with pytest.raises(ClaimError, match="ledger supersede requires an issue-identified claim"):
+        protocol.supersede_comment(lane_claim, 170, "Fleet Coordinator", "coordinator", "reviewed")
+
+
 def test_missing_marker_fields_fail_loud() -> None:
     """A field this reader requires being absent is a corrupt record, not a newer
     writer (issue #136): it still fails the whole comment, verbatim as before."""
@@ -5160,6 +5758,65 @@ def test_missing_marker_fields_fail_loud() -> None:
     missing = {key: value for key, value in unknown.items() if key not in {"surprise", "scope"}}
     raised_argument_1 = comment(3, marker(missing))
     with pytest.raises(InvalidClaimMarkerError, match=r"fields differ(?!.*upgrade)"):
+        parse_claim_event(raised_argument_1)
+
+
+def _valid_claim_payload(**overrides: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "action": "claim",
+        "agent": "Codex Sol",
+        "base": BASE,
+        "branch": "codex/issue-71-claims",
+        "claim_id": "claim-a",
+        "issue": 71,
+        "role": "builder",
+        "scope": ["src"],
+    }
+    payload.update(overrides)
+    return payload
+
+
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        pytest.param({"claim_id": "bad id"}, "has an invalid claim id", id="invalid-claim-id"),
+        pytest.param(
+            {"base": "not-a-valid-sha"},
+            "must be a full lowercase commit SHA",
+            id="invalid-base",
+        ),
+        pytest.param(
+            {"resource_value": 1},
+            "resource_value requires resource",
+            id="resource-value-without-resource",
+        ),
+        pytest.param(
+            {"resource": "not valid!", "resource_value": 1},
+            "is not a resource name",
+            id="invalid-resource-name",
+        ),
+        pytest.param(
+            {"resource": "schema-hop", "resource_value": 0},
+            "resource_value must be a positive integer",
+            id="invalid-resource-value",
+        ),
+        pytest.param({"scope": None}, "non-empty list", id="scope-not-a-list"),
+        pytest.param({"scope": []}, "non-empty list", id="scope-empty-list"),
+        pytest.param({"scope": [123]}, "entries must be text", id="scope-entry-not-text"),
+        pytest.param(
+            {"scope": ["src"] * (protocol.MAX_SCOPE_ENTRIES + 1)},
+            f"exceeds {protocol.MAX_SCOPE_ENTRIES} entries",
+            id="scope-too-many-entries",
+        ),
+        pytest.param({"scope": ["src", "src"]}, "duplicate paths", id="scope-duplicate-paths"),
+    ],
+)
+def test_parse_active_claim_fails_loud_on_malformed_fields(
+    overrides: dict[str, object], match: str
+) -> None:
+    payload = _valid_claim_payload(**overrides)
+    raised_argument_1 = comment(1, marker(payload))
+    with pytest.raises(InvalidClaimMarkerError, match=match):
         parse_claim_event(raised_argument_1)
 
 
@@ -5190,6 +5847,27 @@ def test_unknown_marker_field_becomes_an_unreadable_claim_not_a_ledger_failure()
     assert unreadable.claim_id == "claim-a"
     assert unreadable.comment_url == raised_argument_1.url
     assert unreadable.unknown_fields == ("surprise",)
+
+
+def test_unreadable_claim_has_no_claim_id_when_its_own_is_unparseable() -> None:
+    """`claim_id` on an `UnreadableClaim` is a best-effort read: when the field
+    that would normally identify it is itself missing or malformed, it stays
+    `None` rather than a guess -- the comment is still named by its URL."""
+    payload = {
+        "action": "claim",
+        "agent": "Codex Sol",
+        "base": BASE,
+        "branch": "topic",
+        "claim_id": "bad id with spaces",
+        "issue": 71,
+        "role": "builder",
+        "scope": ["src"],
+        "surprise": True,
+    }
+
+    unreadable = protocol.unreadable_claims((comment(1, marker(payload)),))
+
+    assert unreadable[0].claim_id is None
 
 
 def test_aggregation_fences_an_unknown_field_comment_instead_of_failing_the_ledger() -> None:
@@ -5284,6 +5962,72 @@ def test_coordinator_override_is_explicit_and_bound_to_claim_comment() -> None:
     raised_argument_1 = comment(1, claimed_body)
     raised_argument_2 = comment(2, marker(payload))
     with pytest.raises(InvalidClaimMarkerError, match="wrong claim comment"):
+        active_claims((raised_argument_1, raised_argument_2))
+
+
+def test_release_refuses_a_mismatched_identity() -> None:
+    """A release event whose own identity marker names a different issue than
+    the claim it targets by claim_id must fail loud, never silently release
+    the wrong claim."""
+    claimed_body = claim_comment(request(issue=71))
+    claimed = parse_claim_event(comment(1, claimed_body))
+    assert isinstance(claimed, ActiveClaim)
+    wrong_identity_claim = replace(claimed, identity=IssueIdentity(72))
+    released = release_event(wrong_identity_claim)
+
+    raised_argument_1 = comment(1, claimed_body)
+    raised_argument_2 = comment(2, released)
+    with pytest.raises(InvalidClaimMarkerError, match="release targets the wrong claim"):
+        active_claims((raised_argument_1, raised_argument_2))
+
+
+def test_rescope_refuses_a_claim_id_rescoped_after_release() -> None:
+    claimed_body = claim_comment(request())
+    claimed = parse_claim_event(comment(1, claimed_body))
+    assert isinstance(claimed, ActiveClaim)
+    released = release_event(claimed)
+    rescope = protocol.rescope_comment(claimed, ("src",), claimed.agent, claimed.role)
+
+    raised_argument_1 = comment(1, claimed_body)
+    raised_argument_2 = comment(2, released)
+    raised_argument_3 = comment(3, rescope)
+    with pytest.raises(InvalidClaimMarkerError, match="was rescoped after it was released"):
+        active_claims((raised_argument_1, raised_argument_2, raised_argument_3))
+
+
+def test_rescope_refuses_a_claim_id_never_acquired() -> None:
+    claimed_body = claim_comment(request())
+    claimed = parse_claim_event(comment(1, claimed_body))
+    assert isinstance(claimed, ActiveClaim)
+    rescope = protocol.rescope_comment(claimed, ("src",), claimed.agent, claimed.role)
+
+    raised_argument_1 = comment(1, rescope)
+    with pytest.raises(InvalidClaimMarkerError, match="was rescoped before it was acquired"):
+        active_claims((raised_argument_1,))
+
+
+def test_rescope_refuses_a_mismatched_identity() -> None:
+    claimed_body = claim_comment(request(issue=71))
+    claimed = parse_claim_event(comment(1, claimed_body))
+    assert isinstance(claimed, ActiveClaim)
+    wrong_identity_claim = replace(claimed, identity=IssueIdentity(72))
+    rescope = protocol.rescope_comment(wrong_identity_claim, ("src",), claimed.agent, claimed.role)
+
+    raised_argument_1 = comment(1, claimed_body)
+    raised_argument_2 = comment(2, rescope)
+    with pytest.raises(InvalidClaimMarkerError, match="rescope targets the wrong claim"):
+        active_claims((raised_argument_1, raised_argument_2))
+
+
+def test_rescope_refuses_an_agent_other_than_the_claimant() -> None:
+    claimed_body = claim_comment(request())
+    claimed = parse_claim_event(comment(1, claimed_body))
+    assert isinstance(claimed, ActiveClaim)
+    rescope = protocol.rescope_comment(claimed, ("src",), "Other Agent", claimed.role)
+
+    raised_argument_1 = comment(1, claimed_body)
+    raised_argument_2 = comment(2, rescope)
+    with pytest.raises(InvalidClaimMarkerError, match="can only be rescoped by its claimant"):
         active_claims((raised_argument_1, raised_argument_2))
 
 
@@ -5429,6 +6173,45 @@ def test_supersede_command_posts_terminal_event_and_observes_freeze() -> None:
     raised_argument_1 = client.list_protocol_candidates(LEDGER_ISSUE)
     with pytest.raises(LedgerSupersededError, match="successor #170"):
         active_claims(raised_argument_1)
+
+
+def test_supersede_reraises_a_pre_existing_supersede_that_does_not_match_this_request() -> None:
+    """A ledger already superseded by a *different* request (a different
+    successor issue or claim id) is not this request's own idempotent retry
+    -- it is a genuine conflict, and the original error must propagate."""
+    claimed_body = claim_comment(request(issue=LEDGER_ISSUE))
+    claimed = parse_claim_event(comment(1, claimed_body))
+    assert isinstance(claimed, ActiveClaim)
+    foreign_supersede = supersede_comment(
+        claimed, 170, "Other Coordinator", "coordinator", "already superseded"
+    )
+    client = FakeForge({LEDGER_ISSUE: [comment(1, claimed_body), comment(2, foreign_supersede)]})
+
+    mismatched_request = supersede_request(
+        170, "Fleet Coordinator", "coordinator", "different reason", "a-different-claim-id"
+    )
+    with pytest.raises(LedgerSupersededError, match="successor #170"):
+        supersede_ledger(client, mismatched_request)
+
+
+def test_supersede_reraises_when_a_foreign_supersede_wins_the_post_mutation_race() -> None:
+    """Analogous to the pre-existing case above, but the foreign supersede
+    lands during this request's own post -- the post-mutation re-check must
+    still recognize it as someone else's event, not this request's own."""
+    client = FakeForge(valid_successors={170, 999})
+    acquired = acquire_claim(client, request(issue=LEDGER_ISSUE))
+    foreign_supersede = supersede_comment(
+        acquired, 999, "Other Coordinator", "coordinator", "a different rollover"
+    )
+    client.inject_before_next_ledger_post = comment(
+        50, foreign_supersede, created_at="2026-08-21T00:00:01Z"
+    )
+
+    raised_argument_1 = supersede_request(
+        170, "Fleet Coordinator", "coordinator", "reviewed successor ready", acquired.claim_id
+    )
+    with pytest.raises(LedgerSupersededError, match="successor #999"):
+        supersede_ledger(client, raised_argument_1)
 
 
 def test_supersede_race_loses_cleanly_without_poisoning_the_ledger() -> None:
@@ -5755,6 +6538,59 @@ def test_rescope_adds_a_path_without_changing_claim_id_or_base() -> None:
     assert [claim.scope for claim in standing] == [("src/widget.py", "src/new.py")]
 
 
+@dataclass
+class _ReadAfterWriteForge(FakeForge):
+    """A `FakeForge` whose second `list_protocol_candidates()` call -- the
+    post-write check `acquire_claim`/`rescope_claim` both make right after
+    posting -- is stale, simulating a read-after-write consistency gap.
+    `hide_claim=True` drops the claim entirely (the id itself looks never
+    to have existed there yet); otherwise only the just-posted comment is
+    hidden, so a still-live rescope target is found but still shows its
+    pre-rescope scope."""
+
+    hide_claim: bool = False
+    _list_calls: int = field(default=0, init=False)
+
+    def list_protocol_candidates(self, issue: int) -> tuple[IssueComment, ...]:
+        candidates = super().list_protocol_candidates(issue)
+        self._list_calls += 1
+        if self._list_calls == 2:
+            return () if self.hide_claim else candidates[:-1]
+        return candidates
+
+
+def test_acquire_claim_refuses_when_the_claim_id_never_reappears_after_posting() -> None:
+    client = _ReadAfterWriteForge(hide_claim=True)
+
+    raised_argument_1 = request(issue=72, scope=("src/widget.py",))
+    with pytest.raises(ClaimError, match="did not expose the posted claim id"):
+        acquire_claim(client, raised_argument_1)
+
+
+def test_rescope_refuses_when_the_claim_id_never_reappears_after_posting() -> None:
+    setup = FakeForge()
+    acquired = acquire_claim(setup, request(issue=72, scope=("src/widget.py",)))
+    client = _ReadAfterWriteForge(comments=setup.comments, hide_claim=True)
+
+    raised_argument_1 = rescope_request(
+        acquired.identity, acquired.agent, ("src/new.py",), (), acquired.claim_id
+    )
+    with pytest.raises(ClaimError, match="did not expose the rescoped claim id"):
+        rescope_claim(client, raised_argument_1)
+
+
+def test_rescope_refuses_when_the_new_scope_never_reappears_after_posting() -> None:
+    setup = FakeForge()
+    acquired = acquire_claim(setup, request(issue=72, scope=("src/widget.py",)))
+    client = _ReadAfterWriteForge(comments=setup.comments, hide_claim=False)
+
+    raised_argument_1 = rescope_request(
+        acquired.identity, acquired.agent, ("src/new.py",), (), acquired.claim_id
+    )
+    with pytest.raises(ClaimError, match="did not observe the posted rescope"):
+        rescope_claim(client, raised_argument_1)
+
+
 def test_rescope_drop_and_add_replace_paths_atomically() -> None:
     client = FakeForge()
     acquired = acquire_claim(client, request(issue=72, scope=("src/old.py", "src/keep.py")))
@@ -5768,6 +6604,41 @@ def test_rescope_drop_and_add_replace_paths_atomically() -> None:
 
     assert updated.claim_id == acquired.claim_id
     assert updated.scope == ("src/keep.py", "src/new.py")
+
+
+def test_rescope_refuses_an_identity_with_no_active_claim_at_all() -> None:
+    client = FakeForge()
+
+    raised_argument_1 = rescope_request(IssueIdentity(72), "Codex Sol", ("src/new.py",), (), None)
+    with pytest.raises(ClaimUnavailableError, match="has no active build claim"):
+        rescope_claim(client, raised_argument_1)
+
+
+def test_rescope_refuses_a_claim_id_that_names_no_standing_claim() -> None:
+    client = FakeForge()
+    acquire_claim(client, request(issue=72, scope=("src/widget.py",)))
+
+    raised_argument_1 = rescope_request(
+        IssueIdentity(72), "Codex Sol", ("src/new.py",), (), "not-a-real-claim-id"
+    )
+    with pytest.raises(ClaimUnavailableError, match="has no active claim 'not-a-real-claim-id'"):
+        rescope_claim(client, raised_argument_1)
+
+
+def test_rescope_refuses_a_checkout_branch_that_does_not_match_the_claim() -> None:
+    client = FakeForge()
+    acquired = acquire_claim(client, request(issue=72, scope=("src/widget.py",)))
+
+    raised_argument_1 = rescope_request(
+        IssueIdentity(72),
+        acquired.agent,
+        ("src/new.py",),
+        (),
+        acquired.claim_id,
+        branch="some-other-branch",
+    )
+    with pytest.raises(ClaimUnavailableError, match="does not match checkout branch"):
+        rescope_claim(client, raised_argument_1)
 
 
 def test_rescope_adds_a_path_held_by_another_issue() -> None:
@@ -6044,6 +6915,39 @@ def test_acquire_claim_translates_a_same_claim_id_post_race_into_a_clear_error()
         acquire_claim(client, raised_argument_1)
 
 
+def test_acquire_claim_loses_an_identity_race_to_an_earlier_competitor() -> None:
+    """Two different claim ids can both legitimately land for the same issue
+    in a genuine post-mutation race (unlike the same-claim-id race above);
+    whichever comment is chronologically earliest wins, and the loser
+    compensates with a release instead of leaving two live claims."""
+    client = FakeForge()
+    client.inject_after_next_ledger_post = comment(
+        2,
+        claim_comment(request("claim-b", "Grok 4.6", issue=72, scope=("elsewhere",))),
+        created_at="2026-08-21T00:00:00Z",
+    )
+
+    raised_argument_1 = request("claim-a", "Codex Sol", issue=72, scope=("mine",))
+    with pytest.raises(ClaimUnavailableError, match="claim race lost to"):
+        acquire_claim(client, raised_argument_1)
+
+    standing = active_claims(client.list_protocol_candidates(LEDGER_ISSUE))
+    assert {claim.claim_id for claim in standing} == {"claim-b"}
+
+
+def test_acquire_claim_wins_an_identity_race_against_a_later_competitor() -> None:
+    client = FakeForge()
+    client.inject_after_next_ledger_post = comment(
+        2,
+        claim_comment(request("claim-b", "Grok 4.6", issue=72, scope=("elsewhere",))),
+        created_at="2026-08-21T00:00:02Z",
+    )
+
+    acquired = acquire_claim(client, request("claim-a", "Codex Sol", issue=72, scope=("mine",)))
+
+    assert acquired.claim_id == "claim-a"
+
+
 def unreadable_ledger_comment(identifier: int, claim_id: str = "claim-b") -> IssueComment:
     """A claim comment shaped like a newer writer's -- every required field present,
     plus one (`surprise`) this reader's schema does not know (issue #136)."""
@@ -6098,6 +7002,21 @@ def test_cross_issue_scope_race_keeps_both_overlapping_claims() -> None:
     standing = active_claims(tuple(client.comments[LEDGER_ISSUE]))
     assert {claim.claim_id for claim in standing} == {"earlier", later.claim_id}
     assert client.labels == {73}
+
+
+def test_release_refuses_a_lane_identity_without_a_branch() -> None:
+    """`_claims_for_identity` is protocol.py's own defense, independent of
+    cli.py's earlier branch gate: calling `release_claim` directly with a
+    lane identity and no branch must still fail loud here too."""
+    client = FakeForge()
+
+    raised_argument_1 = release_context(
+        LaneIdentity(), "Codex Sol", "builder", LANDED, None, branch=""
+    )
+    with pytest.raises(
+        ClaimUnavailableError, match="lane release requires a non-empty current branch"
+    ):
+        release_claim(client, raised_argument_1)
 
 
 def test_release_removes_projection_only_after_claim_is_gone() -> None:
@@ -6412,6 +7331,31 @@ def test_label_reconciliation_heals_claim_posted_during_release_remove() -> None
         claim.claim_id for claim in active_claims(client.list_protocol_candidates(LEDGER_ISSUE))
     ] == ["new"]
     assert client.labels == {72}
+
+
+@dataclass
+class _FlappingClaimForge(FakeForge):
+    """A `FakeForge` whose ledger claim for one issue is a different claim id
+    on every read -- simulating an issue whose claim keeps flapping (claim,
+    release, claim again) faster than `reconcile_issue_label`'s own bounded
+    retries can ever catch a stable snapshot."""
+
+    flapping_issue: int = 0
+    _call: int = field(default=0, init=False)
+
+    def list_protocol_candidates(self, issue: int) -> tuple[IssueComment, ...]:
+        self._call += 1
+        body = claim_comment(
+            request(f"claim-{self._call}", issue=self.flapping_issue, scope=("src",))
+        )
+        return (comment(self._call, body),)
+
+
+def test_reconcile_issue_label_fails_loud_when_the_claim_keeps_flapping() -> None:
+    client = _FlappingClaimForge(flapping_issue=72)
+
+    with pytest.raises(ClaimError, match="claim label changed repeatedly during reconciliation"):
+        reconcile_issue_label(client, 72)
 
 
 def test_label_failure_is_loud_while_comment_truth_remains() -> None:
@@ -6986,6 +7930,105 @@ def test_github_reads_blocker_state_and_pull_request_kind(
     ]
 
 
+def test_github_adapter_runs_gh_when_no_fake_run_is_given(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every other adapter test injects `run=` to avoid a real subprocess;
+    this proves the adapter's own default (`_gh`, via `_bounded_command`)
+    actually builds a `gh` command and runs it through the real bounded-I/O
+    machinery -- substituting the child process itself so the test needs no
+    real `gh` executable."""
+    observed: list[list[str]] = []
+    original_popen = subprocess.Popen
+
+    def start(
+        command: list[str],
+        *,
+        stdin: int | None = None,
+        stdout: int | None = None,
+        stderr: int | None = None,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.Popen[bytes]:
+        observed.append(command)
+        substituted = [sys.executable, "-c", "print('main')"]
+        return original_popen(substituted, stdin=stdin, stdout=stdout, stderr=stderr, env=env)
+
+    monkeypatch.setattr(subprocess, "Popen", start)
+    client = GitHubForge(github._repository_id("example/agent-claim"))
+
+    assert client.default_branch() == "main"
+    assert observed == [["gh", "api", "repos/example/agent-claim", "--jq", ".default_branch"]]
+
+
+def test_github_adapter_capability_reads_the_declared_table() -> None:
+    client = GitHubForge(github._repository_id("example/agent-claim"))
+
+    assert client.capability(forge.ForgeOperation.LIST_ITEMS) is forge.Capability.READ_ONLY
+    assert client.capability(forge.ForgeOperation.CREATE_ITEM) is forge.Capability.READ_WRITE
+
+
+def test_github_adapter_item_reference_reads_state_title_and_body() -> None:
+    client = GitHubForge(
+        github._repository_id("example/agent-claim"),
+        run=lambda _arguments: json.dumps({"state": "open", "title": "Work", "body": "Do it."}),
+    )
+
+    assert client.item_reference(10) == forge.ItemReference(forge.ItemState.OPEN, "Work", "Do it.")
+
+
+def test_github_adapter_item_reference_reads_a_closed_issue_with_no_body() -> None:
+    client = GitHubForge(
+        github._repository_id("example/agent-claim"),
+        run=lambda _arguments: json.dumps({"state": "closed", "title": "Work", "body": None}),
+    )
+
+    assert client.item_reference(10) == forge.ItemReference(forge.ItemState.CLOSED, "Work", "")
+
+
+def test_github_adapter_item_reference_is_missing_after_a_404() -> None:
+    client = GitHubForge(
+        github._repository_id("example/agent-claim"),
+        run=lambda _arguments: (_ for _ in ()).throw(
+            forge.ForgeNotFoundError("GitHub API failed: HTTP 404")
+        ),
+    )
+
+    assert client.item_reference(10) == forge.ItemReference(forge.ItemState.MISSING)
+
+
+@pytest.mark.parametrize(
+    ("raw", "match"),
+    [
+        pytest.param("not-json", "invalid issue reference JSON", id="not-json"),
+        pytest.param(json.dumps([]), "malformed issue reference", id="no-values"),
+        pytest.param(
+            json.dumps([{"a": 1}, {"b": 2}]), "malformed issue reference", id="two-values"
+        ),
+        pytest.param(json.dumps(["not-a-dict"]), "malformed issue reference", id="not-a-dict"),
+        pytest.param(
+            json.dumps({"state": "unknown", "title": "x", "body": None}),
+            "malformed issue reference",
+            id="unknown-state",
+        ),
+        pytest.param(
+            json.dumps({"state": "open", "title": 5, "body": None}),
+            "malformed issue reference",
+            id="title-not-text",
+        ),
+        pytest.param(
+            json.dumps({"state": "open", "title": "x", "body": 5}),
+            "malformed issue reference",
+            id="body-not-text",
+        ),
+    ],
+)
+def test_github_adapter_item_reference_fails_loud_on_a_malformed_response(
+    raw: str, match: str
+) -> None:
+    client = GitHubForge(github._repository_id("example/agent-claim"), run=lambda _arguments: raw)
+
+    with pytest.raises(ClaimError, match=match):
+        client.item_reference(10)
+
+
 @pytest.mark.parametrize("state", ["missing", "unknown"])
 def test_github_rejects_blocker_states_the_api_cannot_return(state: str) -> None:
     client = GitHubForge(
@@ -7011,6 +8054,51 @@ def test_github_marks_a_missing_blocker_only_after_a_404() -> None:
     assert client.list_board_blockers(frozenset({86})) == (
         board.BlockerReference(86, board.BlockerState.MISSING, False),
     )
+
+
+def test_github_list_board_blockers_is_empty_for_no_numbers() -> None:
+    client = GitHubForge(
+        github._repository_id("example/agent-claim"),
+        run=lambda _arguments: pytest.fail("no blocker should be queried"),
+    )
+
+    assert client.list_board_blockers(frozenset()) == ()
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param(json.dumps([]), id="no-values"),
+        pytest.param(json.dumps(["not-a-dict"]), id="not-a-dict"),
+    ],
+)
+def test_github_board_blocker_fails_loud_on_a_malformed_shape(raw: str) -> None:
+    client = GitHubForge(github._repository_id("example/agent-claim"), run=lambda _arguments: raw)
+
+    raised_argument_1 = frozenset({86})
+    with pytest.raises(ClaimError, match="malformed board blocker"):
+        client.list_board_blockers(raised_argument_1)
+
+
+def test_github_board_blocker_fails_loud_on_an_uncalendared_closed_timestamp() -> None:
+    """`closedAt` can pass the timestamp-shape check (digits in the right
+    places) while still naming no real calendar date; `datetime.fromisoformat`
+    itself is the second, calendar-aware check that catches that."""
+    client = GitHubForge(
+        github._repository_id("example/agent-claim"),
+        run=lambda _arguments: json.dumps(
+            {
+                "number": 86,
+                "state": "closed",
+                "closedAt": "9999-99-99T00:00:00Z",
+                "isPullRequest": False,
+            }
+        ),
+    )
+
+    raised_argument_1 = frozenset({86})
+    with pytest.raises(ClaimError, match="malformed board blocker"):
+        client.list_board_blockers(raised_argument_1)
 
 
 def _comment_row(identifier: int, body: str = "ordinary prose") -> dict[str, object]:
@@ -7049,6 +8137,116 @@ def test_github_comment_reader_accepts_concatenated_pretty_json_objects() -> Non
     observed = client.list_protocol_candidates(71)
 
     assert [entry.identifier for entry in observed] == [10, 11]
+
+
+def test_github_comment_reader_refuses_a_ledger_past_its_comment_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(github, "MAX_LEDGER_COMMENTS", 1)
+    rows = [_comment_row(10, "ordinary prose"), _comment_row(11, "ordinary prose")]
+    client = GitHubForge(
+        github._repository_id("example/agent-claim"),
+        run=lambda arguments: "\n".join(json.dumps(row) for row in rows),
+    )
+
+    with pytest.raises(ClaimError, match="claim ledger page limit reached"):
+        client.list_protocol_candidates(71)
+
+
+def test_github_comment_reader_refuses_a_ledger_past_its_protocol_event_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(github, "MAX_PROTOCOL_EVENTS", 1)
+    rows = [
+        _comment_row(10, claim_comment(request("claim-a", issue=72))),
+        _comment_row(11, claim_comment(request("claim-b", issue=73))),
+    ]
+    client = GitHubForge(
+        github._repository_id("example/agent-claim"),
+        run=lambda arguments: "\n".join(json.dumps(row) for row in rows),
+    )
+
+    with pytest.raises(ClaimError, match="claim ledger protocol limit reached"):
+        client.list_protocol_candidates(71)
+
+
+def test_github_projection_reader_refuses_an_issue_past_its_comment_page_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_projection_comments` walks pages until a short one ends the fetch;
+    an issue whose comments never run out before `MAX_LEDGER_PAGES` must
+    fail loud and ask for the documented rollover, not loop forever."""
+    monkeypatch.setattr(github, "MAX_LEDGER_PAGES", 1)
+    full_page = [
+        {**_comment_row(1, "ordinary prose"), "id": index}
+        for index in range(1, github.COMMENTS_PER_PAGE + 1)
+    ]
+    client = GitHubForge(
+        github._repository_id("example/agent-claim"),
+        run=lambda arguments: "\n".join(json.dumps(row) for row in full_page),
+    )
+
+    raised_argument_1 = issue_claim._unclaimed_projection()
+    with pytest.raises(ClaimError, match="owning issue comment limit reached"):
+        client.upsert_projection(72, raised_argument_1)
+
+
+def test_github_projection_reader_returns_normally_on_a_short_page() -> None:
+    """The common case, exercised through the real (unmocked) implementation
+    rather than the `_projection_comments` fake every other `upsert_projection`
+    test injects: a short page ends the fetch and posting proceeds."""
+    body = issue_claim._unclaimed_projection()
+    posted: dict[str, str | None] = {"body": None}
+
+    def run(arguments: list[str], *, input_data: bytes | None = None) -> str:
+        if arguments[0] == "issue" and arguments[1] == "comment":
+            posted["body"] = input_data.decode("utf-8") if input_data else ""
+            return "https://github.com/example/agent-claim/issues/72#issuecomment-10"
+        if posted["body"] is None:
+            return ""
+        return json.dumps(_comment_row(10, posted["body"]))
+
+    client = GitHubForge(github._repository_id("example/agent-claim"), run=run)
+
+    assert client.upsert_projection(72, body)
+    assert posted["body"] == body
+
+
+def test_github_comment_reader_paginates_in_concurrent_batches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A single-page listing (the common case) is already covered; a ledger
+    whose first concurrent batch is itself still full must ask for a second
+    batch rather than assuming one batch is always enough."""
+    monkeypatch.setattr(github, "PARALLEL_FETCH_CONCURRENCY", 1)
+    full_page = [_comment_row(1, "ordinary prose") for _ in range(github.COMMENTS_PER_PAGE)]
+
+    def run(arguments: list[str]) -> str:
+        page = int(arguments[1].rsplit("page=", 1)[1])
+        if page <= 2:
+            return "\n".join(json.dumps(row) for row in full_page)
+        return ""
+
+    client = GitHubForge(github._repository_id("example/agent-claim"), run=run)
+
+    assert client.list_protocol_candidates(71) == ()
+
+
+def test_github_comment_reader_warns_once_past_the_rollover_threshold(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(github, "LEDGER_ROLLOVER_WARNING_COMMENTS", 2)
+    rows = [_comment_row(10, "ordinary prose"), _comment_row(11, "ordinary prose")]
+    client = GitHubForge(
+        github._repository_id("example/agent-claim"),
+        run=lambda arguments: "\n".join(json.dumps(row) for row in rows),
+    )
+
+    client.list_protocol_candidates(71)
+    assert "WARNING: claim ledger has 2 comments" in capsys.readouterr().err
+
+    client.list_protocol_candidates(71)
+    assert capsys.readouterr().err == ""
 
 
 def test_bounded_command_sets_github_quiet_environment() -> None:
@@ -7227,6 +8425,61 @@ def test_merged_pull_request_history_below_the_cap_warns_of_nothing(
     assert capsys.readouterr().err == ""
 
 
+def test_recent_merged_pull_requests_skips_an_entry_with_no_merge_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`mergedAt` can be `None` on an otherwise well-shaped merged-search row
+    (a defensive read, not a documented GitHub behavior); such a row cannot
+    be dated against the window, so it is skipped rather than crashing the
+    whole fetch."""
+    since = datetime(2026, 8, 1, tzinfo=UTC)
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return since
+
+    monkeypatch.setattr(github, "datetime", FixedDateTime)
+    row = {
+        "number": 1,
+        "title": "Fixes #1",
+        "body": "",
+        "headRefName": "codex/issue-1",
+        "mergedAt": None,
+    }
+    client = GitHubForge(
+        github._repository_id("example/agent-claim"), run=lambda arguments: json.dumps(row)
+    )
+
+    assert client.list_recent_merged_board_pull_requests(since) == ()
+
+
+def test_recent_merged_pull_requests_fails_loud_on_an_uncalendared_merge_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    since = datetime(2026, 8, 1, tzinfo=UTC)
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return since
+
+    monkeypatch.setattr(github, "datetime", FixedDateTime)
+    row = {
+        "number": 1,
+        "title": "Fixes #1",
+        "body": "",
+        "headRefName": "codex/issue-1",
+        "mergedAt": "9999-99-99T00:00:00Z",
+    }
+    client = GitHubForge(
+        github._repository_id("example/agent-claim"), run=lambda arguments: json.dumps(row)
+    )
+
+    with pytest.raises(ClaimError, match="malformed merged board pull request"):
+        client.list_recent_merged_board_pull_requests(since)
+
+
 def test_github_projection_update_patches_one_comment_and_deletes_duplicates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -7286,6 +8539,47 @@ def test_github_projection_update_does_not_create_on_a_never_claimed_issue(
     )
 
     assert not client.upsert_projection(999, issue_claim._unclaimed_projection(), create=False)
+
+
+def test_github_projection_update_creates_when_none_exists(monkeypatch: pytest.MonkeyPatch) -> None:
+    body = issue_claim._unclaimed_projection()
+    posted: list[tuple[int, str]] = []
+    created = comment(10, body)
+
+    def fake_post_comment(issue: int, projection_body: str) -> str:
+        posted.append((issue, projection_body))
+        return created.url
+
+    calls = {"n": 0}
+
+    def fake_projection_comments(issue: int) -> tuple[IssueComment, ...]:
+        calls["n"] += 1
+        return (created,) if calls["n"] > 1 else ()
+
+    client = GitHubForge(github._repository_id("example/agent-claim"))
+    monkeypatch.setattr(client, "post_comment", fake_post_comment)
+    monkeypatch.setattr(client, "_projection_comments", fake_projection_comments)
+
+    assert client.upsert_projection(999, body)
+    assert posted == [(999, body)]
+
+
+def test_github_projection_update_fails_loud_when_the_post_never_shows_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A read-after-write consistency gap: the projection comment was posted,
+    but the very next listing of the issue's own comments still does not
+    show it -- this must fail loud rather than claim the projection is live."""
+    posted: list[int] = []
+    client = GitHubForge(github._repository_id("example/agent-claim"))
+    monkeypatch.setattr(client, "post_comment", lambda issue, body: posted.append(issue) or "url")
+    monkeypatch.setattr(client, "_projection_comments", lambda issue: ())
+
+    raised_argument_1 = issue_claim._unclaimed_projection()
+    with pytest.raises(ClaimError, match=r"issue #999 did not expose its posted claim projection"):
+        client.upsert_projection(999, raised_argument_1)
+
+    assert posted == [999]
 
 
 def test_github_successor_adopts_stale_projection_but_old_generation_skips_it(
@@ -7349,6 +8643,15 @@ def test_github_claimed_issue_query_is_scoped_to_this_ledger_generation() -> Non
     assert "--paginate" in observed
 
 
+def test_github_claimed_issues_fails_loud_on_a_malformed_entry() -> None:
+    client = GitHubForge(
+        github._repository_id("example/agent-claim"), run=lambda arguments: "72\ntrue"
+    )
+
+    with pytest.raises(ClaimError, match="malformed claimed-issue"):
+        client.list_claimed_issues()
+
+
 def test_github_successor_must_exist_open_empty_locked_and_not_be_a_pr() -> None:
     repository = github._repository_id("example/agent-claim")
     valid = {
@@ -7373,6 +8676,20 @@ def test_github_successor_must_exist_open_empty_locked_and_not_be_a_pr() -> None
         invalid_client = GitHubForge(repository, run=lambda arguments, row=invalid: json.dumps(row))
         with pytest.raises(ClaimUnavailableError, match="open, empty, collaborator-locked"):
             invalid_client.validate_successor(170)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param(json.dumps([]), id="no-values"),
+        pytest.param(json.dumps(["not-a-dict"]), id="not-a-dict"),
+    ],
+)
+def test_github_successor_fails_loud_on_a_malformed_shape(raw: str) -> None:
+    client = GitHubForge(github._repository_id("example/agent-claim"), run=lambda arguments: raw)
+
+    with pytest.raises(ClaimError, match="malformed successor issue"):
+        client.validate_successor(170)
 
 
 @pytest.mark.parametrize(
@@ -7410,6 +8727,33 @@ def test_missing_gh_repository_resolution_is_a_controlled_error(
 
     with pytest.raises(ClaimError, match="gh is required"):
         github.discover_repository(None, remote_url=_unreachable_remote_url)
+
+
+def test_repository_resolution_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    def timed_out(*args, **kwargs):
+        raise subprocess.TimeoutExpired(["gh"], process.DEFAULT_TIMEOUT_SECONDS)
+
+    monkeypatch.setattr(subprocess, "run", timed_out)
+
+    with pytest.raises(ClaimError, match="gh timed out while resolving the repository"):
+        github.discover_repository(None, remote_url=_unreachable_remote_url)
+
+
+def test_repository_resolution_refuses_when_no_remote_matches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def failed_gh(*arguments, **kwargs):
+        return subprocess.CompletedProcess(arguments[0], 1, b"", b"not a gh repo")
+
+    monkeypatch.setattr(subprocess, "run", failed_gh)
+
+    with pytest.raises(ClaimError, match="cannot resolve GitHub repository"):
+        github.discover_repository(None, remote_url=lambda: "https://example.com/owner/repo")
+
+
+def test_discover_repository_requires_owner_slash_repo_shape_for_an_explicit_repo() -> None:
+    with pytest.raises(ClaimError, match="repository must be OWNER/REPO"):
+        github.discover_repository("not-a-repository-shape", remote_url=lambda: "")
 
 
 def test_cli_version_exits_before_requiring_a_command(
@@ -7731,6 +9075,136 @@ def test_bounded_command_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
     assert recorded["process"].poll() is not None
 
 
+class _FakeBoundedProcess:
+    """A deterministic `subprocess.Popen`-shaped double: a real closed pipe for
+    `stdout` (so the selector has a real, immediately-EOF file descriptor to
+    register) plus scripted `poll`/`terminate`/`kill`/`wait`, so
+    `process.run_bounded`'s stop-and-reap behavior is proven without spawning a
+    child or depending on real OS scheduling.
+    """
+
+    def __init__(self, *, already_exited: bool = False, ignores_terminate: bool = False) -> None:
+        read_fd, write_fd = os.pipe()
+        os.close(write_fd)
+        self.stdout = os.fdopen(read_fd, "rb")
+        self.stdin = None
+        self.stderr = None
+        self._ignores_terminate = ignores_terminate
+        self.events: list[str] = []
+        self._exited = already_exited
+
+    def poll(self) -> int | None:
+        return 0 if self._exited else None
+
+    def terminate(self) -> None:
+        self.events.append("terminate")
+        if not self._ignores_terminate:
+            self._exited = True
+
+    def kill(self) -> None:
+        self.events.append("kill")
+        self._exited = True
+
+    def wait(self, timeout: float = 0.0) -> int:
+        if not self._exited:
+            raise subprocess.TimeoutExpired(cmd="fake", timeout=timeout)
+        return 0
+
+
+def test_run_bounded_times_out_even_when_the_child_already_exited(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A deadline already passed by the time I/O is awaited must fail loud even
+    when the child happened to finish first -- stopping an already-exited
+    process is then a safe no-op, never a second signal or a raised error."""
+    fake_process = _FakeBoundedProcess(already_exited=True)
+    calls = {"n": 0}
+
+    def already_past_deadline() -> float:
+        calls["n"] += 1
+        return 0.0 if calls["n"] == 1 else 1_000_000.0
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: fake_process)
+    monkeypatch.setattr(process.time, "monotonic", already_past_deadline)
+
+    with pytest.raises(process.ProcessTimedOutError):
+        process.run_bounded(["fake"], timeout=5.0)
+
+    assert fake_process.events == []
+    assert fake_process.stdout.closed is True
+    assert fake_process.poll() is not None
+
+
+def test_run_bounded_kills_a_child_that_ignores_termination(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A child that survives `terminate()` (ignoring the request to stop) must
+    be `kill()`ed -- proven with a deterministic process fake controlling
+    `poll`/`terminate`/`kill`/`wait`, not a real child ignoring a real SIGTERM."""
+    fake_process = _FakeBoundedProcess(ignores_terminate=True)
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: fake_process)
+    monkeypatch.setattr(process.time, "monotonic", lambda: 0.0)
+
+    with pytest.raises(process.ProcessTimedOutError):
+        process.run_bounded(["fake"], timeout=-1.0)
+
+    assert fake_process.events == ["terminate", "kill"]
+    assert fake_process.stdout.closed is True
+    assert fake_process.poll() is not None
+
+
+def test_run_bounded_treats_a_broken_input_pipe_as_fully_sent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stdin write that raises `BrokenPipeError` -- the child closed its read
+    end without consuming the input -- must not fail the whole exchange: the
+    write is treated as fully sent and output collection continues."""
+
+    def broken_write(_file_descriptor: int, data: bytes) -> int:
+        raise BrokenPipeError(32, "Broken pipe")
+
+    monkeypatch.setattr(process.os, "write", broken_write)
+
+    observed = process.run_bounded(
+        [sys.executable, "-c", "print('done')"],
+        input_data=b"unread input",
+    )
+    assert observed.output == b"done\n"
+
+
+def test_run_bounded_reaps_the_child_when_the_selector_fails_to_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A selector that cannot close itself on the way out must not mask the
+    command's own result -- reaping swallows that failure."""
+    real_selector_class = process.selectors.DefaultSelector
+
+    class CloseFailingSelector:
+        def __init__(self) -> None:
+            self._inner = real_selector_class()
+
+        def register(self, fileobj, events, data=None):
+            return self._inner.register(fileobj, events, data)
+
+        def unregister(self, fileobj):
+            return self._inner.unregister(fileobj)
+
+        def get_map(self):
+            return self._inner.get_map()
+
+        def select(self, timeout=None):
+            return self._inner.select(timeout)
+
+        def close(self) -> None:
+            raise OSError(5, "close failed")
+
+    monkeypatch.setattr(process.selectors, "DefaultSelector", CloseFailingSelector)
+
+    observed = process.run_bounded([sys.executable, "-c", "print('ok')"])
+    assert observed.output == b"ok\n"
+
+
 def test_bounded_command_stops_a_child_that_hangs_after_closing_output(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -7813,7 +9287,7 @@ def test_bounded_command_rejects_non_utf8_output() -> None:
         pytest.param(
             process.BoundedResult(0, bytes((255,))),
             forge.ForgeMalformedResponseError,
-            "adapter probe returned non-UTF-8 output",
+            "GitHub issue coordination returned non-UTF-8 output",
             id="malformed-non-utf8-output",
         ),
         pytest.param(
@@ -7855,7 +9329,7 @@ def test_bounded_command_rejects_non_utf8_output() -> None:
         pytest.param(
             process.BoundedResult(1, b""),
             forge.ForgeError,
-            "adapter probe failed with exit 1",
+            "GitHub issue coordination failed with exit 1",
             id="unclassified-empty-exit",
         ),
         pytest.param(
@@ -7867,43 +9341,43 @@ def test_bounded_command_rejects_non_utf8_output() -> None:
         pytest.param(
             process.ProcessIoFailedError(process.IoStage.WAITING, "boom"),
             forge.ForgeTransientError,
-            "adapter probe failed while waiting for I/O: boom",
+            "GitHub issue coordination failed while waiting for I/O: boom",
             id="io-stage-waiting",
         ),
         pytest.param(
             process.ProcessIoFailedError(process.IoStage.SENDING, "boom"),
             forge.ForgeTransientError,
-            "adapter probe failed while sending bounded input: boom",
+            "GitHub issue coordination failed while sending bounded input: boom",
             id="io-stage-sending",
         ),
         pytest.param(
             process.ProcessIoFailedError(process.IoStage.READING, "boom"),
             forge.ForgeTransientError,
-            "adapter probe failed while reading output: boom",
+            "GitHub issue coordination failed while reading output: boom",
             id="io-stage-reading",
         ),
         pytest.param(
             process.ProcessIoFailedError(process.IoStage.COORDINATING, "boom"),
             forge.ForgeTransientError,
-            "adapter probe failed while coordinating I/O: boom",
+            "GitHub issue coordination failed while coordinating I/O: boom",
             id="io-stage-coordinating",
         ),
         pytest.param(
             process.ProcessDidNotExitError(),
             forge.ForgeTransientError,
-            "adapter probe did not exit after closing its output",
+            "GitHub issue coordination did not exit after closing its output",
             id="did-not-exit",
         ),
         pytest.param(
             process.ProcessTimedOutError(),
             forge.ForgeTransientError,
-            "adapter probe timed out",
+            "GitHub issue coordination timed out",
             id="process-timed-out",
         ),
         pytest.param(
             process.ProcessOutputTooLargeError(),
             forge.ForgeMalformedResponseError,
-            "adapter probe exceeded its output limit",
+            "GitHub issue coordination exceeded its output limit",
             id="output-too-large",
         ),
     ],
@@ -7914,10 +9388,11 @@ def test_bounded_command_classifies_every_forge_failure_signal(
     expected_type: type[forge.ForgeError],
     expected_message: str,
 ) -> None:
-    """Adapter-boundary proof: every nonzero-exit signal (#4.2) and every
-    process failure that reaches no forge response (#4.1) becomes the exact
-    typed `ForgeError` subclass with the exact message -- not just some
-    `ClaimError`."""
+    """Adapter-boundary proof, driven through `GitHubForge.default_branch`
+    (the real caller of `_gh` -> `_bounded_command`) with `process.run_bounded`
+    faked: every nonzero-exit signal (#4.2) and every process failure that
+    reaches no forge response (#4.1) becomes the exact typed `ForgeError`
+    subclass with the exact message -- not just some `ClaimError`."""
 
     def fake_run_bounded(*args, **kwargs):
         if isinstance(outcome, process.ProcessError):
@@ -7925,12 +9400,36 @@ def test_bounded_command_classifies_every_forge_failure_signal(
         return outcome
 
     monkeypatch.setattr(process, "run_bounded", fake_run_bounded)
+    client = GitHubForge(github._repository_id("example/agent-claim"))
 
     with pytest.raises(expected_type) as excinfo:
-        github._bounded_command(["gh", "probe"], purpose="adapter probe")
+        client.default_branch()
 
     assert type(excinfo.value) is expected_type
     assert str(excinfo.value) == expected_message
+
+
+def test_bounded_command_refuses_a_process_error_type_it_does_not_classify(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The isinstance chain the GitHub adapter's failure classifier walks names
+    every concrete `process.ProcessError` subclass; a hypothetical new one added
+    there without updating this dispatch must fail loud as a defect, not
+    silently fall through as some generic `ForgeError` -- proven through
+    `GitHubForge.default_branch`, the real caller, with `process.run_bounded`
+    faked to raise the unclassified type."""
+
+    class _UnknownProcessError(process.ProcessError):
+        pass
+
+    def fake_run_bounded(*args, **kwargs):
+        raise _UnknownProcessError
+
+    monkeypatch.setattr(process, "run_bounded", fake_run_bounded)
+    client = GitHubForge(github._repository_id("example/agent-claim"))
+
+    with pytest.raises(AssertionError, match="unhandled process failure type"):
+        client.default_branch()
 
 
 def test_scope_directories_detects_a_git_tree(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -8963,21 +10462,47 @@ def test_versioned_paths_reads_nul_terminated_ls_files_without_stripping(
     assert observed == [["git", "ls-files", "-z", "--full-name"]]
 
 
-def test_versioned_paths_fails_loud_like_git_output(monkeypatch: pytest.MonkeyPatch) -> None:
-    def missing(*_arguments, **_kwargs):
-        raise FileNotFoundError("git")
+@pytest.mark.parametrize(
+    "git_call",
+    [
+        pytest.param(_LIVE_VERSIONED_PATHS, id="versioned-paths"),
+        pytest.param(checkout.origin_remote_url, id="origin-remote-url"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("raised", "match"),
+    [
+        pytest.param(
+            FileNotFoundError("git"), "git is required for issue claims", id="missing-executable"
+        ),
+        pytest.param(
+            subprocess.TimeoutExpired(["git"], process.DEFAULT_TIMEOUT_SECONDS),
+            "git timed out while validating the build checkout",
+            id="timed-out",
+        ),
+    ],
+)
+def test_checkout_git_calls_fail_loud_when_git_is_missing_or_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+    git_call: Callable[[], object],
+    raised: Exception,
+    match: str,
+) -> None:
+    """`versioned_paths` and `origin_remote_url` -- both direct `subprocess.run`
+    callers (`_git_output` backs the latter) -- must translate a missing
+    executable or a timeout to the same `ClaimError` text."""
 
-    monkeypatch.setattr(subprocess, "run", missing)
-    with pytest.raises(ClaimError, match="git is required for issue claims"):
-        _LIVE_VERSIONED_PATHS()
+    def fails(*_arguments, **_kwargs):
+        raise raised
 
-    def timed_out(*_arguments, **_kwargs):
-        raise subprocess.TimeoutExpired(["git"], process.DEFAULT_TIMEOUT_SECONDS)
+    monkeypatch.setattr(subprocess, "run", fails)
+    with pytest.raises(ClaimError, match=match):
+        git_call()
 
-    monkeypatch.setattr(subprocess, "run", timed_out)
-    with pytest.raises(ClaimError, match="git timed out while validating the build checkout"):
-        _LIVE_VERSIONED_PATHS()
 
+def test_versioned_paths_fails_loud_on_a_nonzero_git_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     def failed(arguments, **_kwargs):
         return subprocess.CompletedProcess(
             arguments, 128, stdout=b"", stderr=b"fatal: not a git repository\n"
@@ -9085,6 +10610,21 @@ def test_cli_reconcile_still_clears_stale_labels_when_ledger_is_frozen(
     assert client.labels == set()
 
 
+def test_cli_bootstrap_creates_and_prints_the_ledger(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    client = FakeForge()
+    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
+
+    status = issue_claim.main(["--repo", "example/agent-claim", "bootstrap"])
+
+    assert status == 0
+    created = next(iter(client.ledger_items)).number
+    assert capsys.readouterr().out == f"LEDGER #{created}\n"
+    assert issue_claim.LEDGER_LABEL in client.other_labels
+
+
 def test_cli_status_empty_ledger_prints_ledger_then_unclaimed_repository(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -9146,6 +10686,20 @@ def test_cli_status_after_claim_prints_ledger_then_claimed(
         "branch=codex/issue-72 claim=cli-claim 0h 0m\n"
         "  src\n"
     )
+
+
+def test_cli_status_prints_the_resource_line_for_an_allocated_hold(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    client = _claims_client(
+        request("hop-1", "Ada", issue=72, scope=("src",), resource="schema-hop", resource_value=1)
+    )
+    _patch_status_cli(monkeypatch, client)
+
+    status = issue_claim.main(["--repo", "example/agent-claim", "status", "72"])
+
+    assert status == 0
+    assert "  resource schema-hop=1\n" in capsys.readouterr().out
 
 
 def test_cli_lane_claim_status_and_release_round_trip_without_issue_number(
@@ -9236,6 +10790,23 @@ def test_cli_lane_mode_refuses_a_non_conventional_branch(
     assert "'docs/'" in captured.err
     assert "'fix/'" in captured.err
     assert client.comments == {}
+
+
+def test_cli_release_requires_a_non_empty_current_branch_without_an_issue(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _set_agent_identity_env(monkeypatch, {"AGENT_CLAIM_AGENT": "Codex Sol"})
+    client = FakeForge()
+    _patch_status_cli(monkeypatch, client)
+    monkeypatch.setattr(checkout, "_git_output", lambda arguments: "")
+
+    status = issue_claim.main(
+        ["--repo", "example/agent-claim", "release", "--abandoned", "stopped"]
+    )
+
+    assert status == 2
+    assert "lane release requires a non-empty current branch" in capsys.readouterr().err
 
 
 def test_cli_status_overlapping_protocol_comments_print_ledger_then_notes(
@@ -9407,6 +10978,36 @@ def test_cli_claim_refuses_while_an_unreadable_claim_stands(
     assert "ERROR: claim refused: claim 'claim-b'" in captured.err
     assert "unknown fields: surprise" in captured.err
     assert active_claims(tuple(client.comments[LEDGER_ISSUE])) == ()
+
+
+def test_cli_rescope_requires_a_non_empty_current_branch(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Rescope always operates on the checked-out worktree's own claim, so a
+    detached or branchless checkout must refuse even when an issue number is
+    also given -- unlike release, it never falls back to the issue alone."""
+    client = FakeForge()
+    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
+    monkeypatch.setattr(discovery, "discover_ledger", lambda _client: LEDGER_ISSUE)
+    git_values = _git_checkout(branch="")
+    monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
+
+    status = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "rescope",
+            "72",
+            "--agent",
+            "Ada",
+            "--add",
+            "src/new.py",
+        ]
+    )
+
+    assert status == 2
+    assert "non-empty current branch" in capsys.readouterr().err
 
 
 def test_cli_rescope_refuses_while_an_unreadable_claim_stands(
@@ -10224,6 +11825,29 @@ def test_cli_status_json_issue_on_overlap_prints_related_claimed_object(
         )
         + "\n"
     )
+
+
+def test_cli_status_json_reports_conflict_state_for_duplicate_issue_claims(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Two live claims on the same issue are a genuine conflict (same identity),
+    unlike the merely path-overlapping claims on different issues above --
+    both the top-level state and each claim's own state must say so."""
+    client = _claims_client(
+        request("claim-a", "Ada", issue=72, scope=("src/a.py",)),
+        request("claim-b", "Grok 4.6", issue=72, scope=("src/b.py",)),
+    )
+    _patch_status_cli(monkeypatch, client)
+
+    status = issue_claim.main(["--repo", "example/agent-claim", "status", "72", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert status == 2
+    assert payload["state"] == "CONFLICT"
+    assert {claim["claim_id"]: claim["state"] for claim in payload["claims"]} == {
+        "claim-a": "CONFLICT",
+        "claim-b": "CONFLICT",
+    }
 
 
 def test_cli_status_json_without_ledger_errors_and_prints_no_stdout(
@@ -11129,6 +12753,43 @@ def test_cli_claim_touches_stay_empty_beside_a_disjoint_standing_claim(
     assert payload["touches"] == []
 
 
+def test_cli_claim_json_lists_an_overlapping_standing_claim_as_a_touch(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    client = _claims_client(request("claim-a", "Ada", issue=73, scope=("src",)))
+    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
+    monkeypatch.setattr(discovery, "discover_ledger", lambda _client: LEDGER_ISSUE)
+    monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
+    monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+
+    status = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "claim",
+            "72",
+            "--agent",
+            "Ada",
+            "--base",
+            BASE,
+            "--branch",
+            "codex/issue-72",
+            "--scope",
+            "src/work.py",
+            "--claim-id",
+            "overlapping",
+            "--json",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert status == 0
+    assert payload["touches"] == [
+        {"issue": 73, "lane": None, "claim_id": "claim-a", "agent": "Ada", "scope": ["src"]}
+    ]
+
+
 def test_claim_cost_lists_an_overlapping_standing_claim_as_a_touch() -> None:
     standing = parse_claim_event(
         comment(1, claim_comment(request("claim-a", issue=55, scope=("src",))))
@@ -11304,6 +12965,22 @@ def test_parse_claim_rescope_rejects_a_marker_with_both_whole_and_whole_clear() 
     both_set_and_clear_comment = comment(1, marker(payload))
     with pytest.raises(InvalidClaimMarkerError, match="cannot both set and clear"):
         parse_claim_event(both_set_and_clear_comment)
+
+
+def test_parse_claim_rescope_requires_whole_clear_to_be_exactly_true() -> None:
+    payload = {
+        "action": "rescope",
+        "agent": "Codex Sol",
+        "claim_id": "claim-a",
+        "issue": 72,
+        "role": "builder",
+        "scope": ["src"],
+        "whole_clear": "yes",
+    }
+
+    raised_argument_1 = comment(1, marker(payload))
+    with pytest.raises(InvalidClaimMarkerError, match="whole_clear field must be true"):
+        parse_claim_event(raised_argument_1)
 
 
 def test_cli_claim_cut_does_not_exempt_a_directory_scope(
@@ -11588,6 +13265,12 @@ def test_scope_is_wide_for_more_than_three_paths_any_directory_or_a_share_above_
             ("a.py", "b.py"), directories=(), covered_file_count=2, versioned_file_count=4
         )
         is True
+    )
+    assert (
+        protocol.scope_is_wide(
+            ("a.py",), directories=(), covered_file_count=0, versioned_file_count=0
+        )
+        is False
     )
 
 
@@ -12228,6 +13911,30 @@ def test_cli_policy_print_emits_the_locked_loader_without_github(
     assert list(work.iterdir()) == []
 
 
+def test_cli_module_entry_point_exits_with_mains_return_code(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`python -m agent_claim.cli` and the installed console script run the
+    `if __name__ == "__main__":` guard, not `main()` as a library call --
+    exercise that guard directly rather than only ever calling `main()`."""
+    home = tmp_path / "home"
+    work = tmp_path / "work"
+    home.mkdir()
+    work.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(work)
+    forbid_github_for_policy(monkeypatch)
+    monkeypatch.setattr(sys, "argv", ["agent-claim", "policy", "--print"])
+
+    with pytest.warns(RuntimeWarning, match="agent_claim.cli"), pytest.raises(SystemExit) as exited:
+        runpy.run_module("agent_claim.cli", run_name="__main__")
+
+    assert exited.value.code == 0
+    assert capsys.readouterr().out.startswith("<!-- agent-claim-policy:v1 -->\n")
+
+
 def test_cli_policy_without_print_is_an_argparse_error(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -12862,6 +14569,26 @@ def test_same_issue_still_refuses_a_second_live_claim() -> None:
     raised_argument_1 = request("claim-b", "Grok 4.6", issue=72, scope=("src/b.py",))
     with pytest.raises(ClaimUnavailableError, match="issue #72 is claimed"):
         acquire_claim(client, raised_argument_1)
+
+
+def test_claim_comment_refuses_a_non_positive_resource_value() -> None:
+    raised_argument_1 = request(resource="schema-hop", resource_value=0)
+    with pytest.raises(ClaimError, match="resource value must be a positive integer"):
+        claim_comment(raised_argument_1)
+
+
+def test_acquire_claim_refuses_a_resource_value_without_a_resource_name() -> None:
+    raised_argument_1 = FakeForge()
+    raised_argument_2 = request(resource_value=5)
+    with pytest.raises(ClaimError, match="resource value requires a resource name"):
+        acquire_claim(raised_argument_1, raised_argument_2)
+
+
+def test_acquire_claim_refuses_a_non_positive_resource_value() -> None:
+    raised_argument_1 = FakeForge()
+    raised_argument_2 = request(resource="schema-hop", resource_value=0)
+    with pytest.raises(ClaimError, match="resource value must be a positive integer"):
+        acquire_claim(raised_argument_1, raised_argument_2)
 
 
 def test_resource_allocates_unique_values_in_sequence() -> None:
@@ -13956,6 +15683,61 @@ def test_trunk_landing_times_read_the_default_branch_not_the_work_branch(
     ] in observed
 
 
+def test_trunk_ref_fails_loud_when_no_candidate_branch_resolves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Neither the symbolic ref nor any of the default-branch-name candidates
+    resolving must fail loud rather than silently ruling every candidate's age
+    as unknown."""
+
+    def git_output(_arguments: list[str]) -> str:
+        raise ClaimError("fatal: not a git repository")
+
+    monkeypatch.setattr(checkout, "_git_output", git_output)
+    with pytest.raises(ClaimError, match="cannot determine the main branch for ruling age"):
+        _LIVE_TRUNK_LANDING_TIMES()
+
+
+def test_trunk_landing_times_is_empty_when_trunk_has_no_first_parent_landings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def git_output(arguments: list[str]) -> str:
+        if arguments[:3] == ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"]:
+            return "refs/remotes/origin/main"
+        if arguments[:4] == ["log", "--first-parent", "--reverse", "--format=%cI"]:
+            return ""
+        raise AssertionError(arguments)
+
+    monkeypatch.setattr(checkout, "_git_output", git_output)
+    assert _LIVE_TRUNK_LANDING_TIMES() == ()
+
+
+@pytest.mark.parametrize(
+    "raw_commit_time",
+    [
+        pytest.param("not-a-timestamp", id="unparsable"),
+        pytest.param("2026-08-29T00:00:00", id="missing-offset"),
+    ],
+)
+def test_trunk_landing_times_fails_loud_on_a_malformed_commit_timestamp(
+    monkeypatch: pytest.MonkeyPatch, raw_commit_time: str
+) -> None:
+    """Neither an unparsable `%cI` line nor one git left offset-naive (both
+    would only occur if git itself misbehaved) may silently produce a wrong
+    ruling age; both fail loud with the same diagnostic."""
+
+    def git_output(arguments: list[str]) -> str:
+        if arguments[:3] == ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"]:
+            return "refs/remotes/origin/main"
+        if arguments[:4] == ["log", "--first-parent", "--reverse", "--format=%cI"]:
+            return raw_commit_time
+        raise AssertionError(arguments)
+
+    monkeypatch.setattr(checkout, "_git_output", git_output)
+    with pytest.raises(ClaimError, match="git returned a malformed trunk landing timestamp"):
+        _LIVE_TRUNK_LANDING_TIMES()
+
+
 def test_trunk_landing_times_count_a_five_commit_merge_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -14356,6 +16138,15 @@ def test_github_adapter_reads_a_pull_request_and_the_default_branch() -> None:
     assert client.default_branch() == "main"
 
 
+def test_github_adapter_reads_a_landing_with_no_body_as_empty() -> None:
+    client = GitHubForge(
+        github._repository_id(REPOSITORY),
+        run=lambda arguments, input_data=None: json.dumps(api_pull_request(body=None)),
+    )
+
+    assert client.landing(12).body == ""
+
+
 def test_github_adapter_reads_a_fork_branch_as_its_own_repository() -> None:
     client = GitHubForge(
         github._repository_id(REPOSITORY),
@@ -14389,6 +16180,12 @@ def test_github_adapter_fails_loud_when_github_answers_for_another_pull_request(
         pytest.param(api_pull_request(headRepository={}), id="head-repository-without-name"),
         pytest.param(
             api_pull_request(headRepositoryOwner=None), id="head-repository-without-owner"
+        ),
+        pytest.param(
+            api_pull_request(
+                headRepository={"name": "repo/extra"}, headRepositoryOwner={"login": "owner"}
+            ),
+            id="head-repository-invalid-shape",
         ),
     ],
 )
@@ -14887,6 +16684,15 @@ def test_github_adapter_refuses_a_sub_issue_from_another_repository() -> None:
         client.list_children(79)
 
 
+def test_github_adapter_fails_loud_when_a_sub_issue_is_not_an_object() -> None:
+    client = GitHubForge(
+        github._repository_id(REPOSITORY), run=lambda arguments, input_data=None: "5"
+    )
+
+    with pytest.raises(ClaimError, match="malformed sub-issue"):
+        client.list_children(79)
+
+
 def test_github_adapter_reads_an_issue_without_a_parent_as_parentless() -> None:
     def run(arguments: list[str], *, input_data: bytes | None = None) -> str:
         raise forge.ForgeNotFoundError("gh: No parent issue found (HTTP 404)")
@@ -14921,6 +16727,46 @@ def test_github_adapter_fails_loud_on_a_malformed_parent_kind() -> None:
         )
 
     client = GitHubForge(github._repository_id(REPOSITORY), run=run)
+
+    with pytest.raises(ClaimError, match="malformed parent issue"):
+        client.parent_issue(72)
+
+
+def test_github_adapter_fails_loud_when_the_parent_issue_response_is_not_one_object() -> None:
+    client = GitHubForge(
+        github._repository_id(REPOSITORY), run=lambda arguments, input_data=None: json.dumps([])
+    )
+
+    with pytest.raises(ClaimError, match="malformed parent issue"):
+        client.parent_issue(72)
+
+
+def test_github_adapter_fails_loud_when_the_parent_issue_body_is_not_text() -> None:
+    client = GitHubForge(
+        github._repository_id(REPOSITORY),
+        run=lambda arguments, input_data=None: json.dumps(
+            {"number": 79, "repository": API_REPOSITORY_URL, "body": 5}
+        ),
+    )
+
+    with pytest.raises(ClaimError, match="malformed parent issue"):
+        client.parent_issue(72)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        pytest.param({"number": True}, id="number-is-a-bool"),
+        pytest.param({"repository": "not-a-repository-url"}, id="repository-unparsable"),
+    ],
+)
+def test_github_adapter_fails_loud_on_a_malformed_parent_reference(
+    overrides: dict[str, object],
+) -> None:
+    value = {"number": 79, "repository": API_REPOSITORY_URL, "body": "## Next\nCut.", **overrides}
+    client = GitHubForge(
+        github._repository_id(REPOSITORY), run=lambda arguments, input_data=None: json.dumps(value)
+    )
 
     with pytest.raises(ClaimError, match="malformed parent issue"):
         client.parent_issue(72)
