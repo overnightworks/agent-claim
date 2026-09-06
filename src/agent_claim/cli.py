@@ -6,7 +6,7 @@ import argparse
 import json
 import sys
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -84,10 +84,6 @@ WHOLE_HELP = (
     "one sentence why this wide scope does not split; required for more than "
     "three paths, any directory, or more than a quarter of versioned files"
 )
-WIDE_SCOPE_REFUSAL = (
-    "scope is wide: more than three paths, a directory, or more than a quarter "
-    "of versioned files; pass --whole REASON"
-)
 
 
 def _resolved_identity(issue: int | None, branch: str) -> protocol.ClaimIdentity:
@@ -142,6 +138,24 @@ def _optional_whole_reason(arguments: argparse.Namespace) -> str | None:
     return protocol._outbound_text(raw, "whole reason", maximum=512)
 
 
+def _wide_scope_condition(trip: protocol.WideScopeTrip) -> str:
+    """The tripped condition in words, with the numbers it was judged
+    against -- what the refusal names instead of restating the whole rule."""
+    if trip.reason is protocol.WideScopeReason.PATH_COUNT:
+        return f"{trip.path_count} paths exceeds three"
+    if trip.reason is protocol.WideScopeReason.DIRECTORY:
+        noun = "directory" if len(trip.directories) == 1 else "directories"
+        return f"{len(trip.directories)} {noun} in scope ({', '.join(trip.directories)})"
+    covered, total = trip.covered_file_count, trip.versioned_file_count
+    percent = round(100 * covered / total)
+    path_word = "path" if covered == 1 else "paths"
+    return f"{covered} {path_word} of {total} versioned files ({percent} %) exceeds a quarter"
+
+
+def _wide_scope_refusal(trip: protocol.WideScopeTrip) -> str:
+    return f"scope is wide: {_wide_scope_condition(trip)}; pass --whole REASON"
+
+
 def _reject_wide_scope(
     scope: tuple[str, ...],
     versioned: tuple[str, ...],
@@ -149,16 +163,11 @@ def _reject_wide_scope(
 ) -> tuple[int, int, float]:
     n, total, share = _scope_cost(versioned, scope)
     directories = checkout._scope_directories(scope)
-    if (
-        protocol.scope_is_wide(
-            scope,
-            directories=directories,
-            covered_file_count=n,
-            versioned_file_count=total,
-        )
-        and whole_reason is None
-    ):
-        raise protocol.ClaimError(WIDE_SCOPE_REFUSAL)
+    trip = protocol.wide_scope_trip(
+        scope, directories=directories, covered_file_count=n, versioned_file_count=total
+    )
+    if trip is not None and whole_reason is None:
+        raise protocol.ClaimError(_wide_scope_refusal(trip))
     return n, total, share
 
 
@@ -926,6 +935,7 @@ def _next_json(
     recovery: tuple[board.BoardItem, ...],
 ) -> int:
     payload: dict[str, object] = {
+        "action": None,
         "recovery": [
             {
                 "number": recovery_item.number,
@@ -949,7 +959,12 @@ def _next_action_lines(action: board.NextAction) -> list[str]:
     """The action-specific lines `_next` prints before `SKIPPED`."""
     if isinstance(action, board.WorkItemAction):
         item = action.item
-        lines = [f"#{item.number} score {item.score}: {item.title}", f"Next: {item.next_step}"]
+        lines = [
+            f"#{item.number} score {item.score}: {item.title}",
+            f"Next: {item.next_step}",
+            f"Run: agent-claim claim {item.number} --scope <paths>",
+            "<paths> cannot be derived; take the files to claim from the item body.",
+        ]
         hint = _ruling_pull_hint(item)
         if hint is not None:
             lines.append(hint)
@@ -1134,7 +1149,15 @@ def _body_contract_checks(
     # but defect-free skeleton) is refused here exactly as it is invisible to
     # `next`, regardless of what else may also be true of it.
     if not item.contract_complete and not item.projectionless_idea:
-        checks.append(SliceCheck("error", "body-incomplete", "body incomplete", issue=item.number))
+        missing = ", ".join(contract.missing_sections)
+        checks.append(
+            SliceCheck(
+                "error",
+                "body-incomplete",
+                f"#{item.number} body incomplete: {missing}",
+                issue=item.number,
+            )
+        )
     return tuple(checks)
 
 
@@ -1653,11 +1676,10 @@ def _cmd_next(parsed: argparse.Namespace, session: _ReadSession) -> int:
     skipped = tuple(item for item in _unworkable(projected) if item.number != chosen_container)
     recovery = projected.recovery
     if action is None:
-        if skipped or recovery:
-            if parsed.json:
-                _next_json(None, skipped, recovery)
-            else:
-                _next(None, skipped, recovery)
+        if parsed.json:
+            _next_json(None, skipped, recovery)
+        else:
+            _next(None, skipped, recovery)
         return 3
     if parsed.json:
         return _next_json(action, skipped, recovery)
@@ -1828,6 +1850,52 @@ def _cut_target(client: forge.ForgeWriter, number: int) -> board.Issue:
     return target
 
 
+def _row_index_ranges(indices: Sequence[int]) -> str:
+    """A plain hyphen joins each range, not an en dash: RUF001/RUF002 read
+    the repository's own output text like any other string literal, and
+    this repository takes no inline suppressions."""
+    ranges: list[tuple[int, int]] = []
+    for value in sorted(indices):
+        if ranges and value == ranges[-1][1] + 1:
+            ranges[-1] = (ranges[-1][0], value)
+        else:
+            ranges.append((value, value))
+    return ", ".join(str(start) if start == end else f"{start}-{end}" for start, end in ranges)
+
+
+def _uncuttable_row_refusal(
+    target: board.Issue, row_number: int, findings: board.SliceTableFindings
+) -> protocol.ClaimUnavailableError:
+    """Why `--row {row_number}` names no row `cut` can link, in priority
+    order: the row exists but is already cut, the whole table has nothing
+    left uncut, or -- the remaining case, a request that matches no row at
+    all while some rows are still malformed -- the malformed rows named by
+    `#` cell and reason instead of only counted."""
+    all_rows = tuple(
+        entry
+        for entry in board.parse_slice_table(target.body)
+        if isinstance(entry, board.SliceTableRow)
+    )
+    requested = next((row for row in all_rows if row.index == row_number), None)
+    if requested is not None and requested.item_issue is not None:
+        cuttable = ", ".join(str(row.index) for row in findings.cuttable) or "none"
+        return protocol.ClaimUnavailableError(
+            f"#{target.number} row {row_number} is already cut (#{requested.item_issue}); "
+            f"cuttable rows: {cuttable}"
+        )
+    cut_rows = tuple(row.index for row in all_rows if row.item_issue is not None)
+    if not findings.cuttable and cut_rows:
+        return protocol.ClaimUnavailableError(
+            f"#{target.number} has no uncut row; rows {_row_index_ranges(cut_rows)} are cut"
+        )
+    if findings.malformed:
+        named = "; ".join(board.malformed_row_clause(row) for row in findings.malformed)
+        return protocol.ClaimUnavailableError(
+            f"#{target.number} has no cuttable slice row; {named}"
+        )
+    return protocol.ClaimUnavailableError(f"#{target.number} has no cuttable slice row")
+
+
 def _cut_row(target: board.Issue, row_number: int | None) -> board.SliceTableRow | None:
     """The slice-table row `cut` dispatches (#151): without `--row`, the
     first still-cuttable row when one exists, else `None` -- `cut` then
@@ -1847,10 +1915,7 @@ def _cut_row(target: board.Issue, row_number: int | None) -> board.SliceTableRow
         (candidate for candidate in findings.cuttable if candidate.index == row_number), None
     )
     if row is None:
-        raise protocol.ClaimUnavailableError(
-            f"#{target.number} has no cuttable slice row; "
-            f"{len(findings.malformed)} malformed rows need a hand fix"
-        )
+        raise _uncuttable_row_refusal(target, row_number, findings)
     return row
 
 

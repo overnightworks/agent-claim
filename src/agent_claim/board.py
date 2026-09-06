@@ -318,9 +318,16 @@ class MalformedSliceTable:
 @dataclass(frozen=True)
 class MalformedSliceRow:
     """A pipe-shaped line inside a recognized slice table that isn't a
-    well-formed row: the wrong column count, or a non-integer `#` cell."""
+    well-formed row: the wrong column count, or a non-integer `#` cell.
+
+    `id_cell` and `reason` are what a refusal names it by -- `row "B":
+    index must be a positive integer` -- instead of only counting it;
+    `line` keeps the raw row for anything that still wants the full text.
+    """
 
     line: str
+    id_cell: str
+    reason: str
 
 
 SliceTableEntry = SliceTableRow | MalformedSliceTable | MalformedSliceRow
@@ -336,6 +343,20 @@ class BoardConfig:
 class ContractDefect:
     field: str
     message: str
+
+
+def _contract_fields(contract: Contract) -> tuple[tuple[str, str | None], ...]:
+    """The four body sections in body order, paired with their current
+    value -- the one place that knows both the names and the order, so a
+    caller asking which are present (`_contract_summary`) and a caller
+    asking which are missing (`Contract.missing_sections`) never drift
+    apart."""
+    return (
+        ("Now", contract.now),
+        ("Next", contract.next),
+        (BLOCKED_BY, contract.blocked_by),
+        ("Done when", contract.done_when),
+    )
 
 
 @dataclass(frozen=True)
@@ -362,6 +383,12 @@ class Contract:
     @property
     def blocker_issues(self) -> frozenset[int]:
         return _blocker_references(self.blocked_by)
+
+    @property
+    def missing_sections(self) -> tuple[str, ...]:
+        """The empty sections, in body order -- what a `body incomplete`
+        refusal names instead of leaving the operator to find them."""
+        return tuple(name for name, value in _contract_fields(self) if value is None)
 
 
 class Stage(StrEnum):
@@ -821,6 +848,17 @@ def _slice_table_header_at(lines: list[str], line_index: int) -> tuple[bool, boo
     return well_formed_header, has_separator
 
 
+def _malformed_row_reason(row_cells: tuple[str, ...]) -> str | None:
+    """Why `row_cells` is not a well-formed slice-table row, or `None` when
+    it is -- the wrong column count is checked first, since a shifted
+    column makes `row_cells[0]` unreliable as the actual `#` cell."""
+    if len(row_cells) != len(SLICE_TABLE_HEADER_CELLS):
+        return f"expected {len(SLICE_TABLE_HEADER_CELLS)} cells, found {len(row_cells)}"
+    if _SLICE_TABLE_INDEX_PATTERN.match(row_cells[0]) is None:
+        return "index must be a positive integer"
+    return None
+
+
 def _slice_table_rows(lines: list[str], start: int) -> tuple[tuple[SliceTableEntry, ...], int]:
     """The row block following a well-formed header, and the line index after it."""
     entries: list[SliceTableEntry] = []
@@ -829,11 +867,10 @@ def _slice_table_rows(lines: list[str], start: int) -> tuple[tuple[SliceTableEnt
         row_cells = _table_row_cells(lines[line_index])
         if row_cells is None:
             break
-        if (
-            len(row_cells) != len(SLICE_TABLE_HEADER_CELLS)
-            or _SLICE_TABLE_INDEX_PATTERN.match(row_cells[0]) is None
-        ):
-            entries.append(MalformedSliceRow(lines[line_index].strip()))
+        reason = _malformed_row_reason(row_cells)
+        if reason is not None:
+            id_cell = row_cells[0] if row_cells else ""
+            entries.append(MalformedSliceRow(lines[line_index].strip(), id_cell, reason))
             line_index += 1
             continue
         entries.append(_slice_table_row(*row_cells[:3]))
@@ -891,7 +928,7 @@ class SliceTableFindings:
 
     cuttable: tuple[SliceTableRow, ...]
     unlinkable: tuple[SliceTableRow, ...]
-    malformed: tuple[str, ...]
+    malformed: tuple[MalformedSliceRow, ...]
     has_table: bool
 
 
@@ -899,16 +936,25 @@ def slice_table_findings(body: str) -> SliceTableFindings:
     entries = parse_slice_table(body)
     cuttable: list[SliceTableRow] = []
     unlinkable: list[SliceTableRow] = []
-    malformed: list[str] = []
+    malformed: list[MalformedSliceRow] = []
     for entry in entries:
         if isinstance(entry, SliceTableRow):
             if entry.item_cell == UNDISPATCHED_SLICE_CELL:
                 cuttable.append(entry)
             elif entry.item_issue is None:
                 unlinkable.append(entry)
-        else:
-            malformed.append(entry.line)
+        elif isinstance(entry, MalformedSliceRow):
+            malformed.append(entry)
     return SliceTableFindings(tuple(cuttable), tuple(unlinkable), tuple(malformed), bool(entries))
+
+
+@dataclass(frozen=True)
+class UncutRow:
+    """One still-open slice-table row `board` names as uncut -- `index` is
+    exactly what `cut --row N` needs to select it."""
+
+    index: int
+    title: str
 
 
 @dataclass(frozen=True)
@@ -916,13 +962,17 @@ class UncutSlices:
     """One item's undispatched slice-table findings, as `board` reports them."""
 
     item: int
-    rows: tuple[str, ...]
+    rows: tuple[UncutRow, ...]
+    malformed: tuple[MalformedSliceRow, ...] = ()
 
 
 def _uncut_slices(issue_number: int, findings: SliceTableFindings) -> UncutSlices | None:
-    named = tuple(row.name for row in (*findings.cuttable, *findings.unlinkable))
-    rows = named + findings.malformed
-    return UncutSlices(issue_number, rows) if rows else None
+    rows = tuple(
+        UncutRow(row.index, row.name) for row in (*findings.cuttable, *findings.unlinkable)
+    )
+    if not rows and not findings.malformed:
+        return None
+    return UncutSlices(issue_number, rows, findings.malformed)
 
 
 def _row_item_cell_span(
@@ -1523,6 +1573,24 @@ def _completes_container(
     return progress.closed >= 1 and len(progress.open_children) == 1
 
 
+def _malformed_only_uncut(
+    issue: Issue, contract: Contract, container_progress: ContainerProgress | None
+) -> tuple[MalformedSliceRow, ...]:
+    """The malformed slice-table rows blocking `issue` when it is a
+    container with no open child, no further `Next` work, and no still-open
+    cuttable or unlinkable row left -- exactly the state `next_action` skips
+    instead of proposing to close, and what its skip reason names via the
+    same `malformed_row_clause` `board`'s own `UNCUT` section uses."""
+    if container_progress is None or container_progress.open_children:
+        return ()
+    if has_further_work(contract.next):
+        return ()
+    findings = slice_table_findings(issue.body)
+    if findings.cuttable or findings.unlinkable:
+        return ()
+    return findings.malformed
+
+
 def _board_item(
     issue: Issue, context: _BoardBuildContext, config: BoardConfig, observed_at: datetime
 ) -> BoardItem:
@@ -1555,6 +1623,7 @@ def _board_item(
     )
     active_claim, claim_age_text, claim_old = _claim_projection(claim, observed_at)
     open_blockers = context.blockers[issue.number]
+    container_progress = context.container_progress.get(issue.number)
     actionable_reason = _actionable_reason(
         _ActionabilityFacts(
             kind=issue.kind,
@@ -1563,6 +1632,7 @@ def _board_item(
             open_blockers=open_blockers,
             contract_complete=contract.complete,
             projectionless_idea=projectionless_idea,
+            malformed_uncut=_malformed_only_uncut(issue, contract, container_progress),
         )
     )
     return BoardItem(
@@ -1573,7 +1643,7 @@ def _board_item(
         priority_category=rank.category,
         priority_bucket=rank.bucket,
         priority_order=rank.order,
-        container=context.container_progress.get(issue.number),
+        container=container_progress,
         container_parent=container_parent,
         contract=contract,
         next_step=next_step,
@@ -1745,13 +1815,15 @@ def next_action(board: Board) -> NextAction | None:
     and returns the first row that is either an actionable non-container
     (`WorkItemAction`; a container is never actionable, so this branch never
     fires for one) or a container with no open child (`CutSliceAction` when
-    its own `Next` line still names work or its slice table still carries an
-    uncut row, else `CloseContainerAction`). `_container_progress` already
-    fails loud on a container whose summary disagrees with its open-children
-    list, so "no open child" here reliably means every created child has
-    closed. Every other row -- blocked, claimed, incomplete, or a container
-    still holding an open child -- is skipped, never blocking a lower-ranked
-    qualifying row.
+    its own `Next` line still names work or its slice table still carries a
+    cuttable or unlinkable row, else `CloseContainerAction`). `_container_progress`
+    already fails loud on a container whose summary disagrees with its
+    open-children list, so "no open child" here reliably means every
+    created child has closed. Every other row -- blocked, claimed,
+    incomplete, a container still holding an open child, or a container
+    whose only uncut findings are malformed rows (nothing left to close for
+    and nothing `cut` could link either) -- is skipped, never blocking a
+    lower-ranked qualifying row.
 
     Whichever branch fires, the printed command never carries `--row` (#151):
     `cut` without `--row` accepts every container `next` names here, linking
@@ -1769,8 +1841,10 @@ def next_action(board: Board) -> NextAction | None:
         if next_line is not None and has_further_work(next_line):
             return CutSliceAction(item, container, next_line)
         uncut = uncut_by_container.get(item.number)
-        if uncut is not None:
-            return CutSliceAction(item, container, uncut.rows[0])
+        if uncut is not None and uncut.rows:
+            return CutSliceAction(item, container, uncut.rows[0].title)
+        if uncut is not None and uncut.malformed:
+            continue
         return CloseContainerAction(item, container)
     return None
 
@@ -1873,22 +1947,24 @@ def _container_lines(board: Board) -> list[str]:
     ]
 
 
+def malformed_row_clause(row: MalformedSliceRow) -> str:
+    """The one naming unit for a malformed row -- `row "B": index must be a
+    positive integer" -- shared by `board`'s `UNCUT` section and `cut
+    --row`'s refusal so a malformed row reads the same way in both."""
+    return f'row "{row.id_cell}": {row.reason}'
+
+
 def _uncut_line(finding: UncutSlices) -> str:
-    names = ", ".join(finding.rows)
-    return f"#{finding.item}: {len(finding.rows)} rows ({names})"
+    clauses = []
+    if finding.rows:
+        indices = ", ".join(str(row.index) for row in finding.rows)
+        clauses.append(f"rows {indices} uncut")
+    clauses.extend(malformed_row_clause(row) for row in finding.malformed)
+    return f"#{finding.item}: " + "; ".join(clauses)
 
 
 def _contract_summary(contract: Contract) -> str:
-    present = (
-        name
-        for name, value in (
-            ("Now", contract.now),
-            ("Next", contract.next),
-            (BLOCKED_BY, contract.blocked_by),
-            ("Done when", contract.done_when),
-        )
-        if value is not None
-    )
+    present = (name for name, value in _contract_fields(contract) if value is not None)
     return ", ".join(present) or "-"
 
 
@@ -1904,11 +1980,19 @@ class _ActionabilityFacts:
     open_blockers: tuple[int, ...]
     contract_complete: bool
     projectionless_idea: bool
+    malformed_uncut: tuple[MalformedSliceRow, ...] = ()
+
+
+def _container_actionable_reason(malformed_uncut: tuple[MalformedSliceRow, ...]) -> str:
+    if not malformed_uncut:
+        return "container; claim a child"
+    named = "; ".join(malformed_row_clause(row) for row in malformed_uncut)
+    return f"container; {named}"
 
 
 def _actionable_reason(facts: _ActionabilityFacts) -> str | None:
     if facts.kind is ItemKind.CONTAINER:
-        return "container; claim a child"
+        return _container_actionable_reason(facts.malformed_uncut)
     if facts.frozen_trigger is not None:
         return f"frozen: {facts.frozen_trigger}"
     if facts.active_claim is not None:
