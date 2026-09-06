@@ -761,14 +761,22 @@ def _board(
         issues = client.list_open_board_issues()
     since = _merged_pull_request_floor(issues, now)
     blockers = board.blocker_references(issues)
-    # Open and recently-merged pull requests are independent reads once
-    # `since` is known, so fetching them on separate threads instead of one
-    # after another overlaps their `gh` subprocess wait time.
-    with ThreadPoolExecutor(max_workers=3) as pool:
+    container_numbers = tuple(
+        issue.number for issue in issues if issue.kind is board.ItemKind.CONTAINER
+    )
+    # Open and recently-merged pull requests, the blocker lookup, and each
+    # container's children are independent reads once `since` is known, so
+    # fetching them on separate threads instead of one after another overlaps
+    # their `gh` subprocess wait time.
+    with ThreadPoolExecutor(max_workers=3 + len(container_numbers)) as pool:
         open_pull_requests = pool.submit(client.list_open_board_pull_requests)
         merged_pull_requests = pool.submit(client.list_recent_merged_board_pull_requests, since)
         blocker_references = pool.submit(client.list_board_blockers, blockers)
+        children_by_container = {
+            number: pool.submit(client.list_children, number) for number in container_numbers
+        }
         pull_requests = (open_pull_requests.result(), merged_pull_requests.result())
+        children = {number: future.result() for number, future in children_by_container.items()}
     return board.build_board(
         board.BoardBuildInputs(
             issues=issues,
@@ -780,6 +788,7 @@ def _board(
             blocker_references=blocker_references.result(),
             now=now,
             trunk_landings=checkout.trunk_landing_times(),
+            children=children,
         )
     )
 
@@ -1157,7 +1166,9 @@ def _parent_requirement(
             "whose children this check cannot read"
         )
     remaining = tuple(
-        child for child in client.open_children(parent.reference.number) if child != item
+        child
+        for child in client.list_children(parent.reference.number)
+        if child.state is board.ChildState.OPEN and child.number != item.number
     )
     if not remaining:
         return _ParentRequirement(parent.reference, True)

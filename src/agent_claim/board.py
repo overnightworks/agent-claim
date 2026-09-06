@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 import re
 import tomllib
-from dataclasses import asdict, dataclass, replace
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
@@ -142,6 +143,16 @@ _SLICE_TITLE_VON_PATTERN = re.compile(
 )
 
 
+class ItemKind(StrEnum):
+    """An item's kind, read from the forge's native issue type -- the one
+    owner for "is this a container" (decision record 0001 ruling D3, #112)."""
+
+    TASK = "task"
+    BUG = "bug"
+    FEATURE = "feature"
+    CONTAINER = "container"
+
+
 @dataclass(frozen=True)
 class Issue:
     number: int
@@ -150,12 +161,51 @@ class Issue:
     body: str
     created_at: str
     updated_at: str
+    kind: ItemKind | None = None
+    children_closed: int | None = None
+    children_total: int | None = None
 
 
 class BlockerState(StrEnum):
     OPEN = "open"
     CLOSED = "closed"
     MISSING = "missing"
+
+
+class ChildState(StrEnum):
+    """The two states a sub-issue can be in.
+
+    Not `BlockerState`: that owns a *referenced* issue, whose third state is
+    MISSING -- a state a sub-issue returned by the relation cannot have, and
+    which `ContainerProgress` must not be able to represent. The adapter
+    fails loud on any other state string, which is exactly what the parent's
+    open-children reading has always required: an unrecognized state must
+    never make a parent look childless.
+    """
+
+    OPEN = "open"
+    CLOSED = "closed"
+
+
+@dataclass(frozen=True)
+class ChildItem:
+    """One sub-issue, as the port returns it and as the board shows it.
+
+    `blocked_by` is empty at the port boundary -- the adapter cannot know it
+    -- and `build_board` fills it for open children from the board's own
+    contracts, with no extra request.
+    """
+
+    number: int
+    state: ChildState
+    blocked_by: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
+class ContainerProgress:
+    closed: int
+    total: int
+    open_children: tuple[ChildItem, ...]
 
 
 @dataclass(frozen=True)
@@ -328,8 +378,12 @@ class BoardItem:
     number: int
     title: str
     labels: tuple[str, ...]
+    kind: ItemKind | None
     priority_category: int
     priority_bucket: str
+    priority_order: int
+    container: ContainerProgress | None
+    container_parent: int | None
     contract: Contract
     next_step: str | None
     contract_complete: bool
@@ -1017,18 +1071,59 @@ def _has_label(labels: tuple[str, ...], label: str | None) -> bool:
     return label is not None and any(item.casefold() == label.casefold() for item in labels)
 
 
+CRITICAL_CATEGORY = 0
+BLOCKER_CATEGORY = 1
+COMPLETION_CATEGORY = 2
+FIRST_LABEL_CATEGORY = 3
+
+
+@dataclass(frozen=True)
+class PriorityRank:
+    """Where one item sits in `board_rank`'s order: its category, the bucket
+    name `render` shows, and its order -- the configured label index inside
+    the critical category only, `0` everywhere else."""
+
+    category: int
+    bucket: str
+    order: int
+
+
 def _priority_bucket(
-    labels: tuple[str, ...], config: BoardConfig, unblocks_count: int
-) -> tuple[int, str]:
+    labels: tuple[str, ...],
+    config: BoardConfig,
+    unblocks_count: int,
+    *,
+    kind: ItemKind | None,
+    completes_container: bool,
+) -> PriorityRank:
+    """The one function that decides where an item sits.
+
+    Ladder, with the defaults `("security","data","ci","product","ux","cleanup")`
+    and `critical_span = 3`: the item's critical label or a Bug's native kind
+    (category 0, score-competing among themselves); a blocker (1); a
+    container's last open child once a sibling has closed (2, "completion" --
+    never above a critical item or a real blocker); the item's own
+    non-critical label (3+); unlabelled (last). A Bug carrying a non-critical
+    label still ranks critical -- only a Bug carrying no label at all reaches
+    this function's second branch.
+    """
     index = _priority_index(labels, config)
-    blocker_category = min(3, len(config.priority_labels))
-    if index is not None and index < blocker_category:
-        return index, config.priority_labels[index]
+    critical_span = min(3, len(config.priority_labels))
+    if index is not None and index < critical_span:
+        return PriorityRank(CRITICAL_CATEGORY, config.priority_labels[index], index)
+    if kind is ItemKind.BUG:
+        return PriorityRank(CRITICAL_CATEGORY, "bug", len(config.priority_labels))
     if unblocks_count:
-        return blocker_category, "blocker"
+        return PriorityRank(BLOCKER_CATEGORY, "blocker", 0)
+    if completes_container:
+        return PriorityRank(COMPLETION_CATEGORY, "last-child", 0)
     if index is not None:
-        return index + 1, config.priority_labels[index]
-    return len(config.priority_labels) + 1, "unlabelled"
+        return PriorityRank(
+            FIRST_LABEL_CATEGORY + index - critical_span, config.priority_labels[index], 0
+        )
+    return PriorityRank(
+        FIRST_LABEL_CATEGORY + len(config.priority_labels) - critical_span, "unlabelled", 0
+    )
 
 
 def _associated_issues(pull_requests: tuple[PullRequest, ...], repository: str) -> frozenset[int]:
@@ -1084,15 +1179,28 @@ def _touched_without_closing(pull_requests: tuple[PullRequest, ...]) -> frozense
     return frozenset(touched)
 
 
-def board_rank(item: BoardItem) -> tuple[int, int, int]:
+def board_rank(item: BoardItem) -> tuple[int, int, int, int, int]:
     """The one order `items`, `ready_now`, and every "is X ahead of Y" comparison share.
 
     `build_board` sorts by this key; any caller that needs to know whether
     one item outranks another — the out-of-order warning, for instance —
     reads this instead of re-deriving its own notion of "ahead", which is
     exactly how `board` and `next` fell out of agreement before.
+
+    `priority_order` only reorders inside the critical category (§2): a Bug
+    and a labelled critical item at equal score still resolve by label index
+    there, byte-for-byte as before this category was widened. `container_parent`
+    falls back to the item's own number, so outside the completion category
+    every group has exactly one member and the tuple degenerates to today's
+    number tie-break.
     """
-    return (item.priority_category, -item.score, item.number)
+    return (
+        item.priority_category,
+        -item.score,
+        item.priority_order,
+        item.container_parent if item.container_parent is not None else item.number,
+        item.number,
+    )
 
 
 def _validated_blocker_by_number(
@@ -1147,6 +1255,8 @@ class _BoardBuildContext:
     landed_references: frozenset[int]
     open_branches: frozenset[str]
     trunk_landings: tuple[datetime, ...]
+    container_progress: dict[int, ContainerProgress]
+    child_container: dict[int, int]
 
 
 def _board_stage(
@@ -1184,6 +1294,43 @@ def _board_score(stage: Stage, unblocks_count: int, single_next: bool) -> int:
     return score
 
 
+def _container_progress(
+    issue: Issue,
+    children: Mapping[int, tuple[ChildItem, ...]],
+    blockers: dict[int, tuple[int, ...]],
+) -> ContainerProgress | None:
+    """`issue`'s own container progress, or `None` when it isn't a container
+    the forge reports numbers for -- a container whose type support is
+    absent (no `kind`, no counts) is treated as an ordinary item, never
+    guessed at from a partial read."""
+    if (
+        issue.kind is not ItemKind.CONTAINER
+        or issue.children_closed is None
+        or issue.children_total is None
+    ):
+        return None
+    open_children = tuple(
+        replace(child, blocked_by=blockers.get(child.number, ()))
+        for child in children.get(issue.number, ())
+        if child.state is ChildState.OPEN
+    )
+    return ContainerProgress(issue.children_closed, issue.children_total, open_children)
+
+
+def _completes_container(
+    issue_number: int,
+    child_container: dict[int, int],
+    container_progress: dict[int, ContainerProgress],
+) -> bool:
+    """Whether `issue_number` is the one open child left in its container,
+    once at least one sibling has already closed (the completion boost)."""
+    container_number = child_container.get(issue_number)
+    if container_number is None:
+        return False
+    progress = container_progress[container_number]
+    return progress.closed >= 1 and len(progress.open_children) == 1
+
+
 def _board_item(
     issue: Issue, context: _BoardBuildContext, config: BoardConfig, observed_at: datetime
 ) -> BoardItem:
@@ -1203,22 +1350,39 @@ def _board_item(
     projectionless_idea = contract.projectionless and _has_label(issue.labels, config.idea_label)
     next_step = IDEA_REFINEMENT_STEP if projectionless_idea else contract.next
     unblocks_count = context.unblocks[issue.number]
-    priority_category, priority_bucket = _priority_bucket(issue.labels, config, unblocks_count)
+    container_parent = context.child_container.get(issue.number)
+    completes_container = _completes_container(
+        issue.number, context.child_container, context.container_progress
+    )
+    rank = _priority_bucket(
+        issue.labels,
+        config,
+        unblocks_count,
+        kind=issue.kind,
+        completes_container=completes_container,
+    )
     active_claim, claim_age_text, claim_old = _claim_projection(claim, observed_at)
     open_blockers = context.blockers[issue.number]
     actionable_reason = _actionable_reason(
-        frozen_trigger=frozen,
-        active_claim=active_claim,
-        open_blockers=open_blockers,
-        contract_complete=contract.complete,
-        projectionless_idea=projectionless_idea,
+        _ActionabilityFacts(
+            kind=issue.kind,
+            frozen_trigger=frozen,
+            active_claim=active_claim,
+            open_blockers=open_blockers,
+            contract_complete=contract.complete,
+            projectionless_idea=projectionless_idea,
+        )
     )
     return BoardItem(
         number=issue.number,
         title=issue.title,
         labels=issue.labels,
-        priority_category=priority_category,
-        priority_bucket=priority_bucket,
+        kind=issue.kind,
+        priority_category=rank.category,
+        priority_bucket=rank.bucket,
+        priority_order=rank.order,
+        container=context.container_progress.get(issue.number),
+        container_parent=container_parent,
         contract=contract,
         next_step=next_step,
         contract_complete=contract.complete,
@@ -1254,6 +1418,7 @@ class BoardBuildInputs:
     blocker_references: tuple[BlockerReference, ...] | None = None
     now: datetime | None = None
     trunk_landings: tuple[datetime, ...] = ()
+    children: Mapping[int, tuple[ChildItem, ...]] = field(default_factory=dict)
 
 
 def build_board(inputs: BoardBuildInputs) -> Board:
@@ -1278,6 +1443,16 @@ def build_board(inputs: BoardBuildInputs) -> Board:
         issue.number: sum(issue.number in other_blockers for other_blockers in blockers.values())
         for issue in issues
     }
+    container_progress = {
+        issue.number: progress
+        for issue in issues
+        if (progress := _container_progress(issue, inputs.children, blockers)) is not None
+    }
+    child_container = {
+        child.number: container_number
+        for container_number, progress in container_progress.items()
+        for child in progress.open_children
+    }
     context = _BoardBuildContext(
         contracts=contracts,
         blockers=blockers,
@@ -1292,6 +1467,8 @@ def build_board(inputs: BoardBuildInputs) -> Board:
         | _touched_without_closing(recent_merged_pull_requests),
         open_branches=frozenset(pr.head_ref_name for pr in open_pull_requests),
         trunk_landings=inputs.trunk_landings,
+        container_progress=container_progress,
+        child_container=child_container,
     )
     landed_work_items = declared_work_items(recent_merged_pull_requests, repository)
     ordered = tuple(
@@ -1347,6 +1524,7 @@ def render(board: Board) -> str:
         (
             "SCORE",
             "ISSUE",
+            "KIND",
             "PRIORITY",
             "STAGE",
             "CONTRACT",
@@ -1365,6 +1543,7 @@ def render(board: Board) -> str:
             (
                 str(item.score),
                 f"#{item.number}",
+                item.kind.value if item.kind is not None else "-",
                 item.priority_bucket,
                 item.stage.value,
                 _contract_summary(item.contract),
@@ -1390,9 +1569,31 @@ def render(board: Board) -> str:
     ready = ", ".join(f"#{item.number}" for item in board.ready_now) or "none"
     stale = ", ".join(f"#{item.number}" for item in board.stale) or "none"
     recovery = ", ".join(f"#{item.number}" for item in board.recovery) or "none"
+    containers = "\n".join(_container_lines(board)) or "none"
     return (
         f"{table}\n\nREADY NOW\n{ready}\n\nSTALE\n{stale}\n\nRECOVERY ({RECOVERY_STEP})\n{recovery}"
+        f"\n\nCONTAINERS\n{containers}"
     )
+
+
+def _open_child_cell(child: ChildItem) -> str:
+    if not child.blocked_by:
+        return f"#{child.number}"
+    blockers = ", ".join(f"#{number}" for number in child.blocked_by)
+    return f"#{child.number} (blocked by {blockers})"
+
+
+def _container_line(number: int, container: ContainerProgress) -> str:
+    open_children = ", ".join(_open_child_cell(child) for child in container.open_children)
+    return f"#{number} {container.closed}/{container.total} closed; open: {open_children or 'none'}"
+
+
+def _container_lines(board: Board) -> list[str]:
+    return [
+        _container_line(item.number, item.container)
+        for item in board.items
+        if item.container is not None
+    ]
 
 
 def _contract_summary(contract: Contract) -> str:
@@ -1409,21 +1610,30 @@ def _contract_summary(contract: Contract) -> str:
     return ", ".join(present) or "-"
 
 
-def _actionable_reason(
-    *,
-    frozen_trigger: str | None,
-    active_claim: str | None,
-    open_blockers: tuple[int, ...],
-    contract_complete: bool,
-    projectionless_idea: bool,
-) -> str | None:
-    if frozen_trigger is not None:
-        return f"frozen: {frozen_trigger}"
-    if active_claim is not None:
+@dataclass(frozen=True)
+class _ActionabilityFacts:
+    """Everything `_actionable_reason` decides on -- one owner for why an
+    item cannot be claimed right now, bundled so the container rule sits
+    beside every other reason instead of a special case at each call site."""
+
+    kind: ItemKind | None
+    frozen_trigger: str | None
+    active_claim: str | None
+    open_blockers: tuple[int, ...]
+    contract_complete: bool
+    projectionless_idea: bool
+
+
+def _actionable_reason(facts: _ActionabilityFacts) -> str | None:
+    if facts.kind is ItemKind.CONTAINER:
+        return "container; claim a child"
+    if facts.frozen_trigger is not None:
+        return f"frozen: {facts.frozen_trigger}"
+    if facts.active_claim is not None:
         return "claimed"
-    if open_blockers:
-        return "blocked by " + ", ".join(f"#{number}" for number in open_blockers)
-    if not contract_complete and not projectionless_idea:
+    if facts.open_blockers:
+        return "blocked by " + ", ".join(f"#{number}" for number in facts.open_blockers)
+    if not facts.contract_complete and not facts.projectionless_idea:
         return "body incomplete"
     return None
 

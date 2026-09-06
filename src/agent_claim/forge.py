@@ -140,7 +140,7 @@ class ForgeOperation(StrEnum):
     ITEM_REFERENCE = "item_reference"
     LANDING = "landing"
     PARENT_ISSUE = "parent_issue"
-    OPEN_CHILDREN = "open_children"
+    LIST_CHILDREN = "list_children"
     DEFAULT_BRANCH = "default_branch"
     LIST_OPEN_BOARD_ISSUES = "list_open_board_issues"
     LIST_BOARD_BLOCKERS = "list_board_blockers"
@@ -156,7 +156,7 @@ class ForgeOperation(StrEnum):
 
 class BoardSource(Protocol):
     """The read surface `_board` actually calls: the repository identity and the
-    four board list operations, not every `ForgeReader` operation. Every
+    five board list operations, not every `ForgeReader` operation. Every
     `ForgeReader` already satisfies it structurally; a board-only fake needs
     nothing more.
     """
@@ -176,6 +176,8 @@ class BoardSource(Protocol):
         self, since: datetime
     ) -> tuple[board.PullRequest, ...]: ...
 
+    def list_children(self, number: int) -> tuple[board.ChildItem, ...]: ...
+
 
 class ForgeReader(protocol.ClaimReader, Protocol):
     @property
@@ -189,7 +191,7 @@ class ForgeReader(protocol.ClaimReader, Protocol):
 
     def parent_issue(self, number: int) -> board.ParentIssue | None: ...
 
-    def open_children(self, number: int) -> tuple[board.IssueReference, ...]: ...
+    def list_children(self, number: int) -> tuple[board.ChildItem, ...]: ...
 
     def default_branch(self) -> str: ...
 

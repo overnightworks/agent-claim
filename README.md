@@ -204,6 +204,21 @@ since then; it otherwise shows `-`. Every item in `board --json` carries the
 same values as `freed_on` (`YYYY-MM-DD` or `null`) and `freed_days` (a
 nonnegative integer or `null`).
 
+An item's `KIND` column (`task`, `bug`, `feature`, `container`, or `-` when the
+forge reports no native issue type) comes from GitHub's issue type, never a
+label. A Bug ranks alongside the first three configured priority labels
+("critical") rather than taking the plain text-only penalty, so a fresh bug
+outranks an unlabelled or product-labelled epic on its first day; among
+critical items a labelled item still ties-breaks ahead of an unlabelled bug at
+equal score. A `container`-kinded issue shows its sub-issue progress —
+`board`'s `KIND` cell and a trailing `CONTAINERS` section (`#122 2/3 closed;
+open: #112 (blocked by #136)`); `board --json` carries the same figures under
+each item's `container` (`closed`, `total`, `open_children`). A container is
+never itself actionable — its `board`/`next` reason reads `container; claim a
+child` — and its own last open child (once at least one sibling has closed)
+ranks above ordinary work, though never above a critical item or a real
+blocker.
+
 `board` ends with a `RECOVERY (close or re-project)` section, and `next` names
 those items first with that step: open issues that a merged pull request already
 declared as its `Work-Item:` — the landing happened, the bookkeeping did not. It

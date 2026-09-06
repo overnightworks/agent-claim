@@ -6,10 +6,11 @@ import re
 import shlex
 import subprocess
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 
@@ -352,6 +353,7 @@ def projected_board(
     blocker_references: tuple[board.BlockerReference, ...] | None = None,
     now: datetime | None = None,
     trunk_landings: tuple[datetime, ...] = (),
+    children: Mapping[int, tuple[board.ChildItem, ...]] = MappingProxyType({}),
 ) -> board.Board:
     """`board.build_board` for scenarios that do not turn on which repository is projected."""
     return board.build_board(
@@ -365,6 +367,7 @@ def projected_board(
             blocker_references=blocker_references,
             now=now,
             trunk_landings=trunk_landings,
+            children=children,
         )
     )
 
@@ -407,7 +410,7 @@ class FakeForge:
     default_branch_name: str = "main"
     landings: dict[int, forge.Landing] = field(default_factory=dict)
     parents: dict[int, board.ParentIssue] = field(default_factory=dict)
-    children: dict[int, tuple[board.IssueReference, ...]] = field(default_factory=dict)
+    children: dict[int, tuple[board.ChildItem, ...]] = field(default_factory=dict)
     closed_issues: set[int] = field(default_factory=set)
     issue_reference_lookups: list[int] = field(default_factory=list)
     ledger_items: list[forge.LedgerItem] = field(default_factory=list)
@@ -553,7 +556,7 @@ class FakeForge:
     def parent_issue(self, number: int) -> board.ParentIssue | None:
         return self.parents.get(number)
 
-    def open_children(self, number: int) -> tuple[board.IssueReference, ...]:
+    def list_children(self, number: int) -> tuple[board.ChildItem, ...]:
         return self.children.get(number, ())
 
     def list_board_blockers(self, numbers: frozenset[int]) -> tuple[board.BlockerReference, ...]:
@@ -816,6 +819,84 @@ def test_github_adapter_reads_the_open_item_count() -> None:
 
     assert client.open_item_count() == 7
     assert observed == [["api", f"repos/{REPOSITORY}", "--jq", ".open_issues_count"]]
+
+
+def board_issue_page_client(*rows: dict[str, object]) -> GitHubForge:
+    return GitHubForge(
+        github._repository_id(REPOSITORY),
+        run=lambda arguments, input_data=None: "\n".join(json.dumps(row) for row in rows),
+    )
+
+
+def raw_board_issue(**overrides: object) -> dict[str, object]:
+    base: dict[str, object] = {
+        "number": 1,
+        "title": "Title",
+        "labels": [],
+        "body": "",
+        "createdAt": "2026-08-20T00:00:00Z",
+        "updatedAt": "2026-08-20T00:00:00Z",
+        "isPullRequest": False,
+        "kind": None,
+        "childrenClosed": None,
+        "childrenTotal": None,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_github_adapter_reads_the_native_issue_type_and_sub_issue_counts() -> None:
+    client = board_issue_page_client(
+        raw_board_issue(kind="Container", childrenClosed=1, childrenTotal=2)
+    )
+
+    issues = client.list_open_board_issues()
+
+    assert issues[0].kind is board.ItemKind.CONTAINER
+    assert issues[0].children_closed == 1
+    assert issues[0].children_total == 2
+
+
+def test_github_adapter_reads_an_unrecognized_issue_type_as_no_kind() -> None:
+    client = board_issue_page_client(raw_board_issue(kind="Epic"))
+
+    issues = client.list_open_board_issues()
+
+    assert issues[0].kind is None
+
+
+def test_github_adapter_reads_a_container_with_zero_children_as_a_real_state() -> None:
+    """`0/0` must survive as a real container state, never as the forge
+    saying nothing (the malformed-mixed-presence check would otherwise be
+    indistinguishable from a genuinely empty container)."""
+    client = board_issue_page_client(
+        raw_board_issue(kind="Container", childrenClosed=0, childrenTotal=0)
+    )
+
+    issues = client.list_open_board_issues()
+
+    assert issues[0].children_closed == 0
+    assert issues[0].children_total == 0
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        pytest.param({"childrenClosed": 1}, id="total-missing"),
+        pytest.param({"childrenTotal": 2}, id="closed-missing"),
+        pytest.param({"childrenClosed": -1, "childrenTotal": 2}, id="closed-negative"),
+        pytest.param({"childrenClosed": 3, "childrenTotal": 2}, id="closed-exceeds-total"),
+        pytest.param({"childrenClosed": True, "childrenTotal": 2}, id="closed-is-a-bool"),
+        pytest.param({"kind": 5}, id="kind-not-a-string"),
+    ],
+)
+def test_github_adapter_fails_loud_on_a_malformed_board_issue(
+    overrides: dict[str, object],
+) -> None:
+    client = board_issue_page_client(raw_board_issue(**overrides))
+
+    with pytest.raises(ClaimError, match="malformed board issue"):
+        client.list_open_board_issues()
 
 
 def test_github_adapter_ensures_a_label_definition() -> None:
@@ -2978,6 +3059,9 @@ def test_board_reads_priority_configuration_from_the_checkout_root(
         ) -> tuple[board.PullRequest, ...]:
             return ()
 
+        def list_children(self, number: int) -> tuple[board.ChildItem, ...]:
+            return ()
+
     monkeypatch.setattr(checkout, "_git_output", git_output)
     monkeypatch.setattr(checkout, "trunk_landing_times", lambda: ())
 
@@ -3209,6 +3293,173 @@ def test_board_category_order_keeps_ci_ahead_of_a_high_scoring_blocker() -> None
     assert projected.items[1].score > projected.items[0].score
 
 
+def test_board_ranks_a_labelled_critical_item_ahead_of_a_bug_at_equal_score() -> None:
+    """Both stay in the critical category (0), but the configured label's
+    index still tie-breaks ahead of an unlabelled Bug's -- the same order
+    the critical category has always used inside itself."""
+    now = datetime(2026, 8, 21, tzinfo=UTC)
+    ci = board.Issue(30, "CI work", ("ci",), "", "2026-08-20T00:00:00Z", "2026-08-20T00:00:00Z")
+    bug = board.Issue(
+        31,
+        "A fresh bug",
+        (),
+        "",
+        "2026-08-20T00:00:00Z",
+        "2026-08-20T00:00:00Z",
+        kind=board.ItemKind.BUG,
+    )
+
+    projected = projected_board((ci, bug), (), (), (), board.BoardConfig(), now=now)
+
+    assert [item.number for item in projected.items] == [30, 31]
+    assert projected.items[0].score == projected.items[1].score
+    assert projected.items[0].priority_category == projected.items[1].priority_category
+
+
+def test_board_ranks_a_bug_last_inside_the_critical_category() -> None:
+    now = datetime(2026, 8, 21, tzinfo=UTC)
+    security = board.Issue(
+        40, "Security", ("security",), "", "2026-08-20T00:00:00Z", "2026-08-20T00:00:00Z"
+    )
+    data = board.Issue(41, "Data", ("data",), "", "2026-08-20T00:00:00Z", "2026-08-20T00:00:00Z")
+    ci = board.Issue(42, "CI", ("ci",), "", "2026-08-20T00:00:00Z", "2026-08-20T00:00:00Z")
+    bug = board.Issue(
+        43,
+        "A fresh bug",
+        (),
+        "",
+        "2026-08-20T00:00:00Z",
+        "2026-08-20T00:00:00Z",
+        kind=board.ItemKind.BUG,
+    )
+    product = board.Issue(
+        44, "Product work", ("product",), "", "2026-08-20T00:00:00Z", "2026-08-20T00:00:00Z"
+    )
+
+    projected = projected_board(
+        (security, data, ci, bug, product), (), (), (), board.BoardConfig(), now=now
+    )
+
+    assert [item.number for item in projected.items] == [40, 41, 42, 43, 44]
+    assert [item.priority_category for item in projected.items[:4]] == [0, 0, 0, 0]
+    assert projected.items[4].priority_category > 0
+
+
+def test_board_ranks_a_blocker_ahead_of_a_last_open_child() -> None:
+    """The completion boost (category 2) never outranks a real blocker (1)."""
+    now = datetime(2026, 8, 21, tzinfo=UTC)
+    container = board.Issue(
+        100,
+        "Container",
+        (),
+        "",
+        "2026-08-20T00:00:00Z",
+        "2026-08-20T00:00:00Z",
+        kind=board.ItemKind.CONTAINER,
+        children_closed=1,
+        children_total=2,
+    )
+    last_child = board.Issue(
+        101, "Last open child", (), "", "2026-08-20T00:00:00Z", "2026-08-20T00:00:00Z"
+    )
+    blocker = board.Issue(
+        102, "Unblocks other work", (), "", "2026-08-20T00:00:00Z", "2026-08-20T00:00:00Z"
+    )
+    dependent = board.Issue(
+        103,
+        "Depends on the blocker",
+        (),
+        "## Blocked by\n#102",
+        "2026-08-20T00:00:00Z",
+        "2026-08-20T00:00:00Z",
+    )
+
+    projected = projected_board(
+        (container, last_child, blocker, dependent),
+        (),
+        (),
+        (),
+        board.BoardConfig(),
+        now=now,
+        children={100: (board.ChildItem(101, board.ChildState.OPEN),)},
+    )
+    by_number = {item.number: item for item in projected.items}
+
+    assert by_number[101].priority_bucket == "last-child"
+    assert by_number[102].priority_bucket == "blocker"
+    assert projected.items.index(by_number[102]) < projected.items.index(by_number[101])
+
+
+def test_completion_boost_requires_at_least_one_closed_sibling() -> None:
+    container = board.Issue(
+        110,
+        "Container",
+        (),
+        "",
+        "2026-08-20T00:00:00Z",
+        "2026-08-20T00:00:00Z",
+        kind=board.ItemKind.CONTAINER,
+        children_closed=0,
+        children_total=1,
+    )
+    only_child = board.Issue(
+        111, "Only child", (), "", "2026-08-20T00:00:00Z", "2026-08-20T00:00:00Z"
+    )
+
+    projected = projected_board(
+        (container, only_child),
+        (),
+        (),
+        (),
+        board.BoardConfig(),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+        children={110: (board.ChildItem(111, board.ChildState.OPEN),)},
+    )
+
+    child_item = next(item for item in projected.items if item.number == 111)
+    assert child_item.priority_bucket == "unlabelled"
+
+
+def test_board_shows_container_progress_and_refuses_it_as_actionable() -> None:
+    container = board.Issue(
+        120,
+        "Container",
+        (),
+        "",
+        "2026-08-20T00:00:00Z",
+        "2026-08-20T00:00:00Z",
+        kind=board.ItemKind.CONTAINER,
+        children_closed=1,
+        children_total=2,
+    )
+    open_child = board_issue(121, "Open child", complete_contract("Ship it."))
+
+    projected = projected_board(
+        (container, open_child),
+        (),
+        (),
+        (),
+        board.BoardConfig(),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+        children={120: (board.ChildItem(121, board.ChildState.OPEN),)},
+    )
+
+    container_item = next(item for item in projected.items if item.number == 120)
+    assert container_item.actionable is False
+    assert container_item.actionable_reason == "container; claim a child"
+    assert container_item not in projected.ready_now
+    assert container_item.container == board.ContainerProgress(
+        1, 2, (board.ChildItem(121, board.ChildState.OPEN, blocked_by=()),)
+    )
+
+    rendered = board.render(projected)
+    header = rendered.splitlines()[0]
+    assert "KIND" in header
+    assert "container" in rendered
+    assert "CONTAINERS" in rendered
+    assert "#120 1/2 closed; open: #121" in rendered
+
+
 def test_next_names_the_boards_top_row_even_when_it_is_not_the_highest_score() -> None:
     now = datetime(2026, 8, 21, tzinfo=UTC)
     in_flight_unlabelled = board_issue(50, "In-flight, unlabelled", complete_contract("Ship it."))
@@ -3394,6 +3645,9 @@ def test_board_queries_merged_pull_requests_back_to_the_oldest_open_issue(
             observed_since.append(since)
             return ()
 
+        def list_children(self, number: int) -> tuple[board.ChildItem, ...]:
+            return ()
+
     monkeypatch.setattr(checkout, "_git_output", lambda _arguments: str(tmp_path))
     monkeypatch.setattr(checkout, "trunk_landing_times", lambda: ())
 
@@ -3433,12 +3687,68 @@ def test_board_loads_each_distinct_blocker_once(
         ) -> tuple[board.PullRequest, ...]:
             return ()
 
+        def list_children(self, number: int) -> tuple[board.ChildItem, ...]:
+            return ()
+
     monkeypatch.setattr(checkout, "_git_output", lambda _arguments: str(tmp_path))
     monkeypatch.setattr(checkout, "trunk_landing_times", lambda: ())
 
     issue_claim._board(BoardClient(), ())
 
     assert observed == [frozenset({90, 91})]
+
+
+def test_board_fetches_children_only_for_container_kinded_issues(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    open_blocker_references: Callable[[frozenset[int]], tuple[board.BlockerReference, ...]],
+) -> None:
+    container = board.Issue(
+        90,
+        "Container",
+        (),
+        "",
+        "2026-08-20T00:00:00Z",
+        "2026-08-20T00:00:00Z",
+        kind=board.ItemKind.CONTAINER,
+        children_closed=0,
+        children_total=1,
+    )
+    plain = board_issue(91, "Plain", complete_contract("Ship it."))
+    observed: list[int] = []
+
+    class BoardClient:
+        repository = github._repository_id(REPOSITORY)
+
+        def list_open_board_issues(self) -> tuple[board.Issue, ...]:
+            return (container, plain)
+
+        def list_board_blockers(
+            self, numbers: frozenset[int]
+        ) -> tuple[board.BlockerReference, ...]:
+            return open_blocker_references(numbers)
+
+        def list_open_board_pull_requests(self) -> tuple[board.PullRequest, ...]:
+            return ()
+
+        def list_recent_merged_board_pull_requests(
+            self, since: datetime
+        ) -> tuple[board.PullRequest, ...]:
+            return ()
+
+        def list_children(self, number: int) -> tuple[board.ChildItem, ...]:
+            observed.append(number)
+            return (board.ChildItem(92, board.ChildState.OPEN),)
+
+    monkeypatch.setattr(checkout, "_git_output", lambda _arguments: str(tmp_path))
+    monkeypatch.setattr(checkout, "trunk_landing_times", lambda: ())
+
+    projected = issue_claim._board(BoardClient(), ())
+
+    assert observed == [90]
+    container_item = next(item for item in projected.items if item.number == 90)
+    assert container_item.container is not None
+    assert container_item.container.open_children == (board.ChildItem(92, board.ChildState.OPEN),)
 
 
 def test_board_configuration_requires_unique_ordered_labels(tmp_path: Path) -> None:
@@ -13468,7 +13778,9 @@ def parented_pr_check_client(
     client.parents[WORK_ITEM_ISSUE] = board.ParentIssue(
         board.IssueReference(parent_repository, PARENT_ISSUE), parent_body
     )
-    client.children[PARENT_ISSUE] = open_children
+    client.children[PARENT_ISSUE] = tuple(
+        board.ChildItem(reference.number, board.ChildState.OPEN) for reference in open_children
+    )
     return client
 
 
@@ -13596,7 +13908,7 @@ def sub_issue_client(*children: dict[str, object]) -> GitHubForge:
     )
 
 
-def test_github_adapter_reads_a_recorded_parent_and_its_open_children() -> None:
+def test_github_adapter_reads_a_recorded_parent_and_its_children() -> None:
     def run(arguments: list[str], *, input_data: bytes | None = None) -> str:
         if arguments[1].endswith("/parent"):
             return json.dumps(
@@ -13609,16 +13921,19 @@ def test_github_adapter_reads_a_recorded_parent_and_its_open_children() -> None:
     assert client.parent_issue(72) == board.ParentIssue(
         board.IssueReference(REPOSITORY, 79), "## Next\nCut."
     )
-    assert client.open_children(79) == (
-        board.IssueReference(REPOSITORY, 72),
-        board.IssueReference(REPOSITORY, 73),
+    assert client.list_children(79) == (
+        board.ChildItem(72, board.ChildState.OPEN),
+        board.ChildItem(73, board.ChildState.OPEN),
     )
 
 
-def test_github_adapter_leaves_a_parents_closed_children_out() -> None:
+def test_github_adapter_reports_a_closed_child_alongside_open_ones() -> None:
     client = sub_issue_client(api_sub_issue(72, "closed"), api_sub_issue(73, "open"))
 
-    assert client.open_children(79) == (board.IssueReference(REPOSITORY, 73),)
+    assert client.list_children(79) == (
+        board.ChildItem(72, board.ChildState.CLOSED),
+        board.ChildItem(73, board.ChildState.OPEN),
+    )
 
 
 @pytest.mark.parametrize(
@@ -13634,7 +13949,16 @@ def test_github_adapter_fails_loud_on_a_sub_issue_state_it_cannot_read(
     client = sub_issue_client(child)
 
     with pytest.raises(ClaimError, match="malformed sub-issue"):
-        client.open_children(79)
+        client.list_children(79)
+
+
+def test_github_adapter_refuses_a_sub_issue_from_another_repository() -> None:
+    client = sub_issue_client(
+        {"number": 72, "repository": "https://api.github.com/repos/other/repo", "state": "open"}
+    )
+
+    with pytest.raises(ClaimError, match="sub-issue from another repository"):
+        client.list_children(79)
 
 
 def test_github_adapter_reads_an_issue_without_a_parent_as_parentless() -> None:
