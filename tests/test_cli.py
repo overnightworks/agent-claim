@@ -2961,6 +2961,59 @@ def test_cut_refuses_when_no_cuttable_row_exists(
     assert client.item_bodies == {}
 
 
+def test_cut_creates_an_untied_child_when_the_container_has_no_slice_table(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """A container with no slice table at all (#151, like #122 on
+    06.09.2026) still gets its next slice cut -- the fresh child is created
+    and related, but there is no row to link, so the container's own body
+    stays exactly as it was."""
+    container = _cut_container_issue(complete_contract("Scheibe 1"))
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
+    )
+
+    assert exit_code == 0
+    child = client.next_created_child_number - 1
+    assert client.created_children == [
+        (CUT_CONTAINER, "Scheibe 1", board.CHILD_SKELETON, board.ItemKind.TASK)
+    ]
+    assert client.item_bodies == {}
+    assert capsys.readouterr().out == f"CUT #{CUT_CONTAINER} -> #{child}\n"
+
+
+def test_cut_refuses_a_row_when_the_container_has_no_slice_table(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """`--row` names a row inside a table; a container without one gets a
+    refusal naming the missing table, never a guessed row (#151)."""
+    container = _cut_container_issue(complete_contract("Scheibe 1"))
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
+
+    exit_code = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "cut",
+            str(CUT_CONTAINER),
+            "--title",
+            "Scheibe 1",
+            "--row",
+            "1",
+        ]
+    )
+
+    assert exit_code == 2
+    assert (
+        f"ERROR: #{CUT_CONTAINER} has no slice table; --row needs one to select a row from"
+        in capsys.readouterr().err
+    )
+    assert client.created_children == []
+    assert client.item_bodies == {}
+
+
 @pytest.mark.parametrize(
     "operation", [forge.ForgeOperation.CREATE_CHILD, forge.ForgeOperation.UPDATE_ITEM_BODY]
 )
@@ -4694,6 +4747,68 @@ def test_next_names_a_cuttable_container_slice(
         "cut_slice #180: Scheibe B — Kartenraster\n"
         'Next: agent-claim cut 180 --title "Scheibe B — Kartenraster"\n'
     )
+
+
+def test_next_prints_a_cut_command_that_cut_accepts_for_a_tableless_container(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """#151: `next`'s recommended `cut` command must never be one `cut`
+    itself refuses -- exactly what #122 hit on 06.09.2026, whose container
+    carried a `Next` line but no slice table."""
+    container = board.Issue(
+        183,
+        "Epic",
+        (),
+        complete_contract("Scheibe D"),
+        "2026-08-20T00:00:00Z",
+        "2026-08-20T00:00:00Z",
+        kind=board.ItemKind.CONTAINER,
+        children_closed=1,
+        children_total=1,
+    )
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
+
+    next_exit_code = issue_claim.main(["--repo", "example/agent-claim", "next"])
+    assert next_exit_code == 0
+    command_line = capsys.readouterr().out.splitlines()[1]
+    cut_arguments = shlex.split(command_line.removeprefix("Next: agent-claim "))
+
+    cut_exit_code = issue_claim.main(["--repo", "example/agent-claim", *cut_arguments])
+
+    assert cut_exit_code == 0
+    child = client.next_created_child_number - 1
+    assert capsys.readouterr().out == f"CUT #183 -> #{child}\n"
+
+
+def test_next_prints_a_cut_command_that_cut_accepts_for_an_uncut_table_row(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """The table-backed twin of the test above: a container whose own `Next`
+    line is empty but whose slice table still carries an uncut row must also
+    print a `cut` command that `cut` itself accepts (#151)."""
+    container = board.Issue(
+        184,
+        "Epic",
+        (),
+        slice_table(("1", "Scheibe E", "—", "—")),
+        "2026-08-20T00:00:00Z",
+        "2026-08-20T00:00:00Z",
+        kind=board.ItemKind.CONTAINER,
+        children_closed=0,
+        children_total=0,
+    )
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
+
+    next_exit_code = issue_claim.main(["--repo", "example/agent-claim", "next"])
+    assert next_exit_code == 0
+    command_line = capsys.readouterr().out.splitlines()[1]
+    cut_arguments = shlex.split(command_line.removeprefix("Next: agent-claim "))
+
+    cut_exit_code = issue_claim.main(["--repo", "example/agent-claim", *cut_arguments])
+
+    assert cut_exit_code == 0
+    child = client.next_created_child_number - 1
+    assert client.item_bodies == {184: slice_table(("1", "Scheibe E", f"#{child}", "—"))}
 
 
 def test_next_json_names_a_cuttable_container_slice(

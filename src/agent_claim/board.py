@@ -879,18 +879,27 @@ class SliceTableFindings:
     A row whose `item_issue` is set (linking any issue, open or closed) is
     landed, never a finding: `cut` only ever targets `cuttable`, and `board`
     only ever reports `cuttable`/`unlinkable`/`malformed` as uncut.
+
+    `has_table` is the one precondition `next`'s `cut_slice` action and `cut`
+    itself both consult (#151): `True` the moment `parse_slice_table` found
+    any table attempt at all, well-formed or not, `False` for a container
+    that carries no slice table whatsoever. `cut` tells the two apart --
+    a container with no table cuts its own `Next` line, untied to any row;
+    one with a table but nothing `cuttable` left is a hand-fix instead.
     """
 
     cuttable: tuple[SliceTableRow, ...]
     unlinkable: tuple[SliceTableRow, ...]
     malformed: tuple[str, ...]
+    has_table: bool
 
 
 def slice_table_findings(body: str) -> SliceTableFindings:
+    entries = parse_slice_table(body)
     cuttable: list[SliceTableRow] = []
     unlinkable: list[SliceTableRow] = []
     malformed: list[str] = []
-    for entry in parse_slice_table(body):
+    for entry in entries:
         if isinstance(entry, SliceTableRow):
             if entry.item_cell == UNDISPATCHED_SLICE_CELL:
                 cuttable.append(entry)
@@ -898,7 +907,7 @@ def slice_table_findings(body: str) -> SliceTableFindings:
                 unlinkable.append(entry)
         else:
             malformed.append(entry.line)
-    return SliceTableFindings(tuple(cuttable), tuple(unlinkable), tuple(malformed))
+    return SliceTableFindings(tuple(cuttable), tuple(unlinkable), tuple(malformed), bool(entries))
 
 
 @dataclass(frozen=True)
@@ -1742,6 +1751,12 @@ def next_action(board: Board) -> NextAction | None:
     closed. Every other row -- blocked, claimed, incomplete, or a container
     still holding an open child -- is skipped, never blocking a lower-ranked
     qualifying row.
+
+    Whichever branch fires, the printed command never carries `--row` (#151):
+    `SliceTableFindings.has_table` is the one board.py-owned precondition
+    `cut` itself consults to accept exactly this -- a tableless container
+    creates its child untied to any row, a tabled one uses its first
+    cuttable row.
     """
     uncut_by_container = {finding.item: finding for finding in board.uncut}
     for item in board.items:
