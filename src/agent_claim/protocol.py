@@ -597,10 +597,12 @@ def _marker_payload(comment: IssueComment) -> tuple[dict[str, object], bool] | N
     if not is_protocol_candidate(comment):
         return None
     first_line = comment.body.partition("\n")[0]
+    # No "neither prefix matched" exit here: `is_protocol_candidate` already
+    # requires `first_line` to start with one of the two prefixes, and
+    # `legacy` records exactly which one matched -- so `prefix` below is
+    # always the one `first_line` was just shown to start with.
     legacy = first_line.startswith(LEGACY_MARKER_PREFIX)
     prefix = LEGACY_MARKER_PREFIX if legacy else MARKER_PREFIX
-    if not first_line.startswith(prefix):
-        return None
     if comment.created_at != comment.updated_at:
         raise InvalidClaimMarkerError(
             f"trusted protocol comment {comment.url} was edited after publication"
@@ -1110,19 +1112,23 @@ def _group_active_holders(
 
 
 def _strip_duplicate_holders(
-    derived: dict[str, ActiveClaim],
-    holders: dict[tuple[str, int], list[ActiveClaim]],
-    first_by_id: dict[str, ActiveClaim],
+    derived: dict[str, ActiveClaim], holders: dict[tuple[str, int], list[ActiveClaim]]
 ) -> None:
-    """Among claims that live for the same (name, value), keep only the earliest holder."""
+    """Among claims that live for the same (name, value), keep only the earliest holder.
+
+    The loser here is always an explicit-value claim: `_assign_resource_values`
+    walks intents for one name in the same chronological order this sorts by,
+    so whichever claim first occupies a value is exactly this group's
+    earliest member, and only the explicit branch there ever occupies a value
+    without first checking it isn't already taken -- an auto intent always
+    picks a value not yet occupied, so it can never itself be a later,
+    colliding loser.
+    """
     for held in holders.values():
         ordered = sorted(
             held, key=lambda claim: (claim.comment.created_at, claim.comment.identifier)
         )
         for loser in ordered[1:]:
-            first = first_by_id.get(loser.claim_id)
-            if first is None or first.resource is None:
-                continue
             derived[loser.claim_id] = replace(loser, resource=None)
 
 
@@ -1149,9 +1155,8 @@ def _apply_derived_resource_holds(
     )
     for name in names:
         _assign_resource_values(derived, first_occurrences, name)
-    first_by_id = {event.claim_id: event for event in first_occurrences}
     holders = _group_active_holders(derived)
-    _strip_duplicate_holders(derived, holders, first_by_id)
+    _strip_duplicate_holders(derived, holders)
     return derived
 
 
@@ -1994,12 +1999,11 @@ def _resolve_resource_race(
     if request.resource is None:
         return
     if request.resource_value is None:
-        hold = own.resource
-        if hold is None or hold.name != request.resource:
-            raise ClaimError(
-                f"{_identity_summary(request.identity, request.branch)} requested "
-                f"{request.resource} but derivation produced no hold"
-            )
+        # No "derivation produced no hold" guard here: `own` is already known
+        # live (an earlier check in the caller requires it), and
+        # `_apply_derived_resource_holds` unconditionally assigns every live
+        # auto intent a hold for its own requested name before this ever runs
+        # -- there is no path back to an unset or misnamed hold to guard.
         return
     expected = ResourceHold(request.resource, request.resource_value)
     if own.resource == expected:
@@ -2009,14 +2013,18 @@ def _resolve_resource_race(
         LEDGER_ISSUE, release_comment(own, request.agent, request.role, CLAIM_RACE_LOST_REASON)
     )
     _reconcile_identity(client, request.identity)
-    if holder is not None:
-        _reconcile_identity(client, holder.identity)
-        raise ClaimUnavailableError(
-            f"{expected.name} {expected.value} is held by "
-            f"{holder.agent} ({holder.role}) on "
-            f"{_identity_summary(holder.identity, holder.branch)}"
-        )
-    raise ClaimUnavailableError(f"{expected.name} {expected.value} is held by another claim")
+    # `holder` is never None here: `own.resource != expected` only happens
+    # when `_strip_duplicate_holders` stripped this claim in favor of an
+    # earlier one holding `expected` -- and that earlier claim, still active,
+    # is exactly what `observed` (the same snapshot the strip itself read)
+    # was searched for above.
+    assert holder is not None, "a resource race always names the claim that won it"
+    _reconcile_identity(client, holder.identity)
+    raise ClaimUnavailableError(
+        f"{expected.name} {expected.value} is held by "
+        f"{holder.agent} ({holder.role}) on "
+        f"{_identity_summary(holder.identity, holder.branch)}"
+    )
 
 
 def _claim_race_lost_repair_command(claim: ActiveClaim) -> str:
