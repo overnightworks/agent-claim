@@ -9015,6 +9015,28 @@ def test_versioned_paths_fails_loud_like_git_output(monkeypatch: pytest.MonkeyPa
         _LIVE_VERSIONED_PATHS()
 
 
+def test_git_output_fails_loud_when_git_is_missing_or_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_git_output` backs every other checkout git call (`origin_remote_url`
+    here); it must translate a missing executable or a timeout the same way
+    `versioned_paths`'s own copy does."""
+
+    def missing(*_arguments, **_kwargs):
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(subprocess, "run", missing)
+    with pytest.raises(ClaimError, match="git is required for issue claims"):
+        checkout.origin_remote_url()
+
+    def timed_out(*_arguments, **_kwargs):
+        raise subprocess.TimeoutExpired(["git"], process.DEFAULT_TIMEOUT_SECONDS)
+
+    monkeypatch.setattr(subprocess, "run", timed_out)
+    with pytest.raises(ClaimError, match="git timed out while validating the build checkout"):
+        checkout.origin_remote_url()
+
+
 @pytest.fixture(autouse=True)
 def _freeze_cli_now(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(issue_claim, "datetime", FixedDateTime)
@@ -13981,6 +14003,61 @@ def test_trunk_landing_times_read_the_default_branch_not_the_work_branch(
         "--format=%cI",
         "refs/remotes/origin/main",
     ] in observed
+
+
+def test_trunk_ref_fails_loud_when_no_candidate_branch_resolves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Neither the symbolic ref nor any of the default-branch-name candidates
+    resolving must fail loud rather than silently ruling every candidate's age
+    as unknown."""
+
+    def git_output(_arguments: list[str]) -> str:
+        raise ClaimError("fatal: not a git repository")
+
+    monkeypatch.setattr(checkout, "_git_output", git_output)
+    with pytest.raises(ClaimError, match="cannot determine the main branch for ruling age"):
+        _LIVE_TRUNK_LANDING_TIMES()
+
+
+def test_trunk_landing_times_is_empty_when_trunk_has_no_first_parent_landings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def git_output(arguments: list[str]) -> str:
+        if arguments[:3] == ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"]:
+            return "refs/remotes/origin/main"
+        if arguments[:4] == ["log", "--first-parent", "--reverse", "--format=%cI"]:
+            return ""
+        raise AssertionError(arguments)
+
+    monkeypatch.setattr(checkout, "_git_output", git_output)
+    assert _LIVE_TRUNK_LANDING_TIMES() == ()
+
+
+@pytest.mark.parametrize(
+    "raw_commit_time",
+    [
+        pytest.param("not-a-timestamp", id="unparsable"),
+        pytest.param("2026-08-29T00:00:00", id="missing-offset"),
+    ],
+)
+def test_trunk_landing_times_fails_loud_on_a_malformed_commit_timestamp(
+    monkeypatch: pytest.MonkeyPatch, raw_commit_time: str
+) -> None:
+    """Neither an unparsable `%cI` line nor one git left offset-naive (both
+    would only occur if git itself misbehaved) may silently produce a wrong
+    ruling age; both fail loud with the same diagnostic."""
+
+    def git_output(arguments: list[str]) -> str:
+        if arguments[:3] == ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"]:
+            return "refs/remotes/origin/main"
+        if arguments[:4] == ["log", "--first-parent", "--reverse", "--format=%cI"]:
+            return raw_commit_time
+        raise AssertionError(arguments)
+
+    monkeypatch.setattr(checkout, "_git_output", git_output)
+    with pytest.raises(ClaimError, match="git returned a malformed trunk landing timestamp"):
+        _LIVE_TRUNK_LANDING_TIMES()
 
 
 def test_trunk_landing_times_count_a_five_commit_merge_once(
