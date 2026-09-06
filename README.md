@@ -271,9 +271,13 @@ without a complete contract when they are not a configured projectionless idea
 list; a container chosen as the `next` action is never also listed there), and
 `next` exits 3 when nothing qualifies.
 `claim` refuses work out of order when a higher-priority actionable item — the
-same order `board` and `next` use — is free. Pass `--out-of-order REASON` to
-proceed deliberately; it remains visible as a warning and preserves the reason
-in the claim comment.
+same order `board` and `next` use — is free, and refuses an item whose
+`Blocked by` still names at least one open issue (a pull request, or a closed
+or missing issue, does not count — those stay their own refusals below) with
+`#5 is blocked by #3 (open); pass --out-of-order REASON to claim it anyway`,
+naming every open blocker. Pass `--out-of-order REASON` to proceed
+deliberately in either case; it remains visible as a warning and preserves the
+reason in the claim comment.
 
 Before it writes a claim, `claim` also reads the pulled issue's live contract:
 `Now`, `Next`, `Blocked by`, and `Done when` each appear at most once outside
