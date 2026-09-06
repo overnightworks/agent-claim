@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
-from . import __version__, board, checkout, discovery, forge, github, protocol
+from . import __version__, board, checkout, discovery, forge, github, protocol, store
 
 AGENT_CLAIM_AGENT_ENV = checkout.AGENT_CLAIM_AGENT_ENV
 CLAUDE_SESSION_ID_ENV = checkout.CLAUDE_SESSION_ID_ENV
@@ -254,7 +254,12 @@ LANE_ISSUE_HELP = "omit for lane mode, derived from a docs/ or fix/ checkout bra
 
 
 def _add_bootstrap_parser(commands: argparse._SubParsersAction) -> None:
-    commands.add_parser("bootstrap", help="create or adopt this repository's locked ledger")
+    commands.add_parser(
+        "bootstrap",
+        help=(
+            "create or adopt this repository's locked ledger, then create or report refs/aco/state"
+        ),
+    )
 
 
 def _add_status_parser(commands: argparse._SubParsersAction) -> None:
@@ -2309,6 +2314,25 @@ def _release_branch_for(parsed: argparse.Namespace) -> str | None:
     )
 
 
+def _bootstrap_state(forge_handle: forge.ForgeWriter) -> int:
+    """Adopt or create this repository's locked ledger, then create or adopt
+    `refs/aco/state`, printing each in turn.
+
+    Two onboarding paths in one command until the state-ref cut (issue #164
+    slice C2) deletes the ledger outright: today, a repository with neither
+    still needs a ledger (every other command reads and writes it) as well as
+    the state ref `store` will eventually replace it with. The ledger half is
+    the last production caller of `discovery.bootstrap_ledger`; the state-ref
+    half is `store`'s sole production caller.
+    """
+    ledger = discovery.bootstrap_ledger(forge_handle)
+    protocol.configure_ledger(ledger)
+    print(f"LEDGER #{ledger}")
+    oid = store.bootstrap(worktree=Path.cwd())
+    print(oid)
+    return 0
+
+
 def _dispatch(parsed: argparse.Namespace) -> int:
     if parsed.command in {"claim", "release", "rescope"}:
         parsed.agent = checkout._resolved_agent(parsed.agent)
@@ -2316,10 +2340,7 @@ def _dispatch(parsed: argparse.Namespace) -> int:
     repository = github.discover_repository(parsed.repo, remote_url=checkout.origin_remote_url)
     forge_handle = github.GitHubForge(repository)
     if parsed.command == "bootstrap":
-        ledger = discovery.bootstrap_ledger(forge_handle)
-        protocol.configure_ledger(ledger)
-        print(f"LEDGER #{ledger}")
-        return 0
+        return _bootstrap_state(forge_handle)
     ledger = discovery.discover_ledger(forge_handle)
     if ledger is None:
         raise protocol.ClaimUnavailableError(

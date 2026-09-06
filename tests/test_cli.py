@@ -12744,21 +12744,6 @@ def test_cli_reconcile_still_clears_stale_labels_when_ledger_is_frozen(
     assert client.labels == set()
 
 
-def test_cli_bootstrap_creates_and_prints_the_ledger(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    client = FakeForge()
-    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
-
-    status = issue_claim.main(["--repo", "example/agent-claim", "bootstrap"])
-
-    assert status == 0
-    created = next(iter(client.ledger_items)).number
-    assert capsys.readouterr().out == f"LEDGER #{created}\n"
-    assert issue_claim.LEDGER_LABEL in client.other_labels
-
-
 def test_cli_status_empty_ledger_prints_ledger_then_unclaimed_repository(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

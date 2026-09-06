@@ -63,13 +63,27 @@ type = "layers"
 containers = ["agent_claim"]
 layers = [
     "cli",
-    "checkout | discovery",
+    "checkout | discovery | store",
     "github",
     "forge",
     "board",
     "protocol",
     "process",
 ]
+
+[[tool.importlinter.contracts]]
+name = "The claim-state store is git transport only"
+type = "forbidden"
+source_modules = ["agent_claim.store"]
+forbidden_modules = [
+    "agent_claim.github",
+    "agent_claim.forge",
+    "agent_claim.board",
+    "agent_claim.checkout",
+    "agent_claim.discovery",
+]
+allow_indirect_imports = true
+as_packages = false
 
 [[tool.importlinter.contracts]]
 name = "Only the process boundary imports subprocess"
@@ -90,6 +104,7 @@ as_packages = false
 ignore_imports = [
     "agent_claim.github -> agent_claim.process",
     "agent_claim.checkout -> agent_claim.process",
+    "agent_claim.store -> agent_claim.process",
 ]
 
 [tool.pyright]

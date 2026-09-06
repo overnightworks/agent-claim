@@ -109,11 +109,23 @@ Agents should read `--json` from `status`, `claim`, `release`, `rescope`, and `w
 `status` prints each live claim's age from its claim comment as `Xh Ym`, and
 marks it `old` after more than one hour.
 
-`bootstrap` adopts the exact `<!-- agent-claim-ledger:v1 -->` issue marker,
-ensures it is locked and labelled, and safely converges concurrent first starts
-to the earliest ledger, visibly closing later duplicates. It refuses to compete
-when another machine-readable claim/ledger contract exists. A claimed issue gets
-one reusable minimal projection comment and a generation-scoped label.
+`bootstrap` does two onboarding jobs in one command, in order, until the
+state-ref cut (issue #164) retires the first of them for good. It first
+adopts the exact `<!-- agent-claim-ledger:v1 -->` issue marker, ensures it is
+locked and labelled, and safely converges concurrent first starts to the
+earliest ledger, visibly closing later duplicates; it refuses to compete when
+another machine-readable claim/ledger contract exists. It then creates or
+reports this repository's claim-state ref, `refs/aco/state`, on its canonical
+remote (`origin`) -- a git ref, invisible in the GitHub UI, never checked out
+into a working tree. A present ref is a pure read: it prints the ref's commit
+id and makes no write. An absent ref (proven by `git ls-remote --exit-code`,
+never inferred from a fetch failure) gets one commit holding an empty state
+tree (`schema.toml`, `version = 1`) pushed as a plain fast-forward. An
+unreachable remote (auth or transport failure) fails loud instead of either
+printing or writing. The ledger half disappears once the state-ref cut lands:
+`claim`/`release`/`rescope`/`status` read and write the issue ledger only
+until then. A claimed issue gets one reusable minimal projection comment
+and a generation-scoped label.
 Use `release --coordinator-override` only for an explicit coordinator action.
 Ledger rollover (`supersede`) requires a coordinator whose named claim is the
 only active claim and owns the ledger issue; the successor is a higher-numbered
