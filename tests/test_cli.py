@@ -5163,6 +5163,65 @@ def test_board_shows_a_container_child_blocked_by_another_open_issue() -> None:
 
     assert "#120 0/1 closed; open: #121 (blocked by #130)" in board.render(projected)
 
+    payload = json.loads(board.board_json(projected))
+    container_json = next(item for item in payload["items"] if item["number"] == 120)
+    assert container_json["container"]["open_children"] == [
+        {"number": 121, "state": "open", "blocked_by": [130]}
+    ]
+
+
+def test_board_json_splits_a_container_childs_foreign_blocker_only_in_block_mode() -> None:
+    """`board --json`'s `container.open_children[].blocked_by` projects the
+    same way `BoardItem.open_blockers` does (#150 A2): local-int only, with
+    a sibling `foreign_blockers` key present only under the block pin."""
+    container = board.Issue(
+        120,
+        "Container",
+        (),
+        agent_claim_body(MINIMAL_BLOCK_TOML),
+        "2026-08-20T00:00:00Z",
+        "2026-08-20T00:00:00Z",
+        kind=board.ItemKind.CONTAINER,
+        children_closed=0,
+        children_total=1,
+    )
+    open_child = board.Issue(
+        121,
+        "Open child",
+        (),
+        agent_claim_body(MINIMAL_BLOCK_TOML),
+        "2026-08-20T00:00:00Z",
+        "2026-08-20T00:00:00Z",
+        blocked_by_count=1,
+    )
+    dependencies = {
+        121: (block_dependency(3), block_dependency(9, repository="overnightworks/other-repo"))
+    }
+
+    projected = projected_board(
+        (container, open_child),
+        (),
+        (),
+        (),
+        board.BoardConfig(body_contract=board.BodyContractMode.BLOCK),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+        children={120: (board.ChildItem(121, board.ChildState.OPEN),)},
+        dependencies=dependencies,
+    )
+
+    payload = json.loads(board.board_json(projected))
+    container_json = next(item for item in payload["items"] if item["number"] == 120)
+    open_children = container_json["container"]["open_children"]
+
+    assert open_children == [
+        {
+            "number": 121,
+            "state": "open",
+            "blocked_by": [3],
+            "foreign_blockers": ["overnightworks/other-repo#9"],
+        }
+    ]
+
 
 def test_board_kind_cell_shows_a_plain_kind_for_a_non_container_item() -> None:
     """`_kind_cell` names a real kind (task/bug/feature) plainly, without the

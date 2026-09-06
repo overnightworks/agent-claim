@@ -2551,14 +2551,30 @@ def next_action(board: Board) -> NextAction | None:
     return None
 
 
+def _project_blocker_references(
+    entry: dict[str, object], key: str, repository: str, *, block_mode: bool
+) -> None:
+    """Rewrite `entry[key]` (a list of `asdict`'d `IssueReference`s) into
+    the pre-#150 local-int list, adding a sibling `foreign_blockers` key
+    only in block mode (A2) -- the one projector `board_json` uses for both
+    `BoardItem.open_blockers` and each open child's `ChildItem.blocked_by`,
+    never a mixed `int | str` list and never re-parsed from a label."""
+    references = cast("list[dict[str, object]]", entry.pop(key))
+    entry[key] = [
+        reference["number"] for reference in references if reference["repository"] == repository
+    ]
+    if block_mode:
+        entry["foreign_blockers"] = [
+            f"{reference['repository']}#{reference['number']}"
+            for reference in references
+            if reference["repository"] != repository
+        ]
+
+
 def board_json(board: Board) -> str:
     payload = asdict(board)
     payload.pop("blocker_references")
     repository = payload.pop("repository")
-    # Pinned by #150 A2: prose JSON stays byte-identical (`open_blockers`
-    # keeps its pre-#150 local-int-only shape); a block-mode item additionally
-    # carries `foreign_blockers` -- present (possibly empty) only under that
-    # pin, never a mixed `int | str` list and never re-parsed from a label.
     block_mode = payload.pop("body_contract") is BodyContractMode.BLOCK
     for group in ("items", "ready_now", "stale", "recovery"):
         for item in payload[group]:
@@ -2567,18 +2583,13 @@ def board_json(board: Board) -> str:
                 None if freed_on is None else freed_on.astimezone(UTC).date().isoformat()
             )
             item.pop("read_state")
-            references = item.pop("open_blockers")
-            item["open_blockers"] = [
-                reference["number"]
-                for reference in references
-                if reference["repository"] == repository
-            ]
-            if block_mode:
-                item["foreign_blockers"] = [
-                    f"{reference['repository']}#{reference['number']}"
-                    for reference in references
-                    if reference["repository"] != repository
-                ]
+            _project_blocker_references(item, "open_blockers", repository, block_mode=block_mode)
+            container = item["container"]
+            if container is not None:
+                for child in container["open_children"]:
+                    _project_blocker_references(
+                        child, "blocked_by", repository, block_mode=block_mode
+                    )
     return json.dumps(payload, default=lambda value: value.value)
 
 
