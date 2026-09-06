@@ -565,24 +565,6 @@ def wide_scope_trip(
     return None
 
 
-def scope_is_wide(
-    scope: tuple[str, ...],
-    *,
-    directories: tuple[str, ...],
-    covered_file_count: int,
-    versioned_file_count: int,
-) -> bool:
-    return (
-        wide_scope_trip(
-            scope,
-            directories=directories,
-            covered_file_count=covered_file_count,
-            versioned_file_count=versioned_file_count,
-        )
-        is not None
-    )
-
-
 def _optional_whole_reason(payload: dict[str, object]) -> str | None:
     if "whole" not in payload:
         return None

@@ -13932,47 +13932,50 @@ def test_cli_rescope_persists_whole_reason(
     assert standing[0].whole_reason == "widen to the docs tree"
 
 
-def test_scope_is_wide_for_more_than_three_paths_any_directory_or_a_share_above_a_quarter() -> None:
+def test_wide_scope_trip_for_paths_directory_or_share_above_the_limits() -> None:
     three = ("a.py", "b.py", "c.py")
     four = (*three, "d.py")
     assert (
-        protocol.scope_is_wide(three, directories=(), covered_file_count=3, versioned_file_count=20)
-        is False
+        protocol.wide_scope_trip(
+            three, directories=(), covered_file_count=3, versioned_file_count=20
+        )
+        is None
     )
     assert (
-        protocol.scope_is_wide(four, directories=(), covered_file_count=4, versioned_file_count=20)
-        is True
+        protocol.wide_scope_trip(
+            four, directories=(), covered_file_count=4, versioned_file_count=20
+        )
+        is not None
     )
     assert (
-        protocol.scope_is_wide(
+        protocol.wide_scope_trip(
             ("docs",), directories=("docs",), covered_file_count=1, versioned_file_count=20
         )
-        is True
+        is not None
     )
     assert (
-        protocol.scope_is_wide(
+        protocol.wide_scope_trip(
             ("a.py",), directories=(), covered_file_count=1, versioned_file_count=4
         )
-        is False
+        is None
     )
     assert (
-        protocol.scope_is_wide(
+        protocol.wide_scope_trip(
             ("a.py", "b.py"), directories=(), covered_file_count=2, versioned_file_count=4
         )
-        is True
+        is not None
     )
     assert (
-        protocol.scope_is_wide(
+        protocol.wide_scope_trip(
             ("a.py",), directories=(), covered_file_count=0, versioned_file_count=0
         )
-        is False
+        is None
     )
 
 
 def test_wide_scope_trip_names_the_condition_in_the_rule_s_priority_order() -> None:
-    """`scope_is_wide` is `wide_scope_trip(...) is not None` -- one rule, one
-    owner -- and a path-count trip outranks a directory trip that would also
-    fire, exactly as `scope_is_wide` already prioritizes them."""
+    """`wide_scope_trip(...) is not None` is the one rule owner -- a
+    path-count trip outranks a directory trip that would also fire."""
     four = ("a.py", "b.py", "c.py", "d.py")
     assert protocol.wide_scope_trip(
         four, directories=("a.py",), covered_file_count=4, versioned_file_count=20
