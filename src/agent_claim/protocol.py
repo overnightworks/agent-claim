@@ -1211,19 +1211,6 @@ def active_claims(comments: tuple[IssueComment, ...]) -> tuple[LedgerActiveClaim
     return aggregate.active
 
 
-def unreadable_claims(comments: tuple[IssueComment, ...]) -> tuple[UnreadableClaim, ...]:
-    """Every trusted claim comment this reader's schema could not parse (issue #136).
-
-    Read-only alongside `active_claims`; unlike `active_claims`, it does not also
-    refuse a reused claim id -- any other ledger corruption `_aggregate_claim_events`
-    itself detects still raises here too. A caller displaying both (`status`) sees
-    the unreadable claims even when duplicate-id repair still owes a `reconcile`.
-    Each record whose `claim_id` names a currently active claim is the same object
-    as that claim's `quarantined_by`.
-    """
-    return _aggregate_claim_events(comments).unreadable
-
-
 def _unreadable_claim_reason(record: UnreadableClaim) -> str:
     """Shared refusal core naming one `UnreadableClaim`'s comment and unknown field
     names -- every fail-closed refusal this reader raises for it quotes this text
@@ -1316,12 +1303,10 @@ def claims_overlap(left: ScopedClaim, right: ScopedClaim) -> bool:
     return _scopes_overlap(left.scope, right.scope)
 
 
-def claims_holding_path(
-    claims: tuple[LedgerActiveClaim, ...], path: str
-) -> tuple[LedgerActiveClaim, ...]:
+def claims_holding_path(claims: tuple[_ScopedClaimT, ...], path: str) -> tuple[_ScopedClaimT, ...]:
     target = _valid_scope([path])
     if len(target) != 1:
-        raise ClaimError("who requires a single repository-relative path")
+        raise ClaimError("status --path requires a single repository-relative path")
     return tuple(claim for claim in claims if _scopes_overlap(claim.scope, target))
 
 
@@ -1442,9 +1427,7 @@ def _claim_conflict_index(claims: tuple[ScopedClaim, ...]) -> ClaimConflictIndex
     )
 
 
-def _related_claim_ids(
-    index: ClaimConflictIndex, selected: tuple[ScopedClaim, ...]
-) -> set[str]:
+def _related_claim_ids(index: ClaimConflictIndex, selected: tuple[ScopedClaim, ...]) -> set[str]:
     related = {claim.claim_id for claim in selected}
     for claim in selected:
         related.update(index.claims_by_identity[_identity_key(claim)])

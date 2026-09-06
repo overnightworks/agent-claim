@@ -46,6 +46,7 @@ from agent_claim.cli import (
     LedgerSupersede,
     LedgerSupersededError,
     _status,
+    _status_json,
     acquire_claim,
     active_claims,
     claim_comment,
@@ -1396,9 +1397,9 @@ def test_read_only_commands_never_write_through_a_reader_only_forge(
 
     for argv in (
         ["status"],
+        ["status", "--path", "src"],
         ["board"],
         ["next"],
-        ["who", "src"],
         ["rulings"],
         ["pr-check", "--pr", "12"],
     ):
@@ -8080,7 +8081,7 @@ def test_unreadable_claim_has_no_claim_id_when_its_own_is_unparseable() -> None:
         "surprise": True,
     }
 
-    unreadable = protocol.unreadable_claims((comment(1, marker(payload)),))
+    unreadable = protocol._aggregate_claim_events((comment(1, marker(payload)),)).unreadable
 
     assert unreadable[0].claim_id is None
 
@@ -8107,7 +8108,7 @@ def test_aggregation_fences_an_unknown_field_comment_instead_of_failing_the_ledg
     ledger = (comment(1, readable), comment(2, newer_writer))
 
     assert [claim.claim_id for claim in active_claims(ledger)] == ["claim-a"]
-    unreadable = protocol.unreadable_claims(ledger)
+    unreadable = protocol._aggregate_claim_events(ledger).unreadable
     assert len(unreadable) == 1
     assert unreadable[0].claim_id == "claim-b"
     assert unreadable[0].unknown_fields == ("surprise",)
@@ -8691,34 +8692,25 @@ def test_status_scope_index_never_rescans_scope_pairs(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    claims: list[LedgerActiveClaim] = []
-    for claim_index in range(50):
-        parsed = parse_claim_event(
-            comment(
-                claim_index + 1,
-                claim_comment(
-                    request(
-                        f"claim-{claim_index}",
-                        issue=claim_index + 100,
-                        scope=tuple(
-                            f"area-{claim_index}/path-{scope_index}" for scope_index in range(32)
-                        ),
-                    )
-                ),
-                created_at="2026-08-21T00:00:00Z",
-            )
+    claims = tuple(
+        _active_claim(
+            claim_id=f"claim-{claim_index}",
+            issue=claim_index + 100,
+            scope=tuple(f"area-{claim_index}/path-{scope_index}" for scope_index in range(32)),
         )
-        assert isinstance(parsed, LedgerActiveClaim)
-        claims.append(parsed)
+        for claim_index in range(50)
+    )
+    opened_at = datetime(2026, 8, 21, tzinfo=UTC)
+    ages: dict[str, datetime] = {claim.claim_id: opened_at for claim in claims}
 
     def scope_pair_scan(*args, **kwargs):
         pytest.fail("status must use its single scope index")
 
     monkeypatch.setattr(protocol, "claims_conflict", scope_pair_scan)
 
-    assert _status(tuple(claims), None) == 0
+    assert _status(claims, None, ages) == 0
     assert capsys.readouterr().out.count("CLAIMED") == 50
-    assert _status(tuple(claims), 100) == 0
+    assert _status(claims, 100, ages) == 0
     assert capsys.readouterr().out.count("CLAIMED") == 1
 
 
@@ -9989,25 +9981,20 @@ def test_paused_old_release_fails_frozen_without_mutating_successor_projection(
 def test_status_reports_repository_scope_overlaps_as_notes(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    first = parse_claim_event(comment(1, claim_comment(request(issue=72, scope=("shared",)))))
-    second = parse_claim_event(
-        comment(
-            2,
-            claim_comment(request("claim-b", issue=73, scope=("shared/file.py",))),
-        )
-    )
-    assert isinstance(first, LedgerActiveClaim)
-    assert isinstance(second, LedgerActiveClaim)
+    first = _active_claim(issue=72, scope=("shared",))
+    second = _active_claim(claim_id="claim-b", issue=73, scope=("shared/file.py",))
+    opened_at = datetime(2026, 8, 21, tzinfo=UTC)
+    ages: dict[str, datetime] = {first.claim_id: opened_at, second.claim_id: opened_at}
 
-    exit_code = _status((first, second), None)
+    exit_code = _status((first, second), None, ages)
 
     assert exit_code == 0
     rendered = capsys.readouterr().out
     assert rendered.count("CLAIMED") == 2
     assert "CONFLICT" not in rendered
     assert "overlaps issue #73 (claim-b)" in rendered
-    assert "overlaps issue #72 (claim-a)" in rendered
-    assert _status((first, second), 72) == 0
+    assert "overlaps issue #72 (cli-claim)" in rendered
+    assert _status((first, second), 72, ages) == 0
     issue_rendered = capsys.readouterr().out
     assert issue_rendered.count("CLAIMED") == 2
     assert "overlaps issue #73 (claim-b)" in issue_rendered
@@ -10016,16 +10003,12 @@ def test_status_reports_repository_scope_overlaps_as_notes(
 def test_status_notes_a_scope_that_is_claimed_after_its_descendant(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    descendant = parse_claim_event(
-        comment(1, claim_comment(request(issue=72, scope=("shared/file.py",))))
-    )
-    parent = parse_claim_event(
-        comment(2, claim_comment(request("claim-b", issue=73, scope=("shared",))))
-    )
-    assert isinstance(descendant, LedgerActiveClaim)
-    assert isinstance(parent, LedgerActiveClaim)
+    descendant = _active_claim(issue=72, scope=("shared/file.py",))
+    parent = _active_claim(claim_id="claim-b", issue=73, scope=("shared",))
+    opened_at = datetime(2026, 8, 21, tzinfo=UTC)
+    ages: dict[str, datetime] = {descendant.claim_id: opened_at, parent.claim_id: opened_at}
 
-    assert _status((descendant, parent), None) == 0
+    assert _status((descendant, parent), None, ages) == 0
     rendered = capsys.readouterr().out
     assert rendered.count("CLAIMED") == 2
     assert "CONFLICT" not in rendered
@@ -12724,7 +12707,7 @@ def test_cli_claim_omitted_base_and_branch_posts_filled_checkout(
     assert posted.scope == ("src",)
 
 
-def test_cli_status_claim_release_and_adapter_error_exit_codes(
+def test_cli_claim_and_release_round_trip_exit_codes(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -12754,7 +12737,6 @@ def test_cli_status_claim_release_and_adapter_error_exit_codes(
             "cli-claim",
         ]
     )
-    status = issue_claim.main(["--repo", "example/agent-claim", "status", "72"])
     released = issue_claim.main(
         [
             "--repo",
@@ -12772,15 +12754,23 @@ def test_cli_status_claim_release_and_adapter_error_exit_codes(
         ]
     )
 
-    assert (claimed, status, released) == (0, 0, 0)
-    assert "CLAIMED issue #72" in capsys.readouterr().out
+    assert (claimed, released) == (0, 0)
 
+
+def test_cli_dispatch_adapter_error_denies_with_exit_code_two(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`main`'s shared `_dispatch` error handling (still the path every
+    command but `status`/`protect`/`policy` takes -- issue #176): a forge
+    adapter construction failure denies loud with exit 2, never a
+    traceback."""
     monkeypatch.setattr(
         github,
         "GitHubForge",
         lambda repository: (_ for _ in ()).throw(ClaimError("adapter failed")),
     )
-    assert issue_claim.main(["--repo", "example/agent-claim", "status"]) == 2
+    assert issue_claim.main(["--repo", "example/agent-claim", "board"]) == 2
     assert "ERROR: adapter failed" in capsys.readouterr().err
 
 
@@ -12921,7 +12911,40 @@ def _patch_status_cli(
     monkeypatch.setattr(issue_claim, "datetime", FixedDateTime)
 
 
-def test_cli_reconcile_repairs_a_poisoned_ledger_and_status_reads_it_afterwards(
+_STATUS_NOW = datetime(2026, 8, 21, tzinfo=UTC)
+
+
+def _patch_status_store(
+    monkeypatch: pytest.MonkeyPatch,
+    *claims: protocol.ActiveClaim,
+    ages: Mapping[str, datetime] | None = None,
+) -> None:
+    """Fake `status`'s two store reads (issue #176): the fetched claim state,
+    and each claim's `opened_commit` committer date (every claim reads as
+    opened at `_STATUS_NOW` -- 0h 0m old -- unless `ages` names it by claim
+    id). Every `status`/`status --path` test builds its live claims via
+    `_active_claim` and wires them in here instead of posting through a
+    ledger-comment `FakeForge`.
+    """
+    monkeypatch.setattr(checkout, "remote_url", lambda remote: f"git@github.com:{REPOSITORY}.git")
+    keyed = {protocol.claim_key(claim.identity, claim.branch): claim for claim in claims}
+    state = protocol.ClaimState(tip=protocol.ObjectId(BASE), claims=keyed)
+    monkeypatch.setattr(store, "fetch_state", lambda *, worktree, remote: state)
+    resolved_ages: dict[str, datetime] = {claim.claim_id: _STATUS_NOW for claim in claims}
+    if ages is not None:
+        resolved_ages.update(ages)
+
+    def fake_committer_date(
+        *, worktree: Path, tip: protocol.ObjectId, commit: protocol.ObjectId
+    ) -> datetime:
+        matching = next(claim for claim in claims if claim.opened_commit == commit)
+        return resolved_ages[matching.claim_id]
+
+    monkeypatch.setattr(store, "committer_date", fake_committer_date)
+    monkeypatch.setattr(issue_claim, "datetime", FixedDateTime)
+
+
+def test_cli_reconcile_repairs_a_poisoned_ledger(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -12934,9 +12957,6 @@ def test_cli_reconcile_repairs_a_poisoned_ledger_and_status_reads_it_afterwards(
     reconcile_out = capsys.readouterr().out
     assert "REPAIRED claim 'claim-a': superseded #1 -> survivor #2" in reconcile_out
     assert "RECONCILED #72" in reconcile_out
-
-    assert issue_claim.main(["--repo", "example/agent-claim", "status", "72"]) == 0
-    assert "CLAIMED issue #72" in capsys.readouterr().out
 
 
 def test_cli_reconcile_targeted_issue_succeeds_on_a_mixed_ledger(
@@ -12992,63 +13012,53 @@ def test_cli_reconcile_still_clears_stale_labels_when_ledger_is_frozen(
     assert client.labels == set()
 
 
-def test_cli_status_empty_ledger_prints_ledger_then_unclaimed_repository(
+def test_cli_status_empty_store_prints_unclaimed_repository(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    _patch_status_cli(monkeypatch, FakeForge())
+    _patch_status_store(monkeypatch)
 
     assert issue_claim.main(["--repo", "example/agent-claim", "status"]) == 0
-    assert capsys.readouterr().out == (f"LEDGER #{LEDGER_ISSUE}\nUNCLAIMED repository\n")
+    assert capsys.readouterr().out == "UNCLAIMED repository\n"
 
 
-def test_cli_status_issue_with_no_claim_prints_ledger_then_unclaimed_issue(
+def test_cli_status_before_bootstrap_prints_unclaimed_repository(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    _patch_status_cli(monkeypatch, FakeForge())
+    """A repository with no `refs/aco/state` at all (`EMPTY_STATE`, `tip is
+    None`) still answers `status` plainly -- there is nothing to derive a
+    claim's age from yet because there are no claims yet either."""
+    monkeypatch.setattr(checkout, "remote_url", lambda remote: f"git@github.com:{REPOSITORY}.git")
+    monkeypatch.setattr(store, "fetch_state", lambda *, worktree, remote: protocol.EMPTY_STATE)
+    monkeypatch.setattr(issue_claim, "datetime", FixedDateTime)
+
+    assert issue_claim.main(["--repo", "example/agent-claim", "status"]) == 0
+    assert capsys.readouterr().out == "UNCLAIMED repository\n"
+
+
+def test_cli_status_issue_with_no_claim_prints_unclaimed_issue(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _patch_status_store(monkeypatch)
 
     assert issue_claim.main(["--repo", "example/agent-claim", "status", "72"]) == 0
-    assert capsys.readouterr().out == (f"LEDGER #{LEDGER_ISSUE}\nUNCLAIMED issue #72\n")
+    assert capsys.readouterr().out == "UNCLAIMED issue #72\n"
 
 
-def test_cli_status_after_claim_prints_ledger_then_claimed(
+def test_cli_status_shows_a_live_store_claim(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    _patch_status_cli(monkeypatch, FakeForge())
-    monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
-    monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
-
-    assert (
-        issue_claim.main(
-            [
-                "--repo",
-                "example/agent-claim",
-                "claim",
-                "72",
-                "--agent",
-                "Codex Sol",
-                "--role",
-                "builder",
-                "--base",
-                BASE,
-                "--branch",
-                "codex/issue-72",
-                "--scope",
-                "src",
-                "--claim-id",
-                "cli-claim",
-            ]
-        )
-        == 0
+    claimed = _active_claim(
+        "Codex Sol", claim_id="cli-claim", issue=72, branch="codex/issue-72", scope=("src",)
     )
-    capsys.readouterr()
+    _patch_status_store(monkeypatch, claimed)
 
     status = issue_claim.main(["--repo", "example/agent-claim", "status", "72"])
     assert status == 0
     assert capsys.readouterr().out == (
-        f"LEDGER #{LEDGER_ISSUE}\n"
         f"CLAIMED issue #72: Codex Sol (builder) base={BASE} "
         "branch=codex/issue-72 claim=cli-claim 0h 0m\n"
         "  src\n"
@@ -13058,10 +13068,14 @@ def test_cli_status_after_claim_prints_ledger_then_claimed(
 def test_cli_status_prints_the_resource_line_for_an_allocated_hold(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    client = _claims_client(
-        request("hop-1", "Ada", issue=72, scope=("src",), resource="schema-hop", resource_value=1)
+    claimed = _active_claim(
+        "Ada",
+        claim_id="hop-1",
+        issue=72,
+        scope=("src",),
+        resource=protocol.ResourceHold("schema-hop", 1),
     )
-    _patch_status_cli(monkeypatch, client)
+    _patch_status_store(monkeypatch, claimed)
 
     status = issue_claim.main(["--repo", "example/agent-claim", "status", "72"])
 
@@ -13069,12 +13083,16 @@ def test_cli_status_prints_the_resource_line_for_an_allocated_hold(
     assert "  resource schema-hop=1\n" in capsys.readouterr().out
 
 
-def test_cli_lane_claim_status_and_release_round_trip_without_issue_number(
+def test_cli_lane_claim_and_release_round_trip_without_issue_number(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """The full `Done when` #1 story: a docs/ checkout claims, is visible in
-    `status`, and releases again — all without ever passing an issue number."""
+    """The `claim`/`release` half of `Done when` #1: a docs/ checkout claims
+    and releases again, all without ever passing an issue number. (The
+    `status` half -- that the store shows a live lane claim -- is proven
+    separately below now that `status` no longer reads what this ledger
+    `claim`/`release` pair posts; issue #176 migrates one command at a
+    time, and `claim`/`release` have not moved onto the store yet.)"""
     _set_agent_identity_env(monkeypatch, {"AGENT_CLAIM_AGENT": "Codex Sol"})
     client = FakeForge()
     _patch_status_cli(monkeypatch, client)
@@ -13105,19 +13123,32 @@ def test_cli_lane_claim_status_and_release_round_trip_without_issue_number(
     )
     capsys.readouterr()
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "status"]) == 0
-    assert capsys.readouterr().out == (
-        f"LEDGER #{LEDGER_ISSUE}\n"
-        f"CLAIMED lane docs/lane-cleanup: Codex Sol (builder) base={BASE} "
-        "branch=docs/lane-cleanup claim=cli-lane-claim 0h 0m\n"
-        "  docs\n"
-    )
-
     released = issue_claim.main(
         ["--repo", "example/agent-claim", "release", "--abandoned", "stopped"]
     )
     assert released == 0
     assert active_claims(tuple(client.comments[LEDGER_ISSUE])) == ()
+
+
+def test_cli_status_shows_a_live_lane_claim(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    claimed = _active_claim(
+        "Codex Sol",
+        claim_id="cli-lane-claim",
+        lane=True,
+        branch="docs/lane-cleanup",
+        scope=("docs",),
+    )
+    _patch_status_store(monkeypatch, claimed)
+
+    assert issue_claim.main(["--repo", "example/agent-claim", "status"]) == 0
+    assert capsys.readouterr().out == (
+        f"CLAIMED lane docs/lane-cleanup: Codex Sol (builder) base={BASE} "
+        "branch=docs/lane-cleanup claim=cli-lane-claim 0h 0m\n"
+        "  docs\n"
+    )
 
 
 @pytest.mark.parametrize("command", ["claim", "release"])
@@ -13176,29 +13207,23 @@ def test_cli_release_requires_a_non_empty_current_branch_without_an_issue(
     assert "lane release requires a non-empty current branch" in capsys.readouterr().err
 
 
-def test_cli_status_overlapping_protocol_comments_print_ledger_then_notes(
+def test_cli_status_overlapping_store_claims_print_notes(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    client = FakeForge(
-        {
-            LEDGER_ISSUE: [
-                comment(1, claim_comment(request(issue=72, scope=("shared",)))),
-                comment(
-                    2,
-                    claim_comment(
-                        request("claim-b", "Grok 4.6", issue=73, scope=("shared/file.py",))
-                    ),
-                ),
-            ]
-        }
+    first = _active_claim("Codex Sol", claim_id="claim-a", issue=72, scope=("shared",))
+    second = _active_claim(
+        "Grok 4.6",
+        claim_id="claim-b",
+        issue=73,
+        branch="codex/issue-73-claims",
+        scope=("shared/file.py",),
     )
-    _patch_status_cli(monkeypatch, client)
+    _patch_status_store(monkeypatch, first, second)
 
     status = issue_claim.main(["--repo", "example/agent-claim", "status"])
     assert status == 0
     assert capsys.readouterr().out == (
-        f"LEDGER #{LEDGER_ISSUE}\n"
         f"CLAIMED issue #72: Codex Sol (builder) base={BASE} "
         "branch=codex/issue-72-claims claim=claim-a 0h 0m\n"
         "  shared\n"
@@ -13207,66 +13232,6 @@ def test_cli_status_overlapping_protocol_comments_print_ledger_then_notes(
         "branch=codex/issue-73-claims claim=claim-b 0h 0m\n"
         "  shared/file.py\n"
         "  overlaps issue #72 (claim-a)\n"
-    )
-
-
-def test_cli_status_shows_an_unreadable_claim_alongside_readable_ones(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Issue #136: a v0.11-shaped comment among v0.10 comments no longer fails
-    `status` outright; it is named as unreadable, with its unknown fields, next to
-    every claim this reader still understands."""
-    client = FakeForge(
-        {
-            LEDGER_ISSUE: [
-                comment(1, claim_comment(request(issue=72, scope=("shared",)))),
-                unreadable_ledger_comment(2),
-            ]
-        }
-    )
-    _patch_status_cli(monkeypatch, client)
-
-    status = issue_claim.main(["--repo", "example/agent-claim", "status"])
-    assert status == 0
-    assert capsys.readouterr().out == (
-        f"LEDGER #{LEDGER_ISSUE}\n"
-        f"CLAIMED issue #72: Codex Sol (builder) base={BASE} "
-        "branch=codex/issue-72-claims claim=claim-a 0h 0m\n"
-        "  shared\n"
-        "UNREADABLE claim claim-b: unreadable, upgrade the installed tool\n"
-        "  fields: surprise\n"
-        f"  {unreadable_ledger_comment(2).url}\n"
-    )
-
-
-def test_cli_status_json_lists_an_unreadable_claim(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    client = FakeForge({LEDGER_ISSUE: [unreadable_ledger_comment(1)]})
-    _patch_status_cli(monkeypatch, client)
-
-    status = issue_claim.main(["--repo", "example/agent-claim", "status", "--json"])
-    assert status == 0
-    assert capsys.readouterr().out == (
-        json.dumps(
-            {
-                "ledger": LEDGER_ISSUE,
-                "issue": None,
-                "state": "UNCLAIMED",
-                "claims": [],
-                "unreadable": [
-                    {
-                        "claim_id": "claim-b",
-                        "comment_url": unreadable_ledger_comment(1).url,
-                        "fields": ["surprise"],
-                        "note": "unreadable, upgrade the installed tool",
-                    }
-                ],
-            }
-        )
-        + "\n"
     )
 
 
@@ -13282,29 +13247,6 @@ def test_cli_board_and_next_succeed_with_an_unreadable_claim_on_the_ledger(
     assert issue_claim.main(["--repo", "example/agent-claim", "board"]) == 0
     capsys.readouterr()
     assert issue_claim.main(["--repo", "example/agent-claim", "next"]) == 3
-
-
-def test_cli_who_succeeds_with_an_unreadable_claim_on_the_ledger(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """`who` is read-only (issue #136): it still finds the readable holder of a
-    path even while an unrelated comment on the ledger is unreadable."""
-    client = FakeForge(
-        {
-            LEDGER_ISSUE: [
-                comment(1, claim_comment(request(issue=72, scope=("shared",)))),
-                unreadable_ledger_comment(2),
-            ]
-        }
-    )
-    _patch_status_cli(monkeypatch, client)
-
-    assert issue_claim.main(["--repo", "example/agent-claim", "who", "shared/file.py"]) == 0
-    assert (
-        "CLAIMED shared/file.py issue #72: Codex Sol (builder) claim=claim-a"
-        in capsys.readouterr().out
-    )
 
 
 def test_cli_claim_refuses_while_an_unreadable_claim_stands(
@@ -13408,10 +13350,11 @@ def test_cli_readable_then_unreadable_rescope_quarantines_release_and_pr_check(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """The lifecycle finding 1 fixes: a claim posted normally is later rescoped by
-    a newer writer whose rescope this reader cannot parse. `status`/`board`/`next`
-    still see the claim, but it is quarantined: its own-branch `pr-check` and its
-    `release` both refuse it, naming the rescope comment, leaving the ledger
-    untouched."""
+    a newer writer whose rescope this reader cannot parse. `board`/`next` still
+    see the claim (status's own quarantine display moved off the ledger with
+    issue #176 and is no longer exercised here), but it is quarantined: its
+    own-branch `pr-check` and its `release` both refuse it, naming the rescope
+    comment, leaving the ledger untouched."""
     claimed_request = request(
         "landing", "Codex Sol", issue=72, branch="codex/issue-72-claims", scope=("src",)
     )
@@ -13434,12 +13377,6 @@ def test_cli_readable_then_unreadable_rescope_quarantines_release_and_pr_check(
     )
     _patch_status_cli(monkeypatch, client)
     _set_agent_identity_env(monkeypatch, {issue_claim.AGENT_CLAIM_AGENT_ENV: "Codex Sol"})
-
-    status = issue_claim.main(["--repo", "example/agent-claim", "status", "72"])
-    assert status == 0
-    status_out = capsys.readouterr().out
-    assert "CLAIMED issue #72: Codex Sol (builder)" in status_out
-    assert "UNREADABLE claim landing: unreadable, upgrade the installed tool" in status_out
 
     assert issue_claim.main(["--repo", "example/agent-claim", "board"]) == 0
     capsys.readouterr()
@@ -13863,79 +13800,23 @@ def test_cli_rescope_race_repair_hint_includes_the_pre_race_whole_reason(
     )
 
 
-def test_cli_status_hard_fails_on_a_comment_missing_a_required_field_plus_an_extra_one(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Missing a required field is a corrupt record, not a newer writer, even when
-    an unrecognized field is also present (issue #136): the CLI still hard-fails
-    the whole ledger read with the old message, never treating it as unreadable."""
-    corrupt = comment(
-        1,
-        marker(
-            {
-                "action": "claim",
-                "agent": "Codex Sol",
-                "branch": "topic",
-                "claim_id": "claim-a",
-                "issue": 71,
-                "role": "builder",
-                "scope": ["src"],
-                "surprise": True,
-            }
-        ),
-    )
-    client = FakeForge({LEDGER_ISSUE: [corrupt]})
-    _patch_status_cli(monkeypatch, client)
-
-    status = issue_claim.main(["--repo", "example/agent-claim", "status"])
-    captured = capsys.readouterr()
-
-    assert status == 2
-    assert "fields differ" in captured.err
-    assert "upgrade" not in captured.err
-
-
-def test_cli_status_without_ledger_errors_and_prints_no_ledger_line(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    _patch_status_cli(monkeypatch, FakeForge(), ledger=None)
-
-    assert issue_claim.main(["--repo", "example/agent-claim", "status"]) == 2
-    captured = capsys.readouterr()
-    assert captured.out == ""
-    assert "ERROR:" in captured.err
-    assert "no agent-claim ledger exists" in captured.err
-    assert "LEDGER" not in captured.out
-
-
 def test_status_direct_empty_claims_prints_unclaimed_repository_without_ledger(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    assert _status((), None) == 0
+    assert _status((), None, {}) == 0
     assert capsys.readouterr().out == "UNCLAIMED repository\n"
 
 
-def test_cli_status_json_empty_ledger_prints_unclaimed_object(
+def test_cli_status_json_empty_store_prints_unclaimed_object(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    _patch_status_cli(monkeypatch, FakeForge())
+    _patch_status_store(monkeypatch)
 
     assert issue_claim.main(["--repo", "example/agent-claim", "status", "--json"]) == 0
     assert (
         capsys.readouterr().out
-        == json.dumps(
-            {
-                "ledger": LEDGER_ISSUE,
-                "issue": None,
-                "state": "UNCLAIMED",
-                "claims": [],
-                "unreadable": [],
-            }
-        )
-        + "\n"
+        == json.dumps({"issue": None, "state": "UNCLAIMED", "claims": []}) + "\n"
     )
 
 
@@ -13943,56 +13824,23 @@ def test_cli_status_json_issue_with_no_claim_prints_unclaimed_object(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    _patch_status_cli(monkeypatch, FakeForge())
+    _patch_status_store(monkeypatch)
 
     assert issue_claim.main(["--repo", "example/agent-claim", "status", "72", "--json"]) == 0
     assert (
         capsys.readouterr().out
-        == json.dumps(
-            {
-                "ledger": LEDGER_ISSUE,
-                "issue": 72,
-                "state": "UNCLAIMED",
-                "claims": [],
-                "unreadable": [],
-            }
-        )
-        + "\n"
+        == json.dumps({"issue": 72, "state": "UNCLAIMED", "claims": []}) + "\n"
     )
 
 
-def test_cli_status_json_after_claim_prints_claimed_object(
+def test_cli_status_json_shows_a_live_store_claim(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    _patch_status_cli(monkeypatch, FakeForge())
-    monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
-    monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
-
-    assert (
-        issue_claim.main(
-            [
-                "--repo",
-                "example/agent-claim",
-                "claim",
-                "72",
-                "--agent",
-                "Codex Sol",
-                "--role",
-                "builder",
-                "--base",
-                BASE,
-                "--branch",
-                "codex/issue-72",
-                "--scope",
-                "src",
-                "--claim-id",
-                "cli-claim",
-            ]
-        )
-        == 0
+    claimed = _active_claim(
+        "Codex Sol", claim_id="cli-claim", issue=72, branch="codex/issue-72", scope=("src",)
     )
-    capsys.readouterr()
+    _patch_status_store(monkeypatch, claimed)
 
     status = issue_claim.main(["--repo", "example/agent-claim", "status", "72", "--json"])
     assert status == 0
@@ -14000,7 +13848,6 @@ def test_cli_status_json_after_claim_prints_claimed_object(
         capsys.readouterr().out
         == json.dumps(
             {
-                "ledger": LEDGER_ISSUE,
                 "issue": 72,
                 "state": "CLAIMED",
                 "claims": [
@@ -14021,31 +13868,25 @@ def test_cli_status_json_after_claim_prints_claimed_object(
                         "old": False,
                     }
                 ],
-                "unreadable": [],
             }
         )
         + "\n"
     )
 
 
-def test_cli_status_json_overlapping_protocol_comments_print_claimed_object(
+def test_cli_status_json_overlapping_store_claims_print_claimed_object(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    client = FakeForge(
-        {
-            LEDGER_ISSUE: [
-                comment(1, claim_comment(request(issue=72, scope=("shared",)))),
-                comment(
-                    2,
-                    claim_comment(
-                        request("claim-b", "Grok 4.6", issue=73, scope=("shared/file.py",))
-                    ),
-                ),
-            ]
-        }
+    first = _active_claim("Codex Sol", claim_id="claim-a", issue=72, scope=("shared",))
+    second = _active_claim(
+        "Grok 4.6",
+        claim_id="claim-b",
+        issue=73,
+        branch="codex/issue-73-claims",
+        scope=("shared/file.py",),
     )
-    _patch_status_cli(monkeypatch, client)
+    _patch_status_store(monkeypatch, first, second)
 
     status = issue_claim.main(["--repo", "example/agent-claim", "status", "--json"])
     assert status == 0
@@ -14053,7 +13894,6 @@ def test_cli_status_json_overlapping_protocol_comments_print_claimed_object(
         capsys.readouterr().out
         == json.dumps(
             {
-                "ledger": LEDGER_ISSUE,
                 "issue": None,
                 "state": "CLAIMED",
                 "claims": [
@@ -14104,7 +13944,6 @@ def test_cli_status_json_overlapping_protocol_comments_print_claimed_object(
                         "old": False,
                     },
                 ],
-                "unreadable": [],
             }
         )
         + "\n"
@@ -14115,20 +13954,15 @@ def test_cli_status_json_issue_on_overlap_prints_related_claimed_object(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    client = FakeForge(
-        {
-            LEDGER_ISSUE: [
-                comment(1, claim_comment(request(issue=72, scope=("shared",)))),
-                comment(
-                    2,
-                    claim_comment(
-                        request("claim-b", "Grok 4.6", issue=73, scope=("shared/file.py",))
-                    ),
-                ),
-            ]
-        }
+    first = _active_claim("Codex Sol", claim_id="claim-a", issue=72, scope=("shared",))
+    second = _active_claim(
+        "Grok 4.6",
+        claim_id="claim-b",
+        issue=73,
+        branch="codex/issue-73-claims",
+        scope=("shared/file.py",),
     )
-    _patch_status_cli(monkeypatch, client)
+    _patch_status_store(monkeypatch, first, second)
 
     status = issue_claim.main(["--repo", "example/agent-claim", "status", "72", "--json"])
     assert status == 0
@@ -14136,7 +13970,6 @@ def test_cli_status_json_issue_on_overlap_prints_related_claimed_object(
         capsys.readouterr().out
         == json.dumps(
             {
-                "ledger": LEDGER_ISSUE,
                 "issue": 72,
                 "state": "CLAIMED",
                 "claims": [
@@ -14187,47 +14020,10 @@ def test_cli_status_json_issue_on_overlap_prints_related_claimed_object(
                         "old": False,
                     },
                 ],
-                "unreadable": [],
             }
         )
         + "\n"
     )
-
-
-def test_cli_status_json_reports_conflict_state_for_duplicate_issue_claims(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """Two live claims on the same issue are a genuine conflict (same identity),
-    unlike the merely path-overlapping claims on different issues above --
-    both the top-level state and each claim's own state must say so."""
-    client = _claims_client(
-        request("claim-a", "Ada", issue=72, scope=("src/a.py",)),
-        request("claim-b", "Grok 4.6", issue=72, scope=("src/b.py",)),
-    )
-    _patch_status_cli(monkeypatch, client)
-
-    status = issue_claim.main(["--repo", "example/agent-claim", "status", "72", "--json"])
-    payload = json.loads(capsys.readouterr().out)
-
-    assert status == 2
-    assert payload["state"] == "CONFLICT"
-    assert {claim["claim_id"]: claim["state"] for claim in payload["claims"]} == {
-        "claim-a": "CONFLICT",
-        "claim-b": "CONFLICT",
-    }
-
-
-def test_cli_status_json_without_ledger_errors_and_prints_no_stdout(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    _patch_status_cli(monkeypatch, FakeForge(), ledger=None)
-
-    assert issue_claim.main(["--repo", "example/agent-claim", "status", "--json"]) == 2
-    captured = capsys.readouterr()
-    assert captured.out == ""
-    assert "ERROR:" in captured.err
-    assert "no agent-claim ledger exists" in captured.err
 
 
 def test_cli_claim_and_release_accept_json_while_parent_and_bootstrap_reject_it() -> None:
@@ -14889,17 +14685,19 @@ def test_cli_claim_refuses_a_directory_plus_child_scope_without_whole(
     assert LEDGER_ISSUE not in client.comments
 
 
-def test_cli_who_prints_the_claim_holding_a_path(
+def test_cli_status_path_prints_the_claim_holding_a_path(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    client = _claims_client(
-        request("mine", "Ada", issue=72, scope=("docs/PRODUCT.md", "src/widget.py"))
+    claimed_claim = _active_claim(
+        "Ada", claim_id="mine", issue=72, scope=("docs/PRODUCT.md", "src/widget.py")
     )
-    _patch_status_cli(monkeypatch, client)
+    _patch_status_store(monkeypatch, claimed_claim)
 
-    claimed = issue_claim.main(["--repo", "example/agent-claim", "who", "docs/PRODUCT.md"])
-    free = issue_claim.main(["--repo", "example/agent-claim", "who", "README.md"])
+    claimed = issue_claim.main(
+        ["--repo", "example/agent-claim", "status", "--path", "docs/PRODUCT.md"]
+    )
+    free = issue_claim.main(["--repo", "example/agent-claim", "status", "--path", "README.md"])
     claimed_out = capsys.readouterr().out
 
     assert claimed == 0
@@ -14908,18 +14706,20 @@ def test_cli_who_prints_the_claim_holding_a_path(
     assert "UNCLAIMED README.md" in claimed_out
 
 
-def test_cli_who_json_prints_holder_or_unclaimed(
+def test_cli_status_path_json_prints_holder_or_unclaimed(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    client = _claims_client(request("mine", "Ada", issue=72, scope=("docs",)))
-    _patch_status_cli(monkeypatch, client)
+    claimed_claim = _active_claim("Ada", claim_id="mine", issue=72, scope=("docs",))
+    _patch_status_store(monkeypatch, claimed_claim)
 
     descendant = issue_claim.main(
-        ["--repo", "example/agent-claim", "who", "docs/decisions/one.md", "--json"]
+        ["--repo", "example/agent-claim", "status", "--path", "docs/decisions/one.md", "--json"]
     )
     claimed = json.loads(capsys.readouterr().out)
-    free = issue_claim.main(["--repo", "example/agent-claim", "who", "src/widget.py", "--json"])
+    free = issue_claim.main(
+        ["--repo", "example/agent-claim", "status", "--path", "src/widget.py", "--json"]
+    )
     unclaimed = json.loads(capsys.readouterr().out)
 
     assert descendant == 0
@@ -14928,7 +14728,6 @@ def test_cli_who_json_prints_holder_or_unclaimed(
     assert claimed["claims"][0]["claim_id"] == "mine"
     assert free == 0
     assert unclaimed == {
-        "ledger": LEDGER_ISSUE,
         "path": "src/widget.py",
         "state": "UNCLAIMED",
         "claims": [],
@@ -15332,7 +15131,7 @@ def test_claim_age_old_compares_real_age_against_the_threshold() -> None:
     assert board.claim_is_old(exactly_one_hour) is False
 
 
-def test_status_and_board_show_claim_age_from_the_claim_comment(
+def test_board_shows_claim_age_from_the_claim_comment(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
@@ -15345,16 +15144,6 @@ def test_status_and_board_show_claim_age_from_the_claim_comment(
     monkeypatch.setattr(checkout, "_git_output", lambda _arguments: str(tmp_path))
     monkeypatch.setattr(checkout, "trunk_landing_times", lambda: ())
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "status", "72"]) == 0
-    status_out = capsys.readouterr().out
-    assert " 0h 30m\n" in status_out
-    assert " old" not in status_out.split("CLAIMED", 1)[1]
-
-    assert issue_claim.main(["--repo", "example/agent-claim", "status", "72", "--json"]) == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["claims"][0]["age"] == "0h 30m"
-    assert payload["claims"][0]["old"] is False
-
     assert issue_claim.main(["--repo", "example/agent-claim", "board"]) == 0
     assert "Ada (builder) 0h 30m" in capsys.readouterr().out
     assert issue_claim.main(["--repo", "example/agent-claim", "board", "--json"]) == 0
@@ -15363,7 +15152,7 @@ def test_status_and_board_show_claim_age_from_the_claim_comment(
     assert item["claim_old"] is False
 
 
-def test_status_and_board_mark_a_claim_old_after_sixty_one_minutes(
+def test_board_marks_a_claim_old_after_sixty_one_minutes(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
@@ -15376,6 +15165,45 @@ def test_status_and_board_mark_a_claim_old_after_sixty_one_minutes(
     monkeypatch.setattr(checkout, "_git_output", lambda _arguments: str(tmp_path))
     monkeypatch.setattr(checkout, "trunk_landing_times", lambda: ())
 
+    assert issue_claim.main(["--repo", "example/agent-claim", "board"]) == 0
+    assert "Ada (builder) 1h 1m old" in capsys.readouterr().out
+
+
+def test_cli_status_shows_claim_age_from_the_opened_commit(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The store equivalent of the ledger's claim-age display (issue #176):
+    age comes from `opened_commit`'s committer date (faked here via
+    `_patch_status_store`'s `ages`), never a later rescope -- that
+    invariant is `apply`'s own (see test_store.py), not re-proven here."""
+    claimed = _active_claim(
+        "Ada", claim_id="mine", issue=72, branch="codex/issue-72", scope=("src",)
+    )
+    opened_at = datetime.fromisoformat("2026-08-20T23:30:00+00:00")
+    _patch_status_store(monkeypatch, claimed, ages={claimed.claim_id: opened_at})
+
+    assert issue_claim.main(["--repo", "example/agent-claim", "status", "72"]) == 0
+    status_out = capsys.readouterr().out
+    assert " 0h 30m\n" in status_out
+    assert " old" not in status_out.split("CLAIMED", 1)[1]
+
+    assert issue_claim.main(["--repo", "example/agent-claim", "status", "72", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["claims"][0]["age"] == "0h 30m"
+    assert payload["claims"][0]["old"] is False
+
+
+def test_cli_status_marks_a_claim_old_after_sixty_one_minutes(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    claimed = _active_claim(
+        "Ada", claim_id="mine", issue=72, branch="codex/issue-72", scope=("src",)
+    )
+    opened_at = datetime.fromisoformat("2026-08-20T22:59:00+00:00")
+    _patch_status_store(monkeypatch, claimed, ages={claimed.claim_id: opened_at})
+
     assert issue_claim.main(["--repo", "example/agent-claim", "status", "72"]) == 0
     assert " 1h 1m old\n" in capsys.readouterr().out
 
@@ -15383,31 +15211,6 @@ def test_status_and_board_mark_a_claim_old_after_sixty_one_minutes(
     payload = json.loads(capsys.readouterr().out)
     assert payload["claims"][0]["age"] == "1h 1m"
     assert payload["claims"][0]["old"] is True
-
-    assert issue_claim.main(["--repo", "example/agent-claim", "board"]) == 0
-    assert "Ada (builder) 1h 1m old" in capsys.readouterr().out
-
-
-def test_claim_age_uses_the_claim_comment_not_a_later_rescope(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    claimed = request("mine", "Ada", issue=72, branch="codex/issue-72", scope=("src",))
-    claim_event = comment(1, claim_comment(claimed), created_at="2026-08-20T23:30:00Z")
-    parsed = parse_claim_event(claim_event)
-    assert isinstance(parsed, LedgerActiveClaim)
-    rescope_event = comment(
-        2,
-        protocol.rescope_comment(parsed, ("src", "LICENSE"), "Ada", "builder"),
-        created_at="2026-08-20T23:59:00Z",
-    )
-    client = FakeForge({LEDGER_ISSUE: [claim_event, rescope_event]})
-    _patch_status_cli(monkeypatch, client)
-
-    assert issue_claim.main(["--repo", "example/agent-claim", "status", "72"]) == 0
-    out = capsys.readouterr().out
-    assert " 0h 30m\n" in out
-    assert " old" not in out.split("CLAIMED", 1)[1]
 
 
 def test_rescope_whole_reason_lifecycle_none_reason_kept_then_cleared() -> None:
@@ -15983,7 +15786,7 @@ def test_cli_rescope_widening_to_four_paths_refuses_without_whole(
     assert standing[0].scope == ("new_a.py",)
 
 
-def test_cli_claim_persists_whole_reason_and_status_and_who_show_it(
+def test_cli_claim_persists_whole_reason(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -16027,7 +15830,22 @@ def test_cli_claim_persists_whole_reason_and_status_and_who_show_it(
     assert posted.whole_reason == reason
     assert f"- Whole: {reason}" in client.comments[LEDGER_ISSUE][0].body
 
-    _patch_status_cli(monkeypatch, client)
+
+def test_cli_status_and_status_path_show_the_whole_reason(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    reason = "the four adapters share one lock"
+    claimed = _active_claim(
+        "Ada",
+        claim_id="wide",
+        issue=72,
+        branch="codex/issue-72",
+        scope=("new_a.py", "new_b.py", "new_c.py", "new_d.py"),
+        whole_reason=reason,
+    )
+    _patch_status_store(monkeypatch, claimed)
+
     assert issue_claim.main(["--repo", "example/agent-claim", "status", "72"]) == 0
     status_out = capsys.readouterr().out
     assert f"  whole: {reason}" in status_out
@@ -16036,11 +15854,16 @@ def test_cli_claim_persists_whole_reason_and_status_and_who_show_it(
     payload = json.loads(capsys.readouterr().out)
     assert payload["claims"][0]["whole"] == reason
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "who", "new_a.py"]) == 0
+    assert issue_claim.main(["--repo", "example/agent-claim", "status", "--path", "new_a.py"]) == 0
     who_out = capsys.readouterr().out
     assert f"  whole: {reason}" in who_out
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "who", "new_a.py", "--json"]) == 0
+    assert (
+        issue_claim.main(
+            ["--repo", "example/agent-claim", "status", "--path", "new_a.py", "--json"]
+        )
+        == 0
+    )
     who_payload = json.loads(capsys.readouterr().out)
     assert who_payload["claims"][0]["whole"] == reason
 
@@ -16586,6 +16409,42 @@ def _patch_protect_git(
     monkeypatch.setattr(checkout, "_git_output", git)
 
 
+def _active_claim(
+    agent: str = "Grok sess-1",
+    *,
+    claim_id: str = "cli-claim",
+    role: str = "builder",
+    scope: tuple[str, ...] = ("src",),
+    branch: str = "codex/issue-72-claims",
+    lane: bool = False,
+    issue: int = 72,
+    base: str = BASE,
+    opened_commit: str = BASE,
+    resource: protocol.ResourceHold | None = None,
+    whole_reason: str | None = None,
+) -> protocol.ActiveClaim:
+    """Build one store-truth `ActiveClaim` directly (issue #176): the store
+    fake's counterpart to `request()`'s ledger-comment `ClaimRequest` --
+    every `protect`/`status` test that needs a live claim on a faked
+    `store.fetch_state` builds it from here instead of round-tripping
+    through a comment marker no store command reads any more."""
+    identity: protocol.ClaimIdentity = (
+        protocol.LaneIdentity() if lane else protocol.IssueIdentity(issue)
+    )
+    return protocol.ActiveClaim(
+        identity=identity,
+        claim_id=protocol.ClaimId(claim_id),
+        agent=agent,
+        role=role,
+        base=protocol.ObjectId(base),
+        branch=branch,
+        scope=scope,
+        opened_commit=protocol.ObjectId(opened_commit),
+        resource=resource,
+        whole_reason=whole_reason,
+    )
+
+
 def _protect_active_claim(
     agent: str,
     *,
@@ -16594,19 +16453,7 @@ def _protect_active_claim(
     lane: bool = False,
     issue: int = 72,
 ) -> protocol.ActiveClaim:
-    identity: protocol.ClaimIdentity = (
-        protocol.LaneIdentity() if lane else protocol.IssueIdentity(issue)
-    )
-    return protocol.ActiveClaim(
-        identity=identity,
-        claim_id=protocol.ClaimId("cli-claim"),
-        agent=agent,
-        role="builder",
-        base=protocol.ObjectId(BASE),
-        branch=branch,
-        scope=scope,
-        opened_commit=protocol.ObjectId(BASE),
-    )
+    return _active_claim(agent, scope=scope, branch=branch, lane=lane, issue=issue)
 
 
 def _protect_state_with_claim(claim: protocol.ActiveClaim) -> protocol.ClaimState:
@@ -17558,6 +17405,18 @@ def test_cli_two_claims_of_the_same_directory_are_advisory(
     assert "CONFLICT" not in claimed
     assert "overlaps issue #72 (dir-a)" in claimed
 
+
+def test_cli_status_and_status_path_show_two_directory_claims_as_advisory(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    dir_a = _active_claim(
+        "Ada", claim_id="dir-a", issue=72, branch="codex/issue-72", scope=("src",)
+    )
+    dir_b = _active_claim(
+        "Grok 4.6", claim_id="dir-b", issue=73, branch="codex/issue-73", scope=("src",)
+    )
+    _patch_status_store(monkeypatch, dir_a, dir_b)
+
     status = issue_claim.main(["--repo", "example/agent-claim", "status"])
     rendered = capsys.readouterr().out
     assert status == 0
@@ -17567,7 +17426,7 @@ def test_cli_two_claims_of_the_same_directory_are_advisory(
     assert "overlaps issue #73 (dir-b)" in rendered
     assert "overlaps issue #72 (dir-a)" in rendered
 
-    who = issue_claim.main(["--repo", "example/agent-claim", "who", "src"])
+    who = issue_claim.main(["--repo", "example/agent-claim", "status", "--path", "src"])
     holders = capsys.readouterr().out
     assert who == 0
     assert "CONFLICT" not in holders
@@ -17628,6 +17487,22 @@ def test_cli_two_claims_of_the_same_file_are_advisory(
     assert "CONFLICT" not in claimed
     assert "overlaps issue #72 (file-a)" in claimed
 
+
+def test_cli_status_and_status_path_show_two_file_claims_as_advisory(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    file_a = _active_claim(
+        "Ada", claim_id="file-a", issue=72, branch="codex/issue-72", scope=("src/widget.py",)
+    )
+    file_b = _active_claim(
+        "Grok 4.6",
+        claim_id="file-b",
+        issue=73,
+        branch="codex/issue-73",
+        scope=("src/widget.py",),
+    )
+    _patch_status_store(monkeypatch, file_a, file_b)
+
     status = issue_claim.main(["--repo", "example/agent-claim", "status"])
     rendered = capsys.readouterr().out
     assert status == 0
@@ -17635,7 +17510,7 @@ def test_cli_two_claims_of_the_same_file_are_advisory(
     assert "CLAIMED issue #72" in rendered
     assert "CLAIMED issue #73" in rendered
 
-    who = issue_claim.main(["--repo", "example/agent-claim", "who", "src/widget.py"])
+    who = issue_claim.main(["--repo", "example/agent-claim", "status", "--path", "src/widget.py"])
     holders = capsys.readouterr().out
     assert who == 0
     assert "CONFLICT" not in holders
@@ -17758,16 +17633,22 @@ def test_cli_resource_race_still_yields_unique_live_holds(
     assert holds == [1, 2]
 
 
-def test_who_lists_every_holder_without_calling_overlap_an_error(
+def test_status_path_lists_every_holder_without_calling_overlap_an_error(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    client = _claims_client(
-        request("mine", "Ada", issue=72, scope=("src/widget.py",)),
-        request("theirs", "Grok 4.6", issue=73, scope=("src/widget.py",)),
+    mine = _active_claim("Ada", claim_id="mine", issue=72, scope=("src/widget.py",))
+    theirs = _active_claim(
+        "Grok 4.6",
+        claim_id="theirs",
+        issue=73,
+        branch="codex/issue-73-claims",
+        scope=("src/widget.py",),
     )
-    _patch_status_cli(monkeypatch, client)
+    _patch_status_store(monkeypatch, mine, theirs)
 
-    status = issue_claim.main(["--repo", "example/agent-claim", "who", "src/widget.py"])
+    status = issue_claim.main(
+        ["--repo", "example/agent-claim", "status", "--path", "src/widget.py"]
+    )
     rendered = capsys.readouterr().out
 
     assert status == 0
@@ -18279,19 +18160,27 @@ def test_each_item_carries_its_own_ruling_age() -> None:
 def test_identity_conflict_still_marks_status_conflict(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    first = parse_claim_event(comment(1, claim_comment(request(issue=72, scope=("src/a.py",)))))
-    second = parse_claim_event(
-        comment(
-            2,
-            claim_comment(request("claim-b", "Grok 4.6", issue=72, scope=("src/b.py",))),
-        )
-    )
-    assert isinstance(first, LedgerActiveClaim)
-    assert isinstance(second, LedgerActiveClaim)
+    first = _active_claim(issue=72, scope=("src/a.py",))
+    second = _active_claim(claim_id="claim-b", agent="Grok 4.6", issue=72, scope=("src/b.py",))
+    opened_at = datetime(2026, 8, 21, tzinfo=UTC)
+    ages: dict[str, datetime] = {first.claim_id: opened_at, second.claim_id: opened_at}
 
-    assert _status((first, second), None) == 2
+    assert _status((first, second), None, ages) == 2
     rendered = capsys.readouterr().out
     assert rendered.count("CONFLICT") == 2
+
+
+def test_identity_conflict_still_marks_status_json_conflict(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    first = _active_claim(issue=72, scope=("src/a.py",))
+    second = _active_claim(claim_id="claim-b", agent="Grok 4.6", issue=72, scope=("src/b.py",))
+    opened_at = datetime(2026, 8, 21, tzinfo=UTC)
+    ages: dict[str, datetime] = {first.claim_id: opened_at, second.claim_id: opened_at}
+
+    assert _status_json((first, second), None, ages) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["state"] == "CONFLICT"
 
 
 def test_trunk_landing_times_read_the_default_branch_not_the_work_branch(

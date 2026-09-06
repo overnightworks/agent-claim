@@ -107,7 +107,7 @@ def _resolved_identity(issue: int | None, branch: str) -> protocol.ClaimIdentity
     return protocol.LaneIdentity()
 
 
-def _claim_subject(claim: protocol.LedgerActiveClaim) -> str:
+def _claim_subject(claim: protocol.ScopedClaim) -> str:
     return (
         f"lane {claim.branch}"
         if isinstance(claim.identity, protocol.LaneIdentity)
@@ -115,13 +115,16 @@ def _claim_subject(claim: protocol.LedgerActiveClaim) -> str:
     )
 
 
-def _claim_age_fields(claim: protocol.LedgerActiveClaim, now: datetime) -> tuple[str, bool]:
-    age = board.claim_age(claim.comment.created_at, now)
+def _claim_age_fields(opened_at: datetime, now: datetime) -> tuple[str, bool]:
+    """The rendered age and old-ness of a claim opened at `opened_at` (a
+    commit's committer date -- issue #176, §1 -- not a ledger comment
+    timestamp)."""
+    age = now.astimezone(UTC) - opened_at.astimezone(UTC)
     return board.format_claim_age(age), board.claim_is_old(age)
 
 
-def _claim_age_suffix(claim: protocol.LedgerActiveClaim, now: datetime) -> str:
-    rendered, old = _claim_age_fields(claim, now)
+def _claim_age_suffix(opened_at: datetime, now: datetime) -> str:
+    rendered, old = _claim_age_fields(opened_at, now)
     return f" {rendered} old" if old else f" {rendered}"
 
 
@@ -265,6 +268,9 @@ def _add_bootstrap_parser(commands: argparse._SubParsersAction) -> None:
 def _add_status_parser(commands: argparse._SubParsersAction) -> None:
     status = commands.add_parser("status", help="show repository-wide build claims")
     status.add_argument("issue", type=int, nargs="?")
+    status.add_argument(
+        "--path", metavar="PATH", help="list holders of this path instead of by issue"
+    )
     status.add_argument("--json", action="store_true")
 
 
@@ -386,12 +392,6 @@ def _add_rescope_parser(commands: argparse._SubParsersAction) -> None:
     rescope.add_argument("--json", action="store_true")
 
 
-def _add_who_parser(commands: argparse._SubParsersAction) -> None:
-    who = commands.add_parser("who", help="show which live claim holds a path")
-    who.add_argument("path")
-    who.add_argument("--json", action="store_true")
-
-
 def _add_reconcile_parser(commands: argparse._SubParsersAction) -> None:
     reconcile = commands.add_parser("reconcile", help="repair claimed-label projections")
     reconcile.add_argument("issue", type=int, nargs="?")
@@ -447,7 +447,6 @@ _SUBPARSER_BUILDERS: tuple[Callable[[argparse._SubParsersAction], None], ...] = 
     _add_claim_parser,
     _add_release_parser,
     _add_rescope_parser,
-    _add_who_parser,
     _add_reconcile_parser,
     _add_supersede_parser,
     _add_cut_parser,
@@ -479,8 +478,8 @@ def _identity_json(identity: protocol.ClaimIdentity) -> dict[str, object]:
 
 
 def _status_claims(
-    claims: tuple[protocol.LedgerActiveClaim, ...], issue: int | None
-) -> tuple[tuple[protocol.LedgerActiveClaim, ...], protocol.ClaimConflictIndex]:
+    claims: tuple[protocol.ActiveClaim, ...], issue: int | None
+) -> tuple[tuple[protocol.ActiveClaim, ...], protocol.ClaimConflictIndex]:
     selected = tuple(
         claim
         for claim in claims
@@ -499,14 +498,14 @@ def _status_claims(
     return related, index
 
 
-def _resource_fields(claim: protocol.LedgerActiveClaim) -> dict[str, object]:
-    if claim.resource is None:
+def _resource_fields(resource: protocol.ResourceHold | None) -> dict[str, object]:
+    if resource is None:
         return {"resource": None, "resource_value": None}
-    return {"resource": claim.resource.name, "resource_value": claim.resource.value}
+    return {"resource": resource.name, "resource_value": resource.value}
 
 
 def _overlap_subjects(
-    claims_by_id: dict[str, protocol.LedgerActiveClaim], peer_ids: set[str]
+    claims_by_id: Mapping[str, protocol.ActiveClaim], peer_ids: set[str]
 ) -> list[dict[str, object]]:
     return [
         {
@@ -520,7 +519,7 @@ def _overlap_subjects(
 
 
 def _overlap_note(
-    claims_by_id: dict[str, protocol.LedgerActiveClaim], peer_ids: set[str]
+    claims_by_id: Mapping[str, protocol.ActiveClaim], peer_ids: set[str]
 ) -> str | None:
     peers = [claims_by_id[claim_id] for claim_id in sorted(peer_ids) if claim_id in claims_by_id]
     if not peers:
@@ -528,24 +527,18 @@ def _overlap_note(
     return "overlaps " + ", ".join(f"{_claim_subject(claim)} ({claim.claim_id})" for claim in peers)
 
 
-def _print_unreadable_claim(record: protocol.UnreadableClaim) -> None:
-    subject = f"claim {record.claim_id}" if record.claim_id else "claim"
-    print(f"UNREADABLE {subject}: unreadable, upgrade the installed tool")
-    print(f"  fields: {', '.join(record.unknown_fields)}")
-    print(f"  {record.comment_url}")
-
-
 def _print_claim_status_lines(
-    claim: protocol.LedgerActiveClaim,
-    claims_by_id: dict[str, protocol.LedgerActiveClaim],
+    claim: protocol.ActiveClaim,
+    claims_by_id: Mapping[str, protocol.ActiveClaim],
     index: protocol.ClaimConflictIndex,
+    opened_at: datetime,
     observed_at: datetime,
 ) -> None:
     state = "CONFLICT" if claim.claim_id in index.conflict_ids else "CLAIMED"
     print(
         f"{state} {_claim_subject(claim)}: {claim.agent} ({claim.role}) "
         f"base={claim.base} branch={claim.branch} claim={claim.claim_id}"
-        f"{_claim_age_suffix(claim, observed_at)}"
+        f"{_claim_age_suffix(opened_at, observed_at)}"
     )
     for path in claim.scope:
         print(f"  {path}")
@@ -559,53 +552,38 @@ def _print_claim_status_lines(
 
 
 def _print_related_claims(
-    claims: tuple[protocol.LedgerActiveClaim, ...],
-    related: tuple[protocol.LedgerActiveClaim, ...],
+    claims: tuple[protocol.ActiveClaim, ...],
+    related: tuple[protocol.ActiveClaim, ...],
     index: protocol.ClaimConflictIndex,
+    ages: Mapping[str, datetime],
     observed_at: datetime,
 ) -> int:
-    claims_by_id = {claim.claim_id: claim for claim in claims}
+    claims_by_id: dict[str, protocol.ActiveClaim] = {claim.claim_id: claim for claim in claims}
     for claim in related:
-        _print_claim_status_lines(claim, claims_by_id, index, observed_at)
+        _print_claim_status_lines(claim, claims_by_id, index, ages[claim.claim_id], observed_at)
     return 2 if any(claim.claim_id in index.conflict_ids for claim in related) else 0
 
 
 def _status(
-    claims: tuple[protocol.LedgerActiveClaim, ...],
+    claims: tuple[protocol.ActiveClaim, ...],
     issue: int | None,
+    ages: Mapping[str, datetime],
     now: datetime | None = None,
-    *,
-    unreadable: tuple[protocol.UnreadableClaim, ...] = (),
 ) -> int:
     observed_at = (now or datetime.now(UTC)).astimezone(UTC)
     related, index = _status_claims(claims, issue)
     if related:
-        exit_code = _print_related_claims(claims, related, index, observed_at)
-    else:
-        subject = "repository" if issue is None else f"issue #{issue}"
-        print(f"UNCLAIMED {subject}")
-        exit_code = 0
-    for record in unreadable:
-        _print_unreadable_claim(record)
-    return exit_code
-
-
-def _unreadable_json(record: protocol.UnreadableClaim) -> dict[str, object]:
-    return {
-        "claim_id": record.claim_id,
-        "comment_url": record.comment_url,
-        "fields": list(record.unknown_fields),
-        "note": "unreadable, upgrade the installed tool",
-    }
+        return _print_related_claims(claims, related, index, ages, observed_at)
+    subject = "repository" if issue is None else f"issue #{issue}"
+    print(f"UNCLAIMED {subject}")
+    return 0
 
 
 def _status_json(
-    claims: tuple[protocol.LedgerActiveClaim, ...],
+    claims: tuple[protocol.ActiveClaim, ...],
     issue: int | None,
-    ledger: int,
+    ages: Mapping[str, datetime],
     now: datetime | None = None,
-    *,
-    unreadable: tuple[protocol.UnreadableClaim, ...] = (),
 ) -> int:
     observed_at = (now or datetime.now(UTC)).astimezone(UTC)
     related, index = _status_claims(claims, issue)
@@ -615,9 +593,8 @@ def _status_json(
         state = "CONFLICT"
     else:
         state = "CLAIMED"
-    claims_by_id = {claim.claim_id: claim for claim in claims}
+    claims_by_id: dict[str, protocol.ActiveClaim] = {claim.claim_id: claim for claim in claims}
     payload = {
-        "ledger": ledger,
         "issue": issue,
         "state": state,
         "claims": [
@@ -629,28 +606,27 @@ def _status_json(
                 "branch": claim.branch,
                 "claim_id": claim.claim_id,
                 "scope": list(claim.scope),
-                **_resource_fields(claim),
+                **_resource_fields(claim.resource),
                 **({"whole": claim.whole_reason} if claim.whole_reason is not None else {}),
                 "overlaps": _overlap_subjects(
                     claims_by_id, protocol._overlap_peer_ids(index, claim)
                 ),
                 "state": "CONFLICT" if claim.claim_id in index.conflict_ids else "CLAIMED",
-                "age": _claim_age_fields(claim, observed_at)[0],
-                "old": _claim_age_fields(claim, observed_at)[1],
+                "age": _claim_age_fields(ages[claim.claim_id], observed_at)[0],
+                "old": _claim_age_fields(ages[claim.claim_id], observed_at)[1],
             }
             for claim in related
         ],
-        "unreadable": [_unreadable_json(record) for record in unreadable],
     }
     print(json.dumps(payload))
     return 2 if state == "CONFLICT" else 0
 
 
-def _who(claims: tuple[protocol.LedgerActiveClaim, ...], path: str) -> None:
+def _status_path(claims: tuple[protocol.ActiveClaim, ...], path: str) -> int:
     holders = protocol.claims_holding_path(claims, path)
     if not holders:
         print(f"UNCLAIMED {path}")
-        return
+        return 0
     for claim in holders:
         print(
             f"CLAIMED {path} {_claim_subject(claim)}: {claim.agent} ({claim.role}) "
@@ -663,13 +639,13 @@ def _who(claims: tuple[protocol.LedgerActiveClaim, ...], path: str) -> None:
             "overlap: "
             + ", ".join(f"{_claim_subject(claim)} ({claim.claim_id})" for claim in holders)
         )
+    return 0
 
 
-def _who_json(claims: tuple[protocol.LedgerActiveClaim, ...], path: str, ledger: int) -> None:
+def _status_path_json(claims: tuple[protocol.ActiveClaim, ...], path: str) -> int:
     holders = protocol.claims_holding_path(claims, path)
     state = "UNCLAIMED" if not holders else "CLAIMED"
     payload = {
-        "ledger": ledger,
         "path": path,
         "state": state,
         "claims": [
@@ -681,7 +657,7 @@ def _who_json(claims: tuple[protocol.LedgerActiveClaim, ...], path: str, ledger:
                 "branch": claim.branch,
                 "claim_id": claim.claim_id,
                 "scope": list(claim.scope),
-                **_resource_fields(claim),
+                **_resource_fields(claim.resource),
                 **({"whole": claim.whole_reason} if claim.whole_reason is not None else {}),
                 "state": "CLAIMED",
             }
@@ -689,6 +665,7 @@ def _who_json(claims: tuple[protocol.LedgerActiveClaim, ...], path: str, ledger:
         ],
     }
     print(json.dumps(payload))
+    return 0
 
 
 def _rescope_json(claimed: protocol.LedgerActiveClaim) -> None:
@@ -735,7 +712,7 @@ def _claim_json(
                 "base": claimed.base,
                 "branch": claimed.branch,
                 "scope": list(claimed.scope),
-                **_resource_fields(claimed),
+                **_resource_fields(claimed.resource),
                 "versioned_files": versioning.versioned_files,
                 "versioned_files_total": versioning.versioned_files_total,
                 "share": versioning.share,
@@ -1657,6 +1634,36 @@ def _refuse_canonical_remote_mismatch(
         )
 
 
+def _resolved_canonical_remote(repository: str | None, toplevel: Path) -> str:
+    """Every store command's shared precondition (issue #176, Erwartung 6/7):
+    read this repository's configured `canonical_remote` and refuse when the
+    forge target does not name the same repository its URL points at."""
+    config = board.load_config(toplevel / board.CONFIG_PATH)
+    forge_target = github.discover_repository(repository, remote_url=checkout.origin_remote_url)
+    _refuse_canonical_remote_mismatch(forge_target, config.canonical_remote)
+    return config.canonical_remote
+
+
+def _fetched_claims_and_ages(
+    worktree: Path, canonical_remote: str
+) -> tuple[tuple[protocol.ActiveClaim, ...], dict[str, datetime]]:
+    """The store's live claims, plus each one's age (its `opened_commit`'s
+    committer date, from the same fetched tip's ancestry -- §1 "Status age
+    ...") -- shared by `status` and, later, `protect`/`claim`/`rescope`/
+    `release`.
+    """
+    state = store.fetch_state(worktree=worktree, remote=canonical_remote)
+    claims = tuple(state.claims.values())
+    if state.tip is None:
+        return claims, {}
+    tip = state.tip
+    ages: dict[str, datetime] = {
+        claim.claim_id: store.committer_date(worktree=worktree, tip=tip, commit=claim.opened_commit)
+        for claim in claims
+    }
+    return claims, ages
+
+
 MUTATING_HOOK_TOOLS = frozenset({"Edit", "MultiEdit", "Write", "search_replace", "write"})
 
 
@@ -1759,10 +1766,8 @@ def _protect_write(repository: str | None, payload: dict[str, object]) -> int:
     relative = _protect_relative_path(raw_path, toplevel=toplevel)
     if relative is None:
         return _hook_deny(PATH_REQUIRED)
-    config = board.load_config(toplevel / board.CONFIG_PATH)
-    forge_target = github.discover_repository(repository, remote_url=checkout.origin_remote_url)
-    _refuse_canonical_remote_mismatch(forge_target, config.canonical_remote)
-    return _protect_store_verdict(agent, branch, relative, config.canonical_remote)
+    canonical_remote = _resolved_canonical_remote(repository, toplevel)
+    return _protect_store_verdict(agent, branch, relative, canonical_remote)
 
 
 def _protect(repository: str | None) -> int:
@@ -1830,16 +1835,23 @@ def _cmd_pull_request_check(parsed: argparse.Namespace, session: _ReadSession) -
     )
 
 
-def _cmd_status(parsed: argparse.Namespace, session: _ReadSession) -> int:
+def _cmd_status(parsed: argparse.Namespace) -> int:
+    """`status` reads live claims from the store directly (issue #176),
+    dispatched straight from `main` -- it never needs `_dispatch`'s ledger
+    resolution (a cut-over repository may have no ledger issue left at all).
+    """
+    toplevel = Path(checkout._git_output(["rev-parse", "--show-toplevel"])).resolve()
+    canonical_remote = _resolved_canonical_remote(parsed.repo, toplevel)
+    claims, ages = _fetched_claims_and_ages(Path.cwd(), canonical_remote)
+    if parsed.path is not None:
+        if parsed.json:
+            return _status_path_json(claims, parsed.path)
+        return _status_path(claims, parsed.path)
     issue = _optional_issue_number(parsed.issue)
-    comments = session.forge.list_protocol_candidates(protocol.LEDGER_ISSUE)
-    claims = protocol.active_claims(comments)
-    unreadable = protocol.unreadable_claims(comments)
     now = datetime.now(UTC)
     if parsed.json:
-        return _status_json(claims, issue, session.ledger, now=now, unreadable=unreadable)
-    print(f"LEDGER #{session.ledger}")
-    return _status(claims, issue, now=now, unreadable=unreadable)
+        return _status_json(claims, issue, ages, now=now)
+    return _status(claims, issue, ages, now=now)
 
 
 def _cmd_board(parsed: argparse.Namespace, session: _ReadSession) -> None:
@@ -1879,15 +1891,6 @@ def _cmd_next(parsed: argparse.Namespace, session: _ReadSession) -> int:
     if parsed.json:
         return _next_json(action, skipped, recovery)
     return _next(action, skipped, recovery)
-
-
-def _cmd_who(parsed: argparse.Namespace, session: _ReadSession) -> None:
-    claims = protocol._ledger_claims(session.forge)
-    if parsed.json:
-        _who_json(claims, parsed.path, session.ledger)
-        return
-    print(f"LEDGER #{session.ledger}")
-    _who(claims, parsed.path)
 
 
 def _cmd_rescope(parsed: argparse.Namespace, session: _WriteSession) -> None:
@@ -2331,11 +2334,9 @@ def _cmd_reconcile(parsed: argparse.Namespace, session: _WriteSession) -> None:
 
 _READ_HANDLERS: dict[str, Callable[[argparse.Namespace, _ReadSession], int | None]] = {
     "pr-check": _cmd_pull_request_check,
-    "status": _cmd_status,
     "board": _cmd_board,
     "rulings": _cmd_rulings,
     "next": _cmd_next,
-    "who": _cmd_who,
 }
 _WRITE_HANDLERS: dict[str, Callable[[argparse.Namespace, _WriteSession], int | None]] = {
     "rescope": _cmd_rescope,
@@ -2418,6 +2419,8 @@ def main(arguments: list[str] | None = None) -> int:
     if parsed.command == "protect":
         return _protect(parsed.repo)
     try:
+        if parsed.command == "status":
+            return _cmd_status(parsed)
         return _dispatch(parsed)
     except protocol.CompensationFailedError as error:
         # A post-mutation race's own repair could not be posted (issue #136
