@@ -188,6 +188,14 @@ class BoardSource(Protocol):
     @property
     def repository(self) -> RepositoryId: ...
 
+    @property
+    def requests(self) -> int:
+        """Every call this adapter has made so far through its one counted
+        chokepoint (`GitHubForge._run`; a fake's own equivalent) -- read once
+        a `board` run's reads are all in, never reset mid-run, so it always
+        answers "how many round trips did this cost" (issue #168)."""
+        ...
+
     def capability(self, operation: ForgeOperation) -> Capability: ...
 
     def list_open_board_issues(self) -> tuple[board.Issue, ...]: ...
@@ -210,6 +218,11 @@ class BoardSource(Protocol):
 class ForgeReader(protocol.ClaimReader, Protocol):
     @property
     def repository(self) -> RepositoryId: ...
+
+    @property
+    def requests(self) -> int:
+        """See `BoardSource.requests`."""
+        ...
 
     def capability(self, operation: ForgeOperation) -> Capability: ...
 

@@ -478,6 +478,19 @@ class FakeForge:
     fail_update_item_body: bool = False
     fail_create_child_relation: bool = False
     capability_overrides: dict[forge.ForgeOperation, forge.Capability] = field(default_factory=dict)
+    requests: int = field(default=0, init=False)
+    _requests_lock: threading.Lock = field(
+        default_factory=threading.Lock, init=False, repr=False, compare=False
+    )
+
+    def _run(self) -> None:
+        """This fake's mirror of `GitHubForge._run` (issue #168): every board
+        read that would cost a real round trip calls this once, so a test can
+        assert `requests` against a hand-counted expectation the same way it
+        would against the real adapter. Locked for the same reason: `board`
+        fans these reads out across worker threads."""
+        with self._requests_lock:
+            self.requests += 1
 
     def capability(self, operation: forge.ForgeOperation) -> forge.Capability:
         return self.capability_overrides.get(operation, github.GITHUB_CAPABILITIES[operation])
@@ -542,6 +555,7 @@ class FakeForge:
         self.item_bodies[number] = body
 
     def list_protocol_candidates(self, issue: int) -> tuple[IssueComment, ...]:
+        self._run()
         return tuple(
             entry for entry in self.comments.get(issue, []) if protocol.is_protocol_candidate(entry)
         )
@@ -614,6 +628,7 @@ class FakeForge:
         return tuple(sorted(self.labels))
 
     def list_open_board_issues(self) -> tuple[board.Issue, ...]:
+        self._run()
         return self.board_issues
 
     def landing(self, number: int) -> forge.Landing:
@@ -634,13 +649,25 @@ class FakeForge:
         return self.parents.get(number)
 
     def list_children(self, number: int) -> tuple[board.ChildItem, ...]:
+        self._run()
         return self.children.get(number, ())
 
     def list_board_blockers(self, numbers: frozenset[int]) -> tuple[board.BlockerReference, ...]:
+        if not numbers:
+            # Mirrors `GitHubForge.list_board_blockers`'s own early return
+            # (issue #168): no numbers means no network call at all, so
+            # nothing to count -- an empty prose board must cost the same
+            # zero requests here as it does against the real adapter.
+            return ()
+        self._run()
         if self.board_blocker_references is not None:
             return self.board_blocker_references
+        # Reads the field directly, never `self.list_open_board_pull_requests()`:
+        # that method is its own counted round trip, and the real adapter never
+        # spends a second one here either -- each blocker's own lookup already
+        # carries its `isPullRequest` flag (`GitHubForge._board_blocker`).
         pull_request_numbers = {
-            pull_request.number for pull_request in self.list_open_board_pull_requests()
+            pull_request.number for pull_request in self.board_open_pull_requests
         }
         return tuple(
             board.BlockerReference(
@@ -652,14 +679,17 @@ class FakeForge:
         )
 
     def list_board_dependencies(self, number: int) -> tuple[board.IssueDependency, ...]:
+        self._run()
         return self.board_dependencies.get(number, ())
 
     def list_open_board_pull_requests(self) -> tuple[board.PullRequest, ...]:
+        self._run()
         return self.board_open_pull_requests
 
     def list_recent_merged_board_pull_requests(
         self, since: datetime
     ) -> tuple[board.PullRequest, ...]:
+        self._run()
         return self.board_merged_pull_requests
 
     def validate_successor(self, issue: int) -> None:
@@ -794,7 +824,7 @@ def test_forge_operation_exhaustiveness_matches_the_declared_reader_and_writer_m
     declared_methods = {
         name
         for name in dir(forge.ForgeWriter)
-        if not name.startswith("_") and name not in {"repository", "capability"}
+        if not name.startswith("_") and name not in {"repository", "capability", "requests"}
     }
     assert {operation.value for operation in forge.ForgeOperation} == declared_methods
     assert len(forge.ForgeOperation) == 26
@@ -1558,7 +1588,7 @@ def test_board_projects_fixture_json_without_github_writes(
 
     assert issue_claim.main(["--repo", "example/agent-claim", "board", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert set(payload) == {"items", "ready_now", "stale", "recovery", "uncut"}
+    assert set(payload) == {"items", "ready_now", "stale", "recovery", "uncut", "requests"}
     first = payload["items"][0]
     ten = next(item for item in payload["items"] if item["number"] == 10)
     eleven = next(item for item in payload["items"] if item["number"] == 11)
@@ -1583,6 +1613,123 @@ def test_board_projects_fixture_json_without_github_writes(
     assert [item["number"] for item in payload["stale"]] == [12]
     assert next(item for item in payload["items"] if item["number"] == 12)["stage"] == "text-only"
     assert 11 not in [item["number"] for item in payload["ready_now"]]
+
+
+def test_board_reports_requests_equal_to_the_adapters_own_invocation_count(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #168: `observed` is the fixture's own independent tally of every
+    `gh` call the injected `run` actually received -- never read from the
+    counter under test -- so a matching `requests` line/field is real
+    evidence, not a tautology. The same client (and its cumulative
+    `observed`) serves both invocations below, so the JSON run's count is
+    checked against `observed`'s size at that later point, not the text
+    run's."""
+    observed = _board_fixture_environment(monkeypatch)
+
+    assert issue_claim.main(["--repo", "example/agent-claim", "board"]) == 0
+    rendered = capsys.readouterr().out
+    assert f"requests: {len(observed)}" in rendered
+
+    assert issue_claim.main(["--repo", "example/agent-claim", "board", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["requests"] == len(observed)
+
+
+def test_board_skips_the_children_list_for_a_container_with_zero_children(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Issue #168: a container whose own summary already says 0/0 must never
+    pay for `list_children` -- there is no open child either way -- while a
+    container that does carry children still gets its detail list."""
+    issues = (
+        board_issue(10, "Plain item", complete_contract("Ship #10.")),
+        replace(
+            board_issue(20, "Empty container", complete_contract("Ship #20.")),
+            kind=board.ItemKind.CONTAINER,
+            children_closed=0,
+            children_total=0,
+        ),
+        replace(
+            board_issue(30, "Container with children", complete_contract("Ship #30.")),
+            kind=board.ItemKind.CONTAINER,
+            children_closed=1,
+            children_total=2,
+        ),
+    )
+    client = FakeForge()
+    client.board_issues = issues
+    client.children[30] = (board.ChildItem(31, board.ChildState.OPEN),)
+    observed_children_calls: list[int] = []
+    original_list_children = client.list_children
+
+    def spy_list_children(number: int) -> tuple[board.ChildItem, ...]:
+        observed_children_calls.append(number)
+        return original_list_children(number)
+
+    monkeypatch.setattr(client, "list_children", spy_list_children)
+    monkeypatch.setattr(github, "GitHubForge", lambda _repository: client)
+    monkeypatch.setattr(discovery, "discover_ledger", lambda _client: LEDGER_ISSUE)
+    monkeypatch.setattr(checkout, "_git_output", lambda _arguments: str(tmp_path))
+    monkeypatch.setattr(checkout, "trunk_landing_times", lambda: ())
+
+    assert issue_claim.main(["--repo", "example/agent-claim", "board"]) == 0
+    rendered = capsys.readouterr().out
+
+    assert observed_children_calls == [30]
+    # Ledger comments, open issues, open PRs, merged PRs, and exactly one
+    # `list_children` call (for #30, never #20). No issue here names a
+    # blocker, so `list_board_blockers` never runs -- an empty numbers set
+    # costs no request, on the fake exactly as on the real adapter.
+    assert client.requests == 5
+    assert f"requests: {client.requests}" in rendered
+
+    client.requests = 0
+    observed_children_calls.clear()
+    assert issue_claim.main(["--repo", "example/agent-claim", "board", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert observed_children_calls == [30]
+    assert payload["requests"] == client.requests == 5
+
+
+def test_board_skips_the_dependency_list_for_a_zero_blocker_item_in_block_mode(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Issue #168: the pattern #150 started with `total_blocked_by` -- an
+    item whose own count already says 0 must never pay for its dependency
+    list, only the one that actually carries a blocker."""
+    (tmp_path / ".agent-claim").mkdir()
+    (tmp_path / ".agent-claim" / "board.toml").write_text('body_contract = "block"\n')
+    unblocked = board_issue(10, "Unblocked", agent_claim_body(MINIMAL_BLOCK_TOML))
+    blocked = replace(
+        board_issue(11, "Blocked", agent_claim_body(MINIMAL_BLOCK_TOML)), blocked_by_count=1
+    )
+    client = FakeForge()
+    client.board_issues = (unblocked, blocked)
+    client.board_dependencies[11] = (block_dependency(10),)
+    observed_dependency_calls: list[int] = []
+    original_list_board_dependencies = client.list_board_dependencies
+
+    def spy_list_board_dependencies(number: int) -> tuple[board.IssueDependency, ...]:
+        observed_dependency_calls.append(number)
+        return original_list_board_dependencies(number)
+
+    monkeypatch.setattr(client, "list_board_dependencies", spy_list_board_dependencies)
+    monkeypatch.setattr(github, "GitHubForge", lambda _repository: client)
+    monkeypatch.setattr(discovery, "discover_ledger", lambda _client: LEDGER_ISSUE)
+    monkeypatch.setattr(checkout, "_git_output", lambda _arguments: str(tmp_path))
+    monkeypatch.setattr(checkout, "trunk_landing_times", lambda: ())
+
+    assert issue_claim.main(["--repo", "example/agent-claim", "board"]) == 0
+    rendered = capsys.readouterr().out
+
+    assert observed_dependency_calls == [11]
+    # Ledger comments, open issues, open PRs, merged PRs, and exactly one
+    # dependency lookup (for #11, never #10) -- block mode never calls
+    # `list_board_blockers`.
+    assert client.requests == 5
+    assert f"requests: {client.requests}" in rendered
 
 
 def test_board_shows_open_and_total_instead_of_proposed(
@@ -1830,6 +1977,11 @@ def _configured_board_client(
     client = _claims_client(*standing)
     monkeypatch.setattr(client, "list_open_board_issues", lambda: open_issues)
     monkeypatch.setattr(client, "list_open_board_pull_requests", lambda: open_pull_requests)
+    # `list_board_blockers` reads the field, not the method above, to flag a
+    # blocker that is itself an open pull request (issue #168) -- keep both
+    # in agreement so a blocker-is-a-pull-request scenario behaves the same
+    # way here as it would against the real adapter.
+    client.board_open_pull_requests = open_pull_requests
     monkeypatch.setattr(client, "list_recent_merged_board_pull_requests", lambda _since: ())
     monkeypatch.setattr(github, "GitHubForge", lambda _repository: client)
     monkeypatch.setattr(discovery, "discover_ledger", lambda _client: LEDGER_ISSUE)
@@ -4660,6 +4812,7 @@ def test_board_reads_priority_configuration_from_the_checkout_root(
 
     class BoardClient:
         repository = github._repository_id(REPOSITORY)
+        requests = 0
 
         def capability(self, operation: forge.ForgeOperation) -> forge.Capability:
             return github.GITHUB_CAPABILITIES[operation]
@@ -6008,6 +6161,7 @@ def test_board_queries_merged_pull_requests_back_to_the_oldest_open_issue(
 
     class BoardClient:
         repository = github._repository_id(REPOSITORY)
+        requests = 0
 
         def capability(self, operation: forge.ForgeOperation) -> forge.Capability:
             return github.GITHUB_CAPABILITIES[operation]
@@ -6056,6 +6210,7 @@ def test_board_loads_each_distinct_blocker_once(
 
     class BoardClient:
         repository = github._repository_id(REPOSITORY)
+        requests = 0
 
         def capability(self, operation: forge.ForgeOperation) -> forge.Capability:
             return github.GITHUB_CAPABILITIES[operation]
@@ -6112,6 +6267,7 @@ def test_board_fetches_children_only_for_container_kinded_issues(
 
     class BoardClient:
         repository = github._repository_id(REPOSITORY)
+        requests = 0
 
         def capability(self, operation: forge.ForgeOperation) -> forge.Capability:
             return github.GITHUB_CAPABILITIES[operation]
@@ -6824,6 +6980,7 @@ class _MinimalBoardSource:
     repository: forge.RepositoryId = field(
         default_factory=lambda: github._repository_id(REPOSITORY)
     )
+    requests: int = 0
     capability_result: forge.Capability = forge.Capability.READ_ONLY
     dependencies_fetcher: Callable[[int], tuple[board.IssueDependency, ...]] = lambda _number: ()
 
