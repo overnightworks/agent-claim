@@ -1977,6 +1977,11 @@ def _configured_board_client(
     client = _claims_client(*standing)
     monkeypatch.setattr(client, "list_open_board_issues", lambda: open_issues)
     monkeypatch.setattr(client, "list_open_board_pull_requests", lambda: open_pull_requests)
+    # `list_board_blockers` reads the field, not the method above, to flag a
+    # blocker that is itself an open pull request (issue #168) -- keep both
+    # in agreement so a blocker-is-a-pull-request scenario behaves the same
+    # way here as it would against the real adapter.
+    client.board_open_pull_requests = open_pull_requests
     monkeypatch.setattr(client, "list_recent_merged_board_pull_requests", lambda _since: ())
     monkeypatch.setattr(github, "GitHubForge", lambda _repository: client)
     monkeypatch.setattr(discovery, "discover_ledger", lambda _client: LEDGER_ISSUE)
