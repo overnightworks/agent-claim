@@ -189,7 +189,11 @@ As ruled by the round-2 counter-check. Strictly sequential.
    remainder.
 5. **One state-ref cut** — claim, rescope, both release outcomes, coordinator override, stale
    takeover, resource allocation and `protect`, together. It must import active claims, claim
-   ids and every consumed released allocation value, and fence v0.9 clients (criterion 8).
+   ids and every consumed released allocation value, and fence v0.9 clients (criterion 8). It
+   retires `reconcile` and `supersede` and the projection comments they exist to repair or
+   duplicate, since the ledger issue they read and reconcile against is gone; `bootstrap`
+   shrinks to creating the state ref, its only remaining job once there is no ledger issue left
+   to seed from.
 6. **The receipt, last** — optional and additive; its absence costs visibility, never
    correctness.
 
@@ -245,3 +249,5 @@ Recorded verbatim.
 | D4 | Wide-scope thresholds are protocol constants, not configuration | No caller for repository-specific thresholds, and configuration would let two fleets in one repository disagree on what "too wide" means |
 | D5 | The migration machinery is deleted in the first release after every supported repository is proven migrated and old clients are fenced | Release distance does not decide safety; the proof does. A fixed "next release" is right only if that proof already exists |
 | D6 | One reviewed AI session per repository performs the body/relation hand migration (issue #150); the typed reader and the real CLI validate its result; GitHub's edit history is the undo. Does not repeal D1 or step 6, which concern later state-transition receipts | A migration command or module would be machinery with one caller and one run per repository — the hand-reviewed edit plus the existing typed reader already proves it without adding that surface |
+| D7 | Ruled 06.09.2026: the package renames to `agent-coordination` and the command to `aco`, one name each with no alias kept for the old ones; the rename lands in the same release as the state-ref cut (step 5) | Command, package, and storage model already break together in that release, so carrying an alias forward would promise a continuity step 5 does not otherwise offer |
+| D8 | Ruled 06.09.2026: `pr-check` becomes `check <number>`, taking its number positionally: against a pull request it reports today's merged-release classification (criterion 9); against an issue it reports the body contract, missing sections, blockers, and legacy body. Same release as D7 | A pull request and an issue are both identified by one number on the forge, and telling them apart is work `check` already has to do internally — one entry point serves both instead of splitting the command before that lookup runs |
