@@ -302,22 +302,31 @@ line reads as the freeze itself.
 
 `agent-claim cut <container> --title "…"` dispatches a container's next slice
 as a fresh child issue in one step: it creates the issue (native type `Task`),
-records it as the container's sub-issue, and rewrites the container's slice
-table so the cut row now links `#<child>` instead of the undispatched `—`
-marker. The fresh child's body is `board.CHILD_SKELETON` — every contract
-section present, `Now`/`Next`/`Done when` empty and `Blocked by: nichts` — so
-it is `body incomplete` (invisible to `next`, refused by `claim`) until the
-head fills it in.
+records it as the container's sub-issue, and, when there is a slice-table row
+to link, rewrites the container's slice table so that row now links
+`#<child>` instead of the undispatched `—` marker. The fresh child's body is
+`board.CHILD_SKELETON` — every contract section present, `Now`/`Next`/`Done
+when` empty and `Blocked by: nichts` — so it is `body incomplete` (invisible
+to `next`, refused by `claim`) until the head fills it in.
+
+`cut` without `--row` links into the first still-cuttable row when one exists
+and otherwise creates an untied child, table or not (#151): a container with
+no slice table at all — only a numbered `Next` line, as #122 carried on
+06.09.2026 — and one whose table is fully linked but whose own `Next` line
+still names further work both cut this way, the container's body left exactly
+as it was. `next` never prints `--row`, so a command it prints for a
+container is always one `cut` accepts. `--row N` requires a table containing
+an uncut row `N` and refuses by name otherwise: no slice table at all, or no
+row `N` left cuttable in it.
 
 Every refusal precedes every write. `cut` refuses when the forge cannot
 create a child issue or update an item body (`capability()` answers anything
 but `read_write` for either); when the target is not an open container, or is
-itself a child of another issue (nested containers are not supported); and
-when no cuttable slice-table row exists — `--row N` selects a specific row (a
-`board`-reported `uncut` finding's own `#` column value), or the first
-cuttable row by default; a row already linked to any issue, or one whose item
-cell is malformed, is never a target. None of the three writes are atomic with
-each other — nor is the child issue's creation atomic with its own sub-issue
+itself a child of another issue (nested containers are not supported); and,
+for `--row N`, when the table it names does not exist, or has no row `N` left
+cuttable — a row already linked to any issue, or one whose item cell is
+malformed, is never a target. None of the three writes are atomic with each
+other — nor is the child issue's creation atomic with its own sub-issue
 relation write inside `create_child` — so a failure at any point after the
 child issue exists names the created child and the step that failed, and
 instructs a hand fix rather than a re-run, which would create a second child.

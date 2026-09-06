@@ -1810,21 +1810,53 @@ def _cut_target(client: forge.ForgeWriter, number: int) -> board.Issue:
     return target
 
 
-def _cut_row(target: board.Issue, row_number: int | None) -> board.SliceTableRow:
-    """The slice-table row `cut` dispatches -- `--row N`, or the first cuttable row."""
+def _cut_row(target: board.Issue, row_number: int | None) -> board.SliceTableRow | None:
+    """The slice-table row `cut` dispatches (#151): without `--row`, the
+    first still-cuttable row when one exists, else `None` -- `cut` then
+    creates an untied child, table or not, so a command `next` just printed
+    for `target` is never refused for lacking one. `--row N` requires a
+    table containing an uncut row `N` and refuses by name otherwise: no
+    slice table at all, or no row `N` left cuttable in it.
+    """
     findings = board.slice_table_findings(target.body)
-    if row_number is not None:
-        row = next(
-            (candidate for candidate in findings.cuttable if candidate.index == row_number), None
+    if row_number is None:
+        return findings.cuttable[0] if findings.cuttable else None
+    if not findings.has_table:
+        raise protocol.ClaimUnavailableError(
+            f"#{target.number} has no slice table; --row needs one to select a row from"
         )
-    else:
-        row = findings.cuttable[0] if findings.cuttable else None
+    row = next(
+        (candidate for candidate in findings.cuttable if candidate.index == row_number), None
+    )
     if row is None:
         raise protocol.ClaimUnavailableError(
             f"#{target.number} has no cuttable slice row; "
             f"{len(findings.malformed)} malformed rows need a hand fix"
         )
     return row
+
+
+@dataclass(frozen=True)
+class _SliceLink:
+    """The slice-table row `cut` links its fresh child into, and the exact
+    item-cell span `board.locate_slice_row` found for it."""
+
+    row: board.SliceTableRow
+    span: tuple[int, int]
+
+
+def _cut_link(target: board.Issue, row_number: int | None) -> _SliceLink | None:
+    """Where `cut` links its fresh child, or `None` when `target` has no
+    slice table to link into -- the child is then created untied to any row."""
+    row = _cut_row(target, row_number)
+    if row is None:
+        return None
+    span = board.locate_slice_row(target.body, row.index)
+    if span is None:
+        raise protocol.ClaimUnavailableError(
+            f"#{target.number}'s row {row.index} could not be located"
+        )
+    return _SliceLink(row, span)
 
 
 def _link_created_child(
@@ -1858,25 +1890,25 @@ def _cmd_cut(parsed: argparse.Namespace, session: _WriteSession) -> int:
                 f"this forge cannot {operation.value}; cut the slice by hand"
             )
     target = _cut_target(client, number)
-    row = _cut_row(target, parsed.row)
-    span = board.locate_slice_row(target.body, row.index)
-    if span is None:
-        raise protocol.ClaimUnavailableError(f"#{number}'s row {row.index} could not be located")
+    link = _cut_link(target, parsed.row)
     try:
         child = client.create_child(
             parent=number, title=parsed.title, body=board.CHILD_SKELETON, kind=board.ItemKind.TASK
         )
-        new_body = board.link_slice_row(target.body, span, child)
-        _link_created_child(client, number, new_body, child, row.index)
+        if link is not None:
+            new_body = board.link_slice_row(target.body, link.span, child)
+            _link_created_child(client, number, new_body, child, link.row.index)
     except forge.ForgePartialChildCreationError as error:
         raise protocol.ClaimUnavailableError(
             f"created #{error.child} but failed to {error.step}: {error.cause}; "
             "do not re-run -- finish it by hand"
         ) from error
+    row_index = None if link is None else link.row.index
     if parsed.json:
-        print(json.dumps({"container": number, "row": row.index, "child": child}))
+        print(json.dumps({"container": number, "row": row_index, "child": child}))
         return 0
-    print(f"CUT #{number} row {row.index} -> #{child}")
+    suffix = "" if row_index is None else f" row {row_index}"
+    print(f"CUT #{number}{suffix} -> #{child}")
     return 0
 
 
