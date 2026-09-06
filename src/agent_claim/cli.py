@@ -1134,7 +1134,15 @@ def _body_contract_checks(
     # but defect-free skeleton) is refused here exactly as it is invisible to
     # `next`, regardless of what else may also be true of it.
     if not item.contract_complete and not item.projectionless_idea:
-        checks.append(SliceCheck("error", "body-incomplete", "body incomplete", issue=item.number))
+        missing = ", ".join(contract.missing_sections)
+        checks.append(
+            SliceCheck(
+                "error",
+                "body-incomplete",
+                f"#{item.number} body incomplete: {missing}",
+                issue=item.number,
+            )
+        )
     return tuple(checks)
 
 

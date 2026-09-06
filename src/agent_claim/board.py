@@ -338,6 +338,20 @@ class ContractDefect:
     message: str
 
 
+def _contract_fields(contract: Contract) -> tuple[tuple[str, str | None], ...]:
+    """The four body sections in body order, paired with their current
+    value -- the one place that knows both the names and the order, so a
+    caller asking which are present (`_contract_summary`) and a caller
+    asking which are missing (`Contract.missing_sections`) never drift
+    apart."""
+    return (
+        ("Now", contract.now),
+        ("Next", contract.next),
+        (BLOCKED_BY, contract.blocked_by),
+        ("Done when", contract.done_when),
+    )
+
+
 @dataclass(frozen=True)
 class Contract:
     now: str | None
@@ -362,6 +376,12 @@ class Contract:
     @property
     def blocker_issues(self) -> frozenset[int]:
         return _blocker_references(self.blocked_by)
+
+    @property
+    def missing_sections(self) -> tuple[str, ...]:
+        """The empty sections, in body order -- what a `body incomplete`
+        refusal names instead of leaving the operator to find them."""
+        return tuple(name for name, value in _contract_fields(self) if value is None)
 
 
 class Stage(StrEnum):
@@ -1879,16 +1899,7 @@ def _uncut_line(finding: UncutSlices) -> str:
 
 
 def _contract_summary(contract: Contract) -> str:
-    present = (
-        name
-        for name, value in (
-            ("Now", contract.now),
-            ("Next", contract.next),
-            (BLOCKED_BY, contract.blocked_by),
-            ("Done when", contract.done_when),
-        )
-        if value is not None
-    )
+    present = (name for name, value in _contract_fields(contract) if value is not None)
     return ", ".join(present) or "-"
 
 

@@ -2821,7 +2821,7 @@ def test_claim_refuses_a_freshly_cut_childs_incomplete_skeleton(
     assert exit_code == 2
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert "ERROR: body incomplete" in captured.err
+    assert "ERROR: #101 body incomplete: Now, Next, Done when" in captured.err
 
 
 def test_claim_names_an_incomplete_body_even_when_the_item_is_also_blocked(
