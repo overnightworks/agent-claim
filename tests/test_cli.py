@@ -9,6 +9,7 @@ import shlex
 import subprocess
 import sys
 import threading
+import tomllib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
@@ -3394,6 +3395,327 @@ def test_cut_names_the_created_child_when_the_relation_post_fails(
     err = capsys.readouterr().err
     assert f"created #{child} but failed to record #{child} as a sub-issue" in err
     assert "do not re-run" in err
+
+
+def test_render_block_round_trips_every_field() -> None:
+    toml_text = (
+        f"{MINIMAL_BLOCK_TOML}"
+        'frozen_until = { trigger = "named trigger", ruled_on = 2026-09-06 }\n'
+        '[[expectation]]\ntext = "Proposed"\ndefault = "later"\n'
+        '[[expectation]]\ntext = "Ruled"\nruling = "yes"\nruled_on = 2026-09-05\n'
+        '[[slice]]\nindex = 4\ntitle = "Block contract in issue bodies"\n'
+    )
+    located = board.locate_agent_claim_block(agent_claim_body(toml_text))
+
+    reparsed = tomllib.loads(board.render_block(located.data))
+
+    assert reparsed == located.data
+
+
+def test_render_block_escapes_quotes_and_backslashes() -> None:
+    toml_text = f'{MINIMAL_BLOCK_TOML}[[slice]]\nindex = 1\ntitle = "Quote \\" and back\\\\slash"\n'
+    located = board.locate_agent_claim_block(agent_claim_body(toml_text))
+
+    reparsed = tomllib.loads(board.render_block(located.data))
+
+    assert reparsed == located.data
+
+
+def test_replace_agent_claim_block_preserves_crlf_and_surrounding_bytes() -> None:
+    body = (
+        "Prose before.\r\n\r\n"
+        "```agent-claim\r\n"
+        'version = 1\r\nnow = "N"\r\nnext = "X"\r\ndone_when = "D"\r\n'
+        "```\r\n\r\nProse after.\r\n"
+    )
+    located = board.locate_agent_claim_block(body)
+    new_data = {**located.data, "now": "Changed"}
+
+    new_body = board.replace_agent_claim_block(body, located, new_data)
+
+    assert new_body.startswith("Prose before.\r\n\r\n```agent-claim\r\n")
+    assert new_body.endswith("```\r\n\r\nProse after.\r\n")
+    assert '\nnow = "Changed"\r\n' in new_body
+    assert board.parse_body(new_body, board.BodyContractMode.BLOCK).contract.now == "Changed"
+
+
+def test_render_block_emits_an_empty_slice_array_after_removing_the_final_entry() -> None:
+    toml_text = f'{MINIMAL_BLOCK_TOML}[[slice]]\nindex = 1\ntitle = "Only slice"\n'
+    located = board.locate_agent_claim_block(agent_claim_body(toml_text))
+    new_data = {**located.data, "slice": []}
+
+    rendered = board.render_block(new_data)
+
+    assert "slice = []" in rendered
+    assert tomllib.loads(rendered)["slice"] == []
+
+
+def _write_block_pin(tmp_path: Path) -> None:
+    (tmp_path / ".agent-claim").mkdir(exist_ok=True)
+    (tmp_path / ".agent-claim" / "board.toml").write_text('body_contract = "block"\n')
+
+
+def _block_cut_container_issue(toml_text: str) -> board.Issue:
+    return board.Issue(
+        CUT_CONTAINER,
+        "Epic",
+        (),
+        agent_claim_body(toml_text),
+        "2026-08-20T00:00:00Z",
+        "2026-08-20T00:00:00Z",
+        kind=board.ItemKind.CONTAINER,
+        children_closed=0,
+        children_total=0,
+    )
+
+
+def test_cut_block_creates_a_child_and_removes_the_first_cuttable_slice(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    toml_text = (
+        f"{MINIMAL_BLOCK_TOML}"
+        '[[slice]]\nindex = 1\ntitle = "Scheibe 1"\n'
+        '[[slice]]\nindex = 2\ntitle = "Scheibe 2"\n'
+    )
+    container = _block_cut_container_issue(toml_text)
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
+    _write_block_pin(tmp_path)
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
+    )
+
+    assert exit_code == 0
+    child = client.next_created_child_number - 1
+    assert client.created_children == [
+        (CUT_CONTAINER, "Scheibe 1", board.BLOCK_CHILD_SKELETON, board.ItemKind.TASK)
+    ]
+    new_data = board.locate_agent_claim_block(client.item_bodies[CUT_CONTAINER]).data
+    assert new_data["slice"] == [{"index": 2, "title": "Scheibe 2"}]
+    assert capsys.readouterr().out == f"CUT #{CUT_CONTAINER} row 1 -> #{child}\n"
+
+
+def test_cut_block_selects_a_row_by_number_and_removes_only_that_entry(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    toml_text = (
+        f"{MINIMAL_BLOCK_TOML}"
+        '[[slice]]\nindex = 1\ntitle = "Scheibe 1"\n'
+        '[[slice]]\nindex = 2\ntitle = "Scheibe 2"\n'
+    )
+    container = _block_cut_container_issue(toml_text)
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
+    _write_block_pin(tmp_path)
+
+    exit_code = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "cut",
+            str(CUT_CONTAINER),
+            "--title",
+            "Scheibe 2",
+            "--row",
+            "2",
+            "--json",
+        ]
+    )
+
+    assert exit_code == 0
+    child = client.next_created_child_number - 1
+    assert json.loads(capsys.readouterr().out) == {
+        "container": CUT_CONTAINER,
+        "row": 2,
+        "child": child,
+    }
+    remaining = board.locate_agent_claim_block(client.item_bodies[CUT_CONTAINER]).data
+    assert remaining["slice"] == [{"index": 1, "title": "Scheibe 1"}]
+
+
+def test_cut_block_creates_an_untied_child_with_no_slice_table(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    container = _block_cut_container_issue(MINIMAL_BLOCK_TOML)
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
+    _write_block_pin(tmp_path)
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "Untied"]
+    )
+
+    assert exit_code == 0
+    assert client.item_bodies == {}
+    child = client.next_created_child_number - 1
+    assert capsys.readouterr().out == f"CUT #{CUT_CONTAINER} -> #{child}\n"
+
+
+def test_cut_block_creates_an_untied_child_when_slice_is_explicitly_empty(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    toml_text = f"{MINIMAL_BLOCK_TOML}slice = []\n"
+    container = _block_cut_container_issue(toml_text)
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
+    _write_block_pin(tmp_path)
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "Untied"]
+    )
+
+    assert exit_code == 0
+    assert client.item_bodies == {}
+
+
+def test_cut_block_refuses_a_row_with_no_slice_table(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    container = _block_cut_container_issue(MINIMAL_BLOCK_TOML)
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
+    _write_block_pin(tmp_path)
+
+    exit_code = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "cut",
+            str(CUT_CONTAINER),
+            "--title",
+            "X",
+            "--row",
+            "1",
+        ]
+    )
+
+    assert exit_code == 2
+    assert (
+        f"ERROR: #{CUT_CONTAINER} has no slice table; --row needs one to select a row from"
+        in capsys.readouterr().err
+    )
+    assert client.created_children == []
+
+
+def test_cut_block_refuses_a_row_with_no_cuttable_row(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    toml_text = f'{MINIMAL_BLOCK_TOML}[[slice]]\nindex = 1\ntitle = "Scheibe 1"\n'
+    container = _block_cut_container_issue(toml_text)
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
+    _write_block_pin(tmp_path)
+
+    exit_code = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "cut",
+            str(CUT_CONTAINER),
+            "--title",
+            "X",
+            "--row",
+            "9",
+        ]
+    )
+
+    assert exit_code == 2
+    assert (
+        f"ERROR: #{CUT_CONTAINER} has no cuttable slice row; 0 malformed rows need a hand fix"
+        in capsys.readouterr().err
+    )
+    assert client.created_children == []
+
+
+def test_cut_block_refuses_a_title_mismatch_before_any_write(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    toml_text = f'{MINIMAL_BLOCK_TOML}[[slice]]\nindex = 1\ntitle = "Scheibe 1"\n'
+    container = _block_cut_container_issue(toml_text)
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
+    _write_block_pin(tmp_path)
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "Wrong title"]
+    )
+
+    assert exit_code == 2
+    assert (
+        f"ERROR: #{CUT_CONTAINER}'s slice 1 is titled 'Scheibe 1'; --title must match it exactly"
+        in capsys.readouterr().err
+    )
+    assert client.created_children == []
+    assert client.item_bodies == {}
+
+
+def test_cut_block_refuses_a_legacy_container_before_any_write(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    container = board.Issue(
+        CUT_CONTAINER,
+        "Epic",
+        (),
+        "## Now\nOld prose.\n",
+        "2026-08-20T00:00:00Z",
+        "2026-08-20T00:00:00Z",
+        kind=board.ItemKind.CONTAINER,
+        children_closed=0,
+        children_total=0,
+    )
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
+    _write_block_pin(tmp_path)
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "X"]
+    )
+
+    assert exit_code == 2
+    assert "body legacy" in capsys.readouterr().err
+    assert client.created_children == []
+
+
+def test_cut_block_names_the_created_child_when_linking_fails(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    toml_text = f'{MINIMAL_BLOCK_TOML}[[slice]]\nindex = 1\ntitle = "Scheibe 1"\n'
+    container = _block_cut_container_issue(toml_text)
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
+    _write_block_pin(tmp_path)
+    client.fail_update_item_body = True
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
+    )
+
+    assert exit_code == 2
+    child = client.next_created_child_number - 1
+    assert client.created_children == [
+        (CUT_CONTAINER, "Scheibe 1", board.BLOCK_CHILD_SKELETON, board.ItemKind.TASK)
+    ]
+    err = capsys.readouterr().err
+    assert (
+        f"created #{child} but failed to remove row 1 from #{CUT_CONTAINER}'s agent-claim block"
+        in err
+    )
+    assert "do not re-run" in err
+
+
+def test_next_prints_a_cut_command_block_mode_accepts_for_a_valid_container(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    toml_text = (
+        'version = 1\nnow = "N"\nnext = "nichts"\ndone_when = "D"\n'
+        '[[slice]]\nindex = 1\ntitle = "Scheibe 1"\n'
+    )
+    container = _block_cut_container_issue(toml_text)
+    _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
+    _write_block_pin(tmp_path)
+
+    exit_code = issue_claim.main(["--repo", "example/agent-claim", "next"])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert f'agent-claim cut {CUT_CONTAINER} --title "Scheibe 1"' in out
+
+    cut_exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
+    )
+    assert cut_exit_code == 0
 
 
 def test_claim_json_refusal_carries_refused_issue_and_checks(

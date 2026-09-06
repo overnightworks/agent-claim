@@ -6,7 +6,7 @@ import argparse
 import json
 import sys
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -2037,25 +2037,157 @@ def _cut_link(target: board.Issue, row_number: int | None) -> _SliceLink | None:
 
 
 def _link_created_child(
-    client: forge.ForgeWriter, container: int, new_body: str, child: int, row_index: int
+    client: forge.ForgeWriter, container: int, new_body: str, child: int, step: str
 ) -> None:
-    """Link the just-created `child` into `container`'s slice table.
+    """Write `new_body` (`container`'s slice table or `agent-claim` block,
+    the just-created `child` already linked or removed from it) back to
+    `container`.
 
     Not atomic with `create_child` -- GitHub has no transaction across the
     two writes. A failure here still leaves the created child behind, so it
     raises the same `forge.ForgePartialChildCreationError` a failed relation
     write inside `create_child` itself would -- one type, so `_cmd_cut`
-    renders one recovery message for either.
+    renders one recovery message for either, `step` naming the exact manual
+    repair for whichever mode wrote `new_body`.
     """
     try:
         client.update_item_body(container, new_body)
     except protocol.ClaimError as error:
         raise forge.ForgePartialChildCreationError(
-            child=child,
-            parent=container,
-            step=f"link it into #{container}'s slice table row {row_index}",
-            cause=error,
+            child=child, parent=container, step=step, cause=error
         ) from error
+
+
+def _print_cut_result(number: int, row_index: int | None, child: int, *, as_json: bool) -> int:
+    if as_json:
+        print(json.dumps({"container": number, "row": row_index, "child": child}))
+        return 0
+    suffix = "" if row_index is None else f" row {row_index}"
+    print(f"CUT #{number}{suffix} -> #{child}")
+    return 0
+
+
+def _cmd_cut_prose(
+    client: forge.ForgeWriter, target: board.Issue, parsed: argparse.Namespace
+) -> int:
+    number = target.number
+    link = _cut_link(target, parsed.row)
+    try:
+        child = client.create_child(
+            parent=number, title=parsed.title, body=board.CHILD_SKELETON, kind=board.ItemKind.TASK
+        )
+        if link is not None:
+            new_body = board.link_slice_row(target.body, link.span, child)
+            step = f"link it into #{number}'s slice table row {link.row.index}"
+            _link_created_child(client, number, new_body, child, step)
+    except forge.ForgePartialChildCreationError as error:
+        raise protocol.ClaimUnavailableError(
+            f"created #{error.child} but failed to {error.step}: {error.cause}; "
+            "do not re-run -- finish it by hand"
+        ) from error
+    return _print_cut_result(
+        number, None if link is None else link.row.index, child, as_json=parsed.json
+    )
+
+
+@dataclass(frozen=True)
+class _BlockSliceLink:
+    """The `[[slice]]` entry block `cut` links its fresh child into --
+    `cut`'s block-mode counterpart to `_SliceLink`."""
+
+    index: int
+    title: str
+
+
+def _block_slice_entries(data: Mapping[str, object]) -> list[dict[str, object]]:
+    value = data.get("slice")
+    if not isinstance(value, list):
+        return []
+    return [entry for entry in value if isinstance(entry, dict)]
+
+
+def _block_slice_link(entry: dict[str, object]) -> _BlockSliceLink:
+    return _BlockSliceLink(cast(int, entry["index"]), cast(str, entry["title"]))
+
+
+def _block_cut_link(
+    number: int, data: Mapping[str, object], row_number: int | None
+) -> _BlockSliceLink | None:
+    """Where block `cut` links its fresh child (#150 §7): without `--row`,
+    the first slice entry when present; with `--row N`, the entry `N` names
+    -- refusing by the same two shared prose/#151 strings when there is no
+    slice table at all, or no matching cuttable row in it."""
+    entries = _block_slice_entries(data)
+    if row_number is None:
+        return _block_slice_link(entries[0]) if entries else None
+    if "slice" not in data:
+        raise protocol.ClaimUnavailableError(
+            f"#{number} has no slice table; --row needs one to select a row from"
+        )
+    match = next((entry for entry in entries if entry["index"] == row_number), None)
+    if match is None:
+        raise protocol.ClaimUnavailableError(
+            f"#{number} has no cuttable slice row; 0 malformed rows need a hand fix"
+        )
+    return _block_slice_link(match)
+
+
+def _require_matching_title(number: int, link: _BlockSliceLink, title: str) -> None:
+    if title != link.title:
+        raise protocol.ClaimUnavailableError(
+            f"#{number}'s slice {link.index} is titled {link.title!r}; "
+            "--title must match it exactly"
+        )
+
+
+def _block_cut_target(number: int, target: board.Issue) -> board.LocatedBlock:
+    parsed = board.parse_body(target.body, board.BodyContractMode.BLOCK)
+    if parsed.read_state is board.BodyReadState.LEGACY:
+        raise protocol.ClaimUnavailableError(
+            f"#{number} body legacy; cut needs a valid agent-claim block"
+        )
+    if parsed.read_state is board.BodyReadState.MALFORMED:
+        defect = parsed.contract.defects[0]
+        raise protocol.ClaimUnavailableError(
+            f"#{number} body malformed: {defect.field}: {defect.message}; "
+            "cut needs a valid agent-claim block"
+        )
+    return board.locate_agent_claim_block(target.body)
+
+
+def _cmd_cut_block(
+    client: forge.ForgeWriter, target: board.Issue, parsed: argparse.Namespace
+) -> int:
+    number = target.number
+    located = _block_cut_target(number, target)
+    link = _block_cut_link(number, located.data, parsed.row)
+    if link is not None:
+        _require_matching_title(number, link, parsed.title)
+    try:
+        child = client.create_child(
+            parent=number,
+            title=parsed.title,
+            body=board.BLOCK_CHILD_SKELETON,
+            kind=board.ItemKind.TASK,
+        )
+        if link is not None:
+            remaining = [
+                entry
+                for entry in _block_slice_entries(located.data)
+                if entry["index"] != link.index
+            ]
+            new_data = {**located.data, "slice": remaining}
+            new_body = board.replace_agent_claim_block(target.body, located, new_data)
+            step = f"remove row {link.index} from #{number}'s agent-claim block"
+            _link_created_child(client, number, new_body, child, step)
+    except forge.ForgePartialChildCreationError as error:
+        raise protocol.ClaimUnavailableError(
+            f"created #{error.child} but failed to {error.step}: {error.cause}; "
+            "do not re-run -- finish it by hand"
+        ) from error
+    return _print_cut_result(
+        number, None if link is None else link.index, child, as_json=parsed.json
+    )
 
 
 def _cmd_cut(parsed: argparse.Namespace, session: _WriteSession) -> int:
@@ -2066,27 +2198,12 @@ def _cmd_cut(parsed: argparse.Namespace, session: _WriteSession) -> int:
             raise protocol.ClaimUnavailableError(
                 f"this forge cannot {operation.value}; cut the slice by hand"
             )
+    toplevel = Path(checkout._git_output(["rev-parse", "--show-toplevel"]))
+    config = _load_board_config(client, toplevel)
     target = _cut_target(client, number)
-    link = _cut_link(target, parsed.row)
-    try:
-        child = client.create_child(
-            parent=number, title=parsed.title, body=board.CHILD_SKELETON, kind=board.ItemKind.TASK
-        )
-        if link is not None:
-            new_body = board.link_slice_row(target.body, link.span, child)
-            _link_created_child(client, number, new_body, child, link.row.index)
-    except forge.ForgePartialChildCreationError as error:
-        raise protocol.ClaimUnavailableError(
-            f"created #{error.child} but failed to {error.step}: {error.cause}; "
-            "do not re-run -- finish it by hand"
-        ) from error
-    row_index = None if link is None else link.row.index
-    if parsed.json:
-        print(json.dumps({"container": number, "row": row_index, "child": child}))
-        return 0
-    suffix = "" if row_index is None else f" row {row_index}"
-    print(f"CUT #{number}{suffix} -> #{child}")
-    return 0
+    if config.body_contract is board.BodyContractMode.BLOCK:
+        return _cmd_cut_block(client, target, parsed)
+    return _cmd_cut_prose(client, target, parsed)
 
 
 def _cmd_reconcile(parsed: argparse.Namespace, session: _WriteSession) -> None:

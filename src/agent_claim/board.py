@@ -139,6 +139,12 @@ UNDISPATCHED_SLICE_CELL = "—"
 # by` value is itself a contract defect (`_validate_blocked_by`), which
 # would read as a malformed body rather than an unfinished one.
 CHILD_SKELETON = f"## Now\n\n## Next\n\n## Blocked by\n{NO_BLOCKERS}\n\n## Done when\n"
+# Block mode's fresh child (#150 §7): every projection key present, empty --
+# `parse_body` reads this as `VALID`/incomplete, exactly like `CHILD_SKELETON`
+# reads in prose. No `source_slice`: title, sub-issue relation, and GitHub
+# history are the owners. Only `cut` writes this; a hand-created issue does
+# not get one automatically (README shows the same four lines to paste by hand).
+BLOCK_CHILD_SKELETON = '```agent-claim\nversion = 1\nnow = ""\nnext = ""\ndone_when = ""\n```\n'
 # The three slice-title forms seen in atelier-2 (`#79`): a parenthetical
 # after the real title (`(#962 Scheibe 4)`, `(#962 slice 4)`) or a leading
 # German phrase (`Scheibe 4 von #962`).
@@ -1416,6 +1422,120 @@ def parse_body(body: str, mode: BodyContractMode) -> ParsedBody:
     if mode is BodyContractMode.BLOCK:
         return _parse_block_body(body)
     return _parse_prose_body(body)
+
+
+@dataclass(frozen=True)
+class LocatedBlock:
+    """A valid `agent-claim` block's decoded TOML, plus the byte-exact span
+    of its interior -- between the fence lines, which stay byte-identical --
+    and the newline convention new interior lines are rendered with (#150
+    §4/§7). Callable only on a body `parse_body` already read as `VALID`;
+    `cut` refuses a legacy or malformed target before ever calling this."""
+
+    data: dict[str, object]
+    content_start: int
+    content_end: int
+    newline: str
+
+
+def locate_agent_claim_block(body: str) -> LocatedBlock:
+    lines = body.splitlines(keepends=True)
+    matches = _agent_claim_fence_matches(body)
+    if not matches:
+        raise protocol.ClaimError("locate_agent_claim_block found no recognized agent-claim fence")
+    start_line, end_line, content = matches[0]
+    if end_line is None:
+        raise protocol.ClaimError("locate_agent_claim_block found no closed agent-claim fence")
+    content_start = sum(len(line) for line in lines[: start_line + 1])
+    content_end = sum(len(line) for line in lines[:end_line])
+    newline = _line_ending(lines[start_line]) or "\n"
+    return LocatedBlock(tomllib.loads(content), content_start, content_end, newline)
+
+
+_TOML_BASIC_STRING_ESCAPES = {
+    "\\": "\\\\",
+    '"': '\\"',
+    "\b": "\\b",
+    "\t": "\\t",
+    "\n": "\\n",
+    "\f": "\\f",
+    "\r": "\\r",
+}
+
+
+def _toml_string(value: object) -> str:
+    """A TOML basic string for `value` -- the writer's one escaping path,
+    matching what `tomllib.loads` (the reader) accepts back unchanged."""
+    escaped = "".join(_TOML_BASIC_STRING_ESCAPES.get(char, char) for char in cast(str, value))
+    return f'"{escaped}"'
+
+
+def _render_frozen_until(data: Mapping[str, object]) -> list[str]:
+    frozen_until = data.get("frozen_until")
+    if not isinstance(frozen_until, dict):
+        return []
+    ruled_on = cast(date, frozen_until["ruled_on"])
+    return [
+        "",
+        f"frozen_until = {{ trigger = {_toml_string(frozen_until['trigger'])}, "
+        f"ruled_on = {ruled_on.isoformat()} }}",
+    ]
+
+
+def _render_expectations(data: Mapping[str, object]) -> list[str]:
+    lines: list[str] = []
+    for expectation in cast("list[dict[str, object]]", data.get("expectation", [])):
+        lines.extend(("", "[[expectation]]", f"text = {_toml_string(expectation['text'])}"))
+        if "default" in expectation:
+            lines.append(f"default = {_toml_string(expectation['default'])}")
+        else:
+            ruled_on = cast(date, expectation["ruled_on"])
+            lines.append(f"ruling = {_toml_string(expectation['ruling'])}")
+            lines.append(f"ruled_on = {ruled_on.isoformat()}")
+    return lines
+
+
+def _render_slices(data: Mapping[str, object]) -> list[str]:
+    if "slice" not in data:
+        return []
+    slices = cast("list[dict[str, object]]", data["slice"])
+    if not slices:
+        return ["", "slice = []"]
+    lines: list[str] = []
+    for entry in slices:
+        lines.extend(
+            (
+                "",
+                "[[slice]]",
+                f"index = {entry['index']}",
+                f"title = {_toml_string(entry['title'])}",
+            )
+        )
+    return lines
+
+
+def render_block(data: Mapping[str, object], newline: str = "\n") -> str:
+    """The canonical `agent-claim` block interior for `data` (#150 §4):
+    schema key order, TOML-safe strings, unquoted dates, ending in
+    `newline` so a following fence line starts clean. Production caller:
+    block-mode `cut`; there is no standalone validator."""
+    lines = [f"version = {data['version']}"]
+    lines.extend(f"{key} = {_toml_string(data[key])}" for key in ("now", "next", "done_when"))
+    lines.extend(_render_frozen_until(data))
+    lines.extend(_render_expectations(data))
+    lines.extend(_render_slices(data))
+    return newline.join((*lines, ""))
+
+
+def replace_agent_claim_block(body: str, located: LocatedBlock, data: Mapping[str, object]) -> str:
+    """`body` with its one `agent-claim` block's interior replaced by
+    `render_block(data, located.newline)` -- pure, changing only that span
+    and preserving every other byte, fence lines included."""
+    return (
+        body[: located.content_start]
+        + render_block(data, located.newline)
+        + body[located.content_end :]
+    )
 
 
 def missing_or_empty_sections(contract: Contract) -> tuple[str, ...]:
