@@ -1457,6 +1457,10 @@ _TOML_BASIC_STRING_ESCAPES = {
     "\f": "\\f",
     "\r": "\\r",
 }
+# The shape a decoded homogeneous array of tables (`[[expectation]]`,
+# `[[slice]]`) or an `asdict`'d list of dataclasses takes -- one alias so
+# `cast` names a real type instead of repeating the string.
+_JsonRows = list[dict[str, object]]
 
 
 def _toml_string(value: object) -> str:
@@ -1480,7 +1484,7 @@ def _render_frozen_until(data: Mapping[str, object]) -> list[str]:
 
 def _render_expectations(data: Mapping[str, object]) -> list[str]:
     lines: list[str] = []
-    for expectation in cast("list[dict[str, object]]", data.get("expectation", [])):
+    for expectation in cast(_JsonRows, data.get("expectation", [])):
         lines.extend(("", "[[expectation]]", f"text = {_toml_string(expectation['text'])}"))
         if "default" in expectation:
             lines.append(f"default = {_toml_string(expectation['default'])}")
@@ -1494,7 +1498,7 @@ def _render_expectations(data: Mapping[str, object]) -> list[str]:
 def _render_slices(data: Mapping[str, object]) -> list[str]:
     if "slice" not in data:
         return []
-    slices = cast("list[dict[str, object]]", data["slice"])
+    slices = cast(_JsonRows, data["slice"])
     if not slices:
         return ["", "slice = []"]
     lines: list[str] = []
@@ -2537,18 +2541,29 @@ def next_action(board: Board) -> NextAction | None:
         container = item.container
         if item.kind is not ItemKind.CONTAINER or container is None or container.open_children:
             continue
-        if item.read_state is not BodyReadState.VALID:
-            continue
-        next_line = item.contract.next
-        if next_line is not None and has_further_work(next_line):
-            return CutSliceAction(item, container, next_line)
-        uncut = uncut_by_container.get(item.number)
-        if uncut is not None and uncut.rows:
-            return CutSliceAction(item, container, uncut.rows[0].title)
-        if uncut is not None and uncut.malformed:
-            continue
-        return CloseContainerAction(item, container)
+        action = _container_next_action(item, container, uncut_by_container)
+        if action is not None:
+            return action
     return None
+
+
+def _container_next_action(
+    item: BoardItem, container: ContainerProgress, uncut_by_container: dict[int, UncutSlices]
+) -> NextAction | None:
+    """The action a childless container qualifies for, or `None` to skip it:
+    a non-`VALID` body, or a slice table whose only findings are malformed
+    rows, name their own finding elsewhere and are never guessed through."""
+    if item.read_state is not BodyReadState.VALID:
+        return None
+    next_line = item.contract.next
+    if next_line is not None and has_further_work(next_line):
+        return CutSliceAction(item, container, next_line)
+    uncut = uncut_by_container.get(item.number)
+    if uncut is not None and uncut.rows:
+        return CutSliceAction(item, container, uncut.rows[0].title)
+    if uncut is not None and uncut.malformed:
+        return None
+    return CloseContainerAction(item, container)
 
 
 def _project_blocker_references(
@@ -2559,7 +2574,7 @@ def _project_blocker_references(
     only in block mode (A2) -- the one projector `board_json` uses for both
     `BoardItem.open_blockers` and each open child's `ChildItem.blocked_by`,
     never a mixed `int | str` list and never re-parsed from a label."""
-    references = cast("list[dict[str, object]]", entry.pop(key))
+    references = cast(_JsonRows, entry.pop(key))
     entry[key] = [
         reference["number"] for reference in references if reference["repository"] == repository
     ]

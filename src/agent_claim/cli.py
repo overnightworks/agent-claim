@@ -2091,13 +2091,12 @@ def _link_created_child(
         ) from error
 
 
-def _print_cut_result(number: int, row_index: int | None, child: int, *, as_json: bool) -> int:
+def _print_cut_result(number: int, row_index: int | None, child: int, *, as_json: bool) -> None:
     if as_json:
         print(json.dumps({"container": number, "row": row_index, "child": child}))
-        return 0
+        return
     suffix = "" if row_index is None else f" row {row_index}"
     print(f"CUT #{number}{suffix} -> #{child}")
-    return 0
 
 
 def _cmd_cut_prose(
@@ -2118,9 +2117,8 @@ def _cmd_cut_prose(
             f"created #{error.child} but failed to {error.step}: {error.cause}; "
             "do not re-run -- finish it by hand"
         ) from error
-    return _print_cut_result(
-        number, None if link is None else link.row.index, child, as_json=parsed.json
-    )
+    _print_cut_result(number, None if link is None else link.row.index, child, as_json=parsed.json)
+    return 0
 
 
 @dataclass(frozen=True)
@@ -2218,9 +2216,8 @@ def _cmd_cut_block(
             f"created #{error.child} but failed to {error.step}: {error.cause}; "
             "do not re-run -- finish it by hand"
         ) from error
-    return _print_cut_result(
-        number, None if link is None else link.index, child, as_json=parsed.json
-    )
+    _print_cut_result(number, None if link is None else link.index, child, as_json=parsed.json)
+    return 0
 
 
 def _cmd_cut(parsed: argparse.Namespace, session: _WriteSession) -> int:
