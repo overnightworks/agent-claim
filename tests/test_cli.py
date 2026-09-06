@@ -3130,6 +3130,37 @@ def test_cut_refuses_a_row_with_the_wrong_cell_count(
     assert client.item_bodies == {}
 
 
+def test_cut_refuses_an_unlinkable_row_with_the_bare_reason(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """`--row N` naming a well-formed but unlinkable row (a broken link
+    text, neither the undispatched marker nor a valid `#n` link) falls
+    through every other refusal shape -- not already cut, not the whole
+    table cut, no malformed rows to name -- to the bare `has no cuttable
+    slice row` message."""
+    body = slice_table(("1", "Broken link slice", "not a link", "—"))
+    container = _cut_container_issue(body)
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
+
+    exit_code = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "cut",
+            str(CUT_CONTAINER),
+            "--title",
+            "Scheibe 1",
+            "--row",
+            "1",
+        ]
+    )
+
+    assert exit_code == 2
+    assert capsys.readouterr().err == f"ERROR: #{CUT_CONTAINER} has no cuttable slice row\n"
+    assert client.created_children == []
+    assert client.item_bodies == {}
+
+
 def test_cut_refuses_a_row_already_cut_into_another_item(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
