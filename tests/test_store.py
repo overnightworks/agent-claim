@@ -444,6 +444,7 @@ def test_push_retry_exhausts_and_fails_loud_when_the_ref_never_stops_moving(
         message="bootstrap empty claim state\n\noperation_id: never-applied\n",
         operation_id="never-applied",
     )
+    transport = _AlwaysRejectingTransport()
 
     with pytest.raises(protocol.ClaimUnavailableError, match="moved 8 times"):
         store.push_tree(
@@ -451,7 +452,7 @@ def test_push_retry_exhausts_and_fails_loud_when_the_ref_never_stops_moving(
             remote=str(bare_remote),
             observed=observed,
             pending=pending,
-            transport=_AlwaysRejectingTransport(),
+            transport=transport,
         )
 
 
@@ -463,9 +464,10 @@ def test_git_push_transport_raises_on_a_non_fast_forward_push(
     orphan_commit = store._commit_tree(
         worktree, tree_oid=orphan_tree, parent=None, message="unrelated root commit\n"
     )
+    transport = store.GitPushTransport()
 
     with pytest.raises(protocol.PushRejectedError):
-        store.GitPushTransport().push(
+        transport.push(
             worktree=worktree, remote=str(bare_remote), ref=store.STATE_REF, new_oid=orphan_commit
         )
 
@@ -585,10 +587,11 @@ def test_read_schema_blob_fails_loud_when_schema_toml_is_not_a_blob(worktree: Pa
         .strip()
     )
     inner_tree = _raw_tree(worktree, [("100644", "blob", inner_blob, "x")])
-    outer_tree = _raw_tree(worktree, [("040000", "tree", inner_tree, "schema.toml")])
+    outer_tree_oid = _raw_tree(worktree, [("040000", "tree", inner_tree, "schema.toml")])
+    outer_tree = protocol.ObjectId(outer_tree_oid)
 
     with pytest.raises(protocol.MalformedStateTreeError, match="is not a blob"):
-        store._read_schema_blob(worktree, protocol.ObjectId(outer_tree), tip=_PLACEHOLDER_TIP)
+        store._read_schema_blob(worktree, outer_tree, tip=_PLACEHOLDER_TIP)
 
 
 def test_read_schema_blob_fails_loud_when_the_blob_is_unresolvable(worktree: Path) -> None:
@@ -606,12 +609,12 @@ def test_read_schema_blob_fails_loud_when_the_blob_is_unresolvable(worktree: Pat
         .stdout.decode()
         .strip()
     )
-    tree = _raw_tree(worktree, [("100644", "blob", blob_oid, "schema.toml")])
+    tree = protocol.ObjectId(_raw_tree(worktree, [("100644", "blob", blob_oid, "schema.toml")]))
     loose_object = worktree / ".git" / "objects" / blob_oid[:2] / blob_oid[2:]
     loose_object.unlink()
 
     with pytest.raises(protocol.MalformedStateTreeError, match=r"cannot read schema\.toml blob"):
-        store._read_schema_blob(worktree, protocol.ObjectId(tree), tip=_PLACEHOLDER_TIP)
+        store._read_schema_blob(worktree, tree, tip=_PLACEHOLDER_TIP)
 
 
 def test_write_lineage_stamp_cleans_up_its_temp_file_on_failure(
@@ -621,9 +624,10 @@ def test_write_lineage_stamp_cleans_up_its_temp_file_on_failure(
         raise OSError("simulated replace failure")
 
     monkeypatch.setattr(store.os, "replace", fail_replace)
+    tip = protocol.ObjectId("a" * 40)
 
     with pytest.raises(OSError, match="simulated replace failure"):
-        store._write_lineage_stamp(worktree, protocol.ObjectId("a" * 40))
+        store._write_lineage_stamp(worktree, tip)
 
     stamp_directory = store._git_dir(worktree) / "aco"
     assert list(stamp_directory.glob(".last-oid-*")) == []

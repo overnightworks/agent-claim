@@ -52,6 +52,10 @@ _LS_REMOTE_EXIT_NO_MATCH = 2
 # C2: this loop only ever contends over a bootstrap-empty-tree commit.
 _MAX_PUSH_ATTEMPTS = 8
 
+# The fallback detail every git-transport failure message falls back to when
+# git's own stderr/stdout carried nothing readable.
+_UNKNOWN_GIT_FAILURE = "unknown git failure"
+
 _LINEAGE_STAMP_DIRECTORY = "aco"
 _LINEAGE_STAMP_FILENAME = "last-oid"
 
@@ -185,7 +189,7 @@ def _ls_remote_state(worktree: Path, remote: str) -> ObjectId | None:
     if result.exit_status == _LS_REMOTE_EXIT_NO_MATCH:
         return None
     detail = (
-        result.stderr.decode().strip() or result.stdout.decode().strip() or "unknown git failure"
+        result.stderr.decode().strip() or result.stdout.decode().strip() or _UNKNOWN_GIT_FAILURE
     )
     raise ClaimError(
         f"cannot reach {remote} {STATE_REF}: auth or transport failure "
@@ -202,7 +206,7 @@ def _fetch_to_fetch_head(worktree: Path, remote: str) -> None:
     """
     result = _run_git(worktree, ["fetch", remote, STATE_REF])
     if result.exit_status != 0:
-        detail = result.stderr.decode().strip() or "unknown git failure"
+        detail = result.stderr.decode().strip() or _UNKNOWN_GIT_FAILURE
         raise ClaimError(f"cannot fetch {remote} {STATE_REF}: {detail}")
 
 
@@ -298,7 +302,7 @@ def _find_operation_id(
     range_argument = f"{since}..{until}" if since is not None else str(until)
     listing = _run_git(worktree, ["log", "--format=%H", range_argument])
     if listing.exit_status != 0:
-        detail = listing.stderr.decode().strip() or "unknown git failure"
+        detail = listing.stderr.decode().strip() or _UNKNOWN_GIT_FAILURE
         raise ClaimError(
             f"cannot search {range_argument} for operation_id {operation_id}: {detail}"
         )
