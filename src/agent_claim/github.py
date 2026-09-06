@@ -638,7 +638,8 @@ class GitHubForge:
                     "api",
                     f"repos/{self.repository}/issues/{number}/parent",
                     "--jq",
-                    '{number,repository:.repository_url,body:(.body // "")}',
+                    '{number,repository:.repository_url,body:(.body // ""),'
+                    "kind:(.type.name // null)}",
                 ]
             )
         except forge.ForgeNotFoundError:
@@ -649,10 +650,14 @@ class GitHubForge:
         values = self._json_lines(raw, "parent issue")
         if len(values) != 1 or not isinstance(values[0], dict):
             raise forge.ForgeMalformedResponseError("GitHub returned a malformed parent issue")
-        body = values[0].get("body")
-        if not isinstance(body, str):
+        value = values[0]
+        body = value.get("body")
+        kind_raw = value.get("kind")
+        if not isinstance(body, str) or (kind_raw is not None and not isinstance(kind_raw, str)):
             raise forge.ForgeMalformedResponseError("GitHub returned a malformed parent issue")
-        return board.ParentIssue(self._issue_reference(values[0], "parent issue"), body)
+        return board.ParentIssue(
+            self._issue_reference(value, "parent issue"), body, self._issue_kind(kind_raw)
+        )
 
     def list_children(self, number: int) -> tuple[board.ChildItem, ...]:
         """Every sub-issue GitHub records under `number`, open or closed.

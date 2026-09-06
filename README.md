@@ -154,12 +154,19 @@ documentation, never a declaration. `Advances #n` is read nowhere: a dispatched
 slice is its own item, and its pull request closes it.
 
 Parentage is GitHub's own sub-issue relation, not a line in a body. `pr-check`
-reads the work item's recorded parent and that parent's open sub-issues: a
-landing that closes the parent's last open child must close the parent too,
-while a parent that keeps other open children must stay open and carry a `Next`
-line in its body. A parent recorded in another repository is refused by name,
-never skipped silently. `claim` warns when a slice-shaped title such as
-`Schema (#79 Scheibe 21)` names a parent that GitHub does not record as one.
+reads the work item's recorded parent and that parent's open sub-issues. The
+parent must be kind `container` (its own native issue type); any other kind is
+refused by name, since only a container holds children. Closing the parent's
+last open child *permits* closing the parent in the same landing but
+*requires* it only when the parent's own `Next` line names no further work
+(`keiner`/`keine`/`nichts`/`none`/`-`, case-insensitively, all count as none);
+with further `Next` work the container keeps dispatching slices and the
+landing may pass without closing it. A parent that keeps other open children
+must stay open and carry a `Next` line in its body. A parent recorded in
+another repository is refused by name, never skipped silently. `claim` warns
+when a slice-shaped title such as `Schema (#79 Scheibe 21)` names a parent
+that GitHub does not record as one, and refuses outright when the target
+itself is a container (`claim a child`).
 
 ## Read-only board projection
 
@@ -219,6 +226,14 @@ child` — and its own last open child (once at least one sibling has closed)
 ranks above ordinary work, though never above a critical item or a real
 blocker.
 
+`board` also ends with an `UNCUT` section naming, per item, the slice-table
+rows (`#79`'s grammar) that are not yet linked to a dispatched child — an
+undispatched (`—`) row, or one whose item cell is neither the marker nor a
+well-formed `#n` link — as `#<item>: N rows (name, name, …)`; a row linking any
+issue (open or closed) is landed, never uncut. `board --json` carries the same
+findings under the top-level `uncut` list (`item`, `rows`). This is a finding,
+never a status column: a landed row simply leaves the list.
+
 `board` ends with a `RECOVERY (close or re-project)` section, and `next` names
 those items first with that step: open issues that a merged pull request already
 declared as its `Work-Item:` — the landing happened, the bookkeeping did not. It
@@ -232,17 +247,25 @@ priority category and score first, then fewer open expectation lines and the
 issue number. An empty list succeeds.
 
 Use `agent-claim next` (or `agent-claim next --json`) to name the board's
-top-ranked actionable item — the same bucket-then-score-then-number order
-`board` shows, read from its first row: it is open, free, unblocked, not
-frozen, and has a complete Now/Next/Blocked by/Done when contract, or is a
-configured projectionless idea. Pulling is not dispatching, so unruled
-expectations never withhold an item; the pulled item carries `Erwartungen
-ungeregelt, beim Ziehen zuerst refinen` instead, and an item ruled long ago
-carries `vor N Landungen geregelt, beim Ziehen neu refinen` (both as the JSON
-`ruling_hint`). Items that genuinely cannot be worked — claimed, blocked by an
-open issue, frozen, or without a complete contract when they are not a
-configured projectionless idea — are named with that reason under `SKIPPED`
-(also in the JSON `skipped` list), and `next` exits 3 when none qualifies.
+top-ranked qualifying row — the same bucket-then-score-then-number order
+`board` shows. `next --json` carries an `action` field naming one of three
+shapes. `work_item` (unchanged): the row is open, free, unblocked, not frozen,
+and has a complete Now/Next/Blocked by/Done when contract, or is a configured
+projectionless idea. `cut_slice`: a container with no open child still names
+work in its own `Next` line (`{"action": "cut_slice", "number", "title",
+"slice"}`); the head cuts that slice (`agent-claim cut <number> --title
+"..."`) and dispatches it. `close_container`: a container with no open child
+and no further `Next` work (`{"action": "close_container", "number", "closed",
+"total"}`); the head closes it. A container is never itself the `work_item`
+target. Pulling is not dispatching, so unruled expectations never withhold a
+`work_item`; the pulled item carries `Erwartungen ungeregelt, beim Ziehen
+zuerst refinen` instead, and an item ruled long ago carries `vor N Landungen
+geregelt, beim Ziehen neu refinen` (both as the JSON `ruling_hint`). Items that
+genuinely cannot be worked — claimed, blocked by an open issue, frozen, or
+without a complete contract when they are not a configured projectionless idea
+— are named with that reason under `SKIPPED` (also in the JSON `skipped`
+list; a container chosen as the `next` action is never also listed there), and
+`next` exits 3 when nothing qualifies.
 `claim` refuses work out of order when a higher-priority actionable item — the
 same order `board` and `next` use — is free. Pass `--out-of-order REASON` to
 proceed deliberately; it remains visible as a warning and preserves the reason

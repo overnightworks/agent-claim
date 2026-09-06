@@ -843,8 +843,40 @@ def _ruling_pull_hint(item: board.BoardItem) -> str | None:
     return f"vor {item.ruling_landings} Landungen geregelt, beim Ziehen neu refinen"
 
 
+def _next_action_payload(action: board.NextAction) -> dict[str, object]:
+    """The action-specific fields `_next_json` adds beyond `recovery`/`skipped`."""
+    if isinstance(action, board.WorkItemAction):
+        item = action.item
+        payload: dict[str, object] = {
+            "action": "work_item",
+            "number": item.number,
+            "score": item.score,
+            "title": item.title,
+            "next": item.next_step,
+            "ruling_landings": item.ruling_landings,
+            "ruling_old": item.ruling_old,
+        }
+        hint = _ruling_pull_hint(item)
+        if hint is not None:
+            payload["ruling_hint"] = hint
+        return payload
+    if isinstance(action, board.CutSliceAction):
+        return {
+            "action": "cut_slice",
+            "number": action.container.number,
+            "title": action.container.title,
+            "slice": action.next_step,
+        }
+    return {
+        "action": "close_container",
+        "number": action.container.number,
+        "closed": action.container_progress.closed,
+        "total": action.container_progress.total,
+    }
+
+
 def _next_json(
-    item: board.BoardItem | None,
+    action: board.NextAction | None,
     skipped: tuple[board.BoardItem, ...],
     recovery: tuple[board.BoardItem, ...],
 ) -> int:
@@ -862,26 +894,35 @@ def _next_json(
             for skipped_item in skipped
         ],
     }
-    if item is not None:
-        payload.update(
-            {
-                "number": item.number,
-                "score": item.score,
-                "title": item.title,
-                "next": item.next_step,
-                "ruling_landings": item.ruling_landings,
-                "ruling_old": item.ruling_old,
-            }
-        )
-        hint = _ruling_pull_hint(item)
-        if hint is not None:
-            payload["ruling_hint"] = hint
+    if action is not None:
+        payload.update(_next_action_payload(action))
     print(json.dumps(payload))
     return 0
 
 
+def _next_action_lines(action: board.NextAction) -> list[str]:
+    """The action-specific lines `_next` prints before `SKIPPED`."""
+    if isinstance(action, board.WorkItemAction):
+        item = action.item
+        lines = [f"#{item.number} score {item.score}: {item.title}", f"Next: {item.next_step}"]
+        hint = _ruling_pull_hint(item)
+        if hint is not None:
+            lines.append(hint)
+        return lines
+    if isinstance(action, board.CutSliceAction):
+        return [
+            f"#{action.container.number} cut_slice: {action.next_step}",
+            f'Next: agent-claim cut {action.container.number} --title "{action.next_step}"',
+        ]
+    progress = action.container_progress
+    return [
+        f"#{action.container.number} close_container: "
+        f"{progress.closed}/{progress.total} children closed, no Next work"
+    ]
+
+
 def _next(
-    item: board.BoardItem | None,
+    action: board.NextAction | None,
     skipped: tuple[board.BoardItem, ...],
     recovery: tuple[board.BoardItem, ...],
 ) -> int:
@@ -893,14 +934,7 @@ def _next(
             f"#{recovery_item.number}: {board.RECOVERY_STEP}" for recovery_item in recovery
         )
         lines.append("")
-    if item is None:
-        lines.append("No actionable item.")
-    else:
-        lines.append(f"#{item.number} score {item.score}: {item.title}")
-        lines.append(f"Next: {item.next_step}")
-        hint = _ruling_pull_hint(item)
-        if hint is not None:
-            lines.append(hint)
+    lines.extend(_next_action_lines(action) if action is not None else ["No actionable item."])
     if skipped:
         skipped_lines = (
             f"#{skipped_item.number}: {skipped_item.actionable_reason}" for skipped_item in skipped
@@ -1055,6 +1089,11 @@ def _slice_rule_checks(
     out_of_order = _out_of_order_check(projected, issue, out_of_order_reason)
     if out_of_order is not None:
         checks.append(out_of_order)
+    item = next((item for item in projected.items if item.number == issue), None)
+    if item is not None and item.kind is board.ItemKind.CONTAINER:
+        checks.append(
+            SliceCheck("error", "container", f"#{issue} is a container; claim a child", issue=issue)
+        )
     state, title, _body = _issue_reference_state(lookup.client, lookup.open_by_number, issue)
     if state is forge.ItemState.CLOSED:
         checks.append(SliceCheck("error", "closed-issue", f"issue #{issue} is closed", issue=issue))
@@ -1062,7 +1101,6 @@ def _slice_rule_checks(
         checks.append(
             SliceCheck("error", "missing-issue", f"issue #{issue} does not exist here", issue=issue)
         )
-    item = next((item for item in projected.items if item.number == issue), None)
     if item is not None:
         checks.extend(_body_contract_checks(item.contract, projected.blocker_references))
     if title is not None:
@@ -1140,10 +1178,17 @@ def _no_item_defect(
 
 @dataclass(frozen=True)
 class _ParentRequirement:
-    """What an item's parent demands of the pull request that lands the item."""
+    """What an item's parent demands of the pull request that lands the item.
+
+    `last_child` says closing the parent is *permitted* -- this landing
+    closes the parent's one remaining open child; `closing_required` narrows
+    that to *required*, which holds only when the parent's own `Next` line
+    names no further work.
+    """
 
     reference: board.IssueReference
     closing_required: bool
+    last_child: bool
 
 
 def _parent_requirement(
@@ -1153,9 +1198,11 @@ def _parent_requirement(
 ) -> _ParentRequirement | board.ClassificationDefect | None:
     """The parent's demand, read from GitHub's sub-issue relation.
 
-    Closing a parent's last open child completes the parent, so that landing
-    closes the parent too. A parent keeping other open children stays open,
-    and must say what happens next.
+    Closing a parent's last open child completes the parent only when the
+    parent's own `Next` line names no further work; otherwise the container
+    keeps dispatching slices, and the landing may close the parent (its one
+    remaining child) but need not. A parent keeping other open children
+    stays open, and must say what happens next.
     """
     parent = client.parent_issue(item.number)
     if parent is None:
@@ -1165,20 +1212,30 @@ def _parent_requirement(
             f"has parent {parent.reference} in another repository, "
             "whose children this check cannot read"
         )
+    if parent.kind is not board.ItemKind.CONTAINER:
+        kind_text = parent.kind.value if parent.kind is not None else "unknown"
+        return board.ClassificationDefect(
+            f"has parent {parent.reference} of kind {kind_text}, which is not a "
+            "container; only a container holds children"
+        )
     remaining = tuple(
         child
         for child in client.list_children(parent.reference.number)
         if child.state is board.ChildState.OPEN and child.number != item.number
     )
     if not remaining:
-        return _ParentRequirement(parent.reference, True)
+        return _ParentRequirement(
+            parent.reference,
+            not board.has_further_work(board.parse_contract(parent.body).next),
+            True,
+        )
     if board.parse_contract(parent.body).next is None:
         children = "child" if len(remaining) == 1 else "children"
         return board.ClassificationDefect(
             f"leaves parent {parent.reference} open with {len(remaining)} other open "
             f"{children}, whose body carries no Next line"
         )
-    return _ParentRequirement(parent.reference, False)
+    return _ParentRequirement(parent.reference, False, False)
 
 
 def _closing_defect(
@@ -1191,18 +1248,18 @@ def _closing_defect(
     closing = board.closing_references(detail.body, repository)
     if item not in closing:
         return board.ClassificationDefect(f"carries no closing reference for its work item {item}")
-    completed_parent = (
-        {requirement.reference}
-        if requirement is not None and requirement.closing_required
-        else set()
-    )
-    missing_parent = completed_parent - closing
-    if missing_parent:
-        parent = next(iter(missing_parent))
+    if (
+        requirement is not None
+        and requirement.closing_required
+        and requirement.reference not in closing
+    ):
         return board.ClassificationDefect(
-            f"closes the last open child of parent {parent}; close the parent too"
+            f"closes the last open child of parent {requirement.reference}; close the parent too"
         )
-    besides = tuple(sorted(closing - {item} - completed_parent, key=str))
+    permitted_parent = (
+        {requirement.reference} if requirement is not None and requirement.last_child else set()
+    )
+    besides = tuple(sorted(closing - {item} - permitted_parent, key=str))
     if besides:
         named = ", ".join(str(reference) for reference in besides)
         return board.ClassificationDefect(
@@ -1507,20 +1564,31 @@ def _cmd_rulings(parsed: argparse.Namespace, session: _ReadSession) -> None:
     _rulings(projected, issues, as_json=parsed.json)
 
 
+def _next_action_container_number(action: board.NextAction | None) -> int | None:
+    """The container `action` targets, when it targets one -- excluded from
+    `SKIPPED` below since a container is always non-actionable itself."""
+    if isinstance(action, board.CutSliceAction | board.CloseContainerAction):
+        return action.container.number
+    return None
+
+
 def _cmd_next(parsed: argparse.Namespace, session: _ReadSession) -> int:
     comments = session.forge.list_protocol_candidates(protocol.LEDGER_ISSUE)
     projected = _board(session.forge, protocol.active_claims(comments))
-    item = board.highest_scored_actionable(projected)
-    skipped = _unworkable(projected)
+    action = board.next_action(projected)
+    chosen_container = _next_action_container_number(action)
+    skipped = tuple(item for item in _unworkable(projected) if item.number != chosen_container)
     recovery = projected.recovery
-    if item is None:
+    if action is None:
         if skipped or recovery:
             if parsed.json:
                 _next_json(None, skipped, recovery)
             else:
                 _next(None, skipped, recovery)
         return 3
-    return _next_json(item, skipped, recovery) if parsed.json else _next(item, skipped, recovery)
+    if parsed.json:
+        return _next_json(action, skipped, recovery)
+    return _next(action, skipped, recovery)
 
 
 def _cmd_who(parsed: argparse.Namespace, session: _ReadSession) -> None:

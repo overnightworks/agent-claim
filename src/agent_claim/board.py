@@ -242,6 +242,7 @@ class ParentIssue:
 
     reference: IssueReference
     body: str
+    kind: ItemKind | None = None
 
 
 class NoItemKind(StrEnum):
@@ -424,6 +425,7 @@ class Board:
     ready_now: tuple[BoardItem, ...]
     stale: tuple[BoardItem, ...]
     recovery: tuple[BoardItem, ...]
+    uncut: tuple[UncutSlices, ...]
     blocker_references: tuple[BlockerReference, ...]
 
 
@@ -816,6 +818,49 @@ def parse_slice_table(body: str) -> tuple[SliceTableEntry, ...]:
     return tuple(entries)
 
 
+@dataclass(frozen=True)
+class SliceTableFindings:
+    """`parse_slice_table`'s entries, classified by what a builder does next.
+
+    A row whose `item_issue` is set (linking any issue, open or closed) is
+    landed, never a finding: `cut` only ever targets `cuttable`, and `board`
+    only ever reports `cuttable`/`unlinkable`/`malformed` as uncut.
+    """
+
+    cuttable: tuple[SliceTableRow, ...]
+    unlinkable: tuple[SliceTableRow, ...]
+    malformed: tuple[str, ...]
+
+
+def slice_table_findings(body: str) -> SliceTableFindings:
+    cuttable: list[SliceTableRow] = []
+    unlinkable: list[SliceTableRow] = []
+    malformed: list[str] = []
+    for entry in parse_slice_table(body):
+        if isinstance(entry, SliceTableRow):
+            if entry.item_cell == UNDISPATCHED_SLICE_CELL:
+                cuttable.append(entry)
+            elif entry.item_issue is None:
+                unlinkable.append(entry)
+        else:
+            malformed.append(entry.line)
+    return SliceTableFindings(tuple(cuttable), tuple(unlinkable), tuple(malformed))
+
+
+@dataclass(frozen=True)
+class UncutSlices:
+    """One item's undispatched slice-table findings, as `board` reports them."""
+
+    item: int
+    rows: tuple[str, ...]
+
+
+def _uncut_slices(issue_number: int, findings: SliceTableFindings) -> UncutSlices | None:
+    named = tuple(row.name for row in (*findings.cuttable, *findings.unlinkable))
+    rows = named + findings.malformed
+    return UncutSlices(issue_number, rows) if rows else None
+
+
 def _issue_reference(match: re.Match[str], repository: str) -> IssueReference:
     return IssueReference(match.group("repository") or repository, int(match.group("number")))
 
@@ -1051,6 +1096,18 @@ def _single_concrete_next(value: str | None) -> bool:
         return False
     lines = tuple(line.strip(" -\t") for line in value.splitlines() if line.strip())
     return len(lines) == 1 and lines[0].casefold() not in {"tbd", "todo", "unknown"}
+
+
+# Beside `NO_BLOCKERS`'s vocabulary for `Blocked by`, a container's `Next`
+# line has its own small set of "nothing left" spellings -- German and
+# English, ASCII only. `pr-check`'s last-child rule and `next`'s
+# cut_slice/close_container split both read a `Next` line the same way.
+_NO_FURTHER_WORK_VALUES = frozenset({"keiner", "keine", NO_BLOCKERS, "none", "-"})
+
+
+def has_further_work(next_line: str | None) -> bool:
+    """Whether a container's own `Next` line still names work to dispatch."""
+    return next_line is not None and next_line.casefold() not in _NO_FURTHER_WORK_VALUES
 
 
 def _claim_by_issue(claims: tuple[protocol.ActiveClaim, ...]) -> dict[int, protocol.ActiveClaim]:
@@ -1477,6 +1534,17 @@ def build_board(inputs: BoardBuildInputs) -> Board:
             key=board_rank,
         )
     )
+    uncut = tuple(
+        sorted(
+            (
+                finding
+                for issue in issues
+                if (finding := _uncut_slices(issue.number, slice_table_findings(issue.body)))
+                is not None
+            ),
+            key=lambda finding: finding.item,
+        )
+    )
     return Board(
         items=ordered,
         ready_now=tuple(item for item in ordered if item.actionable),
@@ -1490,6 +1558,7 @@ def build_board(inputs: BoardBuildInputs) -> Board:
             for item in ordered
             if item.number in landed_work_items and item.number != protocol.LEDGER_ISSUE
         ),
+        uncut=uncut,
         blocker_references=blocker_references,
     )
 
@@ -1505,6 +1574,58 @@ def highest_scored_actionable(board: Board) -> BoardItem | None:
     higher score must never outrank a human's priority label.
     """
     return next(iter(board.ready_now), None)
+
+
+@dataclass(frozen=True)
+class WorkItemAction:
+    """Claim `item` -- today's `next` target, unchanged."""
+
+    item: BoardItem
+
+
+@dataclass(frozen=True)
+class CutSliceAction:
+    """`container` has no open child and still names work: cut `next_step`
+    (its own `Next` line) and dispatch the fresh slice."""
+
+    container: BoardItem
+    container_progress: ContainerProgress
+    next_step: str
+
+
+@dataclass(frozen=True)
+class CloseContainerAction:
+    """`container` has no open child and no further `Next` work: close it."""
+
+    container: BoardItem
+    container_progress: ContainerProgress
+
+
+NextAction = WorkItemAction | CutSliceAction | CloseContainerAction
+
+
+def next_action(board: Board) -> NextAction | None:
+    """The one action `next` recommends: the board's own top qualifying row.
+
+    Walks `items` in `board_rank` order -- the same order `board` shows --
+    and returns the first row that is either an actionable non-container
+    (`WorkItemAction`; a container is never actionable, so this branch never
+    fires for one) or a container with no open child (`CutSliceAction` when
+    its own `Next` line still names work, else `CloseContainerAction`). Every
+    other row -- blocked, claimed, incomplete, or a container still holding
+    an open child -- is skipped, never blocking a lower-ranked qualifying row.
+    """
+    for item in board.items:
+        if item.actionable:
+            return WorkItemAction(item)
+        container = item.container
+        if item.kind is not ItemKind.CONTAINER or container is None or container.open_children:
+            continue
+        next_line = item.contract.next
+        if next_line is not None and has_further_work(next_line):
+            return CutSliceAction(item, container, next_line)
+        return CloseContainerAction(item, container)
+    return None
 
 
 def board_json(board: Board) -> str:
@@ -1570,9 +1691,10 @@ def render(board: Board) -> str:
     stale = ", ".join(f"#{item.number}" for item in board.stale) or "none"
     recovery = ", ".join(f"#{item.number}" for item in board.recovery) or "none"
     containers = "\n".join(_container_lines(board)) or "none"
+    uncut = "\n".join(_uncut_line(finding) for finding in board.uncut) or "none"
     return (
         f"{table}\n\nREADY NOW\n{ready}\n\nSTALE\n{stale}\n\nRECOVERY ({RECOVERY_STEP})\n{recovery}"
-        f"\n\nCONTAINERS\n{containers}"
+        f"\n\nCONTAINERS\n{containers}\n\nUNCUT\n{uncut}"
     )
 
 
@@ -1594,6 +1716,11 @@ def _container_lines(board: Board) -> list[str]:
         for item in board.items
         if item.container is not None
     ]
+
+
+def _uncut_line(finding: UncutSlices) -> str:
+    names = ", ".join(finding.rows)
+    return f"#{finding.item}: {len(finding.rows)} rows ({names})"
 
 
 def _contract_summary(contract: Contract) -> str:

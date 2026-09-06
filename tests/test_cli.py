@@ -1171,7 +1171,7 @@ def test_board_projects_fixture_json_without_github_writes(
 
     assert issue_claim.main(["--repo", "example/agent-claim", "board", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert set(payload) == {"items", "ready_now", "stale", "recovery"}
+    assert set(payload) == {"items", "ready_now", "stale", "recovery", "uncut"}
     first = payload["items"][0]
     ten = next(item for item in payload["items"] if item["number"] == 10)
     eleven = next(item for item in payload["items"] if item["number"] == 11)
@@ -1478,6 +1478,7 @@ def _stub_issue_reference(
             ("next", "--json"),
             0,
             {
+                "action": "work_item",
                 "number": 11,
                 "score": 10,
                 "title": "Top work",
@@ -1673,6 +1674,7 @@ def test_next_pulls_an_unruled_item_and_names_only_unworkable_ones_as_skipped(
 
     assert issue_claim.main(["--repo", "example/agent-claim", "next", "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == {
+        "action": "work_item",
         "number": 11,
         "score": 10,
         "title": "Needs rulings",
@@ -2295,6 +2297,46 @@ def test_claim_refuses_a_closed_or_missing_target(
     assert client.comments[LEDGER_ISSUE] == []
 
 
+def test_claim_refuses_a_container(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    container = board.Issue(
+        72,
+        "Container work",
+        (),
+        "",
+        "2026-08-20T00:00:00Z",
+        "2026-08-20T00:00:00Z",
+        kind=board.ItemKind.CONTAINER,
+        children_closed=0,
+        children_total=1,
+    )
+    _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
+    monkeypatch.setattr(
+        issue_claim, "_request", lambda _arguments: request(issue=72, scope=("src/work.py",))
+    )
+
+    exit_code = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "claim",
+            "72",
+            "--agent",
+            "Codex Sol",
+            "--scope",
+            "src/work.py",
+        ]
+    )
+
+    assert exit_code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "ERROR: #72 is a container; claim a child" in captured.err
+
+
 def test_claim_json_refusal_carries_refused_issue_and_checks(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -2434,6 +2476,48 @@ def test_parse_slice_table_reads_every_table_in_the_body() -> None:
         board.SliceTableRow(1, "First table's slice", "#101", 101),
         board.SliceTableRow(1, "Second table's slice", "—", None),
     )
+
+
+def test_slice_table_findings_classifies_cuttable_unlinkable_landed_and_malformed() -> None:
+    bad_row = "| x | Broken index | — | — |"
+    body = (
+        slice_table(
+            ("1", "Undispatched slice", "—", "—"),
+            ("2", "Landed slice", "#101", "—"),
+            ("3", "Malformed link slice", "not a link", "—"),
+        )
+        + f"{bad_row}\n"
+    )
+
+    findings = board.slice_table_findings(body)
+
+    assert findings.cuttable == (board.SliceTableRow(1, "Undispatched slice", "—", None),)
+    assert findings.unlinkable == (
+        board.SliceTableRow(3, "Malformed link slice", "not a link", None),
+    )
+    assert findings.malformed == (bad_row,)
+
+
+def test_uncut_slices_is_none_when_every_row_is_linked() -> None:
+    body = slice_table(("1", "Landed slice", "#101", "—"))
+
+    assert board._uncut_slices(79, board.slice_table_findings(body)) is None
+
+
+@pytest.mark.parametrize(
+    ("next_line", "expected"),
+    [
+        pytest.param(None, False, id="no-next-line"),
+        pytest.param("keiner", False, id="german-none"),
+        pytest.param("Keine", False, id="german-none-casefolded"),
+        pytest.param("nichts", False, id="no-blockers-spelling"),
+        pytest.param("none", False, id="english-none"),
+        pytest.param("-", False, id="dash"),
+        pytest.param("Cut the next slice.", True, id="concrete-work"),
+    ],
+)
+def test_has_further_work(next_line: str | None, expected: bool) -> None:
+    assert board.has_further_work(next_line) is expected
 
 
 @pytest.mark.parametrize(
@@ -3460,6 +3544,113 @@ def test_board_shows_container_progress_and_refuses_it_as_actionable() -> None:
     assert "#120 1/2 closed; open: #121" in rendered
 
 
+def test_next_action_names_the_top_actionable_work_item() -> None:
+    item = board_issue(10, "Top work", complete_contract("Claim #10."))
+    projected = projected_board(
+        (item,), (), (), (), board.BoardConfig(), now=datetime(2026, 8, 21, tzinfo=UTC)
+    )
+
+    action = board.next_action(projected)
+
+    assert isinstance(action, board.WorkItemAction)
+    assert action.item.number == 10
+
+
+def test_next_action_cuts_a_container_with_no_open_child_and_further_next_work() -> None:
+    container = board.Issue(
+        130,
+        "Container",
+        (),
+        "## Now\nWork.\n\n## Next\nCut the next slice.\n\n"
+        "## Blocked by\nnichts\n\n## Done when\nAll slices land.",
+        "2026-08-20T00:00:00Z",
+        "2026-08-20T00:00:00Z",
+        kind=board.ItemKind.CONTAINER,
+        children_closed=2,
+        children_total=2,
+    )
+    projected = projected_board(
+        (container,), (), (), (), board.BoardConfig(), now=datetime(2026, 8, 21, tzinfo=UTC)
+    )
+
+    action = board.next_action(projected)
+
+    assert isinstance(action, board.CutSliceAction)
+    assert action.container.number == 130
+    assert action.next_step == "Cut the next slice."
+
+
+def test_next_action_closes_a_container_with_no_open_child_and_no_further_work() -> None:
+    container = board.Issue(
+        140,
+        "Container",
+        (),
+        "## Now\nWork.\n\n## Next\nkeiner\n\n## Blocked by\nnichts\n\n"
+        "## Done when\nAll slices land.",
+        "2026-08-20T00:00:00Z",
+        "2026-08-20T00:00:00Z",
+        kind=board.ItemKind.CONTAINER,
+        children_closed=3,
+        children_total=3,
+    )
+    projected = projected_board(
+        (container,), (), (), (), board.BoardConfig(), now=datetime(2026, 8, 21, tzinfo=UTC)
+    )
+
+    action = board.next_action(projected)
+
+    assert isinstance(action, board.CloseContainerAction)
+    assert action.container.number == 140
+    assert action.container_progress == board.ContainerProgress(3, 3, ())
+
+
+def test_board_json_and_render_report_an_uncut_slice_table_row() -> None:
+    container = board.Issue(
+        160,
+        "Container",
+        (),
+        slice_table(("1", "Undispatched slice", "—", "—")),
+        "2026-08-20T00:00:00Z",
+        "2026-08-20T00:00:00Z",
+        kind=board.ItemKind.CONTAINER,
+        children_closed=0,
+        children_total=0,
+    )
+    projected = projected_board(
+        (container,), (), (), (), board.BoardConfig(), now=datetime(2026, 8, 21, tzinfo=UTC)
+    )
+
+    assert projected.uncut == (board.UncutSlices(160, ("Undispatched slice",)),)
+    payload = json.loads(board.board_json(projected))
+    assert payload["uncut"] == [{"item": 160, "rows": ["Undispatched slice"]}]
+    assert "UNCUT\n#160: 1 rows (Undispatched slice)" in board.render(projected)
+
+
+def test_next_action_skips_a_container_that_still_holds_an_open_child() -> None:
+    container = board.Issue(
+        150,
+        "Container",
+        (),
+        "",
+        "2026-08-20T00:00:00Z",
+        "2026-08-20T00:00:00Z",
+        kind=board.ItemKind.CONTAINER,
+        children_closed=0,
+        children_total=1,
+    )
+    projected = projected_board(
+        (container,),
+        (),
+        (),
+        (),
+        board.BoardConfig(),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+        children={150: (board.ChildItem(151, board.ChildState.OPEN),)},
+    )
+
+    assert board.next_action(projected) is None
+
+
 def test_next_names_the_boards_top_row_even_when_it_is_not_the_highest_score() -> None:
     now = datetime(2026, 8, 21, tzinfo=UTC)
     in_flight_unlabelled = board_issue(50, "In-flight, unlabelled", complete_contract("Ship it."))
@@ -3787,6 +3978,7 @@ def test_next_pulls_a_configured_projectionless_idea_with_refinement_step(
 
     assert issue_claim.main(["--repo", "example/agent-claim", "next", "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == {
+        "action": "work_item",
         "number": 10,
         "score": -20,
         "title": "Operator idea",
@@ -13773,10 +13965,11 @@ def parented_pr_check_client(
     parent_body: str,
     open_children: tuple[board.IssueReference, ...],
     parent_repository: str = REPOSITORY,
+    parent_kind: board.ItemKind | None = board.ItemKind.CONTAINER,
 ) -> FakeForge:
     client = pr_check_client(monkeypatch, landing_pull_request(body=body))
     client.parents[WORK_ITEM_ISSUE] = board.ParentIssue(
-        board.IssueReference(parent_repository, PARENT_ISSUE), parent_body
+        board.IssueReference(parent_repository, PARENT_ISSUE), parent_body, parent_kind
     )
     client.children[PARENT_ISSUE] = tuple(
         board.ChildItem(reference.number, board.ChildState.OPEN) for reference in open_children
@@ -13787,10 +13980,12 @@ def parented_pr_check_client(
 def test_pr_check_requires_the_parent_to_close_with_its_last_open_child(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """Closing is required only when the parent's own `Next` line names no
+    further work -- `complete_contract("keiner")` is exactly that."""
     parented_pr_check_client(
         monkeypatch,
         body="Work-Item: #72\n\nCloses #72",
-        parent_body=complete_contract("Cut the next slice."),
+        parent_body=complete_contract("keiner"),
         open_children=(board.IssueReference(REPOSITORY, WORK_ITEM_ISSUE),),
     )
 
@@ -13798,6 +13993,56 @@ def test_pr_check_requires_the_parent_to_close_with_its_last_open_child(
     assert capsys.readouterr().err == (
         f"REFUSED: pull request #12 closes the last open child of parent "
         f"{REPOSITORY}#{PARENT_ISSUE}; close the parent too\n"
+    )
+
+
+def test_pr_check_accepts_a_last_child_landing_when_the_parent_still_has_next_work(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Ruled example: the container's own `Next` line still names work, so
+    the landing may pass without closing it -- a container with a single
+    dispatched child is the normal case, not the end."""
+    parented_pr_check_client(
+        monkeypatch,
+        body="Work-Item: #72\n\nCloses #72",
+        parent_body=complete_contract("Cut the next slice."),
+        open_children=(board.IssueReference(REPOSITORY, WORK_ITEM_ISSUE),),
+    )
+
+    assert run_pr_check() == 0
+    assert capsys.readouterr().out == (
+        f"PR #12 by ada declares Work-Item: {REPOSITORY}#{WORK_ITEM_ISSUE}\n"
+    )
+
+
+def test_pr_check_permits_but_does_not_require_closing_a_parent_with_further_next_work(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    parented_pr_check_client(
+        monkeypatch,
+        body="Work-Item: #72\n\nCloses #72\nCloses #79",
+        parent_body=complete_contract("Cut the next slice."),
+        open_children=(board.IssueReference(REPOSITORY, WORK_ITEM_ISSUE),),
+    )
+
+    assert run_pr_check() == 0
+
+
+def test_pr_check_refuses_a_parent_that_is_not_a_container(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    parented_pr_check_client(
+        monkeypatch,
+        body="Work-Item: #72\n\nCloses #72",
+        parent_body=complete_contract("keiner"),
+        open_children=(),
+        parent_kind=board.ItemKind.TASK,
+    )
+
+    assert run_pr_check() == 1
+    assert capsys.readouterr().err == (
+        f"REFUSED: pull request #12 has parent {REPOSITORY}#{PARENT_ISSUE} of kind task, "
+        "which is not a container; only a container holds children\n"
     )
 
 
@@ -13968,6 +14213,36 @@ def test_github_adapter_reads_an_issue_without_a_parent_as_parentless() -> None:
     client = GitHubForge(github._repository_id(REPOSITORY), run=run)
 
     assert client.parent_issue(72) is None
+
+
+def test_github_adapter_reads_the_parents_native_kind() -> None:
+    def run(arguments: list[str], *, input_data: bytes | None = None) -> str:
+        return json.dumps(
+            {
+                "number": 79,
+                "repository": API_REPOSITORY_URL,
+                "body": "## Next\nCut.",
+                "kind": "Container",
+            }
+        )
+
+    client = GitHubForge(github._repository_id(REPOSITORY), run=run)
+
+    assert client.parent_issue(72) == board.ParentIssue(
+        board.IssueReference(REPOSITORY, 79), "## Next\nCut.", board.ItemKind.CONTAINER
+    )
+
+
+def test_github_adapter_fails_loud_on_a_malformed_parent_kind() -> None:
+    def run(arguments: list[str], *, input_data: bytes | None = None) -> str:
+        return json.dumps(
+            {"number": 79, "repository": API_REPOSITORY_URL, "body": "## Next\nCut.", "kind": 5}
+        )
+
+    client = GitHubForge(github._repository_id(REPOSITORY), run=run)
+
+    with pytest.raises(ClaimError, match="malformed parent issue"):
+        client.parent_issue(72)
 
 
 def test_board_recovers_an_open_item_a_merged_pull_request_already_landed() -> None:
