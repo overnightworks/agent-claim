@@ -4926,10 +4926,59 @@ def test_board_json_and_render_report_an_uncut_slice_table_row() -> None:
         (container,), (), (), (), board.BoardConfig(), now=datetime(2026, 8, 21, tzinfo=UTC)
     )
 
-    assert projected.uncut == (board.UncutSlices(160, ("Undispatched slice",)),)
+    assert projected.uncut == (board.UncutSlices(160, (board.UncutRow(1, "Undispatched slice"),)),)
     payload = json.loads(board.board_json(projected))
-    assert payload["uncut"] == [{"item": 160, "rows": ["Undispatched slice"], "malformed": []}]
-    assert "UNCUT\n#160: 1 rows (Undispatched slice)" in board.render(projected)
+    assert payload["uncut"] == [
+        {"item": 160, "rows": [{"index": 1, "title": "Undispatched slice"}], "malformed": []}
+    ]
+    assert "UNCUT\n#160: rows 1 uncut" in board.render(projected)
+
+
+def test_board_json_and_render_name_several_uncut_rows_by_index() -> None:
+    """`#122`'s own shape (06.09.2026): several still-open rows are named
+    by index, not by re-deriving it from a name string."""
+    container = board.Issue(
+        122,
+        "Container",
+        (),
+        slice_table(
+            ("5", "Fifth slice", "—", "—"),
+            ("6", "Sixth slice", "—", "—"),
+            ("7", "Seventh slice", "—", "—"),
+        ),
+        "2026-08-20T00:00:00Z",
+        "2026-08-20T00:00:00Z",
+        kind=board.ItemKind.CONTAINER,
+        children_closed=0,
+        children_total=0,
+    )
+    projected = projected_board(
+        (container,), (), (), (), board.BoardConfig(), now=datetime(2026, 8, 21, tzinfo=UTC)
+    )
+
+    assert projected.uncut == (
+        board.UncutSlices(
+            122,
+            (
+                board.UncutRow(5, "Fifth slice"),
+                board.UncutRow(6, "Sixth slice"),
+                board.UncutRow(7, "Seventh slice"),
+            ),
+        ),
+    )
+    payload = json.loads(board.board_json(projected))
+    assert payload["uncut"] == [
+        {
+            "item": 122,
+            "rows": [
+                {"index": 5, "title": "Fifth slice"},
+                {"index": 6, "title": "Sixth slice"},
+                {"index": 7, "title": "Seventh slice"},
+            ],
+            "malformed": [],
+        }
+    ]
+    assert "UNCUT\n#122: rows 5, 6, 7 uncut" in board.render(projected)
 
 
 def test_board_json_and_render_name_a_malformed_row_by_its_cell_and_reason() -> None:

@@ -949,19 +949,30 @@ def slice_table_findings(body: str) -> SliceTableFindings:
 
 
 @dataclass(frozen=True)
+class UncutRow:
+    """One still-open slice-table row `board` names as uncut -- `index` is
+    exactly what `cut --row N` needs to select it."""
+
+    index: int
+    title: str
+
+
+@dataclass(frozen=True)
 class UncutSlices:
     """One item's undispatched slice-table findings, as `board` reports them."""
 
     item: int
-    rows: tuple[str, ...]
+    rows: tuple[UncutRow, ...]
     malformed: tuple[MalformedSliceRow, ...] = ()
 
 
 def _uncut_slices(issue_number: int, findings: SliceTableFindings) -> UncutSlices | None:
-    named = tuple(row.name for row in (*findings.cuttable, *findings.unlinkable))
-    if not named and not findings.malformed:
+    rows = tuple(
+        UncutRow(row.index, row.name) for row in (*findings.cuttable, *findings.unlinkable)
+    )
+    if not rows and not findings.malformed:
         return None
-    return UncutSlices(issue_number, named, findings.malformed)
+    return UncutSlices(issue_number, rows, findings.malformed)
 
 
 def _row_item_cell_span(
@@ -1808,8 +1819,8 @@ def next_action(board: Board) -> NextAction | None:
         if next_line is not None and has_further_work(next_line):
             return CutSliceAction(item, container, next_line)
         uncut = uncut_by_container.get(item.number)
-        if uncut is not None:
-            return CutSliceAction(item, container, uncut.rows[0])
+        if uncut is not None and uncut.rows:
+            return CutSliceAction(item, container, uncut.rows[0].title)
         return CloseContainerAction(item, container)
     return None
 
@@ -1922,8 +1933,8 @@ def malformed_row_clause(row: MalformedSliceRow) -> str:
 def _uncut_line(finding: UncutSlices) -> str:
     clauses = []
     if finding.rows:
-        names = ", ".join(finding.rows)
-        clauses.append(f"{len(finding.rows)} rows ({names})")
+        indices = ", ".join(str(row.index) for row in finding.rows)
+        clauses.append(f"rows {indices} uncut")
     clauses.extend(malformed_row_clause(row) for row in finding.malformed)
     return f"#{finding.item}: " + "; ".join(clauses)
 
