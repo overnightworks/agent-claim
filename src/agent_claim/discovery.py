@@ -6,13 +6,9 @@ from . import forge
 from .protocol import (
     LEDGER_BODY_MARKER,
     LEDGER_LABEL,
-    MARKER_SUFFIX,
     ClaimError,
     ClaimUnavailableError,
-    claim_label,
 )
-
-LEDGER_LABEL_COLOUR = "6f42c1"
 
 
 def _issue_first_line(item: forge.LedgerItem) -> str:
@@ -56,10 +52,10 @@ def _select_ledger(items: tuple[forge.LedgerItem, ...]) -> int | None:
 def discover_ledger(client: forge.ForgeReader) -> int | None:
     """Find the single open, locked protocol ledger without changing GitHub state.
 
-    Every bootstrapped ledger is labelled `LEDGER_LABEL` (`_ensure_ledger_labels`
-    attaches it, and `reconcile` backfills it onto an older, unlabelled ledger —
-    see `protocol.reconcile_all_labels`), and only the canonical ledger ever
-    carries it. Asking for that exact label is genuinely atomic under normal
+    Every canonical ledger is labelled `LEDGER_LABEL`, attached and backfilled
+    by `reconcile` (`protocol.reconcile_all_labels`) rather than by discovery
+    itself, and only the canonical ledger ever carries it. Asking for that
+    exact label is genuinely atomic under normal
     operation: the answer is at most one issue, always one response, one
     snapshot — never a fetch spanning multiple page requests that a
     concurrent open/close could shift an issue across.
@@ -103,89 +99,3 @@ def discover_ledger(client: forge.ForgeReader) -> int | None:
             "changed mid-fetch); retry rather than bootstrap"
         )
     return None
-
-
-def _ensure_ledger_labels(client: forge.ForgeWriter, ledger: int) -> None:
-    """Create both label definitions and attach `LEDGER_LABEL` to `ledger` itself.
-
-    `claim_label(ledger)` is never attached here — it belongs on whichever
-    other issues carry an active claim rooted in this ledger, applied by
-    `protocol.reconcile_issue_label`; this only needs the definition to exist
-    before that first attach.
-    """
-    for label, description in (
-        (LEDGER_LABEL, "agent-claim canonical ledger"),
-        (claim_label(ledger), "agent-claim active issue projection"),
-    ):
-        client.ensure_label(label, colour=LEDGER_LABEL_COLOUR, description=description)
-    client.add_label(ledger, LEDGER_LABEL)
-
-
-def _create_ledger(client: forge.ForgeWriter) -> int:
-    body = (
-        f"{LEDGER_BODY_MARKER}\n\n## Agent claim ledger\n\n"
-        "This open, collaborator-locked issue serializes build-claim events."
-    )
-    number = client.create_item(title="Agent claim ledger", body=body)
-    client.lock_item(number)
-    return number
-
-
-def _refuse_competing_contracts(items: tuple[forge.LedgerItem, ...]) -> None:
-    foreign = [
-        item.number
-        for item in items
-        if not item.is_landing
-        and item.author_is_trusted
-        and item.state is forge.ItemState.OPEN
-        and _foreign_contract(item)
-    ]
-    if foreign:
-        raise ClaimError(
-            f"another coordination contract exists on issue(s) {foreign}; refusing to compete"
-        )
-
-
-def _trusted_ledger_candidates(items: tuple[forge.LedgerItem, ...]) -> tuple[forge.LedgerItem, ...]:
-    return tuple(
-        item
-        for item in items
-        if not item.is_landing
-        and item.state is forge.ItemState.OPEN
-        and _issue_first_line(item) == LEDGER_BODY_MARKER
-        and item.author_is_trusted
-        and (item.locked or item.author_is_trusted)
-    )
-
-
-def _converge_on_canonical_ledger(
-    client: forge.ForgeWriter, candidates: tuple[forge.LedgerItem, ...]
-) -> int:
-    canonical = min(item.number for item in candidates)
-    for item in candidates:
-        if not item.locked:
-            client.lock_item(item.number)
-    _ensure_ledger_labels(client, canonical)
-    for item in candidates:
-        if item.number == canonical:
-            continue
-        client.post_comment(
-            item.number,
-            "<!-- agent-claim-ledger-duplicate:v1 "
-            f"canonical={canonical}{MARKER_SUFFIX}\n\n"
-            f"Superseded duplicate ledger; canonical ledger is #{canonical}.",
-        )
-        client.close_item(item.number)
-    return canonical
-
-
-def bootstrap_ledger(client: forge.ForgeWriter) -> int:
-    """Create/adopt one ledger and make racing first starts converge to the earliest issue."""
-    items = client.list_items().items
-    _refuse_competing_contracts(items)
-    if not _trusted_ledger_candidates(items):
-        _create_ledger(client)
-    candidates = _trusted_ledger_candidates(client.list_items().items)
-    if not candidates:
-        raise ClaimError("bootstrap did not expose a trusted ledger candidate; retry")
-    return _converge_on_canonical_ledger(client, candidates)

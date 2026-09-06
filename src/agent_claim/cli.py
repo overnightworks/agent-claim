@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
-from . import __version__, board, checkout, discovery, forge, github, protocol
+from . import __version__, board, checkout, discovery, forge, github, protocol, store
 
 AGENT_CLAIM_AGENT_ENV = checkout.AGENT_CLAIM_AGENT_ENV
 CLAUDE_SESSION_ID_ENV = checkout.CLAUDE_SESSION_ID_ENV
@@ -46,7 +46,6 @@ _unclaimed_projection = protocol._unclaimed_projection
 _validate_checkout = checkout._validate_checkout
 acquire_claim = protocol.acquire_claim
 active_claims = protocol.active_claims
-bootstrap_ledger = discovery.bootstrap_ledger
 claim_comment = protocol.claim_comment
 claim_label = protocol.claim_label
 claims_conflict = protocol.claims_conflict
@@ -254,7 +253,9 @@ LANE_ISSUE_HELP = "omit for lane mode, derived from a docs/ or fix/ checkout bra
 
 
 def _add_bootstrap_parser(commands: argparse._SubParsersAction) -> None:
-    commands.add_parser("bootstrap", help="create or adopt this repository's locked ledger")
+    commands.add_parser(
+        "bootstrap", help="create or report this repository's refs/aco/state claim store"
+    )
 
 
 def _add_status_parser(commands: argparse._SubParsersAction) -> None:
@@ -2309,17 +2310,26 @@ def _release_branch_for(parsed: argparse.Namespace) -> str | None:
     )
 
 
+def _bootstrap_state() -> int:
+    """Create or adopt `refs/aco/state`, the store's sole production caller.
+
+    Pure git transport against this checkout's canonical remote: unlike
+    every other command, this never touches GitHub, so it needs neither
+    `--repo` nor a ledger.
+    """
+    oid = store.bootstrap(worktree=Path.cwd())
+    print(oid)
+    return 0
+
+
 def _dispatch(parsed: argparse.Namespace) -> int:
+    if parsed.command == "bootstrap":
+        return _bootstrap_state()
     if parsed.command in {"claim", "release", "rescope"}:
         parsed.agent = checkout._resolved_agent(parsed.agent)
     release_branch = _release_branch_for(parsed) if parsed.command == "release" else None
     repository = github.discover_repository(parsed.repo, remote_url=checkout.origin_remote_url)
     forge_handle = github.GitHubForge(repository)
-    if parsed.command == "bootstrap":
-        ledger = discovery.bootstrap_ledger(forge_handle)
-        protocol.configure_ledger(ledger)
-        print(f"LEDGER #{ledger}")
-        return 0
     ledger = discovery.discover_ledger(forge_handle)
     if ledger is None:
         raise protocol.ClaimUnavailableError(

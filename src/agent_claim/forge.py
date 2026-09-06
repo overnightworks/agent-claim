@@ -170,10 +170,6 @@ class ForgeOperation(StrEnum):
     LIST_RECENT_MERGED_BOARD_PULL_REQUESTS = "list_recent_merged_board_pull_requests"
     LIST_ITEMS = "list_items"
     OPEN_ITEM_COUNT = "open_item_count"
-    ENSURE_LABEL = "ensure_label"
-    CREATE_ITEM = "create_item"
-    LOCK_ITEM = "lock_item"
-    CLOSE_ITEM = "close_item"
     CREATE_CHILD = "create_child"
     UPDATE_ITEM_BODY = "update_item_body"
 
@@ -259,14 +255,6 @@ class ForgeReader(protocol.ClaimReader, Protocol):
 
 class ForgeWriter(ForgeReader, protocol.ClaimWriter, Protocol):
     """`ForgeReader` plus every operation that mutates forge state."""
-
-    def ensure_label(self, name: str, *, colour: str, description: str) -> None: ...
-
-    def create_item(self, *, title: str, body: str) -> int: ...
-
-    def lock_item(self, number: int) -> None: ...
-
-    def close_item(self, number: int) -> None: ...
 
     def create_child(self, *, parent: int, title: str, body: str, kind: board.ItemKind) -> int: ...
 
