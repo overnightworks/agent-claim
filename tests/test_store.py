@@ -193,6 +193,42 @@ def _raw_tree(worktree: Path, entries: list[tuple[str, str, str, str]]) -> str:
     )
 
 
+def _blob(worktree: Path, content: bytes) -> str:
+    return (
+        subprocess.run(
+            ["git", "-C", str(worktree), "hash-object", "-w", "--stdin"],
+            input=content,
+            check=True,
+            capture_output=True,
+        )
+        .stdout.decode()
+        .strip()
+    )
+
+
+def _push_raw_state_tree(
+    remote: Path, worktree: Path, entries: list[tuple[str, str, str, str]]
+) -> str:
+    """Push an arbitrary top-level tree (built via `_raw_tree`) onto `STATE_REF`,
+    for the malformed shapes `store`'s own write path can never produce."""
+    tree = _raw_tree(worktree, entries)
+    commit = (
+        subprocess.run(
+            ["git", "-C", str(worktree), "commit-tree", tree, "-m", "test fixture"],
+            check=True,
+            capture_output=True,
+        )
+        .stdout.decode()
+        .strip()
+    )
+    subprocess.run(
+        ["git", "-C", str(worktree), "push", "--force", str(remote), f"{commit}:{store.STATE_REF}"],
+        check=True,
+        capture_output=True,
+    )
+    return commit
+
+
 class _AcceptThenRaiseTransport:
     """A `PushTransport` that performs the real push once, then raises --
     reproducing a lost response after the remote actually advanced
@@ -321,6 +357,87 @@ def test_fetch_state_rejects_a_malformed_or_unsupported_tree(
     _push_custom_tree(bare_remote, worktree, parent=None, files=files)
 
     with pytest.raises(expected_error, match=match):
+        store.fetch_state(worktree=worktree, remote=str(bare_remote))
+
+
+def test_fetch_state_rejects_a_tree_missing_schema_toml(bare_remote: Path, worktree: Path) -> None:
+    empty_tree = _raw_tree(worktree, [])
+    _push_raw_state_tree(
+        bare_remote, worktree, [("040000", "tree", empty_tree, store.CLAIMS_DIRECTORY)]
+    )
+
+    with pytest.raises(protocol.MalformedStateTreeError, match=r"missing schema\.toml"):
+        store.fetch_state(worktree=worktree, remote=str(bare_remote))
+
+
+def test_fetch_state_rejects_a_claims_entry_that_is_not_a_directory(
+    bare_remote: Path, worktree: Path
+) -> None:
+    schema_blob = _blob(worktree, b"version = 1\n")
+    claims_blob = _blob(worktree, b"not a tree\n")
+    _push_raw_state_tree(
+        bare_remote,
+        worktree,
+        [
+            ("100644", "blob", schema_blob, "schema.toml"),
+            ("100644", "blob", claims_blob, store.CLAIMS_DIRECTORY),
+        ],
+    )
+
+    with pytest.raises(protocol.MalformedStateTreeError, match="is not a directory"):
+        store.fetch_state(worktree=worktree, remote=str(bare_remote))
+
+
+def test_fetch_state_rejects_a_non_toml_entry_in_claims(bare_remote: Path, worktree: Path) -> None:
+    schema_blob = _blob(worktree, b"version = 1\n")
+    stray_blob = _blob(worktree, b"junk\n")
+    claims_tree = _raw_tree(worktree, [("100644", "blob", stray_blob, "issue-42.txt")])
+    _push_raw_state_tree(
+        bare_remote,
+        worktree,
+        [
+            ("100644", "blob", schema_blob, "schema.toml"),
+            ("040000", "tree", claims_tree, store.CLAIMS_DIRECTORY),
+        ],
+    )
+
+    with pytest.raises(protocol.MalformedStateTreeError, match="is not a claim file"):
+        store.fetch_state(worktree=worktree, remote=str(bare_remote))
+
+
+def test_fetch_state_rejects_an_invalid_id_entry(bare_remote: Path, worktree: Path) -> None:
+    schema_blob = _blob(worktree, b"version = 1\n")
+    empty_blob = _blob(worktree, b"")
+    ids_tree = _raw_tree(worktree, [("100644", "blob", empty_blob, "not valid!")])
+    _push_raw_state_tree(
+        bare_remote,
+        worktree,
+        [
+            ("100644", "blob", schema_blob, "schema.toml"),
+            ("040000", "tree", ids_tree, store.IDS_DIRECTORY),
+        ],
+    )
+
+    with pytest.raises(protocol.MalformedStateTreeError, match="is not a claim id"):
+        store.fetch_state(worktree=worktree, remote=str(bare_remote))
+
+
+def test_fetch_state_rejects_a_non_toml_entry_in_resources(
+    bare_remote: Path, worktree: Path
+) -> None:
+    schema_blob = _blob(worktree, b"version = 1\n")
+    stray_blob = _blob(worktree, b"junk\n")
+    resources_tree = _raw_tree(worktree, [("100644", "blob", stray_blob, "display.txt")])
+    _push_raw_state_tree(
+        bare_remote,
+        worktree,
+        [
+            ("100644", "blob", schema_blob, "schema.toml"),
+            ("040000", "tree", resources_tree, store.RESOURCES_DIRECTORY),
+        ],
+    )
+
+    with pytest.raises(protocol.MalformedStateTreeError, match="is not a resource file"):
         store.fetch_state(worktree=worktree, remote=str(bare_remote))
 
 
@@ -1467,3 +1584,84 @@ def test_serialize_and_parse_resource_toml_round_trips() -> None:
 def test_parse_resource_toml_rejects_a_malformed_record(content: str) -> None:
     with pytest.raises(protocol.MalformedStateTreeError):
         protocol.parse_resource_toml(content, name="display", tip=_OTHER_TIP)
+
+
+def test_parse_resource_toml_rejects_malformed_toml() -> None:
+    with pytest.raises(protocol.MalformedStateTreeError, match="malformed resource file"):
+        protocol.parse_resource_toml("not = valid = toml\n", name="display", tip=_OTHER_TIP)
+
+
+def test_claim_id_rejects_a_value_that_is_not_a_valid_claim_id() -> None:
+    with pytest.raises(protocol.ClaimError, match="not a valid claim id"):
+        protocol.ClaimId("not a claim id")
+
+
+def test_parse_claim_key_rejects_a_lane_key_whose_escape_does_not_decode_as_utf8() -> None:
+    # `%FF` is a valid two-hex-digit escape but not a valid standalone UTF-8
+    # byte, so the codec's decode step (not its hex-digit syntax check) fails.
+    with pytest.raises(protocol.MalformedStateTreeError, match="does not decode as utf-8"):
+        protocol.parse_claim_key("lane-%FF")
+
+
+def test_apply_rescope_intent_can_set_a_new_whole_reason() -> None:
+    claimed = protocol.apply(_STATE_WITH_TIP, _claim_intent())
+    rescope = protocol.RescopeIntent(
+        claim_id=protocol.ClaimId("a1"),
+        agent="Ada",
+        role="builder",
+        scope=("README.md",),
+        operation_id="op-2",
+        whole_reason="repo-wide rename",
+    )
+
+    rescoped = protocol.apply(claimed, rescope)
+
+    assert rescoped.claims["issue-42"].whole_reason == "repo-wide rename"
+
+
+def _minimal_claim_toml_fields(**overrides: str) -> dict[str, str]:
+    fields = {
+        "claim_id": '"a1"',
+        "agent": '"Ada"',
+        "role": '"builder"',
+        "base": f'"{_BASE}"',
+        "branch": '"claude/issue-42-cut"',
+        "scope": '["README.md"]',
+        "opened_commit": f'"{_TIP}"',
+    }
+    fields.update(overrides)
+    return fields
+
+
+def _claim_toml_content(**overrides: str) -> str:
+    fields = _minimal_claim_toml_fields(**overrides)
+    return "\n".join(f"{key} = {value}" for key, value in fields.items()) + "\n"
+
+
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        pytest.param({"agent": "123"}, "must be non-empty text", id="agent-not-text"),
+        pytest.param({"agent": '""'}, "must be non-empty text", id="agent-empty"),
+        pytest.param({"scope": "[]"}, "non-empty list of text", id="scope-empty"),
+        pytest.param({"scope": "[1]"}, "non-empty list of text", id="scope-not-text"),
+        pytest.param({"claim_id": '"not valid!"'}, "invalid claim id", id="claim-id-invalid"),
+    ],
+)
+def test_parse_claim_toml_rejects_a_malformed_field(overrides: dict[str, str], match: str) -> None:
+    with pytest.raises(protocol.MalformedStateTreeError, match=match):
+        protocol.parse_claim_toml(_claim_toml_content(**overrides), key="issue-42", tip=_OTHER_TIP)
+
+
+def test_parse_claim_toml_rejects_a_non_positive_resource_value() -> None:
+    content = _claim_toml_content() + 'resource_name = "display"\nresource_value = 0\n'
+
+    with pytest.raises(protocol.MalformedStateTreeError, match="positive integer"):
+        protocol.parse_claim_toml(content, key="issue-42", tip=_OTHER_TIP)
+
+
+def test_parse_claim_toml_rejects_a_non_text_whole_reason() -> None:
+    content = _claim_toml_content() + "whole_reason = 3\n"
+
+    with pytest.raises(protocol.MalformedStateTreeError, match="must be text"):
+        protocol.parse_claim_toml(content, key="issue-42", tip=_OTHER_TIP)
