@@ -339,10 +339,12 @@ class GitHubForge:
         length = len(text)
         try:
             while offset < length:
+                # No "only whitespace remains" exit here: `text` is already
+                # `.strip()`ped above, so its last character is never
+                # whitespace -- this inner skip can never reach `length`
+                # without first landing on a value to decode.
                 while offset < length and text[offset].isspace():
                     offset += 1
-                if offset >= length:
-                    break
                 value, offset = decoder.raw_decode(text, offset)
                 values.append(value)
         except json.JSONDecodeError as error:
@@ -773,8 +775,9 @@ class GitHubForge:
                 parsed_closed_at = datetime.fromisoformat(closed_at)
             except ValueError as error:
                 raise forge.ForgeMalformedResponseError(self.MALFORMED_BOARD_BLOCKER) from error
-            if parsed_closed_at.tzinfo is None:
-                raise forge.ForgeMalformedResponseError(self.MALFORMED_BOARD_BLOCKER)
+            # No naive-datetime guard here: TIMESTAMP_PATTERN (checked above)
+            # requires a literal trailing "Z", which `fromisoformat` (3.11+)
+            # always parses as UTC -- never a naive result to guard against.
             parsed_closed_at = parsed_closed_at.astimezone(UTC)
         return board.BlockerReference(
             number,

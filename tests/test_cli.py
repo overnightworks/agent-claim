@@ -817,6 +817,34 @@ def test_github_adapter_lists_items_with_state_and_label_filters() -> None:
 
 
 @pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param(json.dumps("not-a-dict"), id="not-a-dict"),
+        pytest.param(json.dumps({"number": True}), id="number-is-a-bool"),
+        pytest.param(json.dumps({"number": 9, "state": "unknown"}), id="unknown-state"),
+        pytest.param(
+            json.dumps(
+                {
+                    "number": 9,
+                    "state": "open",
+                    "locked": "yes",
+                    "body": "b",
+                    "author_association": "OWNER",
+                    "is_landing": False,
+                }
+            ),
+            id="locked-not-a-bool",
+        ),
+    ],
+)
+def test_github_adapter_fails_loud_on_a_malformed_ledger_item(raw: str) -> None:
+    client = GitHubForge(github._repository_id(REPOSITORY), run=lambda arguments: raw)
+
+    with pytest.raises(ClaimError, match="malformed ledger issue"):
+        client.list_items()
+
+
+@pytest.mark.parametrize(
     ("total_items", "expected_pages_fetched", "expect_absence_confirmed"),
     [
         pytest.param(99, 1, True, id="99-items-one-page-confirms-absence"),
@@ -878,6 +906,20 @@ def test_github_adapter_reads_the_open_item_count() -> None:
 
     assert client.open_item_count() == 7
     assert observed == [["api", f"repos/{REPOSITORY}", "--jq", ".open_issues_count"]]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param("not-a-number", id="unparsable"),
+        pytest.param("-1", id="negative"),
+    ],
+)
+def test_github_adapter_fails_loud_on_a_malformed_open_item_count(raw: str) -> None:
+    client = GitHubForge(github._repository_id(REPOSITORY), run=lambda arguments: raw)
+
+    with pytest.raises(ClaimError, match="malformed open-issue count"):
+        client.open_item_count()
 
 
 def board_issue_page_client(*rows: dict[str, object]) -> GitHubForge:
@@ -947,6 +989,8 @@ def test_github_adapter_reads_a_container_with_zero_children_as_a_real_state() -
         pytest.param({"childrenClosed": 3, "childrenTotal": 2}, id="closed-exceeds-total"),
         pytest.param({"childrenClosed": True, "childrenTotal": 2}, id="closed-is-a-bool"),
         pytest.param({"kind": 5}, id="kind-not-a-string"),
+        pytest.param({"childrenClosed": 2, "childrenTotal": True}, id="total-is-a-bool"),
+        pytest.param({"childrenClosed": 2, "childrenTotal": -1}, id="total-negative"),
     ],
 )
 def test_github_adapter_fails_loud_on_a_malformed_board_issue(
@@ -956,6 +1000,80 @@ def test_github_adapter_fails_loud_on_a_malformed_board_issue(
 
     with pytest.raises(ClaimError, match="malformed board issue"):
         client.list_open_board_issues()
+
+
+def test_github_adapter_fails_loud_when_a_board_issue_is_not_an_object() -> None:
+    client = GitHubForge(
+        github._repository_id(REPOSITORY), run=lambda arguments, input_data=None: '"not an object"'
+    )
+
+    with pytest.raises(ClaimError, match="malformed board issue"):
+        client.list_open_board_issues()
+
+
+def raw_board_pull_request(**overrides: object) -> dict[str, object]:
+    base: dict[str, object] = {
+        "number": 62,
+        "title": "Fixes #10",
+        "body": "Ship it.",
+        "headRefName": "codex/issue-10",
+        "mergedAt": None,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_github_adapter_reads_an_open_board_pull_request() -> None:
+    client = GitHubForge(
+        github._repository_id(REPOSITORY),
+        run=lambda arguments, input_data=None: json.dumps(raw_board_pull_request()),
+    )
+
+    assert client.list_open_board_pull_requests() == (
+        board.PullRequest(62, "Fixes #10", "Ship it.", "codex/issue-10", None),
+    )
+
+
+def test_github_adapter_reads_a_board_pull_request_with_no_body_as_empty() -> None:
+    client = GitHubForge(
+        github._repository_id(REPOSITORY),
+        run=lambda arguments, input_data=None: json.dumps(raw_board_pull_request(body=None)),
+    )
+
+    assert client.list_open_board_pull_requests()[0].body == ""
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        pytest.param({"number": True}, id="number-is-a-bool"),
+        pytest.param({"number": 0}, id="number-not-positive"),
+        pytest.param({"title": 5}, id="title-not-text"),
+        pytest.param({"body": 5}, id="body-not-text"),
+        pytest.param({"headRefName": None}, id="head-ref-missing"),
+        pytest.param({"mergedAt": 5}, id="merged-at-not-text"),
+        pytest.param({"mergedAt": "yesterday"}, id="merged-at-unparsable-shape"),
+    ],
+)
+def test_github_adapter_fails_loud_on_a_malformed_board_pull_request(
+    overrides: dict[str, object],
+) -> None:
+    client = GitHubForge(
+        github._repository_id(REPOSITORY),
+        run=lambda arguments, input_data=None: json.dumps(raw_board_pull_request(**overrides)),
+    )
+
+    with pytest.raises(ClaimError, match="malformed board pull request"):
+        client.list_open_board_pull_requests()
+
+
+def test_github_adapter_fails_loud_when_a_board_pull_request_is_not_an_object() -> None:
+    client = GitHubForge(
+        github._repository_id(REPOSITORY), run=lambda arguments, input_data=None: '"not an object"'
+    )
+
+    with pytest.raises(ClaimError, match="malformed board pull request"):
+        client.list_open_board_pull_requests()
 
 
 def test_github_adapter_ensures_a_label_definition() -> None:
@@ -1003,6 +1121,30 @@ def test_github_adapter_creates_an_item_and_returns_its_number() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    ("raw", "match"),
+    [
+        pytest.param("not json", "invalid created-ledger JSON", id="invalid-json"),
+        pytest.param(json.dumps({}), "did not return a created ledger number", id="missing-number"),
+        pytest.param(
+            json.dumps({"number": True}),
+            "did not return a created ledger number",
+            id="number-is-a-bool",
+        ),
+        pytest.param(
+            json.dumps({"number": 0}), "did not return a created ledger number", id="non-positive"
+        ),
+    ],
+)
+def test_github_adapter_fails_loud_on_a_malformed_created_ledger(raw: str, match: str) -> None:
+    client = GitHubForge(
+        github._repository_id(REPOSITORY), run=lambda arguments, input_data=None: raw
+    )
+
+    with pytest.raises(ClaimError, match=match):
+        client.create_item(title="Agent claim ledger", body="body text")
+
+
 def test_github_adapter_locks_an_item() -> None:
     observed: list[list[str]] = []
 
@@ -1029,6 +1171,50 @@ def test_github_adapter_closes_an_item() -> None:
     client.close_item(11)
 
     assert observed == [["issue", "close", "11", "--repo", REPOSITORY]]
+
+
+def test_github_adapter_neutralizes_a_claim_comment() -> None:
+    observed: list[tuple[list[str], bytes | None]] = []
+
+    def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
+        observed.append((arguments, input_data))
+        return ""
+
+    client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
+
+    client.neutralize_claim_comment(5, "new body")
+
+    assert observed == [
+        (
+            [
+                "api",
+                "--method",
+                "PATCH",
+                f"repos/{REPOSITORY}/issues/comments/5",
+                "--input",
+                "-",
+            ],
+            json.dumps({"body": "new body"}).encode("utf-8"),
+        )
+    ]
+
+
+def test_github_adapter_adds_and_removes_a_label() -> None:
+    observed: list[list[str]] = []
+
+    def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
+        observed.append(arguments)
+        return ""
+
+    client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
+
+    client.add_label(10, "agent-claim:active")
+    client.remove_label(10, "agent-claim:active")
+
+    assert observed == [
+        ["issue", "edit", "10", "--repo", REPOSITORY, "--add-label", "agent-claim:active"],
+        ["issue", "edit", "10", "--repo", REPOSITORY, "--remove-label", "agent-claim:active"],
+    ]
 
 
 def test_github_adapter_creates_a_child_and_links_it_as_a_sub_issue() -> None:
@@ -1305,6 +1491,11 @@ def test_board_renders_fixture_as_text_without_github_writes(
     assert merged_days == {
         day.isoformat() for day in github._query_days(date(2026, 8, 1), date(2026, 8, 21))
     }
+
+
+def test_query_days_refuses_a_window_that_ends_before_it_starts() -> None:
+    with pytest.raises(ClaimError, match="merged pull request window ends before it starts"):
+        github._query_days(date(2026, 8, 21), date(2026, 8, 1))
 
 
 def test_board_projects_fixture_json_without_github_writes(
@@ -7253,6 +7444,105 @@ def test_github_reads_blocker_state_and_pull_request_kind(
     ]
 
 
+def test_github_adapter_runs_gh_when_no_fake_run_is_given(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every other adapter test injects `run=` to avoid a real subprocess;
+    this proves the adapter's own default (`_gh`, via `_bounded_command`)
+    actually builds a `gh` command and runs it through the real bounded-I/O
+    machinery -- substituting the child process itself so the test needs no
+    real `gh` executable."""
+    observed: list[list[str]] = []
+    original_popen = subprocess.Popen
+
+    def start(
+        command: list[str],
+        *,
+        stdin: int | None = None,
+        stdout: int | None = None,
+        stderr: int | None = None,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.Popen[bytes]:
+        observed.append(command)
+        substituted = [sys.executable, "-c", "print('main')"]
+        return original_popen(substituted, stdin=stdin, stdout=stdout, stderr=stderr, env=env)
+
+    monkeypatch.setattr(subprocess, "Popen", start)
+    client = GitHubForge(github._repository_id("example/agent-claim"))
+
+    assert client.default_branch() == "main"
+    assert observed == [["gh", "api", "repos/example/agent-claim", "--jq", ".default_branch"]]
+
+
+def test_github_adapter_capability_reads_the_declared_table() -> None:
+    client = GitHubForge(github._repository_id("example/agent-claim"))
+
+    assert client.capability(forge.ForgeOperation.LIST_ITEMS) is forge.Capability.READ_ONLY
+    assert client.capability(forge.ForgeOperation.CREATE_ITEM) is forge.Capability.READ_WRITE
+
+
+def test_github_adapter_item_reference_reads_state_title_and_body() -> None:
+    client = GitHubForge(
+        github._repository_id("example/agent-claim"),
+        run=lambda _arguments: json.dumps({"state": "open", "title": "Work", "body": "Do it."}),
+    )
+
+    assert client.item_reference(10) == forge.ItemReference(forge.ItemState.OPEN, "Work", "Do it.")
+
+
+def test_github_adapter_item_reference_reads_a_closed_issue_with_no_body() -> None:
+    client = GitHubForge(
+        github._repository_id("example/agent-claim"),
+        run=lambda _arguments: json.dumps({"state": "closed", "title": "Work", "body": None}),
+    )
+
+    assert client.item_reference(10) == forge.ItemReference(forge.ItemState.CLOSED, "Work", "")
+
+
+def test_github_adapter_item_reference_is_missing_after_a_404() -> None:
+    client = GitHubForge(
+        github._repository_id("example/agent-claim"),
+        run=lambda _arguments: (_ for _ in ()).throw(
+            forge.ForgeNotFoundError("GitHub API failed: HTTP 404")
+        ),
+    )
+
+    assert client.item_reference(10) == forge.ItemReference(forge.ItemState.MISSING)
+
+
+@pytest.mark.parametrize(
+    ("raw", "match"),
+    [
+        pytest.param("not-json", "invalid issue reference JSON", id="not-json"),
+        pytest.param(json.dumps([]), "malformed issue reference", id="no-values"),
+        pytest.param(
+            json.dumps([{"a": 1}, {"b": 2}]), "malformed issue reference", id="two-values"
+        ),
+        pytest.param(json.dumps(["not-a-dict"]), "malformed issue reference", id="not-a-dict"),
+        pytest.param(
+            json.dumps({"state": "unknown", "title": "x", "body": None}),
+            "malformed issue reference",
+            id="unknown-state",
+        ),
+        pytest.param(
+            json.dumps({"state": "open", "title": 5, "body": None}),
+            "malformed issue reference",
+            id="title-not-text",
+        ),
+        pytest.param(
+            json.dumps({"state": "open", "title": "x", "body": 5}),
+            "malformed issue reference",
+            id="body-not-text",
+        ),
+    ],
+)
+def test_github_adapter_item_reference_fails_loud_on_a_malformed_response(
+    raw: str, match: str
+) -> None:
+    client = GitHubForge(github._repository_id("example/agent-claim"), run=lambda _arguments: raw)
+
+    with pytest.raises(ClaimError, match=match):
+        client.item_reference(10)
+
+
 @pytest.mark.parametrize("state", ["missing", "unknown"])
 def test_github_rejects_blocker_states_the_api_cannot_return(state: str) -> None:
     client = GitHubForge(
@@ -7278,6 +7568,49 @@ def test_github_marks_a_missing_blocker_only_after_a_404() -> None:
     assert client.list_board_blockers(frozenset({86})) == (
         board.BlockerReference(86, board.BlockerState.MISSING, False),
     )
+
+
+def test_github_list_board_blockers_is_empty_for_no_numbers() -> None:
+    client = GitHubForge(
+        github._repository_id("example/agent-claim"),
+        run=lambda _arguments: pytest.fail("no blocker should be queried"),
+    )
+
+    assert client.list_board_blockers(frozenset()) == ()
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param(json.dumps([]), id="no-values"),
+        pytest.param(json.dumps(["not-a-dict"]), id="not-a-dict"),
+    ],
+)
+def test_github_board_blocker_fails_loud_on_a_malformed_shape(raw: str) -> None:
+    client = GitHubForge(github._repository_id("example/agent-claim"), run=lambda _arguments: raw)
+
+    with pytest.raises(ClaimError, match="malformed board blocker"):
+        client.list_board_blockers(frozenset({86}))
+
+
+def test_github_board_blocker_fails_loud_on_an_uncalendared_closed_timestamp() -> None:
+    """`closedAt` can pass the timestamp-shape check (digits in the right
+    places) while still naming no real calendar date; `datetime.fromisoformat`
+    itself is the second, calendar-aware check that catches that."""
+    client = GitHubForge(
+        github._repository_id("example/agent-claim"),
+        run=lambda _arguments: json.dumps(
+            {
+                "number": 86,
+                "state": "closed",
+                "closedAt": "9999-99-99T00:00:00Z",
+                "isPullRequest": False,
+            }
+        ),
+    )
+
+    with pytest.raises(ClaimError, match="malformed board blocker"):
+        client.list_board_blockers(frozenset({86}))
 
 
 def _comment_row(identifier: int, body: str = "ordinary prose") -> dict[str, object]:
@@ -7316,6 +7649,115 @@ def test_github_comment_reader_accepts_concatenated_pretty_json_objects() -> Non
     observed = client.list_protocol_candidates(71)
 
     assert [entry.identifier for entry in observed] == [10, 11]
+
+
+def test_github_comment_reader_refuses_a_ledger_past_its_comment_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(github, "MAX_LEDGER_COMMENTS", 1)
+    rows = [_comment_row(10, "ordinary prose"), _comment_row(11, "ordinary prose")]
+    client = GitHubForge(
+        github._repository_id("example/agent-claim"),
+        run=lambda arguments: "\n".join(json.dumps(row) for row in rows),
+    )
+
+    with pytest.raises(ClaimError, match="claim ledger page limit reached"):
+        client.list_protocol_candidates(71)
+
+
+def test_github_comment_reader_refuses_a_ledger_past_its_protocol_event_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(github, "MAX_PROTOCOL_EVENTS", 1)
+    rows = [
+        _comment_row(10, claim_comment(request("claim-a", issue=72))),
+        _comment_row(11, claim_comment(request("claim-b", issue=73))),
+    ]
+    client = GitHubForge(
+        github._repository_id("example/agent-claim"),
+        run=lambda arguments: "\n".join(json.dumps(row) for row in rows),
+    )
+
+    with pytest.raises(ClaimError, match="claim ledger protocol limit reached"):
+        client.list_protocol_candidates(71)
+
+
+def test_github_projection_reader_refuses_an_issue_past_its_comment_page_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_projection_comments` walks pages until a short one ends the fetch;
+    an issue whose comments never run out before `MAX_LEDGER_PAGES` must
+    fail loud and ask for the documented rollover, not loop forever."""
+    monkeypatch.setattr(github, "MAX_LEDGER_PAGES", 1)
+    full_page = [
+        {**_comment_row(1, "ordinary prose"), "id": index}
+        for index in range(1, github.COMMENTS_PER_PAGE + 1)
+    ]
+    client = GitHubForge(
+        github._repository_id("example/agent-claim"),
+        run=lambda arguments: "\n".join(json.dumps(row) for row in full_page),
+    )
+
+    with pytest.raises(ClaimError, match="owning issue comment limit reached"):
+        client.upsert_projection(72, issue_claim._unclaimed_projection())
+
+
+def test_github_projection_reader_returns_normally_on_a_short_page() -> None:
+    """The common case, exercised through the real (unmocked) implementation
+    rather than the `_projection_comments` fake every other `upsert_projection`
+    test injects: a short page ends the fetch and posting proceeds."""
+    body = issue_claim._unclaimed_projection()
+    posted: dict[str, str | None] = {"body": None}
+
+    def run(arguments: list[str], *, input_data: bytes | None = None) -> str:
+        if arguments[0] == "issue" and arguments[1] == "comment":
+            posted["body"] = input_data.decode("utf-8") if input_data else ""
+            return "https://github.com/example/agent-claim/issues/72#issuecomment-10"
+        if posted["body"] is None:
+            return ""
+        return json.dumps(_comment_row(10, posted["body"]))
+
+    client = GitHubForge(github._repository_id("example/agent-claim"), run=run)
+
+    assert client.upsert_projection(72, body)
+    assert posted["body"] == body
+
+
+def test_github_comment_reader_paginates_in_concurrent_batches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A single-page listing (the common case) is already covered; a ledger
+    whose first concurrent batch is itself still full must ask for a second
+    batch rather than assuming one batch is always enough."""
+    monkeypatch.setattr(github, "PARALLEL_FETCH_CONCURRENCY", 1)
+    full_page = [_comment_row(1, "ordinary prose") for _ in range(github.COMMENTS_PER_PAGE)]
+
+    def run(arguments: list[str]) -> str:
+        page = int(arguments[1].rsplit("page=", 1)[1])
+        if page <= 2:
+            return "\n".join(json.dumps(row) for row in full_page)
+        return ""
+
+    client = GitHubForge(github._repository_id("example/agent-claim"), run=run)
+
+    assert client.list_protocol_candidates(71) == ()
+
+
+def test_github_comment_reader_warns_once_past_the_rollover_threshold(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(github, "LEDGER_ROLLOVER_WARNING_COMMENTS", 2)
+    rows = [_comment_row(10, "ordinary prose"), _comment_row(11, "ordinary prose")]
+    client = GitHubForge(
+        github._repository_id("example/agent-claim"),
+        run=lambda arguments: "\n".join(json.dumps(row) for row in rows),
+    )
+
+    client.list_protocol_candidates(71)
+    assert "WARNING: claim ledger has 2 comments" in capsys.readouterr().err
+
+    client.list_protocol_candidates(71)
+    assert capsys.readouterr().err == ""
 
 
 def test_bounded_command_sets_github_quiet_environment() -> None:
@@ -7494,6 +7936,61 @@ def test_merged_pull_request_history_below_the_cap_warns_of_nothing(
     assert capsys.readouterr().err == ""
 
 
+def test_recent_merged_pull_requests_skips_an_entry_with_no_merge_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`mergedAt` can be `None` on an otherwise well-shaped merged-search row
+    (a defensive read, not a documented GitHub behavior); such a row cannot
+    be dated against the window, so it is skipped rather than crashing the
+    whole fetch."""
+    since = datetime(2026, 8, 1, tzinfo=UTC)
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return since
+
+    monkeypatch.setattr(github, "datetime", FixedDateTime)
+    row = {
+        "number": 1,
+        "title": "Fixes #1",
+        "body": "",
+        "headRefName": "codex/issue-1",
+        "mergedAt": None,
+    }
+    client = GitHubForge(
+        github._repository_id("example/agent-claim"), run=lambda arguments: json.dumps(row)
+    )
+
+    assert client.list_recent_merged_board_pull_requests(since) == ()
+
+
+def test_recent_merged_pull_requests_fails_loud_on_an_uncalendared_merge_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    since = datetime(2026, 8, 1, tzinfo=UTC)
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return since
+
+    monkeypatch.setattr(github, "datetime", FixedDateTime)
+    row = {
+        "number": 1,
+        "title": "Fixes #1",
+        "body": "",
+        "headRefName": "codex/issue-1",
+        "mergedAt": "9999-99-99T00:00:00Z",
+    }
+    client = GitHubForge(
+        github._repository_id("example/agent-claim"), run=lambda arguments: json.dumps(row)
+    )
+
+    with pytest.raises(ClaimError, match="malformed merged board pull request"):
+        client.list_recent_merged_board_pull_requests(since)
+
+
 def test_github_projection_update_patches_one_comment_and_deletes_duplicates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -7553,6 +8050,46 @@ def test_github_projection_update_does_not_create_on_a_never_claimed_issue(
     )
 
     assert not client.upsert_projection(999, issue_claim._unclaimed_projection(), create=False)
+
+
+def test_github_projection_update_creates_when_none_exists(monkeypatch: pytest.MonkeyPatch) -> None:
+    body = issue_claim._unclaimed_projection()
+    posted: list[tuple[int, str]] = []
+    created = comment(10, body)
+
+    def fake_post_comment(issue: int, projection_body: str) -> str:
+        posted.append((issue, projection_body))
+        return created.url
+
+    calls = {"n": 0}
+
+    def fake_projection_comments(issue: int) -> tuple[IssueComment, ...]:
+        calls["n"] += 1
+        return (created,) if calls["n"] > 1 else ()
+
+    client = GitHubForge(github._repository_id("example/agent-claim"))
+    monkeypatch.setattr(client, "post_comment", fake_post_comment)
+    monkeypatch.setattr(client, "_projection_comments", fake_projection_comments)
+
+    assert client.upsert_projection(999, body)
+    assert posted == [(999, body)]
+
+
+def test_github_projection_update_fails_loud_when_the_post_never_shows_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A read-after-write consistency gap: the projection comment was posted,
+    but the very next listing of the issue's own comments still does not
+    show it -- this must fail loud rather than claim the projection is live."""
+    posted: list[int] = []
+    client = GitHubForge(github._repository_id("example/agent-claim"))
+    monkeypatch.setattr(client, "post_comment", lambda issue, body: posted.append(issue) or "url")
+    monkeypatch.setattr(client, "_projection_comments", lambda issue: ())
+
+    with pytest.raises(ClaimError, match=r"issue #999 did not expose its posted claim projection"):
+        client.upsert_projection(999, issue_claim._unclaimed_projection())
+
+    assert posted == [999]
 
 
 def test_github_successor_adopts_stale_projection_but_old_generation_skips_it(
@@ -7616,6 +8153,15 @@ def test_github_claimed_issue_query_is_scoped_to_this_ledger_generation() -> Non
     assert "--paginate" in observed
 
 
+def test_github_claimed_issues_fails_loud_on_a_malformed_entry() -> None:
+    client = GitHubForge(
+        github._repository_id("example/agent-claim"), run=lambda arguments: "72\ntrue"
+    )
+
+    with pytest.raises(ClaimError, match="malformed claimed-issue"):
+        client.list_claimed_issues()
+
+
 def test_github_successor_must_exist_open_empty_locked_and_not_be_a_pr() -> None:
     repository = github._repository_id("example/agent-claim")
     valid = {
@@ -7640,6 +8186,20 @@ def test_github_successor_must_exist_open_empty_locked_and_not_be_a_pr() -> None
         invalid_client = GitHubForge(repository, run=lambda arguments, row=invalid: json.dumps(row))
         with pytest.raises(ClaimUnavailableError, match="open, empty, collaborator-locked"):
             invalid_client.validate_successor(170)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param(json.dumps([]), id="no-values"),
+        pytest.param(json.dumps(["not-a-dict"]), id="not-a-dict"),
+    ],
+)
+def test_github_successor_fails_loud_on_a_malformed_shape(raw: str) -> None:
+    client = GitHubForge(github._repository_id("example/agent-claim"), run=lambda arguments: raw)
+
+    with pytest.raises(ClaimError, match="malformed successor issue"):
+        client.validate_successor(170)
 
 
 @pytest.mark.parametrize(
@@ -7677,6 +8237,33 @@ def test_missing_gh_repository_resolution_is_a_controlled_error(
 
     with pytest.raises(ClaimError, match="gh is required"):
         github.discover_repository(None, remote_url=_unreachable_remote_url)
+
+
+def test_repository_resolution_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    def timed_out(*args, **kwargs):
+        raise subprocess.TimeoutExpired(["gh"], process.DEFAULT_TIMEOUT_SECONDS)
+
+    monkeypatch.setattr(subprocess, "run", timed_out)
+
+    with pytest.raises(ClaimError, match="gh timed out while resolving the repository"):
+        github.discover_repository(None, remote_url=_unreachable_remote_url)
+
+
+def test_repository_resolution_refuses_when_no_remote_matches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def failed_gh(*arguments, **kwargs):
+        return subprocess.CompletedProcess(arguments[0], 1, b"", b"not a gh repo")
+
+    monkeypatch.setattr(subprocess, "run", failed_gh)
+
+    with pytest.raises(ClaimError, match="cannot resolve GitHub repository"):
+        github.discover_repository(None, remote_url=lambda: "https://example.com/owner/repo")
+
+
+def test_repository_id_requires_owner_slash_repo_shape() -> None:
+    with pytest.raises(ClaimError, match="repository must be OWNER/REPO"):
+        github._repository_id("not-a-repository-shape")
 
 
 def test_cli_version_exits_before_requiring_a_command(
@@ -8332,6 +8919,19 @@ def test_bounded_command_classifies_every_forge_failure_signal(
 
     assert type(excinfo.value) is expected_type
     assert str(excinfo.value) == expected_message
+
+
+def test_forge_failure_refuses_a_process_error_type_it_does_not_classify() -> None:
+    """The isinstance chain above names every concrete `process.ProcessError`
+    subclass; a hypothetical new one added there without updating this
+    dispatch must fail loud as a defect, not silently fall through as some
+    generic `ForgeError`."""
+
+    class _UnknownProcessError(process.ProcessError):
+        pass
+
+    with pytest.raises(AssertionError, match="unhandled process failure type"):
+        github._forge_failure(_UnknownProcessError(), "adapter probe")
 
 
 def test_scope_directories_detects_a_git_tree(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -14994,6 +15594,15 @@ def test_github_adapter_reads_a_pull_request_and_the_default_branch() -> None:
     assert client.default_branch() == "main"
 
 
+def test_github_adapter_reads_a_landing_with_no_body_as_empty() -> None:
+    client = GitHubForge(
+        github._repository_id(REPOSITORY),
+        run=lambda arguments, input_data=None: json.dumps(api_pull_request(body=None)),
+    )
+
+    assert client.landing(12).body == ""
+
+
 def test_github_adapter_reads_a_fork_branch_as_its_own_repository() -> None:
     client = GitHubForge(
         github._repository_id(REPOSITORY),
@@ -15027,6 +15636,12 @@ def test_github_adapter_fails_loud_when_github_answers_for_another_pull_request(
         pytest.param(api_pull_request(headRepository={}), id="head-repository-without-name"),
         pytest.param(
             api_pull_request(headRepositoryOwner=None), id="head-repository-without-owner"
+        ),
+        pytest.param(
+            api_pull_request(
+                headRepository={"name": "repo/extra"}, headRepositoryOwner={"login": "owner"}
+            ),
+            id="head-repository-invalid-shape",
         ),
     ],
 )
@@ -15525,6 +16140,15 @@ def test_github_adapter_refuses_a_sub_issue_from_another_repository() -> None:
         client.list_children(79)
 
 
+def test_github_adapter_fails_loud_when_a_sub_issue_is_not_an_object() -> None:
+    client = GitHubForge(
+        github._repository_id(REPOSITORY), run=lambda arguments, input_data=None: "5"
+    )
+
+    with pytest.raises(ClaimError, match="malformed sub-issue"):
+        client.list_children(79)
+
+
 def test_github_adapter_reads_an_issue_without_a_parent_as_parentless() -> None:
     def run(arguments: list[str], *, input_data: bytes | None = None) -> str:
         raise forge.ForgeNotFoundError("gh: No parent issue found (HTTP 404)")
@@ -15559,6 +16183,46 @@ def test_github_adapter_fails_loud_on_a_malformed_parent_kind() -> None:
         )
 
     client = GitHubForge(github._repository_id(REPOSITORY), run=run)
+
+    with pytest.raises(ClaimError, match="malformed parent issue"):
+        client.parent_issue(72)
+
+
+def test_github_adapter_fails_loud_when_the_parent_issue_response_is_not_one_object() -> None:
+    client = GitHubForge(
+        github._repository_id(REPOSITORY), run=lambda arguments, input_data=None: json.dumps([])
+    )
+
+    with pytest.raises(ClaimError, match="malformed parent issue"):
+        client.parent_issue(72)
+
+
+def test_github_adapter_fails_loud_when_the_parent_issue_body_is_not_text() -> None:
+    client = GitHubForge(
+        github._repository_id(REPOSITORY),
+        run=lambda arguments, input_data=None: json.dumps(
+            {"number": 79, "repository": API_REPOSITORY_URL, "body": 5}
+        ),
+    )
+
+    with pytest.raises(ClaimError, match="malformed parent issue"):
+        client.parent_issue(72)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        pytest.param({"number": True}, id="number-is-a-bool"),
+        pytest.param({"repository": "not-a-repository-url"}, id="repository-unparsable"),
+    ],
+)
+def test_github_adapter_fails_loud_on_a_malformed_parent_reference(
+    overrides: dict[str, object],
+) -> None:
+    value = {"number": 79, "repository": API_REPOSITORY_URL, "body": "## Next\nCut.", **overrides}
+    client = GitHubForge(
+        github._repository_id(REPOSITORY), run=lambda arguments, input_data=None: json.dumps(value)
+    )
 
     with pytest.raises(ClaimError, match="malformed parent issue"):
         client.parent_issue(72)
