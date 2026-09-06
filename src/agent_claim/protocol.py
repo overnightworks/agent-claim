@@ -2640,20 +2640,160 @@ class ObjectId(str):
         return super().__new__(cls, value)
 
 
+class ClaimId(str):
+    """A runtime-validated claim id (`CLAIM_ID_PATTERN`), the store's own key.
+
+    Same rationale as `ObjectId`: every value reaching here comes from a CLI
+    argument, a generated `uuid4().hex`, or an untrusted fetched tree, never
+    from a value this module already trusts.
+    """
+
+    def __new__(cls, value: str) -> ClaimId:
+        if CLAIM_ID_PATTERN.fullmatch(value) is None:
+            raise ClaimError(f"not a valid claim id: {value!r}")
+        return super().__new__(cls, value)
+
+
+COORDINATOR_ROLE = "coordinator"
+
+
+@dataclass(frozen=True)
+class ActingIdentity:
+    """The agent and role acting on a transition (criterion 10: identity
+    carries both). `role` stays an open string -- `COORDINATOR_ROLE` is the
+    one value `apply` treats specially, for a coordinator override."""
+
+    agent: str
+    role: str
+
+
+# --- Claim key codec (criterion 10, issue #176 slice C2) -------------------
+#
+# One path segment, no `/`, collision-free and reversible -- the only owner
+# of a claims/resources/ids tree entry's file name. `apply` is the codec's
+# first production caller; `store.py` calls `claim_key`/`parse_claim_key`
+# when it writes or reads a `claims/<key>.toml` tree entry.
+
+_ISSUE_KEY_PREFIX = "issue-"
+_LANE_KEY_PREFIX = "lane-"
+_LANE_KEY_UNRESERVED = frozenset(
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+)
+_PERCENT_ESCAPE_PATTERN = re.compile("[0-9A-Fa-f]{2}")
+
+
+def _percent_encode_branch(branch: str) -> str:
+    """RFC 3986 percent-encoding with an empty safe set: every byte but the
+    unreserved set becomes `%HH`, so `/` and `%` themselves are always
+    escaped and can never reappear literally in the encoded key."""
+    encoded = bytearray()
+    for byte in branch.encode("utf-8"):
+        if byte in _LANE_KEY_UNRESERVED:
+            encoded.append(byte)
+        else:
+            encoded.extend(f"%{byte:02X}".encode("ascii"))
+    return encoded.decode("ascii")
+
+
+def _percent_decode_branch(encoded: str) -> str:
+    raw = bytearray()
+    index = 0
+    while index < len(encoded):
+        character = encoded[index]
+        if character != "%":
+            raw.extend(character.encode("utf-8"))
+            index += 1
+            continue
+        hex_digits = encoded[index + 1 : index + 3]
+        if not _PERCENT_ESCAPE_PATTERN.fullmatch(hex_digits):
+            raise MalformedStateTreeError(f"claim key has a malformed percent-escape: {encoded!r}")
+        raw.append(int(hex_digits, 16))
+        index += 3
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise MalformedStateTreeError(f"claim key does not decode as utf-8: {encoded!r}") from error
+
+
+def claim_key(identity: ClaimIdentity, branch: str) -> str:
+    """The one collision-free, reversible tree-entry name for this identity.
+
+    `issue-{n}` for an issue claim; `lane-{percent-encoded branch}` for a
+    lane claim. The two prefixes can never collide with each other's payload
+    (`issue-1` vs a lane branch literally named `issue-1`, which encodes to
+    `lane-issue-1`), because `parse_claim_key` below dispatches on the
+    prefix alone before ever looking at the payload.
+    """
+    if isinstance(identity, IssueIdentity):
+        return f"{_ISSUE_KEY_PREFIX}{identity.issue}"
+    return f"{_LANE_KEY_PREFIX}{_percent_encode_branch(branch)}"
+
+
+def parse_claim_key(key: str) -> ClaimIdentity:
+    """Invert `claim_key`. Refuses any prefix but the two the codec writes."""
+    if key.startswith(_ISSUE_KEY_PREFIX):
+        digits = key[len(_ISSUE_KEY_PREFIX) :]
+        if not digits or not digits.isdigit() or digits[0] == "0":
+            raise MalformedStateTreeError(f"claim key has a malformed issue number: {key!r}")
+        return IssueIdentity(int(digits))
+    if key.startswith(_LANE_KEY_PREFIX):
+        # Validate only; the decoded branch itself lives in the claim file.
+        _percent_decode_branch(key[len(_LANE_KEY_PREFIX) :])
+        return LaneIdentity()
+    raise MalformedStateTreeError(f"claim key has neither the issue nor lane prefix: {key!r}")
+
+
+@dataclass(frozen=True)
+class ResourceRecord:
+    """`resources/<name>.toml`: the never-reuse set for one resource name.
+
+    `occupied` never shrinks: a released value stays in it forever (today's
+    contract), so neither an auto nor an explicit intent can ever reassign a
+    value this resource has already given out.
+    """
+
+    name: str
+    occupied: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class ActiveClaim:
+    """One live claim as the store's `apply` maintains it (issue #176, §1).
+
+    Distinct from the ledger's `LedgerActiveClaim`: no `comment`,
+    `requested_resource`, or `quarantined_by` -- those were comment-schema
+    concerns the git-tree store has no equivalent of. `opened_commit` is the
+    state-ref commit this claim_id was first introduced at; rescope never
+    changes it.
+    """
+
+    identity: ClaimIdentity
+    claim_id: ClaimId
+    agent: str
+    role: str
+    base: ObjectId
+    branch: str
+    scope: tuple[str, ...]
+    opened_commit: ObjectId
+    resource: ResourceHold | None = None
+    whole_reason: str | None = None
+
+
 @dataclass(frozen=True)
 class ClaimState:
     """The claim-state tree as observed at one `refs/aco/state` commit.
 
     `tip` is `None` only for `EMPTY_STATE`, standing in for a ref that does
-    not exist yet. `parse_schema_toml` already refuses any `tip` whose schema
-    is not `SUPPORTED_STATE_SCHEMA_VERSION` before a `ClaimState` is ever
-    built, so C1 has no caller that needs the version carried on the value
-    itself; `claims`, `consumed_ids`, and `resources` are added in C2
-    alongside `apply`, which is expected to be schema's first real reader (a
-    compatibility window spanning more than one supported version).
+    not exist yet. `claims`, `consumed_ids`, and `resources` are C2's
+    addition alongside `apply`: immutable collections (`MappingProxyType`,
+    `frozenset`) inside this frozen state, never mutated in place -- every
+    transition builds and returns a whole new `ClaimState`.
     """
 
     tip: ObjectId | None
+    claims: Mapping[str, ActiveClaim] = MappingProxyType({})
+    consumed_ids: frozenset[ClaimId] = frozenset()
+    resources: Mapping[str, ResourceRecord] = MappingProxyType({})
 
 
 EMPTY_STATE = ClaimState(tip=None)
@@ -2695,3 +2835,402 @@ def parse_schema_toml(content: str, *, tip: ObjectId) -> ClaimState:
     if version != SUPPORTED_STATE_SCHEMA_VERSION:
         raise UnsupportedStateSchemaError(f"unsupported state schema version {version}")
     return ClaimState(tip=tip)
+
+
+# --- Claim transitions: intents and `apply` (issue #176, slice C2) ---------
+#
+# `apply` is the sole writer of `ClaimState.claims`/`consumed_ids`/`resources`.
+# It is pure: no git, no clock, no randomness. `store.py`'s commit loop is its
+# one production caller, and refuses every write-path command before this
+# ever runs against `EMPTY_STATE` -- only `bootstrap` may create the ref
+# itself (done-when: a missing ref is never created as a side effect of a
+# claim/rescope/release/override/takeover/resource/protect call).
+
+
+@dataclass(frozen=True)
+class ClaimIntent:
+    """A `claim` transition: adds `claims/<key>.toml`, `ids/<claim_id>`, and
+    maybe creates or updates `resources/<name>.toml`. Any role may claim;
+    identity and resource uniqueness are enforced by `apply` itself."""
+
+    identity: ClaimIdentity
+    agent: str
+    role: str
+    base: ObjectId
+    branch: str
+    scope: tuple[str, ...]
+    claim_id: ClaimId
+    operation_id: str
+    whole_reason: str | None = None
+    resource_name: str | None = None
+    resource_value: int | None = None
+
+
+@dataclass(frozen=True)
+class RescopeIntent:
+    """Replaces `claims/<key>.toml`'s scope (and optionally its whole-reason).
+    Only the claimant `(agent, role)` may rescope its own claim."""
+
+    claim_id: ClaimId
+    agent: str
+    role: str
+    scope: tuple[str, ...]
+    operation_id: str
+    whole_reason: str | None = None
+    clear_whole_reason: bool = False
+
+
+@dataclass(frozen=True)
+class ReleaseIntent:
+    """Deletes `claims/<key>.toml`; `ids/` and `resources/` are unchanged (a
+    released claim id and a released resource value are both terminal:
+    never reused). The claimant may release its own claim; a coordinator may
+    release any claim with `coordinator_override=True`.
+
+    `outcome` (`MergedRelease` | `AbandonedRelease`) carries no tree effect
+    of its own -- `apply` never inspects it -- but is carried on the intent
+    for the commit message `store.py` builds from this transition, and for
+    `MergedRelease`'s own pre-`apply` forge verification (criterion 9,
+    unchanged from today: failure there never reaches `apply` at all).
+    """
+
+    claim_id: ClaimId
+    agent: str
+    role: str
+    outcome: ReleaseOutcome
+    operation_id: str
+    coordinator_override: bool = False
+
+
+ClaimTransitionIntent = ClaimIntent | RescopeIntent | ReleaseIntent
+
+
+def _claim_matches_intent(claim: ActiveClaim, intent: ClaimIntent) -> bool:
+    """Whether `claim` is the exact live claim an interrupted, replayed
+    `intent` would have produced (criterion 2): same identity, agent, role,
+    branch, and scope. Compared as `ActingIdentity` pairs, not raw tuples,
+    so "same claimant" stays one named domain concept everywhere it is
+    checked (here, and in rescope/release below)."""
+    return (
+        claim.identity == intent.identity
+        and ActingIdentity(claim.agent, claim.role) == ActingIdentity(intent.agent, intent.role)
+        and claim.branch == intent.branch
+        and claim.scope == intent.scope
+    )
+
+
+def _auto_resource_value(occupied: set[int]) -> int:
+    value = 1
+    while value in occupied:
+        value += 1
+    return value
+
+
+def _explicit_resource_conflict(state: ClaimState, name: str, value: int) -> ClaimUnavailableError:
+    holder = next(
+        (claim for claim in state.claims.values() if claim.resource == ResourceHold(name, value)),
+        None,
+    )
+    if holder is not None:
+        return ClaimUnavailableError(
+            f"{name} {value} is held by {holder.agent} ({holder.role}) on "
+            f"{_identity_summary(holder.identity, holder.branch)}"
+        )
+    return ClaimUnavailableError(f"{name} {value} was already consumed and cannot be reused")
+
+
+def _resolved_resource(
+    state: ClaimState, intent: ClaimIntent
+) -> tuple[ResourceHold | None, ResourceRecord | None]:
+    """The hold `intent` acquires and the updated record for its resource, or
+    `(None, None)` when it names no resource.
+
+    Auto intent (`resource_value` omitted): the least positive integer not
+    yet in `occupied`. Explicit intent: refuse when the value is already in
+    `occupied` -- live or released, since a released value is never reused
+    (§1 "one allocation owner: this file is the never-reuse set") -- naming
+    the current holder when there is one.
+    """
+    if intent.resource_name is None:
+        if intent.resource_value is not None:
+            raise ClaimError("resource value requires a resource name")
+        return None, None
+    name = intent.resource_name
+    record = state.resources.get(name, ResourceRecord(name=name, occupied=()))
+    occupied = set(record.occupied)
+    if intent.resource_value is None:
+        value = _auto_resource_value(occupied)
+    else:
+        value = intent.resource_value
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ClaimError("resource value must be a positive integer")
+        if value in occupied:
+            raise _explicit_resource_conflict(state, name, value)
+    return ResourceHold(name, value), ResourceRecord(name, tuple(sorted(occupied | {value})))
+
+
+def _apply_claim_intent(state: ClaimState, intent: ClaimIntent) -> ClaimState:
+    if state.tip is None:
+        # The one command allowed to turn `EMPTY_STATE` into real content is
+        # `bootstrap` itself, which never calls `apply` -- every other write
+        # path funnels through here, so this is the one place that must
+        # refuse instead of silently creating `refs/aco/state` as a side
+        # effect (issue #176 slice-review finding 1).
+        raise ClaimError(
+            "the claim state ref does not exist yet; run bootstrap before claim, "
+            "rescope, or release"
+        )
+    live = state.claims.get(intent.claim_id)
+    if intent.claim_id in state.consumed_ids:
+        if live is not None and _claim_matches_intent(live, intent):
+            return state
+        raise ClaimUnavailableError(
+            f"claim id {intent.claim_id!r} is already on this ledger, active or "
+            "released; release it, then claim again with a fresh claim id"
+        )
+    blocked_by = blocking_claims(tuple(state.claims.values()), intent)
+    if blocked_by:
+        owner = blocked_by[0]
+        raise ClaimUnavailableError(
+            f"{_identity_summary(intent.identity, intent.branch)} is claimed by "
+            f"{owner.agent} ({owner.role}) on {_identity_summary(owner.identity, owner.branch)} "
+            f"branch {owner.branch}"
+        )
+    resource, resource_record = _resolved_resource(state, intent)
+    new_claim = ActiveClaim(
+        identity=intent.identity,
+        claim_id=intent.claim_id,
+        agent=intent.agent,
+        role=intent.role,
+        base=intent.base,
+        branch=intent.branch,
+        scope=intent.scope,
+        opened_commit=state.tip,
+        resource=resource,
+        whole_reason=intent.whole_reason,
+    )
+    new_claims = {**state.claims, intent.claim_id: new_claim}
+    new_resources = dict(state.resources)
+    if resource_record is not None:
+        new_resources[resource_record.name] = resource_record
+    return replace(
+        state,
+        claims=MappingProxyType(new_claims),
+        consumed_ids=state.consumed_ids | {intent.claim_id},
+        resources=MappingProxyType(new_resources),
+    )
+
+
+def _apply_rescope_intent(state: ClaimState, intent: RescopeIntent) -> ClaimState:
+    current = state.claims.get(intent.claim_id)
+    if current is None:
+        raise ClaimUnavailableError(f"claim id {intent.claim_id!r} has no active claim to rescope")
+    if ActingIdentity(current.agent, current.role) != ActingIdentity(intent.agent, intent.role):
+        raise ClaimUnavailableError("only the original claimant may rescope")
+    if intent.clear_whole_reason:
+        whole_reason = None
+    elif intent.whole_reason is not None:
+        whole_reason = intent.whole_reason
+    else:
+        whole_reason = current.whole_reason
+    new_claim = replace(current, scope=intent.scope, whole_reason=whole_reason)
+    new_claims = {**state.claims, intent.claim_id: new_claim}
+    return replace(state, claims=MappingProxyType(new_claims))
+
+
+def _apply_release_intent(state: ClaimState, intent: ReleaseIntent) -> ClaimState:
+    current = state.claims.get(intent.claim_id)
+    if current is None:
+        raise ClaimUnavailableError(f"claim id {intent.claim_id!r} has no active claim to release")
+    if intent.coordinator_override:
+        if intent.role != COORDINATOR_ROLE:
+            raise ClaimUnavailableError("a coordinator override requires role coordinator")
+    elif ActingIdentity(current.agent, current.role) != ActingIdentity(intent.agent, intent.role):
+        raise ClaimUnavailableError(
+            "only the original claimant may release; use an explicit coordinator override"
+        )
+    new_claims = {
+        claim_id: claim for claim_id, claim in state.claims.items() if claim_id != intent.claim_id
+    }
+    return replace(state, claims=MappingProxyType(new_claims))
+
+
+def apply(state: ClaimState, intent: ClaimTransitionIntent) -> ClaimState:
+    """The pure claim-state transition (issue #176, §1): the sole writer of
+    `ClaimState.claims`/`consumed_ids`/`resources`. Assumes `state.tip` is
+    already real -- `store.py` never calls this against `EMPTY_STATE`."""
+    if isinstance(intent, ClaimIntent):
+        return _apply_claim_intent(state, intent)
+    if isinstance(intent, RescopeIntent):
+        return _apply_rescope_intent(state, intent)
+    return _apply_release_intent(state, intent)
+
+
+# --- `claims/<key>.toml` and `resources/<name>.toml` codecs -----------------
+#
+# Hand-written, not a TOML-writing library: every field reaching here already
+# passed `_valid_branch`/`_valid_scope`/`CLAIM_ID_PATTERN`/`ObjectId`, which
+# between them exclude control characters and backslashes, so the one
+# genuinely free-form input -- a scope path -- only ever needs `"` escaped to
+# stay a valid TOML basic string. A whole dependency for that single escape
+# would remove less complexity than it adds.
+
+_TOML_STRING_ESCAPES = {"\\": "\\\\", '"': '\\"'}
+
+
+def _toml_string(value: str) -> str:
+    escaped = "".join(_TOML_STRING_ESCAPES.get(character, character) for character in value)
+    return f'"{escaped}"'
+
+
+def _toml_string_array(values: tuple[str, ...]) -> str:
+    return "[" + ", ".join(_toml_string(value) for value in values) + "]"
+
+
+def _toml_int_array(values: tuple[int, ...]) -> str:
+    return "[" + ", ".join(str(value) for value in values) + "]"
+
+
+def serialize_claim_toml(claim: ActiveClaim) -> str:
+    """The `claims/<key>.toml` content for one live claim (§1)."""
+    lines = [
+        f"claim_id = {_toml_string(claim.claim_id)}",
+        f"agent = {_toml_string(claim.agent)}",
+        f"role = {_toml_string(claim.role)}",
+        f"base = {_toml_string(claim.base)}",
+        f"branch = {_toml_string(claim.branch)}",
+        f"scope = {_toml_string_array(claim.scope)}",
+        f"opened_commit = {_toml_string(claim.opened_commit)}",
+    ]
+    if claim.whole_reason is not None:
+        lines.append(f"whole_reason = {_toml_string(claim.whole_reason)}")
+    if claim.resource is not None:
+        lines.append(f"resource_name = {_toml_string(claim.resource.name)}")
+        lines.append(f"resource_value = {claim.resource.value}")
+    return "\n".join(lines) + "\n"
+
+
+_CLAIM_TOML_REQUIRED_KEYS = frozenset(
+    {"claim_id", "agent", "role", "base", "branch", "scope", "opened_commit"}
+)
+_CLAIM_TOML_OPTIONAL_KEYS = frozenset({"whole_reason", "resource_name", "resource_value"})
+_CLAIM_TOML_KEYS = _CLAIM_TOML_REQUIRED_KEYS | _CLAIM_TOML_OPTIONAL_KEYS
+
+
+def _claim_toml_text(
+    data: Mapping[str, object], field_name: str, *, key: str, tip: ObjectId
+) -> str:
+    value = data.get(field_name)
+    if not isinstance(value, str) or not value:
+        raise MalformedStateTreeError(
+            f"claim file {key}.toml at {tip} field {field_name!r} must be non-empty text"
+        )
+    return value
+
+
+def _claim_toml_scope(data: Mapping[str, object], *, key: str, tip: ObjectId) -> tuple[str, ...]:
+    raw = data.get("scope")
+    if not isinstance(raw, list) or not raw or any(not isinstance(entry, str) for entry in raw):
+        raise MalformedStateTreeError(
+            f"claim file {key}.toml at {tip} field 'scope' must be a non-empty list of text"
+        )
+    return tuple(raw)
+
+
+def _claim_toml_resource(
+    data: Mapping[str, object], *, key: str, tip: ObjectId
+) -> ResourceHold | None:
+    if "resource_name" not in data:
+        if "resource_value" in data:
+            raise MalformedStateTreeError(
+                f"claim file {key}.toml at {tip} has resource_value without resource_name"
+            )
+        return None
+    name = _claim_toml_text(data, "resource_name", key=key, tip=tip)
+    value = data.get("resource_value")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise MalformedStateTreeError(
+            f"claim file {key}.toml at {tip} field 'resource_value' must be a positive integer"
+        )
+    return ResourceHold(name, value)
+
+
+def parse_claim_toml(content: str, *, key: str, tip: ObjectId) -> ActiveClaim:
+    """Parse one fetched `claims/<key>.toml` blob into its `ActiveClaim`.
+
+    A malformed claim file fails the whole read loud (ruling: a commit is
+    the unit a writer writes, so a broken tree is corrupt state, not a
+    single quarantinable claim the way an unknown ledger-comment field was).
+    """
+    try:
+        data = tomllib.loads(content)
+    except tomllib.TOMLDecodeError as error:
+        raise MalformedStateTreeError(
+            f"malformed claim file {key}.toml at {tip}: {error}"
+        ) from error
+    observed_keys = frozenset(data)
+    if not observed_keys <= _CLAIM_TOML_KEYS:
+        raise MalformedStateTreeError(
+            f"claim file {key}.toml at {tip} has unknown keys: "
+            f"{sorted(observed_keys - _CLAIM_TOML_KEYS)}"
+        )
+    missing = _CLAIM_TOML_REQUIRED_KEYS - observed_keys
+    if missing:
+        raise MalformedStateTreeError(
+            f"claim file {key}.toml at {tip} is missing {sorted(missing)}"
+        )
+    identity = parse_claim_key(key)
+    claim_id_text = _claim_toml_text(data, "claim_id", key=key, tip=tip)
+    if CLAIM_ID_PATTERN.fullmatch(claim_id_text) is None:
+        raise MalformedStateTreeError(f"claim file {key}.toml at {tip} has an invalid claim id")
+    base_text = _claim_toml_text(data, "base", key=key, tip=tip)
+    opened_commit_text = _claim_toml_text(data, "opened_commit", key=key, tip=tip)
+    commit_fields_valid = (
+        COMMIT_PATTERN.fullmatch(base_text) is not None
+        and COMMIT_PATTERN.fullmatch(opened_commit_text) is not None
+    )
+    if not commit_fields_valid:
+        raise MalformedStateTreeError(f"claim file {key}.toml at {tip} has a malformed commit id")
+    whole_reason = data.get("whole_reason")
+    if whole_reason is not None and not isinstance(whole_reason, str):
+        raise MalformedStateTreeError(
+            f"claim file {key}.toml at {tip} field 'whole_reason' must be text"
+        )
+    return ActiveClaim(
+        identity=identity,
+        claim_id=ClaimId(claim_id_text),
+        agent=_claim_toml_text(data, "agent", key=key, tip=tip),
+        role=_claim_toml_text(data, "role", key=key, tip=tip),
+        base=ObjectId(base_text),
+        branch=_claim_toml_text(data, "branch", key=key, tip=tip),
+        scope=_claim_toml_scope(data, key=key, tip=tip),
+        opened_commit=ObjectId(opened_commit_text),
+        resource=_claim_toml_resource(data, key=key, tip=tip),
+        whole_reason=whole_reason,
+    )
+
+
+def serialize_resource_toml(record: ResourceRecord) -> str:
+    """The `resources/<name>.toml` content for one resource's occupied set (§1)."""
+    return f"occupied = {_toml_int_array(record.occupied)}\n"
+
+
+def parse_resource_toml(content: str, *, name: str, tip: ObjectId) -> ResourceRecord:
+    try:
+        data = tomllib.loads(content)
+    except tomllib.TOMLDecodeError as error:
+        raise MalformedStateTreeError(
+            f"malformed resource file {name}.toml at {tip}: {error}"
+        ) from error
+    if set(data) != {"occupied"}:
+        raise MalformedStateTreeError(
+            f"resource file {name}.toml at {tip} must contain exactly 'occupied'"
+        )
+    occupied = data["occupied"]
+    if not isinstance(occupied, list) or any(
+        isinstance(value, bool) or not isinstance(value, int) or value < 1 for value in occupied
+    ):
+        raise MalformedStateTreeError(
+            f"resource file {name}.toml at {tip} field 'occupied' must be positive integers"
+        )
+    return ResourceRecord(name=name, occupied=tuple(occupied))

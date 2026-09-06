@@ -706,3 +706,546 @@ def test_commit_tree_fails_loud_on_an_unresolvable_tree(worktree: Path) -> None:
         store._commit_tree(
             worktree, tree_oid=_UNRESOLVABLE_OBJECT_ID, parent=None, message="test\n"
         )
+
+
+# --- `apply`, the claim-key codec, and the claim/resource TOML codecs ------
+#
+# Pure logic (issue #176, slice C2): no git subprocess needed, so these
+# exercise `protocol.apply` and its codecs directly rather than through a
+# bare repository -- the thin git-transport integration layer above stays
+# reserved for what actually needs a real repository.
+
+_TIP = protocol.ObjectId("a" * 40)
+_OTHER_TIP = protocol.ObjectId("b" * 40)
+_BASE = protocol.ObjectId("c" * 40)
+_STATE_WITH_TIP = protocol.ClaimState(tip=_TIP)
+_DEFAULT_IDENTITY = protocol.IssueIdentity(42)
+
+
+def _claim_intent(
+    *,
+    identity: protocol.ClaimIdentity = _DEFAULT_IDENTITY,
+    agent: str = "Ada",
+    role: str = "builder",
+    base: protocol.ObjectId = _BASE,
+    branch: str = "claude/issue-42-cut",
+    scope: tuple[str, ...] = ("src/agent_claim/store.py",),
+    claim_id: str = "a1",
+    operation_id: str = "op-1",
+    whole_reason: str | None = None,
+    resource_name: str | None = None,
+    resource_value: int | None = None,
+) -> protocol.ClaimIntent:
+    return protocol.ClaimIntent(
+        identity=identity,
+        agent=agent,
+        role=role,
+        base=base,
+        branch=branch,
+        scope=scope,
+        claim_id=protocol.ClaimId(claim_id),
+        operation_id=operation_id,
+        whole_reason=whole_reason,
+        resource_name=resource_name,
+        resource_value=resource_value,
+    )
+
+
+def test_apply_claim_intent_adds_a_live_claim_and_consumes_its_id() -> None:
+    state = protocol.apply(_STATE_WITH_TIP, _claim_intent())
+
+    claim = state.claims["a1"]
+    assert claim.identity == protocol.IssueIdentity(42)
+    assert claim.agent == "Ada"
+    assert claim.role == "builder"
+    assert claim.base == _BASE
+    assert claim.branch == "claude/issue-42-cut"
+    assert claim.scope == ("src/agent_claim/store.py",)
+    assert claim.opened_commit == _TIP
+    assert claim.resource is None
+    assert claim.whole_reason is None
+    assert state.consumed_ids == frozenset({protocol.ClaimId("a1")})
+
+
+def test_apply_claim_intent_refuses_against_a_missing_state_ref() -> None:
+    with pytest.raises(protocol.ClaimError, match="does not exist yet"):
+        protocol.apply(protocol.EMPTY_STATE, _claim_intent())
+
+
+def test_apply_claim_intent_replays_idempotently_for_the_same_claim_id_and_fields() -> None:
+    once = protocol.apply(_STATE_WITH_TIP, _claim_intent())
+
+    replayed = protocol.apply(once, _claim_intent(operation_id="a-different-operation-id"))
+
+    assert replayed == once
+
+
+def test_apply_claim_intent_refuses_a_reused_claim_id_with_different_fields() -> None:
+    once = protocol.apply(_STATE_WITH_TIP, _claim_intent())
+
+    with pytest.raises(protocol.ClaimUnavailableError, match="already on this ledger"):
+        protocol.apply(once, _claim_intent(scope=("README.md",)))
+
+
+def test_apply_claim_intent_refuses_a_reused_claim_id_after_release() -> None:
+    claimed = protocol.apply(_STATE_WITH_TIP, _claim_intent())
+    release = protocol.ReleaseIntent(
+        claim_id=protocol.ClaimId("a1"),
+        agent="Ada",
+        role="builder",
+        outcome=protocol.AbandonedRelease("done"),
+        operation_id="op-2",
+    )
+    released = protocol.apply(claimed, release)
+
+    with pytest.raises(protocol.ClaimUnavailableError, match="already on this ledger"):
+        protocol.apply(released, _claim_intent(operation_id="op-3"))
+
+
+def test_apply_claim_intent_refuses_an_identity_conflict() -> None:
+    claimed = protocol.apply(_STATE_WITH_TIP, _claim_intent())
+
+    with pytest.raises(protocol.ClaimUnavailableError, match="is claimed by Ada"):
+        protocol.apply(claimed, _claim_intent(agent="Grace", claim_id="a2", operation_id="op-2"))
+
+
+def test_apply_rescope_intent_replaces_scope_and_preserves_opened_commit() -> None:
+    claimed = protocol.apply(_STATE_WITH_TIP, _claim_intent())
+    rescope = protocol.RescopeIntent(
+        claim_id=protocol.ClaimId("a1"),
+        agent="Ada",
+        role="builder",
+        scope=("README.md",),
+        operation_id="op-2",
+    )
+
+    rescoped = protocol.apply(claimed, rescope)
+
+    claim = rescoped.claims["a1"]
+    assert claim.scope == ("README.md",)
+    assert claim.opened_commit == _TIP
+    assert rescoped.consumed_ids == claimed.consumed_ids
+
+
+def test_apply_rescope_intent_refuses_a_non_claimant() -> None:
+    claimed = protocol.apply(_STATE_WITH_TIP, _claim_intent())
+    rescope = protocol.RescopeIntent(
+        claim_id=protocol.ClaimId("a1"),
+        agent="Grace",
+        role="builder",
+        scope=("README.md",),
+        operation_id="op-2",
+    )
+
+    with pytest.raises(protocol.ClaimUnavailableError, match="original claimant"):
+        protocol.apply(claimed, rescope)
+
+
+def test_apply_rescope_intent_refuses_rescoping_a_claim_that_does_not_exist() -> None:
+    rescope = protocol.RescopeIntent(
+        claim_id=protocol.ClaimId("nonexistent"),
+        agent="Ada",
+        role="builder",
+        scope=("README.md",),
+        operation_id="op-1",
+    )
+
+    with pytest.raises(protocol.ClaimUnavailableError, match="no active claim"):
+        protocol.apply(_STATE_WITH_TIP, rescope)
+
+
+def test_apply_rescope_intent_can_clear_the_whole_reason() -> None:
+    claimed = protocol.apply(_STATE_WITH_TIP, _claim_intent(whole_reason="repo-wide rename"))
+    clear = protocol.RescopeIntent(
+        claim_id=protocol.ClaimId("a1"),
+        agent="Ada",
+        role="builder",
+        scope=("README.md",),
+        operation_id="op-2",
+        clear_whole_reason=True,
+    )
+
+    cleared = protocol.apply(claimed, clear)
+
+    assert cleared.claims["a1"].whole_reason is None
+
+
+def test_apply_rescope_intent_keeps_the_whole_reason_when_omitted() -> None:
+    claimed = protocol.apply(_STATE_WITH_TIP, _claim_intent(whole_reason="repo-wide rename"))
+    rescope = protocol.RescopeIntent(
+        claim_id=protocol.ClaimId("a1"),
+        agent="Ada",
+        role="builder",
+        scope=("README.md",),
+        operation_id="op-2",
+    )
+
+    rescoped = protocol.apply(claimed, rescope)
+
+    assert rescoped.claims["a1"].whole_reason == "repo-wide rename"
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        pytest.param(protocol.MergedRelease(108), id="merged"),
+        pytest.param(protocol.AbandonedRelease("no longer needed"), id="abandoned"),
+    ],
+)
+def test_apply_release_intent_removes_the_claim(outcome: protocol.ReleaseOutcome) -> None:
+    claimed = protocol.apply(_STATE_WITH_TIP, _claim_intent())
+    release = protocol.ReleaseIntent(
+        claim_id=protocol.ClaimId("a1"),
+        agent="Ada",
+        role="builder",
+        outcome=outcome,
+        operation_id="op-2",
+    )
+
+    released = protocol.apply(claimed, release)
+
+    assert "a1" not in released.claims
+    assert protocol.ClaimId("a1") in released.consumed_ids
+
+
+def test_apply_release_intent_refuses_releasing_a_claim_that_does_not_exist() -> None:
+    release = protocol.ReleaseIntent(
+        claim_id=protocol.ClaimId("nonexistent"),
+        agent="Ada",
+        role="builder",
+        outcome=protocol.AbandonedRelease("done"),
+        operation_id="op-1",
+    )
+
+    with pytest.raises(protocol.ClaimUnavailableError, match="no active claim"):
+        protocol.apply(_STATE_WITH_TIP, release)
+
+
+def test_apply_release_intent_refuses_a_non_claimant_without_override() -> None:
+    claimed = protocol.apply(_STATE_WITH_TIP, _claim_intent())
+    release = protocol.ReleaseIntent(
+        claim_id=protocol.ClaimId("a1"),
+        agent="Grace",
+        role="builder",
+        outcome=protocol.AbandonedRelease("stealing it"),
+        operation_id="op-2",
+    )
+
+    with pytest.raises(protocol.ClaimUnavailableError, match="original claimant"):
+        protocol.apply(claimed, release)
+
+
+def test_apply_release_intent_allows_a_coordinator_override() -> None:
+    claimed = protocol.apply(_STATE_WITH_TIP, _claim_intent())
+    release = protocol.ReleaseIntent(
+        claim_id=protocol.ClaimId("a1"),
+        agent="Coordinator",
+        role="coordinator",
+        outcome=protocol.AbandonedRelease("stale takeover"),
+        operation_id="op-2",
+        coordinator_override=True,
+    )
+
+    released = protocol.apply(claimed, release)
+
+    assert "a1" not in released.claims
+
+
+def test_apply_release_intent_refuses_a_coordinator_override_without_coordinator_role() -> None:
+    claimed = protocol.apply(_STATE_WITH_TIP, _claim_intent())
+    release = protocol.ReleaseIntent(
+        claim_id=protocol.ClaimId("a1"),
+        agent="Ada",
+        role="builder",
+        outcome=protocol.AbandonedRelease("stale takeover"),
+        operation_id="op-2",
+        coordinator_override=True,
+    )
+
+    with pytest.raises(protocol.ClaimUnavailableError, match="requires role coordinator"):
+        protocol.apply(claimed, release)
+
+
+def test_apply_claim_intent_assigns_the_least_free_auto_resource_value() -> None:
+    first = protocol.apply(_STATE_WITH_TIP, _claim_intent(claim_id="a1", resource_name="display"))
+    second = protocol.apply(
+        first,
+        _claim_intent(
+            identity=protocol.IssueIdentity(43),
+            claim_id="a2",
+            operation_id="op-2",
+            resource_name="display",
+        ),
+    )
+
+    assert first.claims["a1"].resource == protocol.ResourceHold("display", 1)
+    assert second.claims["a2"].resource == protocol.ResourceHold("display", 2)
+    assert second.resources["display"].occupied == (1, 2)
+
+
+def test_apply_claim_intent_refuses_an_explicit_resource_value_already_held() -> None:
+    held = protocol.apply(
+        _STATE_WITH_TIP,
+        _claim_intent(claim_id="a1", resource_name="display", resource_value=2),
+    )
+
+    with pytest.raises(protocol.ClaimUnavailableError, match="display 2 is held by Ada"):
+        protocol.apply(
+            held,
+            _claim_intent(
+                identity=protocol.IssueIdentity(43),
+                claim_id="a2",
+                operation_id="op-2",
+                agent="Grace",
+                resource_name="display",
+                resource_value=2,
+            ),
+        )
+
+
+def test_apply_claim_intent_never_reuses_a_released_auto_resource_value() -> None:
+    """Done-when 2: the import (and every later reader) must be able to
+    derive `occupied` from this run's own history, not from active claims
+    alone -- a released auto value must stay occupied forever."""
+    claimed = protocol.apply(_STATE_WITH_TIP, _claim_intent(claim_id="a1", resource_name="display"))
+    release = protocol.ReleaseIntent(
+        claim_id=protocol.ClaimId("a1"),
+        agent="Ada",
+        role="builder",
+        outcome=protocol.AbandonedRelease("done"),
+        operation_id="op-2",
+    )
+    released = protocol.apply(claimed, release)
+
+    reclaimed = protocol.apply(
+        released, _claim_intent(claim_id="a2", operation_id="op-3", resource_name="display")
+    )
+
+    assert reclaimed.claims["a2"].resource == protocol.ResourceHold("display", 2)
+    assert reclaimed.resources["display"].occupied == (1, 2)
+
+
+def test_apply_claim_intent_never_reuses_a_released_explicit_resource_value() -> None:
+    claimed = protocol.apply(
+        _STATE_WITH_TIP,
+        _claim_intent(claim_id="a1", resource_name="display", resource_value=1),
+    )
+    release = protocol.ReleaseIntent(
+        claim_id=protocol.ClaimId("a1"),
+        agent="Ada",
+        role="builder",
+        outcome=protocol.AbandonedRelease("done"),
+        operation_id="op-2",
+    )
+    released = protocol.apply(claimed, release)
+
+    with pytest.raises(protocol.ClaimUnavailableError, match="already consumed"):
+        protocol.apply(
+            released,
+            _claim_intent(
+                claim_id="a2", operation_id="op-3", resource_name="display", resource_value=1
+            ),
+        )
+
+
+def test_stale_takeover_is_release_then_claim_and_does_not_reuse_the_occupied_integer() -> None:
+    """Coordinator stale-takeover: override-release then claim, two `apply`
+    calls -- never a `TakeoverIntent`. The freed integer stays retired."""
+    claimed = protocol.apply(_STATE_WITH_TIP, _claim_intent(claim_id="a1", resource_name="display"))
+    override_release = protocol.ReleaseIntent(
+        claim_id=protocol.ClaimId("a1"),
+        agent="Coordinator",
+        role="coordinator",
+        outcome=protocol.AbandonedRelease("stale, no activity for 3 days"),
+        operation_id="op-2",
+        coordinator_override=True,
+    )
+    freed = protocol.apply(claimed, override_release)
+
+    retaken = protocol.apply(
+        freed,
+        _claim_intent(claim_id="a3", operation_id="op-3", agent="Grace", resource_name="display"),
+    )
+
+    assert "a1" not in retaken.claims
+    assert retaken.claims["a3"].resource == protocol.ResourceHold("display", 2)
+
+
+def test_apply_resource_value_requires_a_resource_name() -> None:
+    with pytest.raises(protocol.ClaimError, match="resource value requires a resource name"):
+        protocol.apply(_STATE_WITH_TIP, _claim_intent(resource_value=3))
+
+
+def test_apply_resource_value_must_be_a_positive_integer() -> None:
+    with pytest.raises(protocol.ClaimError, match="positive integer"):
+        protocol.apply(_STATE_WITH_TIP, _claim_intent(resource_name="display", resource_value=0))
+
+
+# --- Claim key codec (criterion 10) ----------------------------------------
+
+
+def test_claim_key_round_trips_an_issue_identity() -> None:
+    key = protocol.claim_key(protocol.IssueIdentity(42), "claude/issue-42-cut")
+
+    assert key == "issue-42"
+    assert protocol.parse_claim_key(key) == protocol.IssueIdentity(42)
+
+
+def test_claim_key_round_trips_a_lane_branch_with_slash_and_percent() -> None:
+    branch = "docs/rename-100%-done"
+
+    key = protocol.claim_key(protocol.LaneIdentity(), branch)
+
+    assert key == "lane-docs%2Frename-100%25-done"
+    assert protocol.parse_claim_key(key) == protocol.LaneIdentity()
+
+
+def test_claim_key_round_trips_a_255_character_lane_branch() -> None:
+    branch = "docs/" + "a" * 248 + "/z"
+    assert len(branch) == 255
+
+    key = protocol.claim_key(protocol.LaneIdentity(), branch)
+
+    assert "/" not in key
+    assert protocol.parse_claim_key(key) == protocol.LaneIdentity()
+    # The tree-entry name is one segment, safe for `hash-object`/`mktree`/`ls-tree`
+    # (`--missing`: this placeholder blob need not itself exist).
+    entries = subprocess.run(
+        ["git", "mktree", "--missing"],
+        input=f"100644 blob {'0' * 40}\t{key}\n".encode(),
+        check=False,
+        capture_output=True,
+    )
+    assert entries.returncode == 0
+
+
+def test_claim_key_issue_and_lane_prefixes_never_collide() -> None:
+    issue_key = protocol.claim_key(protocol.IssueIdentity(1), "irrelevant")
+    lane_key = protocol.claim_key(protocol.LaneIdentity(), "issue-1")
+
+    assert issue_key != lane_key
+    assert protocol.parse_claim_key(issue_key) == protocol.IssueIdentity(1)
+    assert protocol.parse_claim_key(lane_key) == protocol.LaneIdentity()
+
+
+@pytest.mark.parametrize(
+    ("key", "match"),
+    [
+        pytest.param("resource-display", "neither the issue nor lane prefix", id="unknown-prefix"),
+        pytest.param("issue-0", "malformed issue number", id="issue-zero"),
+        pytest.param("issue-01", "malformed issue number", id="issue-leading-zero"),
+        pytest.param("issue-abc", "malformed issue number", id="issue-not-a-number"),
+        pytest.param("lane-%2", "malformed percent-escape", id="lane-incomplete-escape"),
+        pytest.param("lane-%zz", "malformed percent-escape", id="lane-invalid-escape"),
+    ],
+)
+def test_parse_claim_key_rejects_a_malformed_key(key: str, match: str) -> None:
+    with pytest.raises(protocol.MalformedStateTreeError, match=match):
+        protocol.parse_claim_key(key)
+
+
+# --- `claims/<key>.toml` and `resources/<name>.toml` codecs ----------------
+
+
+def _sample_claim(**overrides: object) -> protocol.ActiveClaim:
+    fields: dict[str, object] = {
+        "identity": protocol.IssueIdentity(42),
+        "claim_id": protocol.ClaimId("a1"),
+        "agent": "Ada",
+        "role": "builder",
+        "base": _BASE,
+        "branch": "claude/issue-42-cut",
+        "scope": ("src/agent_claim/store.py",),
+        "opened_commit": _TIP,
+        "resource": None,
+        "whole_reason": None,
+    }
+    fields.update(overrides)
+    return protocol.ActiveClaim(**fields)  # type: ignore[arg-type]
+
+
+def test_serialize_and_parse_claim_toml_round_trips_the_minimal_claim() -> None:
+    claim = _sample_claim()
+
+    parsed = protocol.parse_claim_toml(
+        protocol.serialize_claim_toml(claim), key="issue-42", tip=_OTHER_TIP
+    )
+
+    assert parsed == claim
+
+
+def test_serialize_and_parse_claim_toml_round_trips_resource_and_whole_reason() -> None:
+    claim = _sample_claim(
+        resource=protocol.ResourceHold("display", 2), whole_reason="repo-wide rename"
+    )
+
+    parsed = protocol.parse_claim_toml(
+        protocol.serialize_claim_toml(claim), key="issue-42", tip=_OTHER_TIP
+    )
+
+    assert parsed == claim
+
+
+def test_serialize_and_parse_claim_toml_round_trips_a_quote_in_a_scope_path() -> None:
+    claim = _sample_claim(scope=('weird "quoted" path.py',))
+
+    parsed = protocol.parse_claim_toml(
+        protocol.serialize_claim_toml(claim), key="issue-42", tip=_OTHER_TIP
+    )
+
+    assert parsed.scope == ('weird "quoted" path.py',)
+
+
+def test_parse_claim_toml_rejects_an_unknown_key() -> None:
+    content = protocol.serialize_claim_toml(_sample_claim()) + 'comment = "stray"\n'
+
+    with pytest.raises(protocol.MalformedStateTreeError, match="unknown keys"):
+        protocol.parse_claim_toml(content, key="issue-42", tip=_OTHER_TIP)
+
+
+def test_parse_claim_toml_rejects_a_missing_required_key() -> None:
+    with pytest.raises(protocol.MalformedStateTreeError, match="is missing"):
+        protocol.parse_claim_toml('claim_id = "a1"\n', key="issue-42", tip=_OTHER_TIP)
+
+
+def test_parse_claim_toml_rejects_resource_value_without_resource_name() -> None:
+    content = protocol.serialize_claim_toml(_sample_claim()) + "resource_value = 3\n"
+
+    with pytest.raises(protocol.MalformedStateTreeError, match="resource_value without"):
+        protocol.parse_claim_toml(content, key="issue-42", tip=_OTHER_TIP)
+
+
+def test_parse_claim_toml_rejects_a_malformed_commit_id() -> None:
+    content = protocol.serialize_claim_toml(_sample_claim()).replace(str(_BASE), "not-a-sha")
+
+    with pytest.raises(protocol.MalformedStateTreeError, match="malformed commit id"):
+        protocol.parse_claim_toml(content, key="issue-42", tip=_OTHER_TIP)
+
+
+def test_parse_claim_toml_rejects_malformed_toml() -> None:
+    with pytest.raises(protocol.MalformedStateTreeError, match="malformed claim file"):
+        protocol.parse_claim_toml("not = valid = toml\n", key="issue-42", tip=_OTHER_TIP)
+
+
+def test_serialize_and_parse_resource_toml_round_trips() -> None:
+    record = protocol.ResourceRecord(name="display", occupied=(1, 2, 5))
+
+    parsed = protocol.parse_resource_toml(
+        protocol.serialize_resource_toml(record), name="display", tip=_OTHER_TIP
+    )
+
+    assert parsed == record
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        pytest.param('name = "display"\n', id="wrong-key"),
+        pytest.param("occupied = [1, 0]\n", id="non-positive-value"),
+        pytest.param('occupied = ["1"]\n', id="non-integer-value"),
+        pytest.param("occupied = 1\n", id="not-a-list"),
+    ],
+)
+def test_parse_resource_toml_rejects_a_malformed_record(content: str) -> None:
+    with pytest.raises(protocol.MalformedStateTreeError):
+        protocol.parse_resource_toml(content, name="display", tip=_OTHER_TIP)
