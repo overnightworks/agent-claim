@@ -2131,12 +2131,55 @@ def test_claim_refuses_non_issue_or_closed_blockers_before_mutation(
     assert client.comments[LEDGER_ISSUE] == []
 
 
-@pytest.mark.parametrize("blocked_by", ["nichts", "#9", "#9, #11"])
-def test_claim_accepts_nothing_or_open_issue_blockers(
+def test_claim_accepts_a_body_with_no_blockers(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    issue = board_issue(
+        10,
+        "Work",
+        complete_contract("Claim #10.", blocked_by="nichts"),
+        labels=("security",),
+    )
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(issue,))
+    monkeypatch.setattr(
+        issue_claim, "_request", lambda _arguments: request(issue=10, scope=("src/work.py",))
+    )
+
+    assert (
+        issue_claim.main(
+            [
+                "--repo",
+                "example/agent-claim",
+                "claim",
+                "10",
+                "--agent",
+                "Codex Sol",
+                "--scope",
+                "src/work.py",
+            ]
+        )
+        == 0
+    )
+
+    assert len(client.comments[LEDGER_ISSUE]) == 1
+    assert "ERROR:" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("blocked_by", "expected_blockers"),
+    [
+        pytest.param("#9", "#9", id="single-open-blocker"),
+        pytest.param("#9, #11", "#9, #11", id="two-open-blockers"),
+    ],
+)
+def test_claim_refuses_an_open_issue_blocker_before_mutation(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
     blocked_by: str,
+    expected_blockers: str,
 ) -> None:
     blockers = tuple(
         board_issue(number, f"Blocker {number}", complete_contract(f"Claim #{number}."))
@@ -2167,11 +2210,61 @@ def test_claim_accepts_nothing_or_open_issue_blockers(
                 "src/work.py",
             ]
         )
+        == 2
+    )
+
+    captured = capsys.readouterr()
+    assert captured.err == (
+        f"ERROR: #10 is blocked by {expected_blockers} (open); "
+        "pass --out-of-order REASON to claim it anyway\n"
+    )
+    assert client.comments[LEDGER_ISSUE] == []
+
+
+def test_claim_allows_an_open_issue_blocker_with_out_of_order_and_records_it(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    reason = "Blocker #9 is stuck on review; unblocking manually."
+    blocker = board_issue(9, "Blocker 9", complete_contract("Claim #9."))
+    issue = board_issue(
+        10,
+        "Work",
+        complete_contract("Claim #10.", blocked_by="#9"),
+        labels=("security",),
+    )
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(issue, blocker))
+    monkeypatch.setattr(
+        issue_claim,
+        "_request",
+        lambda _arguments: replace(
+            request(issue=10, scope=("src/work.py",)), out_of_order_reason=reason
+        ),
+    )
+
+    assert (
+        issue_claim.main(
+            [
+                "--repo",
+                "example/agent-claim",
+                "claim",
+                "10",
+                "--agent",
+                "Codex Sol",
+                "--scope",
+                "src/work.py",
+                "--out-of-order",
+                reason,
+            ]
+        )
         == 0
     )
 
-    assert len(client.comments[LEDGER_ISSUE]) == 1
-    assert "ERROR:" not in capsys.readouterr().err
+    output = capsys.readouterr().out
+    assert "WARNING: #10 is blocked by #9 (open)" in output
+    comment_body = client.comments[LEDGER_ISSUE][-1].body
+    assert f"Out-of-order reason: {reason}" in comment_body
 
 
 def test_claim_refuses_duplicate_contract_fields_before_mutation(

@@ -298,7 +298,7 @@ def _add_claim_parser(commands: argparse._SubParsersAction) -> None:
         metavar="REASON",
         help=(
             "refuses a claim without a reason when a higher-priority actionable item is "
-            "free; records why"
+            "free or an open blocker remains; records why"
         ),
     )
     claim.add_argument(
@@ -1065,6 +1065,21 @@ def _out_of_order_check(
     )
 
 
+def _blocked_check(
+    item: board.BoardItem | None, out_of_order_reason: str | None
+) -> SliceCheck | None:
+    if item is None or not item.open_blockers:
+        return None
+    blockers = ", ".join(f"#{number}" for number in item.open_blockers)
+    return SliceCheck(
+        "warning" if out_of_order_reason is not None else "error",
+        "blocked",
+        f"#{item.number} is blocked by {blockers} (open); "
+        "pass --out-of-order REASON to claim it anyway",
+        issue=item.number,
+    )
+
+
 def _parent_checks(
     client: forge.ForgeReader, repository: str, issue: int, title: str
 ) -> SliceCheck | None:
@@ -1149,6 +1164,9 @@ def _slice_rule_checks(
         checks.append(
             SliceCheck("error", "container", f"#{issue} is a container; claim a child", issue=issue)
         )
+    blocked = _blocked_check(item, out_of_order_reason)
+    if blocked is not None:
+        checks.append(blocked)
     state, title, _body = _issue_reference_state(lookup.client, lookup.open_by_number, issue)
     if state is forge.ItemState.CLOSED:
         checks.append(SliceCheck("error", "closed-issue", f"issue #{issue} is closed", issue=issue))
