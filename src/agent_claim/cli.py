@@ -6,7 +6,7 @@ import argparse
 import json
 import sys
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -1845,6 +1845,55 @@ def _cut_target(client: forge.ForgeWriter, number: int) -> board.Issue:
     return target
 
 
+def _row_index_ranges(indices: Sequence[int]) -> str:
+    """`indices` (any order) as ascending, comma-joined ranges -- a
+    contiguous run collapses to `start-end`, e.g. `4-7` for `[4, 5, 6, 7]`,
+    so a long run of cut rows reads as one span instead of a long list. A
+    plain hyphen, not an en dash: RUF001/RUF002 read the repository's own
+    output text like any other string literal, and this repository takes no
+    inline suppressions."""
+    ranges: list[tuple[int, int]] = []
+    for value in sorted(indices):
+        if ranges and value == ranges[-1][1] + 1:
+            ranges[-1] = (ranges[-1][0], value)
+        else:
+            ranges.append((value, value))
+    return ", ".join(str(start) if start == end else f"{start}-{end}" for start, end in ranges)
+
+
+def _uncuttable_row_refusal(
+    target: board.Issue, row_number: int, findings: board.SliceTableFindings
+) -> protocol.ClaimUnavailableError:
+    """Why `--row {row_number}` names no row `cut` can link, in priority
+    order: the row exists but is already cut, the whole table has nothing
+    left uncut, or -- the remaining case, a request that matches no row at
+    all while some rows are still malformed -- the malformed rows named by
+    `#` cell and reason instead of only counted."""
+    all_rows = tuple(
+        entry
+        for entry in board.parse_slice_table(target.body)
+        if isinstance(entry, board.SliceTableRow)
+    )
+    requested = next((row for row in all_rows if row.index == row_number), None)
+    if requested is not None and requested.item_issue is not None:
+        cuttable = ", ".join(str(row.index) for row in findings.cuttable) or "none"
+        return protocol.ClaimUnavailableError(
+            f"#{target.number} row {row_number} is already cut (#{requested.item_issue}); "
+            f"cuttable rows: {cuttable}"
+        )
+    cut_rows = tuple(row.index for row in all_rows if row.item_issue is not None)
+    if not findings.cuttable and cut_rows:
+        return protocol.ClaimUnavailableError(
+            f"#{target.number} has no uncut row; rows {_row_index_ranges(cut_rows)} are cut"
+        )
+    if findings.malformed:
+        named = "; ".join(board.malformed_row_clause(row) for row in findings.malformed)
+        return protocol.ClaimUnavailableError(
+            f"#{target.number} has no cuttable slice row; {named}"
+        )
+    return protocol.ClaimUnavailableError(f"#{target.number} has no cuttable slice row")
+
+
 def _cut_row(target: board.Issue, row_number: int | None) -> board.SliceTableRow | None:
     """The slice-table row `cut` dispatches (#151): without `--row`, the
     first still-cuttable row when one exists, else `None` -- `cut` then
@@ -1864,10 +1913,7 @@ def _cut_row(target: board.Issue, row_number: int | None) -> board.SliceTableRow
         (candidate for candidate in findings.cuttable if candidate.index == row_number), None
     )
     if row is None:
-        raise protocol.ClaimUnavailableError(
-            f"#{target.number} has no cuttable slice row; "
-            f"{len(findings.malformed)} malformed rows need a hand fix"
-        )
+        raise _uncuttable_row_refusal(target, row_number, findings)
     return row
 
 

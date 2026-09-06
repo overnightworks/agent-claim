@@ -318,9 +318,16 @@ class MalformedSliceTable:
 @dataclass(frozen=True)
 class MalformedSliceRow:
     """A pipe-shaped line inside a recognized slice table that isn't a
-    well-formed row: the wrong column count, or a non-integer `#` cell."""
+    well-formed row: the wrong column count, or a non-integer `#` cell.
+
+    `id_cell` and `reason` are what a refusal names it by -- `row "B":
+    index must be a positive integer` -- instead of only counting it;
+    `line` keeps the raw row for anything that still wants the full text.
+    """
 
     line: str
+    id_cell: str
+    reason: str
 
 
 SliceTableEntry = SliceTableRow | MalformedSliceTable | MalformedSliceRow
@@ -841,6 +848,17 @@ def _slice_table_header_at(lines: list[str], line_index: int) -> tuple[bool, boo
     return well_formed_header, has_separator
 
 
+def _malformed_row_reason(row_cells: tuple[str, ...]) -> str | None:
+    """Why `row_cells` is not a well-formed slice-table row, or `None` when
+    it is -- the wrong column count is checked first, since a shifted
+    column makes `row_cells[0]` unreliable as the actual `#` cell."""
+    if len(row_cells) != len(SLICE_TABLE_HEADER_CELLS):
+        return f"expected {len(SLICE_TABLE_HEADER_CELLS)} cells, found {len(row_cells)}"
+    if _SLICE_TABLE_INDEX_PATTERN.match(row_cells[0]) is None:
+        return "index must be a positive integer"
+    return None
+
+
 def _slice_table_rows(lines: list[str], start: int) -> tuple[tuple[SliceTableEntry, ...], int]:
     """The row block following a well-formed header, and the line index after it."""
     entries: list[SliceTableEntry] = []
@@ -849,11 +867,10 @@ def _slice_table_rows(lines: list[str], start: int) -> tuple[tuple[SliceTableEnt
         row_cells = _table_row_cells(lines[line_index])
         if row_cells is None:
             break
-        if (
-            len(row_cells) != len(SLICE_TABLE_HEADER_CELLS)
-            or _SLICE_TABLE_INDEX_PATTERN.match(row_cells[0]) is None
-        ):
-            entries.append(MalformedSliceRow(lines[line_index].strip()))
+        reason = _malformed_row_reason(row_cells)
+        if reason is not None:
+            id_cell = row_cells[0] if row_cells else ""
+            entries.append(MalformedSliceRow(lines[line_index].strip(), id_cell, reason))
             line_index += 1
             continue
         entries.append(_slice_table_row(*row_cells[:3]))
@@ -911,7 +928,7 @@ class SliceTableFindings:
 
     cuttable: tuple[SliceTableRow, ...]
     unlinkable: tuple[SliceTableRow, ...]
-    malformed: tuple[str, ...]
+    malformed: tuple[MalformedSliceRow, ...]
     has_table: bool
 
 
@@ -919,15 +936,15 @@ def slice_table_findings(body: str) -> SliceTableFindings:
     entries = parse_slice_table(body)
     cuttable: list[SliceTableRow] = []
     unlinkable: list[SliceTableRow] = []
-    malformed: list[str] = []
+    malformed: list[MalformedSliceRow] = []
     for entry in entries:
         if isinstance(entry, SliceTableRow):
             if entry.item_cell == UNDISPATCHED_SLICE_CELL:
                 cuttable.append(entry)
             elif entry.item_issue is None:
                 unlinkable.append(entry)
-        else:
-            malformed.append(entry.line)
+        elif isinstance(entry, MalformedSliceRow):
+            malformed.append(entry)
     return SliceTableFindings(tuple(cuttable), tuple(unlinkable), tuple(malformed), bool(entries))
 
 
@@ -937,12 +954,14 @@ class UncutSlices:
 
     item: int
     rows: tuple[str, ...]
+    malformed: tuple[MalformedSliceRow, ...] = ()
 
 
 def _uncut_slices(issue_number: int, findings: SliceTableFindings) -> UncutSlices | None:
     named = tuple(row.name for row in (*findings.cuttable, *findings.unlinkable))
-    rows = named + findings.malformed
-    return UncutSlices(issue_number, rows) if rows else None
+    if not named and not findings.malformed:
+        return None
+    return UncutSlices(issue_number, named, findings.malformed)
 
 
 def _row_item_cell_span(
@@ -1893,9 +1912,20 @@ def _container_lines(board: Board) -> list[str]:
     ]
 
 
+def malformed_row_clause(row: MalformedSliceRow) -> str:
+    """The one naming unit for a malformed row -- `row "B": index must be a
+    positive integer" -- shared by `board`'s `UNCUT` section and `cut
+    --row`'s refusal so a malformed row reads the same way in both."""
+    return f'row "{row.id_cell}": {row.reason}'
+
+
 def _uncut_line(finding: UncutSlices) -> str:
-    names = ", ".join(finding.rows)
-    return f"#{finding.item}: {len(finding.rows)} rows ({names})"
+    clauses = []
+    if finding.rows:
+        names = ", ".join(finding.rows)
+        clauses.append(f"{len(finding.rows)} rows ({names})")
+    clauses.extend(malformed_row_clause(row) for row in finding.malformed)
+    return f"#{finding.item}: " + "; ".join(clauses)
 
 
 def _contract_summary(contract: Contract) -> str:

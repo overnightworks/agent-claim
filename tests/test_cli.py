@@ -3058,9 +3058,80 @@ def test_cut_refuses_a_row_when_no_cuttable_row_exists(
     )
 
     assert exit_code == 2
-    assert (
-        f"ERROR: #{CUT_CONTAINER} has no cuttable slice row; 1 malformed rows need a hand fix"
-        in capsys.readouterr().err
+    expected = (
+        f"ERROR: #{CUT_CONTAINER} has no cuttable slice row; "
+        'row "x": index must be a positive integer'
+    )
+    assert expected in capsys.readouterr().err
+    assert client.created_children == []
+    assert client.item_bodies == {}
+
+
+def test_cut_refuses_a_row_already_cut_into_another_item(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """`--row N` on a row already linked names which item it went to and
+    which rows are still cuttable (like #122 on 06.09.2026)."""
+    body = slice_table(
+        ("4", "Landed slice", "#150", "—"),
+        ("5", "Open slice", "—", "—"),
+        ("6", "Another open slice", "—", "—"),
+        ("7", "Yet another open slice", "—", "—"),
+    )
+    container = _cut_container_issue(body)
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
+
+    exit_code = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "cut",
+            str(CUT_CONTAINER),
+            "--title",
+            "Scheibe 4",
+            "--row",
+            "4",
+        ]
+    )
+
+    assert exit_code == 2
+    assert capsys.readouterr().err == (
+        f"ERROR: #{CUT_CONTAINER} row 4 is already cut (#150); cuttable rows: 5, 6, 7\n"
+    )
+    assert client.created_children == []
+    assert client.item_bodies == {}
+
+
+def test_cut_refuses_a_row_when_the_whole_table_is_already_cut(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """No row left to cut names the whole cut range, not the requested row
+    number (like #122 on 06.09.2026, once every row is linked)."""
+    body = slice_table(
+        ("4", "First slice", "#150", "—"),
+        ("5", "Second slice", "#151", "—"),
+        ("6", "Third slice", "#152", "—"),
+        ("7", "Fourth slice", "#153", "—"),
+    )
+    container = _cut_container_issue(body)
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
+
+    exit_code = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "cut",
+            str(CUT_CONTAINER),
+            "--title",
+            "Scheibe 8",
+            "--row",
+            "8",
+        ]
+    )
+
+    assert exit_code == 2
+    assert capsys.readouterr().err == (
+        f"ERROR: #{CUT_CONTAINER} has no uncut row; rows 4-7 are cut\n"
     )
     assert client.created_children == []
     assert client.item_bodies == {}
@@ -3341,7 +3412,7 @@ def test_parse_slice_table_marks_a_row_with_the_wrong_shape_and_keeps_scanning()
     )
 
     assert board.parse_slice_table(body) == (
-        board.MalformedSliceRow(bad_row),
+        board.MalformedSliceRow(bad_row, "x", "index must be a positive integer"),
         board.SliceTableRow(2, "Second slice", "—", None),
     )
 
@@ -3376,7 +3447,9 @@ def test_slice_table_findings_classifies_cuttable_unlinkable_landed_and_malforme
     assert findings.unlinkable == (
         board.SliceTableRow(3, "Malformed link slice", "not a link", None),
     )
-    assert findings.malformed == (bad_row,)
+    assert findings.malformed == (
+        board.MalformedSliceRow(bad_row, "x", "index must be a positive integer"),
+    )
 
 
 def test_uncut_slices_is_none_when_every_row_is_linked() -> None:
@@ -4822,8 +4895,48 @@ def test_board_json_and_render_report_an_uncut_slice_table_row() -> None:
 
     assert projected.uncut == (board.UncutSlices(160, ("Undispatched slice",)),)
     payload = json.loads(board.board_json(projected))
-    assert payload["uncut"] == [{"item": 160, "rows": ["Undispatched slice"]}]
+    assert payload["uncut"] == [{"item": 160, "rows": ["Undispatched slice"], "malformed": []}]
     assert "UNCUT\n#160: 1 rows (Undispatched slice)" in board.render(projected)
+
+
+def test_board_json_and_render_name_a_malformed_row_by_its_cell_and_reason() -> None:
+    """A malformed row (Container #79 with row id "B", 06.09.2026) is named
+    by its `#` cell and reason -- text and JSON -- instead of only counted."""
+    body = "| # | Scheibe | Item | Hängt ab von |\n|---|---|---|---|\n| B | Broken | — | — |\n"
+    container = board.Issue(
+        161,
+        "Container",
+        (),
+        body,
+        "2026-08-20T00:00:00Z",
+        "2026-08-20T00:00:00Z",
+        kind=board.ItemKind.CONTAINER,
+        children_closed=0,
+        children_total=0,
+    )
+    projected = projected_board(
+        (container,), (), (), (), board.BoardConfig(), now=datetime(2026, 8, 21, tzinfo=UTC)
+    )
+
+    malformed_row = board.MalformedSliceRow(
+        "| B | Broken | — | — |", "B", "index must be a positive integer"
+    )
+    assert projected.uncut == (board.UncutSlices(161, (), (malformed_row,)),)
+    payload = json.loads(board.board_json(projected))
+    assert payload["uncut"] == [
+        {
+            "item": 161,
+            "rows": [],
+            "malformed": [
+                {
+                    "line": "| B | Broken | — | — |",
+                    "id_cell": "B",
+                    "reason": "index must be a positive integer",
+                }
+            ],
+        }
+    ]
+    assert 'UNCUT\n#161: row "B": index must be a positive integer' in board.render(projected)
 
 
 def test_next_action_skips_a_container_that_still_holds_an_open_child() -> None:
