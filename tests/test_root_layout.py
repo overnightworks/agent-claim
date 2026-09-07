@@ -48,6 +48,7 @@ def test_allowed_root_layout_has_no_violations(tmp_path: Path) -> None:
     _track(
         tmp_path,
         "pyproject.toml",
+        ".python-version",
         "README.md",
         "AGENTS.md",
         "src/agent_claim/__init__.py",

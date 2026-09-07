@@ -7,7 +7,7 @@ name = "agent-claim"
 dynamic = ["version"]
 description = "Repository-neutral GitHub issue claims for coding agents"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.14"
 license = "MIT"
 authors = [{name = "agent-claim contributors"}]
 

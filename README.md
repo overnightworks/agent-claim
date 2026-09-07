@@ -17,6 +17,9 @@ uv tool uninstall agent-claim
 To roll back, force-install the previous tag with `uv tool install --force
 git+https://github.com/FlexOr2/agent-claim.git@v0.8.0`.
 
+Local proofs run under the pinned interpreter named in `.python-version`
+(currently 3.12); `uv sync` creates the development venv from that file.
+
 ### Reader/writer compatibility
 
 Claim state is a git tree, `claims/<key>.toml` / `ids/<claim_id>` /
