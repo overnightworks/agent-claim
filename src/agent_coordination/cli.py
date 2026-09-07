@@ -1498,10 +1498,16 @@ def _checked_classification(
 
 
 class CheckKind(StrEnum):
-    """Which subject one `check` run read -- the `--json` discriminator."""
+    """Which subject one `check` run read -- the `--json` discriminator.
+
+    Three values, because that is what the one dispatch request actually
+    distinguishes: GitHub gives issues and pull requests a single number
+    space, so a number that is not there was never proven to be either.
+    """
 
     PULL_REQUEST = "pull_request"
     ISSUE = "issue"
+    MISSING = "missing"
 
 
 @dataclass(frozen=True)
@@ -1556,6 +1562,13 @@ def _pull_request_check(
     )
 
 
+def _missing_number(repository: str, number: int) -> CheckOutcome:
+    """A number neither mode can read, named without claiming which of the
+    two it would have been."""
+    finding = f"does not exist in {repository}"
+    return CheckOutcome(CheckKind.MISSING, number, f"REFUSED: #{number} {finding}", finding)
+
+
 def _issue_line(number: int, finding: str) -> str:
     """The one shape every issue-mode answer takes."""
     return f"ISSUE #{number} {finding}"
@@ -1586,15 +1599,13 @@ def _open_issue_blockers(
 def _issue_check(
     client: forge.ForgeReader,
     repository: str,
-    reference: forge.ItemReference,
+    body: str,
     number: int,
     mode: board.BodyContractMode,
 ) -> CheckOutcome:
     """Whether this issue's body is the contract a builder can start from:
     readable under the repository's pin, complete, and unblocked."""
-    if reference.state is forge.ItemState.MISSING:
-        return _refused_issue(number, "does not exist here")
-    parsed = board.parse_body(reference.body or "", mode)
+    parsed = board.parse_body(body, mode)
     if parsed.read_state is board.BodyReadState.LEGACY:
         return _refused_issue(number, "body legacy")
     if parsed.read_state is board.BodyReadState.MALFORMED:
@@ -1988,16 +1999,18 @@ def _rescope_command(parsed: argparse.Namespace) -> protocol.RescopeRequest:
 
 
 def _cmd_check(parsed: argparse.Namespace, session: _ReadSession) -> int:
-    """One number, one dispatch request: the forge's own answer says whether
-    it is a pull request to classify or an issue whose body contract to read.
-    Only the pull-request side needs the live claims, so the issue side never
-    fetches the state ref."""
+    """One number, one dispatch request into one of three answers: a pull
+    request to classify, an issue whose body contract to read, or a number
+    that is in neither number space. Only the pull-request side needs the
+    live claims, so the issue side never fetches the state ref."""
     number = int(parsed.number)
     client = session.forge
     repository = client.repository.path
     config = _load_board_config(client, _resolve_toplevel())
     reference = client.item_reference(number)
-    if reference.is_landing:
+    if reference.state is forge.ItemState.MISSING:
+        outcome = _missing_number(repository, number)
+    elif reference.is_landing:
         _worktree, _remote, observed = _store_observation(parsed)
         outcome = _pull_request_check(
             client,
@@ -2007,7 +2020,9 @@ def _cmd_check(parsed: argparse.Namespace, session: _ReadSession) -> int:
             config.body_contract,
         )
     else:
-        outcome = _issue_check(client, repository, reference, number, config.body_contract)
+        outcome = _issue_check(
+            client, repository, reference.body or "", number, config.body_contract
+        )
     return outcome.report(as_json=parsed.json)
 
 

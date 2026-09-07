@@ -5892,6 +5892,34 @@ def test_parse_body_reads_a_skeleton_block_as_incomplete_but_valid() -> None:
     assert parsed.projectionless is True
 
 
+@pytest.mark.parametrize(
+    ("body", "mode", "missing"),
+    [
+        pytest.param(
+            agent_claim_body(MINIMAL_BLOCK_TOML),
+            board.BodyContractMode.BLOCK,
+            (),
+            id="a-filled-block-is-complete-and-never-names-blocked-by",
+        ),
+        pytest.param(
+            "## Now\nReady.\n\n## Next\nLand it.\n\n## Done when\nMerged.",
+            board.BodyContractMode.PROSE,
+            ("Blocked by",),
+            id="prose-still-demands-blocked-by",
+        ),
+    ],
+)
+def test_missing_or_empty_sections_follows_the_repository_pin(
+    body: str, mode: board.BodyContractMode, missing: tuple[str, ...]
+) -> None:
+    """A block body carries no `Blocked by` section -- its dependencies live
+    on the forge -- so naming one would refuse every correctly migrated body;
+    prose, whose blockers are a body section, still demands it."""
+    contract = board.parse_body(body, mode).contract
+
+    assert board.missing_or_empty_sections(contract, mode) == missing
+
+
 def test_parse_body_treats_a_fenceless_body_as_legacy() -> None:
     parsed = board.parse_body("## Now\nOld prose.\n", board.BodyContractMode.BLOCK)
 
@@ -14879,14 +14907,34 @@ def test_check_reads_a_block_pinned_issue_in_two_requests_even_with_no_dependenc
     assert client.requests == 2
 
 
-def test_check_refuses_a_number_that_does_not_exist_in_one_request(
+def test_check_names_a_number_that_exists_in_neither_number_space(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
+    """GitHub gives issues and pull requests one number space, so an absent
+    number was never proven to be either -- the refusal names no kind word."""
     client = issue_check_client(monkeypatch, tmp_path, body="", state=forge.ItemState.MISSING)
 
     assert run_check(CHECKED_ISSUE) == 1
-    assert capsys.readouterr().err == f"ISSUE #{CHECKED_ISSUE} does not exist here\n"
+    assert capsys.readouterr().err == (
+        f"REFUSED: #{CHECKED_ISSUE} does not exist in {REPOSITORY}\n"
+    )
     assert client.requests == 1
+
+
+def test_check_json_names_a_missing_number_as_its_own_kind(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    issue_check_client(monkeypatch, tmp_path, body="", state=forge.ItemState.MISSING)
+
+    exit_code = issue_claim.main(["--repo", REPOSITORY, "check", str(CHECKED_ISSUE), "--json"])
+
+    assert exit_code == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "ok": False,
+        "kind": "missing",
+        "number": CHECKED_ISSUE,
+        "refused": f"does not exist in {REPOSITORY}",
+    }
 
 
 def test_check_names_a_legacy_body_under_the_block_pin(

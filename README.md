@@ -143,10 +143,10 @@ the forge target does not match the canonical remote's own repository.
 `aco check <n>` reads one number of the current checkout's repository (or
 `--repo OWNER/REPOSITORY`) and says whether it is sound. It claims nothing,
 labels nothing, comments nothing and writes nothing. One forge request
-answers whether the number is a pull request or an issue, and the two modes
-ask different questions. `--json` prints the answer as
-`{"ok": …, "kind": "pull_request"|"issue", "number": n}`, with a `refused`
-reason added when `ok` is false. The command needs a working tree of the
+answers whether the number is a pull request, an issue, or in neither number
+space, and each answer asks a different question. `--json` prints it as
+`{"ok": …, "kind": "pull_request"|"issue"|"missing", "number": n}`, with a
+`refused` reason added when `ok` is false. The command needs a working tree of the
 repository (a shallow checkout is enough) to read the repository's
 `body_contract` pin from `.agent-claim/board.toml`, and refuses outright
 without one.
@@ -157,13 +157,19 @@ one `REFUSED: pull request #<n> ...` line and exits 1. Run it as a required
 check on every pull request that targets the default branch.
 
 For an **issue** it answers: can a builder start from this body? It prints one
-`ISSUE #<n> ...` line — `body ok` and exit 0, or one of `does not exist here`,
-`body legacy`, `body malformed: <reason>`, `body incomplete: <sections>`, or
+`ISSUE #<n> ...` line — `body ok` and exit 0, or one of `body legacy`,
+`body malformed: <reason>`, `body incomplete: <sections>`, or
 `blocked by #<a>, #<b>` and exit 1. Under the prose pin the blockers are the
 body's own `Blocked by` line; under the block pin they are GitHub's
-`blocked_by` dependencies, so a foreign one renders as `owner/repo#n`. The
-issue mode reads nothing else: it repeats none of `claim`'s working-tree,
-identity, or ordering checks.
+`blocked_by` dependencies, so a foreign one renders as `owner/repo#n`. A block
+body has no `Blocked by` section at all, so a body-incomplete line never asks
+for one. The issue mode reads nothing else: it repeats none of `claim`'s
+working-tree, identity, or ordering checks.
+
+A number that is in **neither** number space prints `REFUSED: #<n> does not
+exist in <owner>/<repo>` and exits 1. It names no kind: GitHub gives issues
+and pull requests one number space, so an absent number was never proven to
+be either.
 
 A pull request body carries exactly one classification line:
 
