@@ -28,7 +28,12 @@ def _git_output(arguments: list[str]) -> str:
             or "unknown git failure"
         )
         raise ClaimError(detail)
-    return result.stdout.decode().strip()
+    # Trailing-only: every caller wants the one newline `git` appends after its
+    # output trimmed, but `git status --porcelain`'s short format is
+    # significant in its *leading* column (` M path` names a modified file by
+    # a leading space before the path) -- a leading strip silently turned that
+    # into `M path` and `_dirty_paths` then sliced into the filename itself.
+    return result.stdout.decode().rstrip("\n")
 
 
 def remote_url(remote: str) -> str:
