@@ -8611,6 +8611,71 @@ def test_checkout_validation_names_every_dirty_path_when_three_or_fewer(
     assert str(error.value) == "claim must be acquired before the first worktree edit: src/a.py"
 
 
+def _real_git(repository: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *arguments], cwd=repository, check=True, capture_output=True, text=True
+    )
+
+
+def _scratch_git_repository(tmp_path: Path) -> Path:
+    """An initialized repository with one committed, tracked file -- for
+    tests that drive `_dirty_paths` against real `git status --porcelain`
+    output instead of a fake standing in for `_git_output` itself."""
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    _real_git(repository, "init", "-q", "-b", "main")
+    _real_git(repository, "config", "user.name", "Test")
+    _real_git(repository, "config", "user.email", "test@example.com")
+    (repository / "README.md").write_text("hello\n")
+    _real_git(repository, "add", "README.md")
+    _real_git(repository, "commit", "-q", "-m", "initial")
+    return repository
+
+
+def test_dirty_paths_reads_a_modified_tracked_file_from_real_git_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression for the truncated-name bug (#52 follow-up): `_git_output`
+    used to `.strip()` its whole decoded output, which ate the leading space
+    of a modified file's ` M path` porcelain line before `_dirty_paths`
+    sliced off the fixed three-character status prefix -- `README.md` came
+    back as `EADME.md`. A fake that hands `_dirty_paths` a hand-typed string
+    with the leading space intact cannot catch this; only the real reader
+    against real git output can."""
+    repository = _scratch_git_repository(tmp_path)
+    (repository / "README.md").write_text("hello\nmodified\n")
+    monkeypatch.chdir(repository)
+
+    assert checkout._dirty_paths(checkout._git_output(["status", "--porcelain"])) == ("README.md",)
+
+
+def test_dirty_paths_reads_an_untracked_file_from_real_git_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The untracked `?? path` line has no leading space to lose, which is
+    why the truncation bug above went unnoticed."""
+    repository = _scratch_git_repository(tmp_path)
+    (repository / "extra.txt").write_text("new\n")
+    monkeypatch.chdir(repository)
+
+    assert checkout._dirty_paths(checkout._git_output(["status", "--porcelain"])) == ("extra.txt",)
+
+
+def test_dirty_paths_reads_a_rename_from_real_git_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_dirty_paths`'s docstring claims a rename's `old -> new` line is
+    handled; prove it against a real rename rather than a hand-typed line
+    that could not tell us whether the code actually handles it."""
+    repository = _scratch_git_repository(tmp_path)
+    _real_git(repository, "mv", "README.md", "RENAMED.md")
+    monkeypatch.chdir(repository)
+
+    assert checkout._dirty_paths(checkout._git_output(["status", "--porcelain"])) == (
+        "README.md -> RENAMED.md",
+    )
+
+
 def _git_checkout(
     *,
     head: str = BASE,
