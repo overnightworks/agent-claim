@@ -1,0 +1,8 @@
+claim_id = "0c7d78c0a619461bb8b699e332088b0c"
+agent = "Claude Fable 5.1"
+role = "builder"
+base = "eb0f392c7f3cc67e403557f61164b593156e09ce"
+branch = "claude/issue-201-claim-help-and-comma-paths"
+scope = ["src/agent_coordination/cli.py", "src/agent_coordination/protocol.py", "tests/test_cli.py", "README.md"]
+opened_commit = "4633017637bf017a7139287d3b0d7501bdbd97fc"
+whole_reason = "Ein Hilfetext, die Pfadregel, die sie beschreibt, und ihr Test gehören in einen Zug; getrennt gelandet widersprächen sie sich"
