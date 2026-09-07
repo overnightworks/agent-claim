@@ -14,32 +14,13 @@ from types import MappingProxyType
 from typing import TypeVar
 
 from . import board, forge, process, protocol
-from .protocol import (
-    MAX_PROTOCOL_BYTES,
-    MAX_PROTOCOL_EVENTS,
-    REPOSITORY_PATTERN,
-    ClaimError,
-    IssueComment,
-    is_protocol_candidate,
-)
+from .protocol import REPOSITORY_PATTERN, ClaimError
 
 _Page = TypeVar("_Page")
 TIMESTAMP_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 # gh 2.45 colorizes --jq output when it believes stdout is a TTY.
 ANSI_ESCAPE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 COMMENTS_PER_PAGE = 100
-# `list_protocol_candidates` -- the one remaining ledger read, `bootstrap
-# --ledger`'s one-time import -- still fetches one page per `gh` subprocess
-# call and can stop as soon as a short page ends, so these genuinely bound
-# how much it fetches before giving up and asking for a ledger rollover.
-MAX_LEDGER_PAGES = 100
-LEDGER_ROLLOVER_WARNING_PAGES = 80
-# `list_protocol_candidates` fetches every comment page before it can inspect
-# anything, so by the time either of these is checked the full cost has
-# already been paid; they bound how much is held and processed afterward
-# (and when to ask for a rollover), not the fetch cost itself.
-MAX_LEDGER_COMMENTS = MAX_LEDGER_PAGES * COMMENTS_PER_PAGE
-LEDGER_ROLLOVER_WARNING_COMMENTS = LEDGER_ROLLOVER_WARNING_PAGES * COMMENTS_PER_PAGE
 MAX_RECENT_MERGED_PULL_REQUESTS = 1000
 # GitHub's merged-pull-request search accepts an exact-day filter, so a
 # board's merged-pull-request date shards are independent, order-agnostic
@@ -231,7 +212,6 @@ def _bounded_command(command: list[str], *, purpose: str, input_data: bytes | No
 
 
 _READ_ONLY_OPERATIONS = (
-    forge.ForgeOperation.LIST_PROTOCOL_CANDIDATES,
     forge.ForgeOperation.ITEM_REFERENCE,
     forge.ForgeOperation.LANDING,
     forge.ForgeOperation.PARENT_ISSUE,
@@ -266,7 +246,6 @@ class GitHubForge:
     ) -> None:
         self.repository = repository
         self._perform = run if run is not None else self._gh
-        self._rollover_warning_printed = False
         self.requests = 0
         self._requests_lock = threading.Lock()
 
@@ -354,18 +333,6 @@ class GitHubForge:
             ) from error
         return tuple(values)
 
-    def _comment_page(self, issue: int, page: int) -> tuple[IssueComment, ...]:
-        raw = self._run(
-            [
-                "api",
-                f"repos/{self.repository}/issues/{issue}/comments"
-                f"?per_page={COMMENTS_PER_PAGE}&page={page}",
-                "--jq",
-                ".[] | {id,created_at,updated_at,body,author_association,html_url}",
-            ]
-        )
-        return tuple(self._parse_comment(value) for value in self._json_lines(raw, "issue-comment"))
-
     def _fetch_pages(
         self, page: Callable[[int], tuple[_Page, ...]], *, per_page: int
     ) -> tuple[_Page, ...]:
@@ -395,65 +362,6 @@ class GitHubForge:
             if len(fetched[-1]) < per_page:
                 return tuple(pages)
             start += PARALLEL_FETCH_CONCURRENCY
-
-    def list_protocol_candidates(self, issue: int) -> tuple[IssueComment, ...]:
-        all_comments = self._fetch_pages(
-            lambda page: self._comment_page(issue, page), per_page=COMMENTS_PER_PAGE
-        )
-        total_comments = len(all_comments)
-        if total_comments > MAX_LEDGER_COMMENTS:
-            raise ClaimError(
-                "claim ledger page limit reached; perform the documented ledger rollover"
-            )
-        if (
-            total_comments >= LEDGER_ROLLOVER_WARNING_COMMENTS
-            and not self._rollover_warning_printed
-        ):
-            print(
-                f"WARNING: claim ledger has {total_comments} comments; "
-                "schedule the documented rollover",
-                file=sys.stderr,
-            )
-            self._rollover_warning_printed = True
-        comments: list[IssueComment] = []
-        protocol_bytes = 0
-        for parsed in all_comments:
-            if not is_protocol_candidate(parsed):
-                continue
-            protocol_bytes += len(parsed.body.encode("utf-8"))
-            if len(comments) >= MAX_PROTOCOL_EVENTS or protocol_bytes > MAX_PROTOCOL_BYTES:
-                raise ClaimError(
-                    "claim ledger protocol limit reached; perform the documented ledger rollover"
-                )
-            comments.append(parsed)
-        return tuple(comments)
-
-    def _parse_comment(self, value: object) -> IssueComment:
-        if not isinstance(value, dict):
-            raise forge.ForgeMalformedResponseError("GitHub issue-comment entry must be an object")
-        identifier = value.get("id")
-        created_at = value.get("created_at")
-        updated_at = value.get("updated_at")
-        body = value.get("body")
-        association = value.get("author_association")
-        url = value.get("html_url")
-        if (
-            isinstance(identifier, bool)
-            or not isinstance(identifier, int)
-            or identifier < 1
-            or not isinstance(created_at, str)
-            or TIMESTAMP_PATTERN.fullmatch(created_at) is None
-            or not isinstance(updated_at, str)
-            or TIMESTAMP_PATTERN.fullmatch(updated_at) is None
-            or not isinstance(body, str)
-            or not isinstance(association, str)
-            or not isinstance(url, str)
-            or not url.startswith("https://github.com/")
-        ):
-            raise forge.ForgeMalformedResponseError(
-                "GitHub returned a malformed issue-comment entry"
-            )
-        return IssueComment(identifier, created_at, updated_at, body, association, url)
 
     def _issue_kind(self, value: object) -> board.ItemKind | None:
         return _ISSUE_TYPE_KINDS.get(value.casefold()) if isinstance(value, str) else None

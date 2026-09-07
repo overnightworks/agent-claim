@@ -8,11 +8,11 @@ repository-global state: a remote compare-and-swap ref, reached through
 let a worktree-local module own repository-global state -- exactly the
 linked-worktree stamp collision `_lineage_stamp_path` exists to avoid.
 
-`cli` (issue #176, slice C2) is this module's production caller: `bootstrap`,
-`commit_transition`, and the one-time import. It never checks the state ref
-out: every read goes through plumbing (`ls-remote`, `fetch` to `FETCH_HEAD`,
-`ls-tree`, `cat-file`), and every write builds a tree with `hash-object`/
-`mktree` and a commit with `commit-tree`.
+`cli` (issue #176, slice C2) is this module's production caller: `bootstrap`
+and `commit_transition`. It never checks the state ref out: every read goes
+through plumbing (`ls-remote`, `fetch` to `FETCH_HEAD`, `ls-tree`,
+`cat-file`), and every write builds a tree with `hash-object`/`mktree` and a
+commit with `commit-tree`.
 """
 
 from __future__ import annotations
@@ -218,8 +218,7 @@ def committer_date(*, worktree: Path, tip: ObjectId, commit: ObjectId) -> dateti
 
     Refuses with `StateLineageError` when `commit` is not an ancestor of the
     already-fetched `tip` (§1 "Status age..."): a claim's age display reads
-    real history, it never guesses across a lineage break the way a stale
-    ledger timestamp could.
+    real history, it never guesses across a lineage break.
     """
     ancestry = _run_git(worktree, ["merge-base", "--is-ancestor", str(commit), str(tip)])
     if ancestry.exit_status != 0:
@@ -707,83 +706,3 @@ def bootstrap(
         transport=transport or GitPushTransport(),
     )
     return result.tip if isinstance(result, OperationAlreadyApplied) else result
-
-
-def prepare_import_parent(*, worktree: Path) -> ObjectId:
-    """A local empty-state commit used as the import's parent so each
-    imported claim's `opened_commit` is a real ancestor of the pushed tip.
-
-    Not pushed: the import commit (child of this parent) is the only object
-    `push_import` sends, and git includes this parent in that pack. The
-    remote never points at the empty-only tree, so a failed import cannot
-    leave the "empty ref created by mistake" state (issue #176 done-when 1).
-    """
-    return _commit_tree(
-        worktree,
-        tree_oid=_write_empty_state_tree(worktree),
-        parent=None,
-        message="import parent\n",
-    )
-
-
-@dataclass(frozen=True)
-class PendingImport:
-    """One not-yet-landed one-time ledger import: the state it writes, the
-    local empty-tree commit it is parented on, and the commit message
-    carrying its `operation_id` -- the import's counterpart to
-    `PendingCommit`, kept together so a retry re-applies the same import
-    rather than drifting from it."""
-
-    imported: ClaimState
-    parent: ObjectId
-    subject: str
-    operation_id: str
-
-
-def push_import(
-    *,
-    worktree: Path,
-    remote: str,
-    pending: PendingImport,
-    transport: PushTransport | None = None,
-) -> ClaimState:
-    """Push `pending.imported` as the first tip of `refs/aco/state`, parented
-    on the local empty commit `pending.parent`. Refuses if the ref is no
-    longer empty.
-    """
-    transport = transport or GitPushTransport()
-    observed = fetch_state(worktree=worktree, remote=remote)
-    if observed.tip is not None:
-        raise ClaimUnavailableError(
-            f"{STATE_REF} is no longer empty; refuse to overwrite a present ref"
-        )
-    message = f"{pending.subject}\n\noperation_id: {pending.operation_id}\nintent: import\n"
-    new_commit = _commit_tree(
-        worktree,
-        tree_oid=_write_state_tree(worktree, pending.imported),
-        parent=pending.parent,
-        message=message,
-    )
-    try:
-        transport.push(worktree=worktree, remote=remote, ref=STATE_REF, new_oid=new_commit)
-    except PushRejectedError:
-        refreshed = fetch_state(worktree=worktree, remote=remote)
-        if refreshed.tip is not None:
-            found = _find_operation_id(
-                worktree,
-                since=None,
-                until=refreshed.tip,
-                operation_id=pending.operation_id,
-            )
-            if found is not None:
-                return refreshed
-        raise ClaimUnavailableError(
-            f"{STATE_REF} moved before the import landed; retry the command"
-        ) from None
-    _write_lineage_stamp(worktree, new_commit)
-    return ClaimState(
-        tip=new_commit,
-        claims=pending.imported.claims,
-        consumed_ids=pending.imported.consumed_ids,
-        resources=pending.imported.resources,
-    )

@@ -1,8 +1,7 @@
-"""Claim-ledger protocol: markers, claims, projections, and reconciliation."""
+"""Claim protocol: claim records, scope rules, and the `refs/aco/state` codec."""
 
 from __future__ import annotations
 
-import json
 import re
 import tomllib
 from collections.abc import Mapping
@@ -12,16 +11,6 @@ from pathlib import PurePosixPath, PureWindowsPath
 from types import MappingProxyType
 from typing import Protocol, TypeVar
 
-# The protocol core is configured by bootstrap --ledger before the one-time import.
-LEDGER_ISSUE = 0
-LEGACY_MARKER_PREFIX = "<!-- agent-claim:v1 "
-MARKER_PREFIX = "<!-- agent-claim:v2 "
-MARKER_SUFFIX = " -->"
-# The tombstone action a 0.12.x (and older) client fences on. Not in
-# `parse_claim_event`'s allow-list: that omission *is* the fence. The import
-# reader skips it by reading `_marker_payload` and never calling
-# `parse_claim_event` (issue #176, §2).
-STATE_CUT_ACTION = "state_cut"
 # Named refusal when a write-path command would otherwise create
 # `refs/aco/state` as a side effect (issue #176 done-when 1). One owner so
 # `apply`, `store.commit_transition`, and `protect` cannot drift.
@@ -32,14 +21,11 @@ MISSING_STATE_REF = (
 # may use, so a builder that forgot its issue number never gets a silent, unlabeled,
 # non-projected claim instead of a loud refusal.
 ISSUELESS_LANE_BRANCH_PREFIXES = ("docs/", "fix/")
-TRUSTED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 CLAIM_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 RESOURCE_NAME_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9._-]{0,63}")
 COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
 BRANCH_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,254}")
 REPOSITORY_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_.-]{1,100}")
-MAX_PROTOCOL_EVENTS = 4096
-MAX_PROTOCOL_BYTES = 8 * 1024 * 1024
 MAX_SCOPE_ENTRIES = 256
 MAX_SCOPE_PATH_LENGTH = 512
 WIDE_SCOPE_PATH_LIMIT = 3
@@ -65,27 +51,6 @@ class InvalidClaimMarkerError(ClaimError):
     pass
 
 
-LEDGER_BODY_MARKER = "<!-- agent-claim-ledger:v1 -->"
-
-
-def configure_ledger(issue: int) -> None:
-    """Bind the otherwise protocol-only core to this repository's ledger generation."""
-    if isinstance(issue, bool) or not isinstance(issue, int) or issue < 1:
-        raise ClaimError("ledger issue must be a positive integer")
-    global LEDGER_ISSUE
-    LEDGER_ISSUE = issue
-
-
-@dataclass(frozen=True)
-class IssueComment:
-    identifier: int
-    created_at: str
-    updated_at: str
-    body: str
-    author_association: str
-    url: str
-
-
 @dataclass(frozen=True)
 class IssueIdentity:
     """A claim scoped to one numbered GitHub issue."""
@@ -102,7 +67,7 @@ class LaneIdentity:
     """A claim scoped to one issueless `docs/`/`fix/` lane.
 
     Carries no branch of its own: the lane name is owned entirely by the enclosing
-    `LedgerActiveClaim`/`ClaimRequest.branch`, which every lane claim already has. A second
+    claim record's `branch`, which every lane claim already has. A second
     branch-shaped field here would give the branch two owners that could drift apart.
     """
 
@@ -116,148 +81,6 @@ class ResourceHold:
 
     name: str
     value: int
-
-
-@dataclass(frozen=True)
-class LedgerActiveClaim:
-    """One claim id's current standing, derived from the whole ledger walk.
-
-    This dataclass and its whole aggregation walk are D-scheduled
-    infrastructure the import reader (`bootstrap --ledger`) still needs
-    whole, kept intact rather than picked apart function by function ahead
-    of that deletion.
-    """
-
-    identity: ClaimIdentity
-    claim_id: str
-    agent: str
-    role: str
-    base: str
-    branch: str
-    scope: tuple[str, ...]
-    comment: IssueComment
-    resource: ResourceHold | None = None
-    requested_resource: str | None = None
-    whole_reason: str | None = None
-
-
-@dataclass(frozen=True)
-class UnreadableClaim:
-    """A trusted claim comment carrying a field this reader's schema does not know.
-
-    A newer `agent-claim` wrote it; this reader fences the record itself
-    instead of letting it corrupt the whole read. `bootstrap --ledger`
-    refuses the whole import by name when any comment is unreadable
-    (`ClaimLedgerAggregate.unreadable`, `_reject_unreadable_claims`) -- an
-    unreadable comment's true content is unknowable to this reader, so
-    nothing downstream can be proven not to conflict with it. `claim_id` is
-    `None` when the field that would normally identify it is itself missing
-    or malformed -- the comment is still named by `comment_url` in that
-    case. Missing a field this reader requires is a different, harder
-    failure (a corrupt record, not a newer writer): `_strict_keys` still
-    raises `InvalidClaimMarkerError` for that and never produces an
-    `UnreadableClaim`.
-    """
-
-    claim_id: str | None
-    comment_url: str
-    unknown_fields: tuple[str, ...]
-
-
-class UnreadableClaimError(ClaimError):
-    """Internal signal that one trusted comment is an `UnreadableClaim`.
-
-    Raised only by `_strict_keys` and caught only by `_aggregate_claim_events`,
-    which turns it into an `UnreadableClaim` record on `ClaimLedgerAggregate`
-    instead of letting it fail the whole ledger read. It must never escape past
-    that one catch site uncaught.
-    """
-
-    def __init__(self, claim: UnreadableClaim) -> None:
-        self.claim = claim
-        super().__init__(
-            f"trusted comment {claim.comment_url} unreadable, upgrade the installed tool"
-        )
-
-
-@dataclass(frozen=True)
-class ClaimantRelease:
-    identity: ClaimIdentity
-    claim_id: str
-    agent: str
-    role: str
-    reason: str
-    comment: IssueComment
-
-
-@dataclass(frozen=True)
-class OverrideRelease:
-    identity: ClaimIdentity
-    claim_id: str
-    agent: str
-    role: str
-    reason: str
-    claim_comment_id: int
-    comment: IssueComment
-
-
-@dataclass(frozen=True)
-class ClaimRescope:
-    """Append-only scope replacement for a still-active claim.
-
-    Keeps claim id, identity, agent, role, base, and branch. Old helpers that
-    do not know this action fail loud on the whole ledger.
-
-    `whole_reason=None` means "leave the claim's current whole-reason alone" --
-    the wire marker simply omits the `whole` field, so an old reader that has
-    never heard of clearing a reason still parses this event exactly as before.
-    Explicitly dropping a reason back to unset is a third, distinct state a bare
-    `None` cannot express (the marker already uses absence for "unchanged"), so
-    `clear_whole_reason=True` carries it instead, wire-encoded as a small,
-    separate `whole_clear` marker field that is present only for that one
-    purpose (issue #136 finding: never both `whole_reason` and
-    `clear_whole_reason=True` at once).
-    """
-
-    identity: ClaimIdentity
-    claim_id: str
-    agent: str
-    role: str
-    scope: tuple[str, ...]
-    comment: IssueComment
-    whole_reason: str | None = None
-    clear_whole_reason: bool = False
-
-
-@dataclass(frozen=True)
-class LedgerSupersede:
-    """Terminal event that freezes the whole ledger; always issue(ledger)-scoped.
-
-    No lane variant exists on purpose (Entschieden #6): the ledger itself is the
-    numbered issue configured by `configure_ledger`, and a lane claim can never
-    own it, so `issue` stays a plain int rather than a `ClaimIdentity`.
-    """
-
-    issue: int
-    claim_id: str
-    agent: str
-    role: str
-    reason: str
-    claim_comment_id: int
-    successor_issue: int
-    comment: IssueComment
-
-
-ClaimEvent = LedgerActiveClaim | ClaimantRelease | OverrideRelease | ClaimRescope | LedgerSupersede
-
-
-class LedgerSupersededError(ClaimError):
-    def __init__(self, successor_issue: int, claim: LedgerActiveClaim):
-        self.successor_issue = successor_issue
-        self.claim = claim
-        super().__init__(
-            f"claim ledger #{LEDGER_ISSUE} is frozen; update and use successor #{successor_issue}"
-        )
 
 
 @dataclass(frozen=True)
@@ -313,12 +136,6 @@ class RescopeRequest:
     whole_reason: str | None = None
 
 
-class ClaimReader(Protocol):
-    """The remaining ledger-comment read: `bootstrap --ledger` import."""
-
-    def list_protocol_candidates(self, issue: int) -> tuple[IssueComment, ...]: ...
-
-
 def _has_control_character(text: str) -> bool:
     return any(
         ord(character) < ASCII_PRINTABLE_MIN or ord(character) == ASCII_DEL for character in text
@@ -363,37 +180,7 @@ def _outbound_resource_name(value: object) -> str:
     return name
 
 
-def _required_issue(payload: dict[str, object]) -> int:
-    issue = payload.get("issue")
-    if isinstance(issue, bool) or not isinstance(issue, int) or issue < 1:
-        raise InvalidClaimMarkerError("claim marker issue must be a positive integer")
-    return issue
-
-
 LANE_MARKER_KEY = "lane"
-
-
-def _required_identity(payload: dict[str, object]) -> ClaimIdentity:
-    """Dispatch a claim/release/override_release marker to its identity kind.
-
-    Checks for the lane marker key before ever requiring `issue`, so a lane event
-    never triggers `_required_issue`: the natural hard stop for an old reader (which
-    always calls `_required_issue` unconditionally) happens exactly there instead of
-    in a try/except that would silently skip the comment.
-    """
-    has_issue = "issue" in payload
-    has_lane = LANE_MARKER_KEY in payload
-    if has_issue and has_lane:
-        raise InvalidClaimMarkerError("claim marker must not carry both issue and lane")
-    if has_lane:
-        if payload[LANE_MARKER_KEY] is not True:
-            raise InvalidClaimMarkerError("claim marker lane field must be true")
-        return LaneIdentity()
-    return IssueIdentity(_required_issue(payload))
-
-
-def _identity_marker_key(identity: ClaimIdentity) -> str:
-    return LANE_MARKER_KEY if isinstance(identity, LaneIdentity) else "issue"
 
 
 def _identity_summary(identity: ClaimIdentity, branch: str) -> str:
@@ -427,9 +214,8 @@ def _scope_list_entries(scope: object) -> list[str]:
     """Expand a stored or CLI scope list into individual path strings.
 
     Each list entry may itself be comma-joined: `--scope a,b` equals
-    `--scope a --scope b`. Existing ledger markers that stored one opaque
-    comma-joined string are read the same way, so overlap detection covers
-    them without rewriting the append-only comment.
+    `--scope a --scope b`, so overlap detection sees the same paths however
+    the caller grouped them.
     """
     if not isinstance(scope, list) or not scope:
         raise InvalidClaimMarkerError("claim marker scope must be a non-empty list")
@@ -523,670 +309,6 @@ def wide_scope_trip(
     return None
 
 
-def _optional_whole_reason(payload: dict[str, object]) -> str | None:
-    if "whole" not in payload:
-        return None
-    return _required_text(payload, "whole", maximum=512)
-
-
-WHOLE_CLEAR_MARKER_KEY = "whole_clear"
-
-
-def _rescope_clears_whole_reason(payload: dict[str, object], comment: IssueComment) -> bool:
-    """Whether a rescope marker explicitly drops its claim's whole-reason back to
-    unset -- a third state a bare `whole_reason=None` cannot carry, since absence
-    of `whole` already means "leave it alone" (see `ClaimRescope`)."""
-    if WHOLE_CLEAR_MARKER_KEY not in payload:
-        return False
-    if payload[WHOLE_CLEAR_MARKER_KEY] is not True:
-        raise InvalidClaimMarkerError(
-            f"trusted comment {comment.url} {WHOLE_CLEAR_MARKER_KEY} field must be true"
-        )
-    return True
-
-
-def _claim_id_if_parseable(payload: dict[str, object]) -> str | None:
-    """Best-effort `claim_id` for an `UnreadableClaim`: only when it is itself
-    well-formed, never validated any further than that."""
-    raw = payload.get("claim_id")
-    if isinstance(raw, str) and raw.strip() == raw and CLAIM_ID_PATTERN.fullmatch(raw):
-        return raw
-    return None
-
-
-def _strict_keys(
-    payload: dict[str, object], expected: frozenset[str], comment: IssueComment
-) -> None:
-    observed = frozenset(payload)
-    if observed == expected:
-        return
-    missing = expected - observed
-    if missing:
-        raise InvalidClaimMarkerError(
-            f"trusted comment {comment.url} claim fields differ: "
-            f"expected {sorted(expected)}, got {sorted(observed)}"
-        )
-    # Every expected field is present; the mismatch is only fields this reader's
-    # schema does not know. That is a newer writer, not a corrupt record: fence
-    # this one claim instead of failing the whole ledger read (issue #136).
-    raise UnreadableClaimError(
-        UnreadableClaim(
-            claim_id=_claim_id_if_parseable(payload),
-            comment_url=comment.url,
-            unknown_fields=tuple(sorted(observed - expected)),
-        )
-    )
-
-
-def is_protocol_candidate(comment: IssueComment) -> bool:
-    first_line = comment.body.partition("\n")[0]
-    return comment.author_association in TRUSTED_ASSOCIATIONS and first_line.startswith(
-        (LEGACY_MARKER_PREFIX, MARKER_PREFIX)
-    )
-
-
-def _marker_payload(comment: IssueComment) -> tuple[dict[str, object], bool] | None:
-    if not is_protocol_candidate(comment):
-        return None
-    first_line = comment.body.partition("\n")[0]
-    # No "neither prefix matched" exit here: `is_protocol_candidate` already
-    # requires `first_line` to start with one of the two prefixes, and
-    # `legacy` records exactly which one matched -- so `prefix` below is
-    # always the one `first_line` was just shown to start with.
-    legacy = first_line.startswith(LEGACY_MARKER_PREFIX)
-    prefix = LEGACY_MARKER_PREFIX if legacy else MARKER_PREFIX
-    if comment.created_at != comment.updated_at:
-        raise InvalidClaimMarkerError(
-            f"trusted protocol comment {comment.url} was edited after publication"
-        )
-    if not first_line.endswith(MARKER_SUFFIX):
-        raise InvalidClaimMarkerError(
-            f"trusted comment {comment.url} has an unterminated claim marker"
-        )
-    encoded = first_line[len(prefix) : -len(MARKER_SUFFIX)]
-    try:
-        payload = json.loads(encoded)
-    except json.JSONDecodeError as error:
-        raise InvalidClaimMarkerError(
-            f"trusted comment {comment.url} has invalid claim JSON"
-        ) from error
-    if not isinstance(payload, dict):
-        raise InvalidClaimMarkerError(
-            f"trusted comment {comment.url} claim payload must be an object"
-        )
-    return payload, legacy
-
-
-def _event_identity(payload: dict[str, object], comment: IssueComment) -> tuple[str, str, str]:
-    claim_id = _required_text(payload, "claim_id", maximum=128)
-    agent = _required_text(payload, "agent", maximum=128)
-    role = _required_text(payload, "role", maximum=64)
-    visible_lines = [line for line in comment.body.splitlines() if line.strip()]
-    if not visible_lines or visible_lines[-1] != f"Agent: {agent} ({role})":
-        raise InvalidClaimMarkerError(
-            f"trusted protocol comment {comment.url} lacks its exact agent attribution"
-        )
-    if CLAIM_ID_PATTERN.fullmatch(claim_id) is None:
-        raise InvalidClaimMarkerError(f"trusted comment {comment.url} has an invalid claim id")
-    return claim_id, agent, role
-
-
-def _valid_resource_name(name: str, *, field: str) -> str:
-    if RESOURCE_NAME_PATTERN.fullmatch(name) is None:
-        raise InvalidClaimMarkerError(f"{field} is not a resource name")
-    return name
-
-
-def _required_resource_hold(payload: dict[str, object], comment: IssueComment) -> ResourceHold:
-    name = _required_text(payload, "resource", maximum=64)
-    _valid_resource_name(name, field=f"trusted comment {comment.url} resource")
-    value = payload.get("resource_value")
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise InvalidClaimMarkerError(
-            f"trusted comment {comment.url} resource_value must be a positive integer"
-        )
-    return ResourceHold(name, value)
-
-
-def _parse_active_claim(
-    payload: dict[str, object], comment: IssueComment, identity: ClaimIdentity, *, legacy: bool
-) -> LedgerActiveClaim:
-    expected = {"action", "agent", "base", "branch", "claim_id", "role", "scope"}
-    if not legacy:
-        expected.add(_identity_marker_key(identity))
-    if "resource_value" in payload and "resource" not in payload:
-        raise InvalidClaimMarkerError(
-            f"trusted comment {comment.url} resource_value requires resource"
-        )
-    if "resource" in payload:
-        expected.add("resource")
-        if "resource_value" in payload:
-            expected.add("resource_value")
-    if "whole" in payload:
-        expected.add("whole")
-    _strict_keys(payload, frozenset(expected), comment)
-    claim_id, agent, role = _event_identity(payload, comment)
-    base = _required_text(payload, "base", maximum=40)
-    if COMMIT_PATTERN.fullmatch(base) is None:
-        raise InvalidClaimMarkerError(
-            f"trusted comment {comment.url} base must be a full lowercase commit SHA"
-        )
-    requested_resource = None
-    resource = None
-    if "resource" in payload:
-        requested_resource = _required_text(payload, "resource", maximum=64)
-        _valid_resource_name(requested_resource, field=f"trusted comment {comment.url} resource")
-        if "resource_value" in payload:
-            resource = _required_resource_hold(payload, comment)
-    return LedgerActiveClaim(
-        identity=identity,
-        claim_id=claim_id,
-        agent=agent,
-        role=role,
-        base=base,
-        branch=_valid_branch(payload),
-        scope=_valid_scope(payload.get("scope")),
-        comment=comment,
-        resource=resource,
-        requested_resource=requested_resource,
-        whole_reason=_optional_whole_reason(payload),
-    )
-
-
-def _parse_claimant_release(
-    payload: dict[str, object], comment: IssueComment, identity: ClaimIdentity, *, legacy: bool
-) -> ClaimantRelease:
-    expected = {"action", "agent", "claim_id", "reason", "role"}
-    if not legacy:
-        expected.add(_identity_marker_key(identity))
-    _strict_keys(payload, frozenset(expected), comment)
-    claim_id, agent, role = _event_identity(payload, comment)
-    return ClaimantRelease(
-        identity=identity,
-        claim_id=claim_id,
-        agent=agent,
-        role=role,
-        reason=_required_text(payload, "reason", maximum=512),
-        comment=comment,
-    )
-
-
-def _required_comment_id(payload: dict[str, object], *, action: str) -> int:
-    raw_comment_id = payload.get("claim_comment_id")
-    if (
-        isinstance(raw_comment_id, bool)
-        or not isinstance(raw_comment_id, int)
-        or raw_comment_id < 1
-    ):
-        raise InvalidClaimMarkerError(f"{action} requires a positive claim comment id")
-    return raw_comment_id
-
-
-def _parse_override_release(
-    payload: dict[str, object], comment: IssueComment, identity: ClaimIdentity
-) -> OverrideRelease:
-    _strict_keys(
-        payload,
-        frozenset(
-            {
-                "action",
-                "agent",
-                "claim_comment_id",
-                "claim_id",
-                _identity_marker_key(identity),
-                "reason",
-                "role",
-            }
-        ),
-        comment,
-    )
-    claim_id, agent, role = _event_identity(payload, comment)
-    if role != "coordinator":
-        raise InvalidClaimMarkerError("override releases require coordinator role")
-    return OverrideRelease(
-        identity=identity,
-        claim_id=claim_id,
-        agent=agent,
-        role=role,
-        reason=_required_text(payload, "reason", maximum=512),
-        claim_comment_id=_required_comment_id(payload, action="override releases"),
-        comment=comment,
-    )
-
-
-def _parse_ledger_supersede(
-    payload: dict[str, object], comment: IssueComment, issue: int
-) -> LedgerSupersede:
-    _strict_keys(
-        payload,
-        frozenset(
-            {
-                "action",
-                "agent",
-                "claim_comment_id",
-                "claim_id",
-                "issue",
-                "reason",
-                "role",
-                "successor_issue",
-            }
-        ),
-        comment,
-    )
-    claim_id, agent, role = _event_identity(payload, comment)
-    if role != "coordinator":
-        raise InvalidClaimMarkerError("ledger supersede requires coordinator role")
-    successor_issue = payload.get("successor_issue")
-    if (
-        isinstance(successor_issue, bool)
-        or not isinstance(successor_issue, int)
-        or successor_issue < 1
-        or successor_issue <= LEDGER_ISSUE
-    ):
-        raise InvalidClaimMarkerError("ledger successor must be greater than the current ledger")
-    return LedgerSupersede(
-        issue=issue,
-        claim_id=claim_id,
-        agent=agent,
-        role=role,
-        reason=_required_text(payload, "reason", maximum=512),
-        claim_comment_id=_required_comment_id(payload, action="ledger supersede"),
-        successor_issue=successor_issue,
-        comment=comment,
-    )
-
-
-def _parse_claim_rescope(
-    payload: dict[str, object], comment: IssueComment, identity: ClaimIdentity
-) -> ClaimRescope:
-    expected = {
-        "action",
-        "agent",
-        "claim_id",
-        _identity_marker_key(identity),
-        "role",
-        "scope",
-    }
-    if "whole" in payload and WHOLE_CLEAR_MARKER_KEY in payload:
-        raise InvalidClaimMarkerError(
-            f"trusted comment {comment.url} rescope cannot both set and clear the whole reason"
-        )
-    if "whole" in payload:
-        expected.add("whole")
-    if WHOLE_CLEAR_MARKER_KEY in payload:
-        expected.add(WHOLE_CLEAR_MARKER_KEY)
-    _strict_keys(payload, frozenset(expected), comment)
-    claim_id, agent, role = _event_identity(payload, comment)
-    return ClaimRescope(
-        identity=identity,
-        claim_id=claim_id,
-        agent=agent,
-        role=role,
-        scope=_valid_scope(payload.get("scope")),
-        comment=comment,
-        whole_reason=_optional_whole_reason(payload),
-        clear_whole_reason=_rescope_clears_whole_reason(payload, comment),
-    )
-
-
-def parse_claim_event(comment: IssueComment) -> ClaimEvent | None:
-    parsed_marker = _marker_payload(comment)
-    if parsed_marker is None:
-        return None
-    payload, legacy = parsed_marker
-    action = _required_text(payload, "action", maximum=32)
-    if action not in {"claim", "release", "override_release", "rescope", "supersede"}:
-        raise InvalidClaimMarkerError(
-            f"trusted comment {comment.url} has unknown action {action!r}"
-        )
-
-    if legacy:
-        if action not in {"claim", "release"}:
-            raise InvalidClaimMarkerError("legacy claim markers cannot use this action")
-        if LEDGER_ISSUE < 1:
-            # IssueIdentity itself would reject 0 as "not a positive integer", which
-            # would misreport this as a marker defect; it is a caller/setup defect.
-            raise ClaimError(
-                "legacy claim marker cannot be parsed before configure_ledger "
-                "binds the ledger issue"
-            )
-        identity: ClaimIdentity = IssueIdentity(LEDGER_ISSUE)
-    elif action == "supersede":
-        # Supersede stays ledger-issue-only (Entschieden #6): no lane branching here,
-        # so it returns straight from the issue number rather than routing through
-        # `identity` -- the shared union below never carries a supersede action.
-        return _parse_ledger_supersede(payload, comment, _required_issue(payload))
-    else:
-        identity = _required_identity(payload)
-    if action == "claim":
-        return _parse_active_claim(payload, comment, identity, legacy=legacy)
-    if action == "release":
-        return _parse_claimant_release(payload, comment, identity, legacy=legacy)
-    if action == "override_release":
-        return _parse_override_release(payload, comment, identity)
-    return _parse_claim_rescope(payload, comment, identity)
-
-
-def _apply_terminal_event(
-    event: ClaimantRelease | OverrideRelease | LedgerSupersede,
-    active: dict[str, LedgerActiveClaim],
-    acquired: dict[str, LedgerActiveClaim],
-) -> bool:
-    """Validate and apply a terminal event against the claim it targets.
-
-    Returns whether the engine honored the event: accepted it as a real terminal
-    event for the claim `acquired` currently holds for this id, whether or not
-    popping `active` actually changed anything (an idempotent release retry, or a
-    coordinator override after the claimant already released, still counts as
-    honored). A `LedgerSupersede` that does not satisfy its narrow freeze window is
-    never honored — it silently no-ops without being validated against any claim.
-    """
-    claimed = acquired.get(event.claim_id)
-    if isinstance(event, LedgerSupersede):
-        if (
-            claimed is None
-            or not isinstance(claimed.identity, IssueIdentity)
-            or claimed.identity.issue != event.issue
-            or claimed.identity.issue != LEDGER_ISSUE
-            or event.claim_comment_id != claimed.comment.identifier
-            or set(active) != {claimed.claim_id}
-        ):
-            return False
-        raise LedgerSupersededError(event.successor_issue, claimed)
-    if claimed is None:
-        raise InvalidClaimMarkerError(
-            f"claim id {event.claim_id!r} was released before it was acquired"
-        )
-    if claimed.identity != event.identity:
-        raise InvalidClaimMarkerError(
-            f"claim id {event.claim_id!r} release targets the wrong claim"
-        )
-    if isinstance(event, ClaimantRelease):
-        if (claimed.agent, claimed.role) != (event.agent, event.role):
-            raise InvalidClaimMarkerError(
-                f"claim id {event.claim_id!r} can only be released by its claimant"
-            )
-    elif event.claim_comment_id != claimed.comment.identifier:
-        raise InvalidClaimMarkerError(
-            f"claim id {event.claim_id!r} terminal event targets the wrong claim comment"
-        )
-    active.pop(event.claim_id, None)
-    return True
-
-
-@dataclass(frozen=True)
-class ClaimLedgerAggregate:
-    """Non-raising result of one chronological walk over the ledger's claim events.
-
-    `occurrences` holds every LedgerActiveClaim event seen for a claim id, in ledger order;
-    a duplicated id has more than one. `terminated_by`, when present for a claim id,
-    holds every terminal-event comment `_apply_terminal_event` honored for it — a
-    release retry or a coordinator override that lands after the claimant already
-    released both still count, since the engine validated and accepted each one.
-    An inert or foreign terminal event (one `_apply_terminal_event` never honored,
-    such as a `LedgerSupersede` posted outside its narrow freeze window) never shows
-    up here. Because `acquired` (below) only ever binds a claim id to its first-ever
-    occurrence, every honored termination belongs to `occurrences[claim_id][0]`;
-    later occurrences of a duplicated id are never tracked as "acquired" and so can
-    never absorb a terminal event themselves.
-
-    `unreadable` holds one `UnreadableClaim` per trusted comment the walk could not
-    parse because of an unknown field (issue #136); such a comment contributes no
-    event of its own, so it never appears in `occurrences`, `terminated_by`, or
-    `active`. `bootstrap --ledger` refuses the whole import by name when this is
-    non-empty (`_reject_unreadable_claims`); `active_claims` tolerates it.
-    """
-
-    active: tuple[LedgerActiveClaim, ...]
-    seen_claim_ids: frozenset[str]
-    duplicate_claim_ids: tuple[str, ...]
-    occurrences: Mapping[str, tuple[LedgerActiveClaim, ...]]
-    terminated_by: Mapping[str, tuple[IssueComment, ...]]
-    unreadable: tuple[UnreadableClaim, ...]
-
-
-def _record_claim_occurrence(
-    event: LedgerActiveClaim,
-    active: dict[str, LedgerActiveClaim],
-    acquired: dict[str, LedgerActiveClaim],
-    occurrences: dict[str, list[LedgerActiveClaim]],
-    duplicate_claim_ids: list[str],
-) -> None:
-    occurrences.setdefault(event.claim_id, []).append(event)
-    if event.claim_id in acquired:
-        if event.claim_id not in duplicate_claim_ids:
-            duplicate_claim_ids.append(event.claim_id)
-        return
-    acquired[event.claim_id] = event
-    active[event.claim_id] = event
-
-
-def _apply_claim_rescope_event(
-    event: ClaimRescope,
-    active: dict[str, LedgerActiveClaim],
-    acquired: dict[str, LedgerActiveClaim],
-) -> None:
-    current = active.get(event.claim_id)
-    if current is None:
-        if event.claim_id in acquired:
-            raise InvalidClaimMarkerError(
-                f"claim id {event.claim_id!r} was rescoped after it was released"
-            )
-        raise InvalidClaimMarkerError(
-            f"claim id {event.claim_id!r} was rescoped before it was acquired"
-        )
-    if current.identity != event.identity:
-        raise InvalidClaimMarkerError(
-            f"claim id {event.claim_id!r} rescope targets the wrong claim"
-        )
-    if (current.agent, current.role) != (event.agent, event.role):
-        raise InvalidClaimMarkerError(
-            f"claim id {event.claim_id!r} can only be rescoped by its claimant"
-        )
-    if event.clear_whole_reason:
-        new_whole_reason = None
-    elif event.whole_reason is not None:
-        new_whole_reason = event.whole_reason
-    else:
-        new_whole_reason = current.whole_reason
-    active[event.claim_id] = replace(current, scope=event.scope, whole_reason=new_whole_reason)
-
-
-def _aggregate_claim_events(comments: tuple[IssueComment, ...]) -> ClaimLedgerAggregate:
-    """Walk the ledger once, tolerating a reused claim id instead of raising on sight.
-
-    The strict reader, the pre/post acquire guards, and the reconcile repair pass all
-    consume this single walk, so duplicate-claim-id detection and release status can
-    never drift between two independently maintained parsers.
-    """
-    active: dict[str, LedgerActiveClaim] = {}
-    acquired: dict[str, LedgerActiveClaim] = {}
-    occurrences: dict[str, list[LedgerActiveClaim]] = {}
-    terminated_by: dict[str, list[IssueComment]] = {}
-    duplicate_claim_ids: list[str] = []
-    unreadable: list[UnreadableClaim] = []
-    ordered = sorted(comments, key=lambda comment: (comment.created_at, comment.identifier))
-    for comment in ordered:
-        try:
-            event = parse_claim_event(comment)
-        except UnreadableClaimError as error:
-            unreadable.append(error.claim)
-            continue
-        if event is None:
-            continue
-        if isinstance(event, LedgerActiveClaim):
-            _record_claim_occurrence(event, active, acquired, occurrences, duplicate_claim_ids)
-            continue
-        if isinstance(event, ClaimRescope):
-            _apply_claim_rescope_event(event, active, acquired)
-            continue
-        if _apply_terminal_event(event, active, acquired):
-            terminated_by.setdefault(event.claim_id, []).append(event.comment)
-
-    occurrence_map = {claim_id: tuple(events) for claim_id, events in occurrences.items()}
-    derived_active = _apply_derived_resource_holds(active, occurrence_map)
-    return ClaimLedgerAggregate(
-        active=tuple(
-            sorted(
-                derived_active.values(),
-                key=lambda event: (event.comment.created_at, event.comment.identifier),
-            )
-        ),
-        seen_claim_ids=frozenset(acquired),
-        duplicate_claim_ids=tuple(duplicate_claim_ids),
-        occurrences=MappingProxyType(occurrence_map),
-        terminated_by=MappingProxyType(
-            {
-                claim_id: tuple(terminal_comments)
-                for claim_id, terminal_comments in terminated_by.items()
-            }
-        ),
-        unreadable=tuple(unreadable),
-    )
-
-
-def _assign_resource_values(
-    derived: dict[str, LedgerActiveClaim], first_occurrences: list[LedgerActiveClaim], name: str
-) -> tuple[int, ...]:
-    """Occupy `name`'s posted values, then fill auto intents with the next free integer.
-
-    Returns the occupied set for this name, including released autos and
-    explicit posts -- the same first-occurrence walk the import reader
-    writes to `resources/<name>.toml` (issue #176 done-when 2).
-    """
-    intents = sorted(
-        (event for event in first_occurrences if event.requested_resource == name),
-        key=lambda event: (event.comment.created_at, event.comment.identifier),
-    )
-    occupied: set[int] = set()
-    for intent in intents:
-        if intent.resource is not None:
-            occupied.add(intent.resource.value)
-            continue
-        value = 1
-        while value in occupied:
-            value += 1
-        occupied.add(value)
-        current = derived.get(intent.claim_id)
-        if current is None:
-            continue
-        derived[intent.claim_id] = replace(current, resource=ResourceHold(name, value))
-    return tuple(sorted(occupied))
-
-
-def _occupied_resources_from_occurrences(
-    occurrences: Mapping[str, tuple[LedgerActiveClaim, ...]],
-) -> dict[str, tuple[int, ...]]:
-    """Occupied integers per resource name from the first-occurrence walk.
-
-    Drives the import reader's `resources/<name>.toml` (done-when 2): a
-    released auto and a released explicit post both stay occupied. The walk
-    is `_assign_resource_values` itself, against an empty derived map so
-    released claims still occupy without needing a live holder.
-    """
-    first_occurrences = [events[0] for events in occurrences.values()]
-    names = sorted(
-        {
-            event.requested_resource
-            for event in first_occurrences
-            if event.requested_resource is not None
-        }
-    )
-    derived: dict[str, LedgerActiveClaim] = {}
-    return {name: _assign_resource_values(derived, first_occurrences, name) for name in names}
-
-
-def _group_active_holders(
-    derived: dict[str, LedgerActiveClaim],
-) -> dict[tuple[str, int], list[LedgerActiveClaim]]:
-    holders: dict[tuple[str, int], list[LedgerActiveClaim]] = {}
-    for claim in derived.values():
-        if claim.resource is not None:
-            holders.setdefault((claim.resource.name, claim.resource.value), []).append(claim)
-    return holders
-
-
-def _strip_duplicate_holders(
-    derived: dict[str, LedgerActiveClaim], holders: dict[tuple[str, int], list[LedgerActiveClaim]]
-) -> None:
-    """Among claims that live for the same (name, value), keep only the earliest holder.
-
-    The loser here is always an explicit-value claim: `_assign_resource_values`
-    walks intents for one name in the same chronological order this sorts by,
-    so whichever claim first occupies a value is exactly this group's
-    earliest member, and only the explicit branch there ever occupies a value
-    without first checking it isn't already taken -- an auto intent always
-    picks a value not yet occupied, so it can never itself be a later,
-    colliding loser.
-    """
-    for held in holders.values():
-        ordered = sorted(
-            held, key=lambda claim: (claim.comment.created_at, claim.comment.identifier)
-        )
-        for loser in ordered[1:]:
-            derived[loser.claim_id] = replace(loser, resource=None)
-
-
-def _apply_derived_resource_holds(
-    active: dict[str, LedgerActiveClaim],
-    occurrences: Mapping[str, tuple[LedgerActiveClaim, ...]],
-) -> dict[str, LedgerActiveClaim]:
-    """Assign auto resource values from occupied first-occurrence intents.
-
-    Walk first-occurrence intents for a name in ledger order. Explicit intents occupy
-    their posted value, including after release. Auto intents take the next positive
-    integer not already occupied; a released auto still occupies the integer it would
-    have been assigned. Among still-active claims, only the earliest live (name, value)
-    pair stays the holder — later live explicit posts of that pair are stripped.
-    """
-    derived = dict(active)
-    first_occurrences = [events[0] for events in occurrences.values()]
-    names = sorted(
-        {
-            event.requested_resource
-            for event in first_occurrences
-            if event.requested_resource is not None
-        }
-    )
-    for name in names:
-        _assign_resource_values(derived, first_occurrences, name)
-    holders = _group_active_holders(derived)
-    _strip_duplicate_holders(derived, holders)
-    return derived
-
-
-def _reject_duplicate_claim_ids(aggregate: ClaimLedgerAggregate) -> None:
-    if aggregate.duplicate_claim_ids:
-        raise InvalidClaimMarkerError(f"claim id {aggregate.duplicate_claim_ids[0]!r} was reused")
-
-
-def active_claims(comments: tuple[IssueComment, ...]) -> tuple[LedgerActiveClaim, ...]:
-    aggregate = _aggregate_claim_events(comments)
-    _reject_duplicate_claim_ids(aggregate)
-    return aggregate.active
-
-
-def _unreadable_claim_reason(record: UnreadableClaim) -> str:
-    """Shared refusal core naming one `UnreadableClaim`'s comment and unknown field
-    names -- every fail-closed refusal this reader raises for it quotes this text
-    verbatim (issue #136)."""
-    subject = f"claim {record.claim_id!r}" if record.claim_id else "an unreadable claim"
-    fields = ", ".join(sorted(record.unknown_fields))
-    return f"{subject} at {record.comment_url} is unreadable (unknown fields: {fields})"
-
-
-def _reject_unreadable_claims(aggregate: ClaimLedgerAggregate, *, action: str) -> None:
-    """Fail closed (issue #136): an unreadable claim's true scope is unknowable to
-    this reader, so no new `claim` or `rescope` can be proven not to overlap it."""
-    blocker = next(iter(aggregate.unreadable), None)
-    if blocker is None:
-        return
-    raise ClaimUnavailableError(
-        f"{action} refused: {_unreadable_claim_reason(blocker)}; upgrade the installed "
-        "tool before claiming a scope that could overlap it"
-    )
-
-
 def _scope_prefixes(paths: tuple[str, ...]) -> set[tuple[str, ...]]:
     prefixes: set[tuple[str, ...]] = set()
     for path in paths:
@@ -1207,10 +329,10 @@ def _scopes_overlap(left: tuple[str, ...], right: tuple[str, ...]) -> bool:
 class ScopedClaim(Protocol):
     """The structural shape the conflict/overlap helpers need.
 
-    Satisfied by both the ledger's `LedgerActiveClaim`/`ClaimRequest` pair and
-    the store's `ActiveClaim`/`ClaimIntent` pair (issue #176, slice C2), so
-    one set of pure functions serves both instead of a nominal union that
-    would grow every time a new claim-shaped record is added. Read-only
+    Satisfied by both the CLI's `ClaimRequest` and the store's
+    `ActiveClaim`/`ClaimIntent` pair (issue #176, slice C2), so one set of
+    pure functions serves all of them instead of a nominal union that would
+    grow every time a new claim-shaped record is added. Read-only
     properties, not plain attributes: a frozen dataclass field is itself
     read-only, and `claim_id` varies covariantly (`str` here, `ClaimId` on
     the store's records) between the two implementations this protocol
@@ -1303,7 +425,7 @@ def _identity_key(claim: ScopedClaim) -> IdentityKey:
 
     `LaneIdentity` instances all compare equal to each other, so indexing by
     identity alone would merge every lane into one bucket; the branch already owned
-    by `LedgerActiveClaim.branch` supplies the missing distinction without giving the
+    by the claim record supplies the missing distinction without giving the
     lane name a second owner.
     """
     if isinstance(claim.identity, LaneIdentity):
@@ -1562,11 +684,8 @@ class ResourceRecord:
 class ActiveClaim:
     """One live claim as the store's `apply` maintains it (issue #176, §1).
 
-    Distinct from the ledger's `LedgerActiveClaim`: no `comment`,
-    `requested_resource`, or `quarantined_by` -- those were comment-schema
-    concerns the git-tree store has no equivalent of. `opened_commit` is the
-    state-ref commit this claim_id was first introduced at; rescope never
-    changes it.
+    `opened_commit` is the state-ref commit this claim_id was first
+    introduced at; rescope never changes it.
     """
 
     identity: ClaimIdentity
@@ -1679,7 +798,6 @@ class RescopeIntent:
     scope: tuple[str, ...]
     operation_id: str
     whole_reason: str | None = None
-    clear_whole_reason: bool = False
 
 
 @dataclass(frozen=True)
@@ -1851,21 +969,6 @@ def _apply_claim_intent(state: ClaimState, intent: ClaimIntent) -> ClaimState:
     )
 
 
-def _resolved_whole_reason(
-    current: str | None, *, clear: bool, replacement: str | None
-) -> str | None:
-    """The claim's whole-reason after a rescope: cleared, replaced, or
-    unchanged -- one named three-way choice, taking the flag and the
-    replacement as plain values instead of reading `RescopeIntent`'s fields
-    directly inside the branch, so each state is provably reachable rather
-    than a scanner having to trust a dataclass-attribute read."""
-    if clear:
-        return None
-    if replacement is not None:
-        return replacement
-    return current
-
-
 def _apply_rescope_intent(state: ClaimState, intent: RescopeIntent) -> ClaimState:
     found = _live_claim_by_id(state, intent.claim_id)
     if found is None:
@@ -1873,9 +976,7 @@ def _apply_rescope_intent(state: ClaimState, intent: RescopeIntent) -> ClaimStat
     key, current = found
     if not _same_claimant(current, intent):
         raise ClaimUnavailableError("only the original claimant may rescope")
-    whole_reason = _resolved_whole_reason(
-        current.whole_reason, clear=intent.clear_whole_reason, replacement=intent.whole_reason
-    )
+    whole_reason = current.whole_reason if intent.whole_reason is None else intent.whole_reason
     new_claim = replace(current, scope=intent.scope, whole_reason=whole_reason)
     new_claims = {**state.claims, key: new_claim}
     return replace(state, claims=MappingProxyType(new_claims))
@@ -2010,8 +1111,8 @@ def parse_claim_toml(content: str, *, key: str, tip: ObjectId) -> ActiveClaim:
     """Parse one fetched `claims/<key>.toml` blob into its `ActiveClaim`.
 
     A malformed claim file fails the whole read loud (ruling: a commit is
-    the unit a writer writes, so a broken tree is corrupt state, not a
-    single quarantinable claim the way an unknown ledger-comment field was).
+    the unit a writer writes, so a broken tree is corrupt state, never a
+    single quarantinable claim).
     """
     try:
         data = tomllib.loads(content)
@@ -2085,65 +1186,3 @@ def parse_resource_toml(content: str, *, name: str, tip: ObjectId) -> ResourceRe
             f"resource file {name}.toml at {tip} field 'occupied' must be positive integers"
         )
     return ResourceRecord(name=name, occupied=tuple(occupied))
-
-
-def _comment_is_state_cut(comment: IssueComment) -> bool:
-    """Whether `comment`'s marker action is the tombstone, read without
-    `parse_claim_event` so a mid-ledger `state_cut` cannot abort the walk
-    (issue #176, §2 skip mechanism)."""
-    parsed = _marker_payload(comment)
-    if parsed is None:
-        return False
-    return parsed[0].get("action") == STATE_CUT_ACTION
-
-
-def _store_claim_from_ledger(claim: LedgerActiveClaim, opened_commit: ObjectId) -> ActiveClaim:
-    """The store record for one still-active ledger claim at import.
-
-    `opened_commit` is the import parent (age resets at the cut -- named
-    cost). `comment` / `requested_resource` / `quarantined_by` stay on the
-    ledger form and do not cross (ruling 9d).
-    """
-    return ActiveClaim(
-        identity=claim.identity,
-        claim_id=ClaimId(claim.claim_id),
-        agent=claim.agent,
-        role=claim.role,
-        base=ObjectId(claim.base),
-        branch=claim.branch,
-        scope=claim.scope,
-        opened_commit=opened_commit,
-        resource=claim.resource,
-        whole_reason=claim.whole_reason,
-    )
-
-
-def state_from_ledger_aggregate(
-    comments: tuple[IssueComment, ...], *, opened_commit: ObjectId
-) -> ClaimState:
-    """Pure import reader (issue #176, §2): pre-filter `state_cut`, then the
-    current aggregator. Never calls `parse_claim_event` on a tombstone, and
-    `_aggregate_claim_events` still catches only `UnreadableClaimError`.
-
-    Occupied resource values come from the same first-occurrence walk as
-    live holds, including released autos and explicit posts (done-when 2).
-    Claim ids are `ClaimLedgerAggregate.seen_claim_ids`. Does not invent
-    ids or occupied integers.
-    """
-    filtered = tuple(comment for comment in comments if not _comment_is_state_cut(comment))
-    aggregate = _aggregate_claim_events(filtered)
-    _reject_duplicate_claim_ids(aggregate)
-    _reject_unreadable_claims(aggregate, action="import")
-    occupied = _occupied_resources_from_occurrences(aggregate.occurrences)
-    claims = {
-        claim_key(claim.identity, claim.branch): _store_claim_from_ledger(claim, opened_commit)
-        for claim in aggregate.active
-    }
-    return ClaimState(
-        tip=opened_commit,
-        claims=MappingProxyType(claims),
-        consumed_ids=frozenset(ClaimId(claim_id) for claim_id in aggregate.seen_claim_ids),
-        resources=MappingProxyType(
-            {name: ResourceRecord(name, values) for name, values in occupied.items()}
-        ),
-    )
