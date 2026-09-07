@@ -8,10 +8,11 @@ repository-global state: a remote compare-and-swap ref, reached through
 let a worktree-local module own repository-global state -- exactly the
 linked-worktree stamp collision `_lineage_stamp_path` exists to avoid.
 
-`bootstrap` (issue #164, slice C1) is this module's sole production caller.
-It never checks the state ref out: every read goes through plumbing
-(`ls-remote`, `fetch` to `FETCH_HEAD`, `ls-tree`, `cat-file`), and every write
-builds a tree with `hash-object`/`mktree` and a commit with `commit-tree`.
+`cli` (issue #176, slice C2) is this module's production caller: `bootstrap`,
+`commit_transition`, and the one-time import. It never checks the state ref
+out: every read goes through plumbing (`ls-remote`, `fetch` to `FETCH_HEAD`,
+`ls-tree`, `cat-file`), and every write builds a tree with `hash-object`/
+`mktree` and a commit with `commit-tree`.
 """
 
 from __future__ import annotations
@@ -31,6 +32,7 @@ from . import process
 from .protocol import (
     CLAIM_ID_PATTERN,
     EMPTY_STATE,
+    MISSING_STATE_REF,
     ActiveClaim,
     ClaimError,
     ClaimId,
@@ -414,6 +416,12 @@ def fetch_state(*, worktree: Path, remote: str = DEFAULT_CANONICAL_REMOTE) -> Cl
     """
     probed = _ls_remote_state(worktree, remote)
     if probed is None:
+        stamp = _read_lineage_stamp(worktree)
+        if stamp is not None:
+            raise StateLineageError(
+                f"{STATE_REF} was previously observed at {stamp} but is now absent; "
+                "the ref may have been deleted"
+            )
         return EMPTY_STATE
     _fetch_to_fetch_head(worktree, remote)
     tip = _read_fetch_head(worktree)
@@ -619,6 +627,8 @@ def commit_transition(
     """
     transport = transport or GitPushTransport()
     observed = fetch_state(worktree=worktree, remote=remote)
+    if observed.tip is None:
+        raise ClaimError(MISSING_STATE_REF)
     for _attempt in range(_MAX_TRANSITION_ATTEMPTS):
         new_state = apply(observed, intent)
         new_commit = _commit_tree(
@@ -667,10 +677,11 @@ def bootstrap(
     """Create `refs/aco/state` at an empty state tree if it is proven absent;
     otherwise report the existing tip untouched.
 
-    The sole production caller of this module. A present ref is a pure read
-    (no write); an absent ref (`ls-remote` exit 2) gets one commit holding
-    only `schema.toml`; an unreachable ref (auth/transport, exit 128 and
-    friends) fails loud from `fetch_state` before either branch runs.
+    A present ref is a pure read (no write); an absent ref (`ls-remote` exit
+    2) gets one commit holding only `schema.toml`; an unreachable ref
+    (auth/transport, exit 128 and friends) fails loud from `fetch_state`
+    before either branch runs. A worktree that has observed the ref and
+    later finds it absent is a lineage error, not a fresh bootstrap.
     """
     observed = fetch_state(worktree=worktree, remote=remote)
     if observed.tip is not None:
@@ -689,3 +700,71 @@ def bootstrap(
         transport=transport or GitPushTransport(),
     )
     return result.tip if isinstance(result, OperationAlreadyApplied) else result
+
+
+def prepare_import_parent(*, worktree: Path) -> ObjectId:
+    """A local empty-state commit used as the import's parent so each
+    imported claim's `opened_commit` is a real ancestor of the pushed tip.
+
+    Not pushed: the import commit (child of this parent) is the only object
+    `push_import` sends, and git includes this parent in that pack. The
+    remote never points at the empty-only tree, so a failed import cannot
+    leave the "empty ref created by mistake" state (issue #176 done-when 1).
+    """
+    return _commit_tree(
+        worktree,
+        tree_oid=_write_empty_state_tree(worktree),
+        parent=None,
+        message="import parent\n",
+    )
+
+
+def push_import(
+    *,
+    worktree: Path,
+    remote: str,
+    imported: ClaimState,
+    parent: ObjectId,
+    subject: str,
+    operation_id: str,
+    transport: PushTransport | None = None,
+) -> ClaimState:
+    """Push `imported` as the first tip of `refs/aco/state`, parented on the
+    local empty commit `parent`. Refuses if the ref is no longer empty.
+    """
+    transport = transport or GitPushTransport()
+    observed = fetch_state(worktree=worktree, remote=remote)
+    if observed.tip is not None:
+        raise ClaimUnavailableError(
+            f"{STATE_REF} is no longer empty; refuse to overwrite a present ref"
+        )
+    message = f"{subject}\n\noperation_id: {operation_id}\nintent: import\n"
+    new_commit = _commit_tree(
+        worktree,
+        tree_oid=_write_state_tree(worktree, imported),
+        parent=parent,
+        message=message,
+    )
+    try:
+        transport.push(worktree=worktree, remote=remote, ref=STATE_REF, new_oid=new_commit)
+    except PushRejectedError:
+        refreshed = fetch_state(worktree=worktree, remote=remote)
+        if refreshed.tip is not None:
+            found = _find_operation_id(
+                worktree,
+                since=None,
+                until=refreshed.tip,
+                operation_id=operation_id,
+            )
+            if found is not None:
+                return refreshed
+        raise ClaimUnavailableError(
+            f"{STATE_REF} moved before the import landed; retry the command"
+        ) from None
+    _write_lineage_stamp(worktree, new_commit)
+    return ClaimState(
+        tip=new_commit,
+        claims=imported.claims,
+        consumed_ids=imported.consumed_ids,
+        resources=imported.resources,
+    )

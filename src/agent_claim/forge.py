@@ -110,37 +110,6 @@ class Landing:
     merged: bool
 
 
-@dataclass(frozen=True)
-class LedgerItem:
-    """One issue read as ledger-discovery material -- an existing-ledger
-    candidate or the row a foreign coordination contract is detected on."""
-
-    number: int
-    state: ItemState
-    locked: bool
-    body: str
-    author_is_trusted: bool
-    is_landing: bool
-
-
-@dataclass(frozen=True)
-class Listing:
-    """A `list_items` result, plus the provenance discovery needs to judge it.
-
-    `pages_fetched` is the number of paginated requests the adapter actually
-    made to read `items` -- counted in its own paging loop, never inferred
-    from `len(items)` against a duplicated per-page constant (a result sized
-    at an exact multiple of the real page size would otherwise lie: a full
-    page is never assumed to be the last one, so confirming absence costs one
-    more request). `pages_fetched > 1` means the fetch spanned more than one
-    round trip and can never be trusted to prove absence -- a concurrent
-    open/close could have shifted an item across the page boundary.
-    """
-
-    items: tuple[LedgerItem, ...]
-    pages_fetched: int
-
-
 class Capability(StrEnum):
     UNSUPPORTED = "unsupported"
     READ_ONLY = "read_only"
@@ -151,13 +120,7 @@ class ForgeOperation(StrEnum):
     """Every port operation; each member's value is its Protocol method name."""
 
     LIST_PROTOCOL_CANDIDATES = "list_protocol_candidates"
-    LIST_CLAIMED_ISSUES = "list_claimed_issues"
-    VALIDATE_SUCCESSOR = "validate_successor"
     POST_COMMENT = "post_comment"
-    ADD_LABEL = "add_label"
-    REMOVE_LABEL = "remove_label"
-    UPSERT_PROJECTION = "upsert_projection"
-    NEUTRALIZE_CLAIM_COMMENT = "neutralize_claim_comment"
     ITEM_REFERENCE = "item_reference"
     LANDING = "landing"
     PARENT_ISSUE = "parent_issue"
@@ -168,12 +131,6 @@ class ForgeOperation(StrEnum):
     LIST_BOARD_DEPENDENCIES = "list_board_dependencies"
     LIST_OPEN_BOARD_PULL_REQUESTS = "list_open_board_pull_requests"
     LIST_RECENT_MERGED_BOARD_PULL_REQUESTS = "list_recent_merged_board_pull_requests"
-    LIST_ITEMS = "list_items"
-    OPEN_ITEM_COUNT = "open_item_count"
-    ENSURE_LABEL = "ensure_label"
-    CREATE_ITEM = "create_item"
-    LOCK_ITEM = "lock_item"
-    CLOSE_ITEM = "close_item"
     CREATE_CHILD = "create_child"
     UPDATE_ITEM_BODY = "update_item_body"
 
@@ -250,23 +207,9 @@ class ForgeReader(protocol.ClaimReader, Protocol):
         self, since: datetime
     ) -> tuple[board.PullRequest, ...]: ...
 
-    def list_items(
-        self, *, state: ItemState | None = None, label: str | None = None
-    ) -> Listing: ...
-
-    def open_item_count(self) -> int: ...
-
 
 class ForgeWriter(ForgeReader, protocol.ClaimWriter, Protocol):
     """`ForgeReader` plus every operation that mutates forge state."""
-
-    def ensure_label(self, name: str, *, colour: str, description: str) -> None: ...
-
-    def create_item(self, *, title: str, body: str) -> int: ...
-
-    def lock_item(self, number: int) -> None: ...
-
-    def close_item(self, number: int) -> None: ...
 
     def create_child(self, *, parent: int, title: str, body: str, kind: board.ItemKind) -> int: ...
 

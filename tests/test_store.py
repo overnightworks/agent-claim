@@ -16,10 +16,7 @@ from pathlib import Path
 
 import pytest
 
-# `test_cli.py`'s own ledger-onboarding double, reused for the ledger half of
-# `bootstrap` rather than duplicated, so both test files exercise
-# `bootstrap_ledger` against one maintained fake.
-from test_cli import FakeForge
+from test_cli import FakeForge, comment, marker, request
 
 from agent_claim import cli as issue_claim
 from agent_claim import github, process, protocol, store
@@ -646,26 +643,28 @@ def test_serialize_and_parse_schema_toml_round_trip() -> None:
     assert parsed == protocol.ClaimState(tip=tip)
 
 
-def test_cli_bootstrap_creates_both_a_ledger_and_a_state_ref_from_scratch(
+def test_cli_bootstrap_creates_the_empty_state_ref_without_a_ledger(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     bare_remote: Path,
     worktree: Path,
 ) -> None:
-    """A fresh repository has neither a ledger nor `refs/aco/state`.
-    `bootstrap` must still create both, in that order, until the state-ref
-    cut (issue #164 slice C2) retires the ledger half for good."""
+    """Without `--ledger`, bootstrap only creates `refs/aco/state` (issue #176)."""
     client = FakeForge()
     monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
+    monkeypatch.setattr(
+        issue_claim.checkout,
+        "remote_url",
+        lambda remote: "git@github.com:example/agent-claim.git",
+    )
     _git("remote", "add", "origin", str(bare_remote), cwd=worktree)
     monkeypatch.chdir(worktree)
 
     status = issue_claim.main(["--repo", "example/agent-claim", "bootstrap"])
 
     assert status == 0
-    created_ledger = next(iter(client.ledger_items)).number
-    lines = capsys.readouterr().out.splitlines()
-    assert lines == [f"LEDGER #{created_ledger}", _state_ref_oid(bare_remote)]
+    assert client.ledger_items == []
+    assert capsys.readouterr().out.splitlines() == [_state_ref_oid(bare_remote)]
 
 
 def test_cli_bootstrap_is_idempotent_on_a_second_run(
@@ -676,6 +675,11 @@ def test_cli_bootstrap_is_idempotent_on_a_second_run(
 ) -> None:
     client = FakeForge()
     monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
+    monkeypatch.setattr(
+        issue_claim.checkout,
+        "remote_url",
+        lambda remote: "git@github.com:example/agent-claim.git",
+    )
     _git("remote", "add", "origin", str(bare_remote), cwd=worktree)
     monkeypatch.chdir(worktree)
     issue_claim.main(["--repo", "example/agent-claim", "bootstrap"])
@@ -1731,3 +1735,138 @@ def test_parse_claim_toml_rejects_a_non_text_whole_reason() -> None:
 
     with pytest.raises(protocol.MalformedStateTreeError, match="must be text"):
         protocol.parse_claim_toml(content, key="issue-42", tip=_OTHER_TIP)
+
+
+def test_fetch_state_refuses_a_deleted_ref_this_worktree_has_observed(
+    bare_remote: Path, worktree: Path
+) -> None:
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    _git("update-ref", "-d", store.STATE_REF, cwd=bare_remote)
+
+    with pytest.raises(protocol.StateLineageError, match="now absent"):
+        store.fetch_state(worktree=worktree, remote=str(bare_remote))
+
+
+def test_bootstrap_refuses_a_deleted_ref_this_worktree_has_observed(
+    bare_remote: Path, worktree: Path
+) -> None:
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    _git("update-ref", "-d", store.STATE_REF, cwd=bare_remote)
+
+    with pytest.raises(protocol.StateLineageError, match="now absent"):
+        store.bootstrap(worktree=worktree, remote=str(bare_remote))
+
+
+def test_commit_transition_refuses_a_missing_state_ref(worktree: Path, tmp_path: Path) -> None:
+    empty_remote = tmp_path / "empty.git"
+    empty_remote.mkdir()
+    _git("init", "--bare", "-b", "main", cwd=empty_remote)
+
+    with pytest.raises(protocol.ClaimError, match="does not exist yet"):
+        store.commit_transition(
+            worktree=worktree,
+            remote=str(empty_remote),
+            subject="claim issue 42",
+            intent=_claim_intent(),
+        )
+
+
+def _tombstone_body() -> str:
+    return marker(
+        {
+            "action": protocol.STATE_CUT_ACTION,
+            "claim_id": "state-cut",
+            "agent": "coordinator",
+            "role": "coordinator",
+        }
+    )
+
+
+def _ledger_claim_body(claimed: protocol.ClaimRequest) -> str:
+    payload: dict[str, object] = {
+        "action": "claim",
+        "agent": claimed.agent,
+        "base": claimed.base,
+        "branch": claimed.branch,
+        "claim_id": claimed.claim_id,
+        protocol._identity_marker_key(claimed.identity): protocol._identity_marker_value(
+            claimed.identity
+        ),
+        "role": claimed.role,
+        "scope": list(claimed.scope),
+    }
+    if claimed.resource is not None:
+        payload["resource"] = claimed.resource
+        if claimed.resource_value is not None:
+            payload["resource_value"] = claimed.resource_value
+    return marker(payload)
+
+
+def _ledger_release_body(claimed: protocol.ClaimRequest) -> str:
+    payload: dict[str, object] = {
+        "action": "release",
+        "agent": claimed.agent,
+        "claim_id": claimed.claim_id,
+        protocol._identity_marker_key(claimed.identity): protocol._identity_marker_value(
+            claimed.identity
+        ),
+        "role": claimed.role,
+        "reason": "abandoned: imported",
+    }
+    return marker(payload)
+
+
+def test_import_reader_keeps_claims_after_a_mid_ledger_tombstone() -> None:
+    first = request("claim-a", issue=10, scope=("src/a.py",))
+    second = request("claim-b", issue=11, scope=("src/b.py",))
+    comments = (
+        comment(1, _ledger_claim_body(first)),
+        comment(2, _tombstone_body()),
+        comment(3, _ledger_claim_body(second)),
+    )
+
+    imported = protocol.state_from_ledger_aggregate(comments, opened_commit=_TIP)
+
+    assert set(imported.claims) == {"issue-10", "issue-11"}
+    assert imported.claims["issue-11"].claim_id == "claim-b"
+    assert imported.consumed_ids == frozenset(
+        {protocol.ClaimId("claim-a"), protocol.ClaimId("claim-b")}
+    )
+
+
+def test_import_reader_occupies_a_released_auto_resource_value() -> None:
+    claimed = request(
+        "auto-1", issue=10, scope=("src/a.py",), resource="display"
+    )
+    comments = (
+        comment(1, _ledger_claim_body(claimed)),
+        comment(2, _ledger_release_body(claimed)),
+        comment(3, _tombstone_body()),
+    )
+
+    imported = protocol.state_from_ledger_aggregate(comments, opened_commit=_TIP)
+
+    assert imported.claims == {}
+    assert imported.resources["display"].occupied == (1,)
+    assert imported.consumed_ids == frozenset({protocol.ClaimId("auto-1")})
+
+
+def test_import_reader_occupies_a_released_explicit_resource_value() -> None:
+    claimed = request(
+        "explicit-5",
+        issue=10,
+        scope=("src/a.py",),
+        resource="display",
+        resource_value=5,
+    )
+    comments = (
+        comment(1, _ledger_claim_body(claimed)),
+        comment(2, _ledger_release_body(claimed)),
+        comment(3, _tombstone_body()),
+    )
+
+    imported = protocol.state_from_ledger_aggregate(comments, opened_commit=_TIP)
+
+    assert imported.claims == {}
+    assert imported.resources["display"].occupied == (5,)
+    assert imported.consumed_ids == frozenset({protocol.ClaimId("explicit-5")})
