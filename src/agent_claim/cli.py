@@ -1,4 +1,4 @@
-"""Coordinate coding-agent claims through a repository-neutral GitHub ledger."""
+"""Coordinate coding-agent claims through this repository's own state ref."""
 
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ POLICY_LOADER = (
     "<!-- agent-claim-policy:v1 -->\n"
     "Before the first edit in a Git repository, use live `agent-claim`: "
     "`status`, then `claim` the issue and write scope. `bootstrap` only when "
-    "neither a coordination/claim contract nor a ledger exists. `release` after "
+    "the repository's claim state ref does not exist yet. `release` after "
     "landing or abandoning the lane. Missing `gh` or network is a failure, "
     "never coordinated success. Read-only review stays free. Do not invent a "
     "second board."

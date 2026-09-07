@@ -30,7 +30,8 @@ Five costs are measured or read from the v0.9.0 source, not assumed.
 
 ## 2. Decision
 
-**One state ref.** `refs/agent-claim/state` on one configured canonical remote points at a
+**One state ref.** `refs/aco/state` (named by ruling, issue #176) on one configured canonical
+remote points at a
 commit whose tree *is* the current state: `claims/<key>.toml`, `resources/<name>.toml`, a
 schema `version`. The tree owns current state; the commit message owns the transition. A
 released claim is simply absent from the new tree and readable at the parent commit — there
@@ -79,9 +80,11 @@ capability. Forge failures are typed (`ForgeUnsupported`, `ForgePermissionDenied
 `ForgeNotFound`, `ForgeTransient`, `ForgeMalformedResponse`) instead of substring-matched.
 
 **Configuration stays in `.agent-claim/board.toml`,** extended only with settings that have a
-caller today: the pinned body contract (`body_contract`, issue #150) and a canonical-remote
-override. The separately reserved state-storage strategy remains unnamed until step 5 has a
-caller. Renaming the file is rejected — it would cost a migration to buy a better name.
+caller today: the pinned body contract (`body_contract`, issue #150) and `canonical_remote`
+(default `origin`, issue #176) naming the remote `refs/aco/state` lives on — every store and
+import refusal is worded in its terms. No separate state-storage-strategy key was ever added;
+the ref and its tree shape are the only storage decision, and both are named above. Renaming
+the file is rejected — it would cost a migration to buy a better name.
 
 ## 3. Rejected alternatives
 
@@ -144,7 +147,8 @@ plan review must satisfy. The direction in §2 is ruled; these are not.
    `pr-check` and merged-release verification contract, which also reads an author, PR body
    and classification, target and default branch, source repository, closing references, and
    the no-item case. The port must preserve that contract before anything is rewired to it.
-10. **The typed-model gaps.** A collision-free reversible codec for `LaneKey.branch` as a
+10. **The typed-model gaps — mapped, not wholesale (resolved 07.09.2026, issue #176 C1+C2).**
+    A collision-free reversible codec for `LaneKey.branch` as a
     file name; a claim transition carrying a resource *intent* rather than a preallocated
     allocation, with one allocation owner instead of the hold appearing in both the claim and
     the ledger; an acting identity carrying agent *and* validated role, since `apply` must
@@ -156,9 +160,21 @@ plan review must satisfy. The direction in §2 is ruled; these are not.
     rejection and from ambiguous push completion. The item-body portion of this criterion is
     resolved by issue #150 (step 4): each expectation is an exclusive union, `default: yes |
     no | later` (proposed) *or* `ruling: yes | no` with `ruled_on` (ruled), never both and
-    never neither — the typed `RuledExpectation.default` gap above is this union. The
-    state-model remainder (the transition-carried resource intent, the runtime-validating OID
-    type, immutable frozen-state collections, and the rest of this list) stays open for step 5.
+    never neither — the typed `RuledExpectation.default` gap above is this union.
+    The state-model remainder: six of the ten sub-items above are resolved by the state-ref
+    cut (C1+C2) and no others — do not read this criterion as satisfied wholesale. Resolved:
+    the claim-key codec (`store.claim_key`/`parse_claim_key`), the resource intent with one
+    allocation owner (`apply` plus `resources/<name>.toml`), acting identity carrying agent and
+    role (`protocol.ClaimIntent` and its siblings), the runtime-validating OID type
+    (`protocol.ObjectId`), immutable collections inside the frozen state
+    (`ClaimState.claims`/`consumed_ids`/`resources`), and the typed schema-failure pair
+    (`MalformedStateTreeError` / `UnsupportedStateSchemaError`). Still open, each with its
+    current owner: item created/updated timestamps (GitHub issue timestamps via the port, not
+    claim state); the body-update operation the migration needs (`UPDATE_ITEM_BODY` on the
+    port; `cut` is its caller; D6 killed `migrate-body`); the provider-neutral kind mapping
+    (`board.py`'s `idea_label` still competes with the native issue type — leftover of #112,
+    not this cut); and a typed `RuledExpectation.default` (`board.py` still carries only
+    `ExpectationState`'s `NONE`/`PROPOSED`/`RULED` — step 7 or a later item).
 11. **GitHub custom-ref probe re-run — satisfied for GitHub.** The live re-run of the
     custom-ref push/fetch/CAS probe against GitHub — create-if-absent, fast-forward update,
     non-fast-forward rejection, concurrent rejection, and delete — landed 05.09.2026 (results

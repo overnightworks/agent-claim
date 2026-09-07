@@ -13250,7 +13250,7 @@ def test_cli_policy_print_emits_the_locked_loader_without_github(
         "<!-- agent-claim-policy:v1 -->\n"
         "Before the first edit in a Git repository, use live `agent-claim`: "
         "`status`, then `claim` the issue and write scope. `bootstrap` only when "
-        "neither a coordination/claim contract nor a ledger exists. `release` after "
+        "the repository's claim state ref does not exist yet. `release` after "
         "landing or abandoning the lane. Missing `gh` or network is a failure, "
         "never coordinated success. Read-only review stays free. Do not invent a "
         "second board.\n"

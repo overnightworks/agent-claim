@@ -1,8 +1,9 @@
 # agent-claim
 
-`agent-claim` is a small installable CLI that gives coding agents one
-append-only, locked GitHub issue ledger per repository. It is provider-neutral:
-Codex, Claude, Grok, people, and future agents use the same contract.
+`agent-claim` is a small installable CLI that gives coding agents one claim
+state per repository: a compare-and-swap git ref, `refs/aco/state`, on the
+repository's own canonical remote. It is provider-neutral: Codex, Claude,
+Grok, people, and future agents use the same contract.
 
 ## Install and maintain
 
@@ -18,21 +19,17 @@ git+https://github.com/FlexOr2/agent-claim.git@v0.8.0`.
 
 ### Reader/writer compatibility
 
-A claim comment's field set is part of the append-only ledger contract, not just
-one release's schema. A reader refuses a comment outright only when a field it
-requires is missing -- that is a corrupt record. A comment carrying a field an
-older reader's schema does not know is not a corrupt ledger: the reader fences
-that one claim as unreadable (`status` names it, with its unknown field names)
-and still answers `board`, `next`, `who`, and `pr-check` for every other claim; a
-`claim` or `rescope` that could overlap the unreadable claim is refused, since the
-reader cannot tell. A new field therefore ships only in a release whose notes
-name it and the consumers pinned to an older tag, so each can bump its pin in its
-own lane instead of discovering the mismatch as a broken ledger read. For
-example, the rescope marker's `whole_clear` field is written only by the
-automatic revert after a lost rescope race and is readable from 0.11.0 onward;
-a 0.10.1 reader sees it as an unknown field and, since the fence itself ships
-only in 0.11.0, still treats it as a whole-ledger refusal -- so a consumer must
-bump its pin to 0.11.0 before that repair path can appear on its ledger.
+Claim state is a git tree, `claims/<key>.toml` / `ids/<claim_id>` /
+`resources/<name>.toml` under a `schema.toml` `version`, read and written
+whole: an unknown key or a malformed record fails the whole read loud, never
+a single quarantinable claim -- a commit is the unit a writer writes, so a
+broken tree is corrupt state. `version = 1` is the compatibility contract
+this release actually makes; a later tree version is a new cut, not a silent
+patch. Every repository migrated off the old GitHub-issue ledger carries a
+tombstone comment on that closed issue naming the migration; a 0.12.x or
+older client that still tries to read a ledger hits it and fails loud,
+telling the operator to upgrade. A repository not yet migrated still runs
+its old ledger under an installation pinned to 0.12.x or earlier.
 
 ## Five-command quick start
 
@@ -41,18 +38,17 @@ agent-claim bootstrap
 agent-claim status
 agent-claim claim 42 --agent "Ada" --scope src/widget.py
 agent-claim release 42 --merged 57
-agent-claim reconcile
 ```
 
 Omitted `--base`/`--branch` bind the current checkout; explicit values must match it.
 Omitted `--agent` on `claim` and `release` is filled from non-empty
 `AGENT_CLAIM_AGENT`, else non-empty `GROK_SESSION_ID` as `Grok {session}`, else
 non-empty `CLAUDE_SESSION_ID` as `Claude {session}`. `GROK_AGENT` is not a name.
-Missing or present-invalid identity fails closed before GitHub work. Omitted
+Missing or present-invalid identity fails closed before any write. Omitted
 `--role` on `claim` is `builder`; an explicit `--role` wins. Repeating an
-interrupted `claim` for the same active item, agent, role, branch, and scope
-returns that active claim's existing ID without posting a second claim. A
-different live claim still fails; a released claim ID remains terminal.
+interrupted `claim` for the same active item, agent, role, branch, and scope,
+with the same claim id, returns that active claim instead of writing a second
+one. A different live claim still fails; a released claim id remains terminal.
 
 Omitted `--claim-id` on `release` selects the unique active claim on that issue
 or lane whose agent is this session and whose branch is the current checkout;
@@ -61,27 +57,23 @@ Omitted `--role` on `release` uses that selected claim's role; an explicit
 `--role` must still match unless `--coordinator-override`, which still requires
 `--role coordinator`. `release` takes exactly one outcome, never a free-form
 reason: `--merged <pull request>` or `--abandoned "<reason>"`. `--merged` is
-verified against GitHub before anything is posted — the pull request must be
+verified against GitHub before anything is written — the pull request must be
 merged into the default branch, its `Work-Item:` line must name this claim's
 item (or it must carry `No-Item:` for an issue-less lane), and that item must be
-closed; otherwise the release is refused, naming what is missing. The ledger
-records `merged #<n>` or `abandoned: <reason>`. `supersede` still requires
-`--agent` and `--role`. A `--claim-id` already present on the ledger, active or
-released, is refused before anything is posted; release the old claim and pass a
-fresh `--claim-id` instead.
+closed; otherwise the release is refused, naming what is missing. A `--claim-id`
+already consumed, active or released, is refused before anything is written;
+release the old claim and pass a fresh `--claim-id` instead.
 `rescope <issue> --add <path> [--drop <path>]` changes a live claim's scope
 without releasing it: the claim id and base stay, added paths are advisory
 like `claim`, and a resulting wide scope uses the same `--whole` rule as
 `claim`. There is no release window. It does not require HEAD to match
-base or a clean tree. A `rescope` ledger event is a new v2 action; older
-helpers fail loud on the whole ledger until they upgrade.
+base or a clean tree.
 
 Run commands in the repository being coordinated, or pass `--repo
 OWNER/REPOSITORY`. A claim must begin from a clean linked worktree and binds its
 base commit, branch, issue, and repository-relative scope. `--scope a,b` is
 the same as `--scope a --scope b`; each path is stored and compared
-separately, including when an older ledger comment still has one comma-joined
-string. A scope is wide when it declares more than three paths, any directory,
+separately. A scope is wide when it declares more than three paths, any directory,
 or, once the repository has at least twelve versioned files, more than a
 quarter of them; a single named path in a smaller repository is never wide on
 share. Named new paths count; children of containers are never exempt. The
@@ -91,59 +83,55 @@ REASON`, `scope is wide: 1 directory in scope (docs); pass --whole REASON`,
 or `scope is wide: 4 paths of 12 versioned files (33 %) exceeds a quarter;
 pass --whole REASON`. Wide
 scopes need `--whole "<one sentence why it does not split>"`; the sentence
-lands in the claim record and `status`/`who` show it. `--allow-directory` is
+lands in the claim record and `status`/`status --path` show it. `--allow-directory` is
 removed: pass `--whole` instead. Live claims
 are advisory: they say who works where and do not refuse path overlap. Two
 lanes may claim the same
 directory or the same file; `claim` and `status` print the overlap as a note.
 The same issue or the same `docs/`/`fix/` lane branch still holds at most one
-live claim. `claim --resource <name>` posts a name-only intent; the live integer is the next
-positive value not occupied by an earlier first-occurrence request for that name. An explicit
-posted value occupies that integer even after release; a released auto still occupies the
-integer it would have been assigned. A second live hold of the same name and value is
-refused: only the earliest live claim of that pair is the holder. Sequential allocations
-stay unique even after a release. `claim` prints
+live claim. `claim --resource <name>` requests a name-only intent; the held integer is the
+next positive value not occupied by an earlier first-occurrence request for that name. An
+explicit posted value occupies that integer even after release; a released auto still
+occupies the integer it would have been assigned. A second live hold of the same name and
+value is refused: only the earliest live claim of that pair is the holder. Sequential
+allocations stay unique even after a release. `claim` prints
 how many versioned files the scope covers and which open claims it overlaps.
-`who <path>` prints every live claim that holds a path.
-Agents should read `--json` from `status`, `claim`, `release`, `rescope`, and `who`.
-`status` prints each live claim's age from its claim comment as `Xh Ym`, and
-marks it `old` after more than one hour.
+`status --path <path>` prints every live claim that holds a path.
+Agents should read `--json` from `status`, `claim`, `release`, and `rescope`.
+`status` prints each live claim's age from its `opened_commit`'s committer date
+(the state-ref commit that first introduced it) as `Xh Ym`, and marks it `old`
+after more than one hour.
 
-`bootstrap` does two onboarding jobs in one command, in order, until the
-state-ref cut (issue #164) retires the first of them for good. It first
-adopts the exact `<!-- agent-claim-ledger:v1 -->` issue marker, ensures it is
-locked and labelled, and safely converges concurrent first starts to the
-earliest ledger, visibly closing later duplicates; it refuses to compete when
-another machine-readable claim/ledger contract exists. It then creates or
-reports this repository's claim-state ref, `refs/aco/state`, on its canonical
-remote (`origin`) -- a git ref, invisible in the GitHub UI, never checked out
-into a working tree. A present ref is a pure read: it prints the ref's commit
-id and makes no write. An absent ref (proven by `git ls-remote --exit-code`,
-never inferred from a fetch failure) gets one commit holding an empty state
-tree (`schema.toml`, `version = 1`) pushed as a plain fast-forward. An
-unreachable remote (auth or transport failure) fails loud instead of either
-printing or writing. The ledger half disappears once the state-ref cut lands:
-`claim`/`release`/`rescope`/`status` read and write the issue ledger only
-until then. A claimed issue gets one reusable minimal projection comment
-and a generation-scoped label.
-Use `release --coordinator-override` only for an explicit coordinator action.
-Ledger rollover (`supersede`) requires a coordinator whose named claim is the
-only active claim and owns the ledger issue; the successor is a higher-numbered
-open empty collaborator-locked issue, and the freeze is atomic.
-`reconcile` also repairs a duplicated claim id it finds on the ledger, keeping the
-newest occurrence and printing one `REPAIRED claim '<id>': superseded <comments> ->
-survivor #<comment>` line per id it fixes, where `<comments>` lists every superseded
-comment it neutralized (the older CLAIM plus each terminal comment that honored its
-release — there can be more than one, e.g. a release retry) as `#id, #id, ...`.
-An older occurrence only auto-repairs when it is already released, or when it
-shares the survivor's agent and role (a same-agent re-claim, kept newest because
-that reflects the agent's latest intent — this is not scoped to one identity, so
-a same-agent duplicate spanning two issues, two lanes, or an issue and a lane
-still only keeps the newer identity's workstream and silently ends the older
-one).
-A duplicate still active under two different agents is a real ownership
-conflict; `reconcile` reports it and leaves the whole ledger untouched — for
-every duplicated id, not just the conflicting one — instead of picking a winner.
+`claim`, `rescope`, `release`, and `status` read and write exclusively through
+`refs/aco/state` -- a compare-and-swap git ref on the repository's configured
+`canonical_remote` (`.agent-claim/board.toml`, default `origin`), invisible in
+the GitHub UI and never checked out into a working tree. No command but
+`bootstrap` ever creates that ref, so a `claim`/`rescope`/`release`/`protect`
+call against a repository that has not been bootstrapped refuses by name
+instead of silently creating it. `release --coordinator-override` is for an
+explicit coordinator action; a stale takeover is that same override-release
+followed by an ordinary `claim` -- two commits, no separate verb, and the new
+claim never reuses a resource integer the released claim held.
+
+`bootstrap` does two jobs, never both in the same invocation. Without
+`--ledger`, it creates or reports the state ref: a present ref is a pure
+read (prints the ref's commit id, writes nothing); an absent ref (proven by
+`git ls-remote --exit-code`, never inferred from a fetch failure) gets one
+commit holding an empty state tree (`schema.toml`, `version = 1`) pushed as
+a plain fast-forward; an unreachable remote (auth or transport failure)
+fails loud instead of either printing or writing. `bootstrap --ledger N`
+is the one-time, head-only import of a repository's closed GitHub-issue
+ledger (issue `N`) into a freshly created state ref, run from that
+repository's own checkout after every writer has drained and a `state_cut`
+tombstone comment has been posted on the ledger issue: it refuses when the
+forge target does not match the canonical remote's own repository, when the
+tombstone is missing, edited, or not the ledger's last protocol comment,
+when the ledger was itself superseded by another, and when the ref already
+carries an import of a *different* run (an empty ref created by some other
+command in error is named and left for manual repair, never silently
+overwritten); on success it carries every active claim, every claim id ever
+consumed, and every occupied resource value forward, and pushes the result
+as the ref's very first commit.
 
 ## Landing classification
 
@@ -164,8 +152,8 @@ A pull request body carries exactly one classification line:
 - `No-Item: docs` or `No-Item: fix` for a lane that owns no issue.
 
 `pr-check` refuses a body with no classification line, with more than one, or
-naming two work items (split the pull request); a work item that is the claim
-ledger issue or lives in another repository; a work item with no active claim
+naming two work items (split the pull request); a work item that lives in
+another repository; a work item with no active claim
 on the pull request's head branch; a closing reference naming anything but the
 work item; a `No-Item` pull request without an active issue-less lane claim on
 that head branch, or carrying any closing reference at all; a pull request
@@ -192,8 +180,8 @@ itself is a container (`claim a child`).
 ## Read-only board projection
 
 `agent-claim board` reads the open issues, open PRs, PRs merged since the
-oldest open issue was filed, and the claim ledger, then prints a ranked
-projection with `READY NOW` and `STALE` sections. A pull request that
+oldest open issue was filed, and the live claim state ref, then prints a
+ranked projection with `READY NOW` and `STALE` sections. A pull request that
 advances an issue without closing it — an epic's dispatched slice, typically
 — credits that issue when the pull request names it a second time outside a
 dedicated `Refs #N`/`Part of #N` line; that is a syntactic marker, not a
@@ -271,8 +259,8 @@ leaves the list.
 followed by the `CONTAINERS` and `UNCUT` sections above; `next` names recovery
 items first with that step: open issues that a merged pull request already
 declared as its `Work-Item:` — the landing happened, the bookkeeping did not. It
-is keyed on that typed line, never on an issue's update time, and never names
-the ledger issue. `next --json` carries the same items under `recovery`.
+is keyed on that typed line, never on an issue's update time. `next --json`
+carries the same items under `recovery`.
 
 `board` ends its text output with a `requests: N` line, counting every read
 the command made through the forge port; `board --json` carries the same
@@ -369,9 +357,7 @@ body_contract = "block"
 Under that pin, `board`, `next`, issue-mode `claim`, `cut`, `rulings`, and the
 parent-body part of `pr-check` read a work item's `Now`/`Next`/`Done when`,
 freeze, expectations, and undispatched slices from one typed `agent-claim`
-fenced TOML block instead — no regex, no German markers, no slice table. The
-claim ledger's own issue (`protocol.LEDGER_ISSUE`) is exempt and always read
-as prose: its body belongs to ledger discovery, never the work-item grammar.
+fenced TOML block instead — no regex, no German markers, no slice table.
 
 A fresh, unfilled item looks like this — the same four lines `cut` writes
 automatically for a dispatched child, and what a human pastes by hand into a
@@ -539,8 +525,7 @@ A lane claim shares the same identity exclusivity, advisory overlap notes, and
 release path as an issue claim: two lane claims collide on the same branch;
 overlapping scope with another lane or issue is a visible note, not a refusal.
 `status` and `protect` show and authorize it the same way. A lane owns no
-GitHub issue, so it gets no projection comment or label, and `reconcile` never
-touches it.
+GitHub issue, so it never appears on `board`, `rulings`, or `next`.
 
 There is no flag to name a lane explicitly on `release`: a lane's only name is
 the checkout branch it was claimed from, so releasing it — including a
@@ -551,13 +536,6 @@ worktree on that branch (`git worktree add <path> <lane-branch>`) and run
 --abandoned "..."` from inside it, where `<id>` comes from `agent-claim status`
 (omitting `--claim-id` still filters by the releasing agent, coordinator
 override or not, so a foreign stuck claim needs the id).
-
-The lane-claim marker extends the same `agent-claim:v2` event, but with a
-different key set than an issue claim. A pre-issue-38 `agent-claim` cannot
-parse it: it fails loud on the whole ledger, not just the lane claim, until it
-upgrades — deliberate, since an agent that cannot read the live locks must not
-build blindly. Upgrade every `agent-claim` installation together with (or
-before) the first lane claim posted to a shared ledger.
 
 ## Global loader
 
