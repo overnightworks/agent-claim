@@ -405,6 +405,15 @@ class ContractDefect:
     message: str
 
 
+def body_defect_text(defect: ContractDefect) -> str:
+    """The one rendering of a malformed body defect (issue #176 H3).
+
+    `cut` and the board/claim checks share this; a second renderer is a
+    defect. `check` in slice F reuses it.
+    """
+    return f"body malformed: {defect.field}: {defect.message}"
+
+
 def _contract_fields(contract: Contract) -> tuple[tuple[str, str | None], ...]:
     """The four body sections in body order, paired with their current
     value -- the one place that knows both the names and the order, so a
@@ -1907,10 +1916,6 @@ def _dependency_freed_on(
     )
 
 
-def claim_age(created_at: str, now: datetime) -> timedelta:
-    return now.astimezone(UTC) - _timestamp(created_at)
-
-
 def _floored_claim_minutes(age: timedelta) -> int:
     return max(0, int(age.total_seconds())) // 60
 
@@ -1959,8 +1964,8 @@ def has_further_work(next_line: str | None) -> bool:
 
 
 def _claim_by_issue(
-    claims: tuple[protocol.LedgerActiveClaim, ...],
-) -> dict[int, protocol.LedgerActiveClaim]:
+    claims: tuple[protocol.ScopedClaim, ...],
+) -> dict[int, protocol.ScopedClaim]:
     return {
         claim.identity.issue: claim
         for claim in claims
@@ -2158,7 +2163,8 @@ class _BoardBuildContext:
     blockers: dict[int, tuple[IssueReference, ...]]
     freed_on: dict[int, datetime | None]
     unblocks: dict[int, int]
-    claims_by_issue: dict[int, protocol.LedgerActiveClaim]
+    claims_by_issue: dict[int, protocol.ScopedClaim]
+    claim_ages: Mapping[str, datetime]
     in_flight_references: frozenset[int]
     landed_references: frozenset[int]
     open_branches: frozenset[str]
@@ -2170,7 +2176,7 @@ class _BoardBuildContext:
 
 def _board_stage(
     issue: Issue,
-    claim: protocol.LedgerActiveClaim | None,
+    claim: protocol.ScopedClaim | None,
     *,
     in_flight_references: frozenset[int],
     landed_references: frozenset[int],
@@ -2187,12 +2193,18 @@ def _board_stage(
 
 
 def _claim_projection(
-    claim: protocol.LedgerActiveClaim | None, observed_at: datetime
+    claim: protocol.ScopedClaim | None,
+    claim_ages: Mapping[str, datetime],
+    observed_at: datetime,
 ) -> tuple[str | None, str | None, bool]:
-    """The (active_claim, claim_age, claim_old) trio a `BoardItem` shows for `claim`."""
+    """The (active_claim, claim_age, claim_old) trio a `BoardItem` shows for
+    `claim`. `opened_at` is the caller's own git-history read (issue #176,
+    §1) -- never derived here, so this stays a pure function of its inputs.
+    """
     if claim is None:
         return None, None, False
-    age = claim_age(claim.comment.created_at, observed_at)
+    opened_at = claim_ages[claim.claim_id]
+    age = observed_at.astimezone(UTC) - opened_at.astimezone(UTC)
     return f"{claim.agent} ({claim.role})", format_claim_age(age), claim_is_old(age)
 
 
@@ -2301,7 +2313,9 @@ def _board_item(
         kind=issue.kind,
         completes_container=completes_container,
     )
-    active_claim, claim_age_text, claim_old = _claim_projection(claim, observed_at)
+    active_claim, claim_age_text, claim_old = _claim_projection(
+        claim, context.claim_ages, observed_at
+    )
     open_blockers = context.blockers[issue.number]
     container_progress = context.container_progress.get(issue.number)
     actionable_reason = _actionable_reason(
@@ -2314,8 +2328,8 @@ def _board_item(
             contract_complete=parsed.contract_complete,
             projectionless_idea=projectionless_idea,
             read_state=parsed.read_state,
-            malformed_defect_field=(
-                contract.defects[0].field if parsed.read_state is BodyReadState.MALFORMED else None
+            malformed_defect=(
+                contract.defects[0] if parsed.read_state is BodyReadState.MALFORMED else None
             ),
             malformed_uncut=_malformed_only_uncut(
                 contract, parsed.slice_findings, container_progress
@@ -2363,7 +2377,7 @@ class BoardBuildInputs:
     issues: tuple[Issue, ...]
     open_pull_requests: tuple[PullRequest, ...]
     recent_merged_pull_requests: tuple[PullRequest, ...]
-    claims: tuple[protocol.LedgerActiveClaim, ...]
+    claims: tuple[protocol.ScopedClaim, ...]
     config: BoardConfig
     repository: str
     blocker_references: tuple[BlockerReference, ...] | None = None
@@ -2372,6 +2386,10 @@ class BoardBuildInputs:
     children: Mapping[int, tuple[ChildItem, ...]] = field(default_factory=dict)
     dependencies: Mapping[int, tuple[IssueDependency, ...]] = field(default_factory=dict)
     requests: int = 0
+    # Each live claim's age (issue #176, §1): a committer date the caller
+    # already read from the store's git history, since board.py's own build
+    # stays pure and never reaches for git itself. Keyed by claim_id.
+    claim_ages: Mapping[str, datetime] = field(default_factory=dict)
 
 
 def build_board(inputs: BoardBuildInputs) -> Board:
@@ -2381,18 +2399,7 @@ def build_board(inputs: BoardBuildInputs) -> Board:
     config = inputs.config
     repository = inputs.repository
     observed_at = (inputs.now or datetime.now(UTC)).astimezone(UTC)
-    # `protocol.LEDGER_ISSUE` is the one per-item exception to the
-    # repository's pin (#150): its body belongs to ledger discovery, not the
-    # work-item grammar, so it is always read as prose regardless of
-    # `body_contract`, and never reports body legacy/malformed.
-    modes = {
-        issue.number: (
-            BodyContractMode.PROSE
-            if issue.number == protocol.LEDGER_ISSUE
-            else config.body_contract
-        )
-        for issue in issues
-    }
+    modes = {issue.number: config.body_contract for issue in issues}
     parsed_bodies = {issue.number: parse_body(issue.body, modes[issue.number]) for issue in issues}
     contracts = {number: parsed.contract for number, parsed in parsed_bodies.items()}
     blocker_by_number, blocker_references = _validated_blocker_by_number(
@@ -2441,6 +2448,7 @@ def build_board(inputs: BoardBuildInputs) -> Board:
         },
         unblocks=unblocks,
         claims_by_issue=_claim_by_issue(inputs.claims),
+        claim_ages=inputs.claim_ages,
         in_flight_references=_associated_issues(open_pull_requests, repository)
         | _touched_without_closing(open_pull_requests),
         landed_references=_associated_issues(recent_merged_pull_requests, repository)
@@ -2478,7 +2486,7 @@ def build_board(inputs: BoardBuildInputs) -> Board:
         recovery=tuple(
             item
             for item in ordered
-            if item.number in landed_work_items and item.number != protocol.LEDGER_ISSUE
+            if item.number in landed_work_items
         ),
         uncut=uncut,
         blocker_references=blocker_references,
@@ -2770,7 +2778,7 @@ class _ActionabilityFacts:
     contract_complete: bool
     projectionless_idea: bool
     read_state: BodyReadState = BodyReadState.VALID
-    malformed_defect_field: str | None = None
+    malformed_defect: ContractDefect | None = None
     malformed_uncut: tuple[MalformedSliceRow, ...] = ()
 
 
@@ -2787,8 +2795,8 @@ def _read_state_actionable_reason(facts: _ActionabilityFacts) -> str | None:
     itself cannot be read is never offered as "claim a child" (#150 §5)."""
     if facts.read_state is BodyReadState.LEGACY:
         return "body legacy"
-    if facts.read_state is BodyReadState.MALFORMED:
-        return f"body malformed: {facts.malformed_defect_field}"
+    if facts.read_state is BodyReadState.MALFORMED and facts.malformed_defect is not None:
+        return body_defect_text(facts.malformed_defect)
     return None
 
 
