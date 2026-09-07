@@ -1624,8 +1624,7 @@ def _store_observation(
 ) -> tuple[Path, str, protocol.ClaimState]:
     """One fetch of `refs/aco/state` for a store command, after the shared
     forge-target / canonical-remote refusal."""
-    toplevel = Path(checkout._git_output(["rev-parse", "--show-toplevel"])).resolve()
-    canonical_remote = _resolved_canonical_remote(parsed.repo, toplevel)
+    canonical_remote = _resolved_canonical_remote(parsed.repo, _resolve_toplevel())
     worktree = Path.cwd()
     return worktree, canonical_remote, store.fetch_state(worktree=worktree, remote=canonical_remote)
 
@@ -1821,7 +1820,7 @@ def _protect_write(repository: str | None, payload: dict[str, object]) -> int:
     refusal = _protect_checkout_refusal(branch)
     if refusal is not None:
         return _hook_deny(refusal)
-    toplevel = Path(checkout._git_output(["rev-parse", "--show-toplevel"])).resolve()
+    toplevel = _resolve_toplevel().resolve()
     relative = _protect_relative_path(raw_path, toplevel=toplevel)
     if relative is None:
         return _hook_deny(PATH_REQUIRED)
@@ -1902,8 +1901,7 @@ def _cmd_status(parsed: argparse.Namespace) -> int:
     dispatched straight from `main` -- it never needs `_dispatch`'s ledger
     resolution (a cut-over repository may have no ledger issue left at all).
     """
-    toplevel = Path(checkout._git_output(["rev-parse", "--show-toplevel"])).resolve()
-    canonical_remote = _resolved_canonical_remote(parsed.repo, toplevel)
+    canonical_remote = _resolved_canonical_remote(parsed.repo, _resolve_toplevel())
     claims, ages = _fetched_claims_and_ages(Path.cwd(), canonical_remote)
     if parsed.path is not None:
         if parsed.json:
@@ -2484,8 +2482,7 @@ def _bootstrap_state(parsed: argparse.Namespace, forge_handle: forge.ForgeWriter
     """Create `refs/aco/state` if proven absent, or import ledger N with
     `--ledger`. Never searches for a ledger (issue #176: `discovery.py` dies).
     """
-    toplevel = Path(checkout._git_output(["rev-parse", "--show-toplevel"])).resolve()
-    canonical_remote = _resolved_canonical_remote(parsed.repo, toplevel)
+    canonical_remote = _resolved_canonical_remote(parsed.repo, _resolve_toplevel())
     if parsed.ledger is not None:
         return _import_ledger(parsed, forge_handle, canonical_remote)
     oid = store.bootstrap(worktree=Path.cwd(), remote=canonical_remote)
