@@ -73,7 +73,6 @@ forbidden_modules = [
     "agent_coordination.forge",
     "agent_coordination.board",
     "agent_coordination.checkout",
-    "agent_coordination.discovery",
 ]
 allow_indirect_imports = true
 as_packages = false

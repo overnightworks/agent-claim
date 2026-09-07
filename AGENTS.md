@@ -1,13 +1,13 @@
 This file is reusable AI policy. Keep project facts, provider glue, architecture
 state, tool commands, and plans outside it.
 
-Entry points (pointers only; the facts live there): `README.md` is operator documentation for install, the CLI, and the claim protocol. Follow the installed `agent-claim` CLI for live ledger rules. Do not copy that protocol here.
+Entry points (pointers only; the facts live there): `README.md` is operator documentation for install, the CLI, and the claim protocol. Follow the installed `aco` CLI for the live rules. Do not copy that protocol here.
 
 Repository facts (owners in parentheses; do not fork them here):
 - Python >= 3.11 (`pyproject.toml`).
 - Verification: `ruff check .` and `pytest` (`.github/workflows/ci.yml`).
-- Package version: `src/agent_claim/__init__.py` (`__version__`).
-- Build in a linked isolated worktree. Use live `agent-claim status` then `claim` before the first edit. Do not use Atelier's Auto-Runner.
+- Package version: `src/agent_coordination/__init__.py` (`__version__`).
+- Build in a linked isolated worktree. Use live `aco status` then `claim` before the first edit. Do not use Atelier's Auto-Runner.
 
 ## Growth
 
