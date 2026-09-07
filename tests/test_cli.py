@@ -192,6 +192,7 @@ class FakeForge:
     parents: dict[int, board.ParentIssue] = field(default_factory=dict)
     children: dict[int, tuple[board.ChildItem, ...]] = field(default_factory=dict)
     closed_issues: set[int] = field(default_factory=set)
+    issue_references: dict[int, forge.ItemReference] = field(default_factory=dict)
     issue_reference_lookups: list[int] = field(default_factory=list)
     created_children: list[tuple[int, str, str, board.ItemKind]] = field(default_factory=list)
     next_created_child_number: int = 900
@@ -239,20 +240,29 @@ class FakeForge:
         return self.board_issues
 
     def landing(self, number: int) -> forge.Landing:
+        self._run()
         detail = self.landings.get(number)
         if detail is None:
             raise ClaimError(f"GitHub has no pull request #{number}")
         return detail
 
     def item_reference(self, number: int) -> forge.ItemReference:
+        self._run()
         self.issue_reference_lookups.append(number)
+        served = self.issue_references.get(number)
+        if served is not None:
+            return served
         state = forge.ItemState.CLOSED if number in self.closed_issues else forge.ItemState.OPEN
-        return forge.ItemReference(state, "", "")
+        # `landings` is this fake's set of pull requests, so the one flag that
+        # distributes `check` is derived from it rather than set twice.
+        return forge.ItemReference(state, "", "", number in self.landings)
 
     def default_branch(self) -> str:
+        self._run()
         return self.default_branch_name
 
     def parent_issue(self, number: int) -> board.ParentIssue | None:
+        self._run()
         return self.parents.get(number)
 
     def list_children(self, number: int) -> tuple[board.ChildItem, ...]:
@@ -700,7 +710,7 @@ def test_read_only_commands_never_write_through_a_reader_only_forge(
         ["board"],
         ["next"],
         ["rulings"],
-        ["pr-check", "--pr", "12"],
+        ["check", "12"],
     ):
         issue_claim.main(["--repo", REPOSITORY, *argv])
         capsys.readouterr()
@@ -5810,6 +5820,36 @@ def test_board_configuration_reads_and_validates_canonical_remote(tmp_path: Path
         board.load_config(config_path)
 
 
+def test_board_configuration_refuses_an_unknown_key_by_name(tmp_path: Path) -> None:
+    """A typo would otherwise leave the pin at its prose default and read
+    every body with the wrong grammar, silently."""
+    config_path = tmp_path / "board.toml"
+    config_path.write_text('body_contarct = "block"\n')
+
+    with pytest.raises(ClaimError) as refused:
+        board.load_config(config_path)
+
+    assert str(refused.value) == (
+        f"board configuration {config_path} has unknown top-level key body_contarct"
+    )
+
+    config_path.write_text('bodies = "block"\nannotation = "x"\n')
+    with pytest.raises(ClaimError, match="unknown top-level key annotation, bodies"):
+        board.load_config(config_path)
+
+
+def test_board_configuration_accepts_every_key_it_defines(tmp_path: Path) -> None:
+    config_path = tmp_path / "board.toml"
+    config_path.write_text(
+        'priority_labels = ["ux"]\nidea_label = "idea"\n'
+        'body_contract = "block"\ncanonical_remote = "upstream"\n'
+    )
+
+    assert board.load_config(config_path) == board.BoardConfig(
+        ("ux",), "idea", board.BodyContractMode.BLOCK, "upstream"
+    )
+
+
 def test_the_body_fence_and_config_path_keep_their_agent_claim_names() -> None:
     """The package renamed to `agent-coordination` and the command to `aco`
     (issue #191); these two strings deliberately did not follow.
@@ -6109,7 +6149,9 @@ def test_body_contract_checks_names_a_legacy_container_by_the_body_legacy_check(
     )
     item = next(item for item in projected.items if item.number == 201)
 
-    checks = issue_claim._body_contract_checks(item, projected.blocker_references)
+    checks = issue_claim._body_contract_checks(
+        item, projected.blocker_references, projected.body_contract
+    )
 
     assert checks == (issue_claim.SliceCheck("error", "body-legacy", "body legacy", issue=201),)
 
@@ -6127,7 +6169,9 @@ def test_body_contract_checks_names_a_malformed_body_by_its_first_defect() -> No
     )
     item = next(item for item in projected.items if item.number == 202)
 
-    checks = issue_claim._body_contract_checks(item, projected.blocker_references)
+    checks = issue_claim._body_contract_checks(
+        item, projected.blocker_references, projected.body_contract
+    )
 
     assert checks == (
         issue_claim.SliceCheck(
@@ -7052,16 +7096,35 @@ def test_github_adapter_capability_reads_the_declared_table() -> None:
 def test_github_adapter_item_reference_reads_state_title_and_body() -> None:
     client = GitHubForge(
         github._repository_id("example/agent-claim"),
-        run=lambda _arguments: json.dumps({"state": "open", "title": "Work", "body": "Do it."}),
+        run=lambda _arguments: json.dumps(
+            {"state": "open", "title": "Work", "body": "Do it.", "is_landing": False}
+        ),
     )
 
     assert client.item_reference(10) == forge.ItemReference(forge.ItemState.OPEN, "Work", "Do it.")
 
 
+def test_github_adapter_item_reference_reports_a_pull_request_as_a_landing() -> None:
+    """The one read `check` distributes on: GitHub answers for a pull request
+    at the issues endpoint too, and only this flag tells the two apart."""
+    client = GitHubForge(
+        github._repository_id("example/agent-claim"),
+        run=lambda _arguments: json.dumps(
+            {"state": "open", "title": "Land it", "body": "Work-Item: #7", "is_landing": True}
+        ),
+    )
+
+    assert client.item_reference(12) == forge.ItemReference(
+        forge.ItemState.OPEN, "Land it", "Work-Item: #7", True
+    )
+
+
 def test_github_adapter_item_reference_reads_a_closed_issue_with_no_body() -> None:
     client = GitHubForge(
         github._repository_id("example/agent-claim"),
-        run=lambda _arguments: json.dumps({"state": "closed", "title": "Work", "body": None}),
+        run=lambda _arguments: json.dumps(
+            {"state": "closed", "title": "Work", "body": None, "is_landing": False}
+        ),
     )
 
     assert client.item_reference(10) == forge.ItemReference(forge.ItemState.CLOSED, "Work", "")
@@ -13665,7 +13728,7 @@ def documentation_lane_claim(
     return request(claim_id, lane=True, branch=branch, scope=("README.md",))
 
 
-def pr_check_client(
+def check_client(
     monkeypatch: pytest.MonkeyPatch,
     detail: forge.Landing,
     *,
@@ -13682,43 +13745,43 @@ def pr_check_client(
     return client
 
 
-def run_pr_check(number: int = 12) -> int:
-    return issue_claim.main(["--repo", REPOSITORY, "pr-check", "--pr", str(number)])
+def run_check(number: int = 12) -> int:
+    return issue_claim.main(["--repo", REPOSITORY, "check", str(number)])
 
 
-def test_pr_check_accepts_a_claimed_work_item_that_the_pull_request_closes(
+def test_check_accepts_a_claimed_work_item_that_the_pull_request_closes(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    pr_check_client(
+    check_client(
         monkeypatch,
         landing_pull_request(
             body=f"Work-Item: {REPOSITORY}#{WORK_ITEM_ISSUE}\n\nCloses #{WORK_ITEM_ISSUE}"
         ),
     )
 
-    assert run_pr_check() == 0
+    assert run_check() == 0
     assert capsys.readouterr().out == (
         f"PR #12 by ada declares Work-Item: {REPOSITORY}#{WORK_ITEM_ISSUE}\n"
     )
 
 
-def test_pr_check_reads_the_same_work_item_from_shorthand_and_qualified_lines(
+def test_check_reads_the_same_work_item_from_shorthand_and_qualified_lines(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    pr_check_client(
+    check_client(
         monkeypatch,
         landing_pull_request(
             body=f"Work-Item: #{WORK_ITEM_ISSUE}\n\nCloses {REPOSITORY}#{WORK_ITEM_ISSUE}"
         ),
     )
 
-    assert run_pr_check() == 0
+    assert run_check() == 0
     assert capsys.readouterr().out == (
         f"PR #12 by ada declares Work-Item: {REPOSITORY}#{WORK_ITEM_ISSUE}\n"
     )
 
 
-def test_pr_check_refuses_a_named_sentence_outside_a_checkout(
+def test_check_refuses_a_named_sentence_outside_a_checkout(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Issue #178: `tests/conftest.py`'s autouse `_isolate_git_toplevel`
@@ -13727,7 +13790,7 @@ def test_pr_check_refuses_a_named_sentence_outside_a_checkout(
     counterpart, overriding the fake back to the failure atelier-2's
     checkout-less CI job hit, to prove the command refuses with the named
     sentence instead of raising git's own message."""
-    pr_check_client(
+    check_client(
         monkeypatch,
         landing_pull_request(
             body=f"Work-Item: {REPOSITORY}#{WORK_ITEM_ISSUE}\n\nCloses #{WORK_ITEM_ISSUE}"
@@ -13740,7 +13803,7 @@ def test_pr_check_refuses_a_named_sentence_outside_a_checkout(
 
     monkeypatch.setattr(checkout, "_git_output", outside_a_checkout)
 
-    assert run_pr_check() == 2
+    assert run_check() == 2
     assert capsys.readouterr().err == (
         "ERROR: this command reads the repository's body contract from "
         ".agent-claim/board.toml and needs a checkout (a shallow one is "
@@ -13749,10 +13812,10 @@ def test_pr_check_refuses_a_named_sentence_outside_a_checkout(
     )
 
 
-def test_pr_check_accepts_an_issueless_documentation_pull_request(
+def test_check_accepts_an_issueless_documentation_pull_request(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    pr_check_client(
+    check_client(
         monkeypatch,
         landing_pull_request(
             body="No-Item: docs\n\nTidy the README.",
@@ -13761,7 +13824,7 @@ def test_pr_check_accepts_an_issueless_documentation_pull_request(
         standing=(documentation_lane_claim(),),
     )
 
-    assert run_pr_check() == 0
+    assert run_check() == 0
     assert capsys.readouterr().out == "PR #12 by ada declares No-Item: docs\n"
 
 
@@ -13787,13 +13850,13 @@ def test_pr_check_accepts_an_issueless_documentation_pull_request(
         ),
     ],
 )
-def test_pr_check_refuses_an_issueless_pull_request_without_its_lane_claim(
+def test_check_refuses_an_issueless_pull_request_without_its_lane_claim(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     standing: tuple[ClaimRequest, ...],
     reason: str,
 ) -> None:
-    pr_check_client(
+    check_client(
         monkeypatch,
         landing_pull_request(
             body="No-Item: docs\n\nTidy the README.",
@@ -13802,14 +13865,14 @@ def test_pr_check_refuses_an_issueless_pull_request_without_its_lane_claim(
         standing=standing,
     )
 
-    assert run_pr_check() == 1
+    assert run_check() == 1
     assert capsys.readouterr().err == f"REFUSED: pull request #12 {reason}\n"
 
 
-def test_pr_check_refuses_an_issueless_pull_request_that_closes_an_item(
+def test_check_refuses_an_issueless_pull_request_that_closes_an_item(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    pr_check_client(
+    check_client(
         monkeypatch,
         landing_pull_request(
             body=f"No-Item: fix\n\nCloses #{WORK_ITEM_ISSUE}",
@@ -13818,17 +13881,17 @@ def test_pr_check_refuses_an_issueless_pull_request_that_closes_an_item(
         standing=(documentation_lane_claim(),),
     )
 
-    assert run_pr_check() == 1
+    assert run_check() == 1
     assert capsys.readouterr().err == (
         f"REFUSED: pull request #12 declares no work item but closes "
         f"{REPOSITORY}#{WORK_ITEM_ISSUE}; name it as the work item\n"
     )
 
 
-def test_pr_check_refuses_a_pull_request_proposing_another_repositorys_branch(
+def test_check_refuses_a_pull_request_proposing_another_repositorys_branch(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    pr_check_client(
+    check_client(
         monkeypatch,
         landing_pull_request(
             body=f"Work-Item: #{WORK_ITEM_ISSUE}\n\nCloses #{WORK_ITEM_ISSUE}",
@@ -13836,7 +13899,7 @@ def test_pr_check_refuses_a_pull_request_proposing_another_repositorys_branch(
         ),
     )
 
-    assert run_pr_check() == 1
+    assert run_check() == 1
     assert capsys.readouterr().err == (
         "REFUSED: pull request #12 proposes a branch of fork/agent-claim; "
         "cross-repository pull requests are not classified\n"
@@ -13889,59 +13952,59 @@ def test_pr_check_refuses_a_pull_request_proposing_another_repositorys_branch(
         ),
     ],
 )
-def test_pr_check_refuses_a_pull_request_body_with_one_line(
+def test_check_refuses_a_pull_request_body_with_one_line(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     body: str,
     reason: str,
 ) -> None:
-    pr_check_client(monkeypatch, landing_pull_request(body=body))
+    check_client(monkeypatch, landing_pull_request(body=body))
 
-    assert run_pr_check() == 1
+    assert run_check() == 1
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == f"REFUSED: pull request #12 {reason}\n"
 
 
-def test_pr_check_refuses_a_work_item_without_a_claim_on_the_head_branch(
+def test_check_refuses_a_work_item_without_a_claim_on_the_head_branch(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    pr_check_client(
+    check_client(
         monkeypatch,
         landing_pull_request(body="Work-Item: #72\n\nCloses #72"),
         standing=(request("elsewhere", issue=72, branch="codex/other-lane", scope=("src",)),),
     )
 
-    assert run_pr_check() == 1
+    assert run_check() == 1
     assert capsys.readouterr().err == (
         f"REFUSED: pull request #12 has no active claim for #72 on branch {LANDING_BRANCH!r}\n"
     )
 
 
-def test_pr_check_refuses_a_pull_request_that_does_not_target_the_default_branch(
+def test_check_refuses_a_pull_request_that_does_not_target_the_default_branch(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    client = pr_check_client(
+    client = check_client(
         monkeypatch,
         landing_pull_request(body="Work-Item: #72\n\nCloses #72", base_ref_name="release"),
     )
     client.default_branch_name = "trunk"
 
-    assert run_pr_check() == 1
+    assert run_check() == 1
     assert capsys.readouterr().err == (
         "REFUSED: pull request #12 targets 'release', not the default branch 'trunk'\n"
     )
 
 
-def test_pr_check_reads_a_fenced_classification_line_as_documentation(
+def test_check_reads_a_fenced_classification_line_as_documentation(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    pr_check_client(
+    check_client(
         monkeypatch,
         landing_pull_request(body="Documents the convention:\n\n```\nWork-Item: #72\n```\n"),
     )
 
-    assert run_pr_check() == 1
+    assert run_check() == 1
     assert capsys.readouterr().err == (
         "REFUSED: pull request #12 carries no `Work-Item:` or `No-Item:` line\n"
     )
@@ -14286,7 +14349,7 @@ def test_release_requires_exactly_one_landing_outcome(arguments: list[str]) -> N
 PARENT_ISSUE = 79
 
 
-def parented_pr_check_client(
+def parented_check_client(
     monkeypatch: pytest.MonkeyPatch,
     *,
     body: str,
@@ -14295,7 +14358,7 @@ def parented_pr_check_client(
     parent_repository: str = REPOSITORY,
     parent_kind: board.ItemKind | None = board.ItemKind.CONTAINER,
 ) -> FakeForge:
-    client = pr_check_client(monkeypatch, landing_pull_request(body=body))
+    client = check_client(monkeypatch, landing_pull_request(body=body))
     client.parents[WORK_ITEM_ISSUE] = board.ParentIssue(
         board.IssueReference(parent_repository, PARENT_ISSUE), parent_body, parent_kind
     )
@@ -14305,45 +14368,45 @@ def parented_pr_check_client(
     return client
 
 
-def test_pr_check_requires_the_parent_to_close_with_its_last_open_child(
+def test_check_requires_the_parent_to_close_with_its_last_open_child(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Closing is required only when the parent's own `Next` line names no
     further work -- `complete_contract("keiner")` is exactly that."""
-    parented_pr_check_client(
+    parented_check_client(
         monkeypatch,
         body="Work-Item: #72\n\nCloses #72",
         parent_body=complete_contract("keiner"),
         open_children=(board.IssueReference(REPOSITORY, WORK_ITEM_ISSUE),),
     )
 
-    assert run_pr_check() == 1
+    assert run_check() == 1
     assert capsys.readouterr().err == (
         f"REFUSED: pull request #12 closes the last open child of parent "
         f"{REPOSITORY}#{PARENT_ISSUE}; close the parent too\n"
     )
 
 
-def test_pr_check_accepts_a_last_child_landing_when_the_parent_still_has_next_work(
+def test_check_accepts_a_last_child_landing_when_the_parent_still_has_next_work(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Ruled example: the container's own `Next` line still names work, so
     the landing may pass without closing it -- a container with a single
     dispatched child is the normal case, not the end."""
-    parented_pr_check_client(
+    parented_check_client(
         monkeypatch,
         body="Work-Item: #72\n\nCloses #72",
         parent_body=complete_contract("Cut the next slice."),
         open_children=(board.IssueReference(REPOSITORY, WORK_ITEM_ISSUE),),
     )
 
-    assert run_pr_check() == 0
+    assert run_check() == 0
     assert capsys.readouterr().out == (
         f"PR #12 by ada declares Work-Item: {REPOSITORY}#{WORK_ITEM_ISSUE}\n"
     )
 
 
-def test_pr_check_reads_the_parents_next_from_the_block_not_stale_prose(
+def test_check_reads_the_parents_next_from_the_block_not_stale_prose(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
     """The last-child rule reads a block-pinned parent's `next` through
@@ -14354,38 +14417,38 @@ def test_pr_check_reads_the_parents_next_from_the_block_not_stale_prose(
         agent_claim_body('version = 1\nnow = "N"\nnext = "Cut the next slice."\ndone_when = "D"\n')
         + "\n\n## Next\nnichts\n"
     )
-    parented_pr_check_client(
+    parented_check_client(
         monkeypatch,
         body="Work-Item: #72\n\nCloses #72",
         parent_body=parent_body,
         open_children=(board.IssueReference(REPOSITORY, WORK_ITEM_ISSUE),),
     )
 
-    assert run_pr_check() == 0
+    assert run_check() == 0
     assert capsys.readouterr().out == (
         f"PR #12 by ada declares Work-Item: {REPOSITORY}#{WORK_ITEM_ISSUE}\n"
     )
 
 
-def test_pr_check_refuses_a_legacy_parent_before_the_next_check(
+def test_check_refuses_a_legacy_parent_before_the_next_check(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
     monkeypatch.setattr(checkout, "_git_output", lambda _arguments: str(tmp_path))
     _write_block_pin(tmp_path)
-    parented_pr_check_client(
+    parented_check_client(
         monkeypatch,
         body="Work-Item: #72\n\nCloses #72",
         parent_body="## Now\nOld prose.\n",
         open_children=(board.IssueReference(REPOSITORY, WORK_ITEM_ISSUE),),
     )
 
-    assert run_pr_check() == 1
+    assert run_check() == 1
     assert capsys.readouterr().err == (
         f"REFUSED: pull request #12 has parent {REPOSITORY}#{PARENT_ISSUE} with a legacy body\n"
     )
 
 
-def test_pr_check_refuses_a_malformed_parent_before_the_next_check(
+def test_check_refuses_a_malformed_parent_before_the_next_check(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
     monkeypatch.setattr(checkout, "_git_output", lambda _arguments: str(tmp_path))
@@ -14393,37 +14456,37 @@ def test_pr_check_refuses_a_malformed_parent_before_the_next_check(
     malformed_parent_body = agent_claim_body(
         'version = 2\nnow = "N"\nnext = "X"\ndone_when = "D"\n'
     )
-    parented_pr_check_client(
+    parented_check_client(
         monkeypatch,
         body="Work-Item: #72\n\nCloses #72",
         parent_body=malformed_parent_body,
         open_children=(board.IssueReference(REPOSITORY, WORK_ITEM_ISSUE),),
     )
 
-    assert run_pr_check() == 1
+    assert run_check() == 1
     assert capsys.readouterr().err == (
         f"REFUSED: pull request #12 has parent {REPOSITORY}#{PARENT_ISSUE} "
         "with a body malformed: version: version must be exactly 1\n"
     )
 
 
-def test_pr_check_permits_but_does_not_require_closing_a_parent_with_further_next_work(
+def test_check_permits_but_does_not_require_closing_a_parent_with_further_next_work(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    parented_pr_check_client(
+    parented_check_client(
         monkeypatch,
         body="Work-Item: #72\n\nCloses #72\nCloses #79",
         parent_body=complete_contract("Cut the next slice."),
         open_children=(board.IssueReference(REPOSITORY, WORK_ITEM_ISSUE),),
     )
 
-    assert run_pr_check() == 0
+    assert run_check() == 0
 
 
-def test_pr_check_refuses_a_parent_that_is_not_a_container(
+def test_check_refuses_a_parent_that_is_not_a_container(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    parented_pr_check_client(
+    parented_check_client(
         monkeypatch,
         body="Work-Item: #72\n\nCloses #72",
         parent_body=complete_contract("keiner"),
@@ -14431,33 +14494,33 @@ def test_pr_check_refuses_a_parent_that_is_not_a_container(
         parent_kind=board.ItemKind.TASK,
     )
 
-    assert run_pr_check() == 1
+    assert run_check() == 1
     assert capsys.readouterr().err == (
         f"REFUSED: pull request #12 has parent {REPOSITORY}#{PARENT_ISSUE} of kind task, "
         "which is not a container; only a container holds children\n"
     )
 
 
-def test_pr_check_accepts_a_landing_that_closes_its_completed_parent(
+def test_check_accepts_a_landing_that_closes_its_completed_parent(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    parented_pr_check_client(
+    parented_check_client(
         monkeypatch,
         body="Work-Item: #72\n\nCloses #72\nCloses #79",
         parent_body="## Now\nEpic.",
         open_children=(board.IssueReference(REPOSITORY, WORK_ITEM_ISSUE),),
     )
 
-    assert run_pr_check() == 0
+    assert run_check() == 0
     assert capsys.readouterr().out == (
         f"PR #12 by ada declares Work-Item: {REPOSITORY}#{WORK_ITEM_ISSUE}\n"
     )
 
 
-def test_pr_check_requires_a_next_line_on_a_parent_that_keeps_other_children(
+def test_check_requires_a_next_line_on_a_parent_that_keeps_other_children(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    parented_pr_check_client(
+    parented_check_client(
         monkeypatch,
         body="Work-Item: #72\n\nCloses #72",
         parent_body="## Now\nEpic without a next step.",
@@ -14467,17 +14530,17 @@ def test_pr_check_requires_a_next_line_on_a_parent_that_keeps_other_children(
         ),
     )
 
-    assert run_pr_check() == 1
+    assert run_check() == 1
     assert capsys.readouterr().err == (
         f"REFUSED: pull request #12 leaves parent {REPOSITORY}#{PARENT_ISSUE} open with "
         "1 other open child, whose body carries no Next line\n"
     )
 
 
-def test_pr_check_accepts_a_landing_whose_parent_says_what_comes_next(
+def test_check_accepts_a_landing_whose_parent_says_what_comes_next(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    parented_pr_check_client(
+    parented_check_client(
         monkeypatch,
         body="Work-Item: #72\n\nCloses #72",
         parent_body=complete_contract("Dispatch slice 4."),
@@ -14487,16 +14550,16 @@ def test_pr_check_accepts_a_landing_whose_parent_says_what_comes_next(
         ),
     )
 
-    assert run_pr_check() == 0
+    assert run_check() == 0
     assert capsys.readouterr().out == (
         f"PR #12 by ada declares Work-Item: {REPOSITORY}#{WORK_ITEM_ISSUE}\n"
     )
 
 
-def test_pr_check_refuses_to_close_a_parent_that_keeps_other_children(
+def test_check_refuses_to_close_a_parent_that_keeps_other_children(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    parented_pr_check_client(
+    parented_check_client(
         monkeypatch,
         body="Work-Item: #72\n\nCloses #72\nCloses #79",
         parent_body=complete_contract("Dispatch slice 4."),
@@ -14506,17 +14569,17 @@ def test_pr_check_refuses_to_close_a_parent_that_keeps_other_children(
         ),
     )
 
-    assert run_pr_check() == 1
+    assert run_check() == 1
     assert capsys.readouterr().err == (
         f"REFUSED: pull request #12 closes {REPOSITORY}#{PARENT_ISSUE} besides its work "
         f"item {REPOSITORY}#{WORK_ITEM_ISSUE}; a pull request lands one item\n"
     )
 
 
-def test_pr_check_refuses_a_parent_recorded_in_another_repository(
+def test_check_refuses_a_parent_recorded_in_another_repository(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    parented_pr_check_client(
+    parented_check_client(
         monkeypatch,
         body="Work-Item: #72\n\nCloses #72",
         parent_body=complete_contract("Cut the next slice."),
@@ -14524,7 +14587,7 @@ def test_pr_check_refuses_a_parent_recorded_in_another_repository(
         parent_repository="other/repo",
     )
 
-    assert run_pr_check() == 1
+    assert run_check() == 1
     assert capsys.readouterr().err == (
         f"REFUSED: pull request #12 has parent other/repo#{PARENT_ISSUE} in another "
         "repository, whose children this check cannot read\n"
@@ -14741,19 +14804,293 @@ def test_next_names_a_recovery_item_before_the_item_it_recommends(
     assert capsys.readouterr().out.startswith(f"RECOVERY\n#90: {board.RECOVERY_STEP}\n\n")
 
 
-def test_pr_check_accepts_a_body_naming_work_github_does_not_close_on(
+def test_check_accepts_a_body_naming_work_github_does_not_close_on(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """`Implements #80` retires nothing on GitHub, so it is no closing reference."""
-    pr_check_client(
+    check_client(
         monkeypatch,
         landing_pull_request(body="Work-Item: #72\n\nCloses #72\n\nImplements #80"),
     )
 
-    assert run_pr_check() == 0
+    assert run_check() == 0
     assert capsys.readouterr().out == (
         f"PR #12 by ada declares Work-Item: {REPOSITORY}#{WORK_ITEM_ISSUE}\n"
     )
+
+
+CHECKED_ISSUE = 81
+
+
+def issue_check_client(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    body: str,
+    state: forge.ItemState = forge.ItemState.OPEN,
+    dependencies: tuple[board.IssueDependency, ...] = (),
+    pin: board.BodyContractMode = board.BodyContractMode.PROSE,
+) -> FakeForge:
+    """A client serving one issue under the repository's own body pin.
+
+    No store patching: the issue mode of `check` never reads the state ref,
+    so a test that needed one would be proving the wrong command.
+    """
+    if pin is board.BodyContractMode.BLOCK:
+        (tmp_path / ".agent-claim").mkdir(parents=True, exist_ok=True)
+        (tmp_path / ".agent-claim" / "board.toml").write_text('body_contract = "block"\n')
+    client = FakeForge()
+    client.issue_references[CHECKED_ISSUE] = forge.ItemReference(state, "Work", body)
+    client.board_dependencies[CHECKED_ISSUE] = dependencies
+    monkeypatch.setattr(github, "GitHubForge", lambda _repository: client)
+    return client
+
+
+def open_dependency(number: int, repository: str = REPOSITORY) -> board.IssueDependency:
+    return board.IssueDependency(
+        board.IssueReference(repository, number), board.BlockerState.OPEN, False
+    )
+
+
+def test_check_accepts_a_complete_unblocked_prose_issue_in_one_request(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    client = issue_check_client(monkeypatch, tmp_path, body=complete_contract("Land it."))
+
+    assert run_check(CHECKED_ISSUE) == 0
+    assert capsys.readouterr().out == f"ISSUE #{CHECKED_ISSUE} body ok\n"
+    assert client.requests == 1
+
+
+def test_check_reads_a_block_pinned_issue_in_two_requests_even_with_no_dependencies(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """The reference read cannot carry the empty dependency list, so the
+    block pin always costs the second request."""
+    client = issue_check_client(
+        monkeypatch,
+        tmp_path,
+        body=agent_claim_body(MINIMAL_BLOCK_TOML),
+        pin=board.BodyContractMode.BLOCK,
+    )
+
+    assert run_check(CHECKED_ISSUE) == 0
+    assert capsys.readouterr().out == f"ISSUE #{CHECKED_ISSUE} body ok\n"
+    assert client.requests == 2
+
+
+def test_check_refuses_a_number_that_does_not_exist_in_one_request(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    client = issue_check_client(monkeypatch, tmp_path, body="", state=forge.ItemState.MISSING)
+
+    assert run_check(CHECKED_ISSUE) == 1
+    assert capsys.readouterr().err == f"ISSUE #{CHECKED_ISSUE} does not exist here\n"
+    assert client.requests == 1
+
+
+def test_check_names_a_legacy_body_under_the_block_pin(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    issue_check_client(
+        monkeypatch,
+        tmp_path,
+        body=complete_contract("Land it."),
+        pin=board.BodyContractMode.BLOCK,
+    )
+
+    assert run_check(CHECKED_ISSUE) == 1
+    assert capsys.readouterr().err == f"ISSUE #{CHECKED_ISSUE} body legacy\n"
+
+
+@pytest.mark.parametrize(
+    ("body", "reason"),
+    [
+        pytest.param(
+            "```agent-claim\nversion = 1\n",
+            "agent-claim: unclosed agent-claim block",
+            id="broken-fence",
+        ),
+        pytest.param(
+            agent_claim_body('version = 1\nnow = 1\nnext = "X"\ndone_when = "D"\n'),
+            "now: now must be a string",
+            id="broken-value",
+        ),
+        pytest.param(
+            agent_claim_body(f'{MINIMAL_BLOCK_TOML}blocked_by = "#7"\n'),
+            "blocked_by: unknown top-level key blocked_by",
+            id="unknown-key",
+        ),
+    ],
+)
+def test_check_names_a_malformed_block_by_its_first_defect(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    body: str,
+    reason: str,
+) -> None:
+    issue_check_client(monkeypatch, tmp_path, body=body, pin=board.BodyContractMode.BLOCK)
+
+    assert run_check(CHECKED_ISSUE) == 1
+    assert capsys.readouterr().err == f"ISSUE #{CHECKED_ISSUE} body malformed: {reason}\n"
+
+
+@pytest.mark.parametrize(
+    ("body", "pin", "missing"),
+    [
+        pytest.param(
+            "## Now\nReady.\n\n## Next\nLand it.\n\n## Blocked by\nnichts",
+            board.BodyContractMode.PROSE,
+            "Done when",
+            id="prose-section-absent",
+        ),
+        pytest.param(
+            board.BLOCK_CHILD_SKELETON,
+            board.BodyContractMode.BLOCK,
+            "Now, Next, Done when",
+            id="block-skeleton-never-names-blocked-by",
+        ),
+    ],
+)
+def test_check_names_the_sections_an_incomplete_body_leaves_empty(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    body: str,
+    pin: board.BodyContractMode,
+    missing: str,
+) -> None:
+    issue_check_client(monkeypatch, tmp_path, body=body, pin=pin)
+
+    assert run_check(CHECKED_ISSUE) == 1
+    assert capsys.readouterr().err == f"ISSUE #{CHECKED_ISSUE} body incomplete: {missing}\n"
+
+
+def test_check_reads_prose_blockers_from_the_body_without_a_second_request(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    client = issue_check_client(
+        monkeypatch, tmp_path, body=complete_contract("Land it.", blocked_by="#75, #62")
+    )
+
+    assert run_check(CHECKED_ISSUE) == 1
+    assert capsys.readouterr().err == f"ISSUE #{CHECKED_ISSUE} blocked by #62, #75\n"
+    assert client.requests == 1
+
+
+def test_check_reads_block_blockers_from_the_forge_and_qualifies_foreign_ones(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    client = issue_check_client(
+        monkeypatch,
+        tmp_path,
+        body=agent_claim_body(MINIMAL_BLOCK_TOML),
+        dependencies=(open_dependency(7), open_dependency(9, "other/repo")),
+        pin=board.BodyContractMode.BLOCK,
+    )
+
+    assert run_check(CHECKED_ISSUE) == 1
+    assert capsys.readouterr().err == f"ISSUE #{CHECKED_ISSUE} blocked by #7, other/repo#9\n"
+    assert client.requests == 2
+
+
+def test_check_reads_a_pull_request_in_one_dispatch_landing_and_classification_request(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Four round trips for a parentless work item: the dispatch reference,
+    the landing itself, the default branch, and the sub-issue relation."""
+    client = check_client(
+        monkeypatch,
+        landing_pull_request(body=f"Work-Item: #{WORK_ITEM_ISSUE}\n\nCloses #{WORK_ITEM_ISSUE}"),
+    )
+
+    assert run_check() == 0
+    capsys.readouterr()
+    assert client.requests == 4
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        pytest.param(
+            f"Work-Item: #{WORK_ITEM_ISSUE}\n\nCloses #{WORK_ITEM_ISSUE}",
+            {"ok": True, "kind": "pull_request", "number": 12},
+            id="declared-pull-request",
+        ),
+        pytest.param(
+            "Tidy the README.",
+            {
+                "ok": False,
+                "kind": "pull_request",
+                "number": 12,
+                "refused": "carries no `Work-Item:` or `No-Item:` line",
+            },
+            id="unclassified-pull-request",
+        ),
+    ],
+)
+def test_check_json_discriminates_a_pull_request(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    body: str,
+    expected: dict[str, object],
+) -> None:
+    check_client(monkeypatch, landing_pull_request(body=body))
+
+    exit_code = issue_claim.main(["--repo", REPOSITORY, "check", "12", "--json"])
+
+    assert exit_code == (0 if expected["ok"] else 1)
+    assert json.loads(capsys.readouterr().out) == expected
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        pytest.param(
+            complete_contract("Land it."),
+            {"ok": True, "kind": "issue", "number": CHECKED_ISSUE},
+            id="sound-issue",
+        ),
+        pytest.param(
+            complete_contract("Land it.", blocked_by="#62"),
+            {
+                "ok": False,
+                "kind": "issue",
+                "number": CHECKED_ISSUE,
+                "refused": "blocked by #62",
+            },
+            id="blocked-issue",
+        ),
+    ],
+)
+def test_check_json_discriminates_an_issue(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    body: str,
+    expected: dict[str, object],
+) -> None:
+    issue_check_client(monkeypatch, tmp_path, body=body)
+
+    exit_code = issue_claim.main(["--repo", REPOSITORY, "check", str(CHECKED_ISSUE), "--json"])
+
+    assert exit_code == (0 if expected["ok"] else 1)
+    assert json.loads(capsys.readouterr().out) == expected
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        pytest.param(["pr-check", "--pr", "12"], id="replaced-command"),
+        pytest.param(["check", "--pr", "12"], id="replaced-option"),
+    ],
+)
+def test_the_replaced_pull_request_check_surface_is_gone(argv: list[str]) -> None:
+    with pytest.raises(SystemExit) as refused:
+        issue_claim.main(["--repo", REPOSITORY, *argv])
+
+    assert refused.value.code == 2
 
 
 def test_a_non_ascii_digit_in_a_hash_reference_is_not_an_issue_number() -> None:

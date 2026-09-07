@@ -6,7 +6,7 @@ import json
 import re
 import tomllib
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
@@ -399,6 +399,11 @@ class BoardConfig:
     canonical_remote: str = "origin"
 
 
+# Every key `.agent-claim/board.toml` defines; anything else is a typo, and
+# `_refuse_unknown_config_keys` names it rather than reading past it.
+CONFIG_KEYS = frozenset({setting.name for setting in fields(BoardConfig)})
+
+
 @dataclass(frozen=True)
 class ContractDefect:
     field: str
@@ -584,6 +589,20 @@ def _validated_canonical_remote(raw: dict[str, object], path: Path) -> str:
     )
 
 
+def _refuse_unknown_config_keys(raw: dict[str, object], path: Path) -> None:
+    """Name a key this file does not define, the way the block parser names
+    an unknown top-level key.
+
+    Silence here is expensive: `body_contarct = "block"` would leave the pin
+    at its prose default and every body would be read with the wrong grammar,
+    with nothing in any output saying so.
+    """
+    unknown = sorted(set(raw) - CONFIG_KEYS)
+    if unknown:
+        named = ", ".join(unknown)
+        raise protocol.ClaimError(f"board configuration {path} has unknown top-level key {named}")
+
+
 def load_config(path: Path = CONFIG_PATH) -> BoardConfig:
     if not path.exists():
         return BoardConfig()
@@ -592,6 +611,7 @@ def load_config(path: Path = CONFIG_PATH) -> BoardConfig:
             raw = tomllib.load(stream)
     except (OSError, tomllib.TOMLDecodeError) as error:
         raise protocol.ClaimError(f"cannot read board configuration {path}: {error}") from error
+    _refuse_unknown_config_keys(raw, path)
     return BoardConfig(
         priority_labels=_validated_priority_labels(raw),
         idea_label=_validated_idea_label(raw),
@@ -1577,14 +1597,23 @@ def replace_agent_claim_block(body: str, located: LocatedBlock, data: Mapping[st
     )
 
 
-def missing_or_empty_sections(contract: Contract) -> tuple[str, ...]:
+def missing_or_empty_sections(contract: Contract, mode: BodyContractMode) -> tuple[str, ...]:
     """Every projection section a body-incomplete refusal names: `None`
     (prose's unset section) or the empty string (a block's fresh skeleton
     value, #150) both count, even though both stay legitimate CONTRACT-column
     *presence* (`_contract_summary` is `None`-only for that column, matching
     #150 §5's rule that a block skeleton still shows `Now, Next, Done
-    when`)."""
-    return tuple(name for name, value in _contract_fields(contract) if not value)
+    when`).
+
+    A block body has no `Blocked by` section at all -- its dependencies live
+    on the forge -- so naming it as missing would ask for a key the block
+    grammar refuses.
+    """
+    return tuple(
+        name
+        for name, value in _contract_fields(contract)
+        if not value and not (mode is BodyContractMode.BLOCK and name == BLOCKED_BY)
+    )
 
 
 def slice_table_findings(body: str) -> SliceTableFindings:
@@ -1898,7 +1927,7 @@ def _freed_on(contract: Contract, blockers: dict[int, BlockerReference]) -> date
     )
 
 
-def _open_dependency_blockers(
+def open_dependency_blockers(
     dependencies: tuple[IssueDependency, ...], repository: str
 ) -> tuple[IssueReference, ...]:
     """Block mode's `open_blockers` (#150 §6): every open dependency, same-
@@ -1959,7 +1988,7 @@ def _single_concrete_next(value: str | None) -> bool:
 
 # Beside `NO_BLOCKERS`'s vocabulary for `Blocked by`, a container's `Next`
 # line has its own small set of "nothing left" spellings -- German and
-# English, ASCII only. `pr-check`'s last-child rule and `next`'s
+# English, ASCII only. `check`'s last-child rule and `next`'s
 # cut_slice/close_container split both read a `Next` line the same way.
 # "" joins this vocabulary for #150's block `next`: a block skeleton's
 # `next = ""` (never mapped to `None` the way prose's empty section is, so
@@ -2424,7 +2453,7 @@ def build_board(inputs: BoardBuildInputs) -> Board:
         issue.number: (
             _open_blockers(contracts[issue.number], blocker_by_number, repository)
             if modes[issue.number] is BodyContractMode.PROSE
-            else _open_dependency_blockers(inputs.dependencies.get(issue.number, ()), repository)
+            else open_dependency_blockers(inputs.dependencies.get(issue.number, ()), repository)
         )
         for issue in issues
     }

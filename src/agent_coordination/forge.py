@@ -92,9 +92,19 @@ class ItemState(StrEnum):
 
 @dataclass(frozen=True)
 class ItemReference:
+    """One referenced number, read once.
+
+    `is_landing` says whether that number is a pull request rather than a
+    plain issue, so a caller that must tell the two apart (`check`)
+    distributes on this single read instead of probing with `landing`, which
+    fails unclassified for an issue number. A number that does not exist is
+    `MISSING` and no landing.
+    """
+
     state: ItemState
     title: str | None = None
     body: str | None = None
+    is_landing: bool = False
 
 
 @dataclass(frozen=True)

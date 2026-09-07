@@ -284,7 +284,14 @@ class GitHubForge:
     def item_reference(self, number: int) -> forge.ItemReference:
         try:
             raw = self._run(
-                ["api", f"repos/{self.repository}/issues/{number}", "--jq", "{state,title,body}"]
+                [
+                    "api",
+                    f"repos/{self.repository}/issues/{number}",
+                    "--jq",
+                    # The issues endpoint answers for a pull request too, and
+                    # only its `pull_request` member tells the two apart.
+                    '{state,title,body,is_landing:has("pull_request")}',
+                ]
             )
         except forge.ForgeNotFoundError:
             return forge.ItemReference(forge.ItemState.MISSING)
@@ -295,16 +302,19 @@ class GitHubForge:
         state = value.get("state")
         title = value.get("title")
         body = value.get("body")
+        is_landing = value.get("is_landing")
         if (
             state not in {"open", "closed"}
             or not isinstance(title, str)
             or (body is not None and not isinstance(body, str))
+            or not isinstance(is_landing, bool)
         ):
             raise forge.ForgeMalformedResponseError("GitHub returned a malformed issue reference")
         return forge.ItemReference(
             forge.ItemState.OPEN if state == "open" else forge.ItemState.CLOSED,
             title,
             body or "",
+            is_landing,
         )
 
     def _json_lines(self, raw: str, description: str) -> tuple[object, ...]:
