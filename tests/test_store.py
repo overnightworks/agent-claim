@@ -1299,6 +1299,26 @@ def test_apply_claim_intent_replays_idempotently_for_the_same_claim_id_and_field
     assert replayed == once
 
 
+def test_apply_claim_intent_replays_idempotently_for_a_lane_identity() -> None:
+    """Same criterion 2 replay as above, but for a `LaneIdentity` claim: it
+    carries no field of its own (`_same_identity`'s other branch, next to
+    `IssueIdentity`'s), so two independently constructed `LaneIdentity()`
+    instances must still compare equal for the replay to match."""
+    lane_intent = _claim_intent(identity=protocol.LaneIdentity(), branch="docs/tidy-readme")
+    once = protocol.apply(_STATE_WITH_TIP, lane_intent)
+
+    replayed = protocol.apply(
+        once,
+        _claim_intent(
+            identity=protocol.LaneIdentity(),
+            branch="docs/tidy-readme",
+            operation_id="a-different-operation-id",
+        ),
+    )
+
+    assert replayed == once
+
+
 def test_apply_claim_intent_refuses_a_reused_claim_id_with_different_fields() -> None:
     once = protocol.apply(_STATE_WITH_TIP, _claim_intent())
     reused = _claim_intent(scope=("README.md",))
