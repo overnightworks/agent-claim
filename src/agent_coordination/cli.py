@@ -2608,6 +2608,8 @@ def main(arguments: list[str] | None = None) -> int:
         return _dispatch(parsed)
     except protocol.ClaimError as error:
         print(f"ERROR: {error}", file=sys.stderr)
+        if getattr(parsed, "json", False):
+            print(json.dumps({"ok": False, "error": str(error)}))
         return 2
 
 
