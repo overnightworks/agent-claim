@@ -15,7 +15,6 @@ from typing import TypeVar
 
 from . import board, forge, process, protocol
 from .protocol import (
-    MAX_COMMENT_BYTES,
     MAX_PROTOCOL_BYTES,
     MAX_PROTOCOL_EVENTS,
     REPOSITORY_PATTERN,
@@ -247,7 +246,6 @@ _READ_ONLY_OPERATIONS = (
     forge.ForgeOperation.LIST_RECENT_MERGED_BOARD_PULL_REQUESTS,
 )
 _READ_WRITE_OPERATIONS = (
-    forge.ForgeOperation.POST_COMMENT,
     forge.ForgeOperation.CREATE_CHILD,
     forge.ForgeOperation.UPDATE_ITEM_BODY,
 )
@@ -930,19 +928,6 @@ class GitHubForge:
             if merged_at >= cutoff:
                 recent.append(pull_request)
         return tuple(recent)
-
-    def post_comment(self, issue: int, body: str) -> str:
-        if "\x00" in body:
-            raise ClaimError("GitHub comment body contains a NUL byte")
-        encoded = body.encode("utf-8")
-        if len(encoded) > MAX_COMMENT_BYTES:
-            raise ClaimError(
-                f"GitHub comment body exceeds the {MAX_COMMENT_BYTES}-byte safety limit"
-            )
-        return self._run(
-            ["issue", "comment", str(issue), "--repo", self.repository.path, "--body-file", "-"],
-            input_data=encoded,
-        )
 
     def create_child(self, *, parent: int, title: str, body: str, kind: board.ItemKind) -> int:
         """Create a fresh issue of `kind` and record it as `parent`'s sub-issue.

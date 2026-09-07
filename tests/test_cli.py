@@ -31,7 +31,6 @@ from agent_claim import (
 )
 from agent_claim import cli as issue_claim
 from agent_claim.cli import (
-    MAX_COMMENT_BYTES,
     ClaimantRelease,
     ClaimError,
     ClaimRequest,
@@ -219,12 +218,6 @@ def _live_store_claim() -> protocol.ActiveClaim:
 @dataclass
 class FakeForge:
     comments: dict[int, list[IssueComment]] = field(default_factory=dict)
-    inject_before_next_ledger_post: IssueComment | None = None
-    inject_after_next_ledger_post: IssueComment | None = None
-    # 1-indexed: the Nth post_comment(LEDGER_ISSUE, ...) call raises instead of
-    # posting -- simulates a compensating repair write itself failing (#136).
-    fail_ledger_post_at_call: int | None = None
-    ledger_post_call_count: int = field(default=0, init=False)
     board_issues: tuple[board.Issue, ...] = ()
     board_open_pull_requests: tuple[board.PullRequest, ...] = ()
     board_merged_pull_requests: tuple[board.PullRequest, ...] = ()
@@ -285,32 +278,6 @@ class FakeForge:
         return tuple(
             entry for entry in self.comments.get(issue, []) if protocol.is_protocol_candidate(entry)
         )
-
-    def post_comment(self, issue: int, body: str) -> str:
-        if issue == protocol.LEDGER_ISSUE:
-            self.ledger_post_call_count += 1
-            if self.ledger_post_call_count == self.fail_ledger_post_at_call:
-                raise ClaimError("ledger post failed (simulated)")
-        if issue == protocol.LEDGER_ISSUE and self.inject_before_next_ledger_post is not None:
-            self.comments.setdefault(protocol.LEDGER_ISSUE, []).append(
-                self.inject_before_next_ledger_post
-            )
-            self.inject_before_next_ledger_post = None
-        identifier = (
-            max(
-                (entry.identifier for entries in self.comments.values() for entry in entries),
-                default=0,
-            )
-            + 1
-        )
-        posted = comment(identifier, body)
-        self.comments.setdefault(issue, []).append(posted)
-        if issue == protocol.LEDGER_ISSUE and self.inject_after_next_ledger_post is not None:
-            self.comments.setdefault(protocol.LEDGER_ISSUE, []).append(
-                self.inject_after_next_ledger_post
-            )
-            self.inject_after_next_ledger_post = None
-        return posted.url
 
     def list_open_board_issues(self) -> tuple[board.Issue, ...]:
         self._run()
@@ -383,9 +350,6 @@ class ReaderOnlyForge(FakeForge):
     succeeding -- the enforcement that a read-only command never writes,
     independent of the `ForgeReader`/`ForgeWriter` annotations (documentation
     only; nothing type-checks in CI)."""
-
-    def post_comment(self, issue: int, body: str) -> str:
-        pytest.fail("a read-only command must never post a comment")
 
     def create_child(self, *, parent: int, title: str, body: str, kind: board.ItemKind) -> int:
         pytest.fail("a read-only command must never create a child")
@@ -481,7 +445,7 @@ def test_forge_operation_exhaustiveness_matches_the_declared_reader_and_writer_m
         if not name.startswith("_") and name not in {"repository", "capability", "requests"}
     }
     assert {operation.value for operation in forge.ForgeOperation} == declared_methods
-    assert len(forge.ForgeOperation) == 14
+    assert len(forge.ForgeOperation) == 13
     assert set(github.GITHUB_CAPABILITIES) == set(forge.ForgeOperation)
     assert forge.Capability.UNSUPPORTED not in github.GITHUB_CAPABILITIES.values()
 
@@ -7500,14 +7464,14 @@ def test_aggregation_fences_an_unknown_field_comment_instead_of_failing_the_ledg
     assert unreadable[0].unknown_fields == ("surprise",)
 
 
-def test_an_unreadable_rescope_quarantines_its_still_readable_claim() -> None:
+def test_an_unreadable_rescope_leaves_its_still_readable_claim_active() -> None:
     """Finding 1 (issue #136): a claim posted normally, then rescoped by a newer
     writer whose rescope this reader cannot parse, stays active and readable --
-    but `LedgerActiveClaim.quarantined_by` now names the rescope comment that
-    fences it. Nothing in production reads that attachment any more
-    (`release`/`pr-check` moved onto the store in this same slice); it is
-    D-scheduled aggregation-walk infrastructure `bootstrap --ledger` still
-    needs whole, so this pins the walk's own behaviour directly."""
+    the unreadable rescope never applies, it only contributes an
+    `UnreadableClaim` record to the aggregate's `unreadable` list.
+    `bootstrap --ledger` refuses the whole import by name whenever that list is
+    non-empty (`_reject_unreadable_claims`); `active_claims` -- the walk this
+    test exercises directly -- tolerates it."""
     claimed = claim_comment(request(issue=72, scope=("src",)))
     newer_rescope = marker(
         {
@@ -7525,12 +7489,12 @@ def test_an_unreadable_rescope_quarantines_its_still_readable_claim() -> None:
     standing = active_claims(ledger)
 
     assert [claim.claim_id for claim in standing] == ["claim-a"]
-    quarantine = standing[0].quarantined_by
-    assert quarantine is not None
-    assert quarantine.claim_id == "claim-a"
-    assert quarantine.unknown_fields == ("surprise",)
     # The claim's own scope is untouched: the unreadable rescope never applied.
     assert standing[0].scope == ("src",)
+    unreadable = protocol._aggregate_claim_events(ledger).unreadable
+    assert len(unreadable) == 1
+    assert unreadable[0].claim_id == "claim-a"
+    assert unreadable[0].unknown_fields == ("surprise",)
 
 
 def test_release_must_come_from_original_claimant() -> None:
@@ -8044,7 +8008,7 @@ def test_github_adapter_capability_reads_the_declared_table() -> None:
         client.capability(forge.ForgeOperation.LIST_PROTOCOL_CANDIDATES)
         is forge.Capability.READ_ONLY
     )
-    assert client.capability(forge.ForgeOperation.POST_COMMENT) is forge.Capability.READ_WRITE
+    assert client.capability(forge.ForgeOperation.CREATE_CHILD) is forge.Capability.READ_WRITE
 
 
 def test_github_adapter_item_reference_reads_state_title_and_body() -> None:
@@ -8536,45 +8500,6 @@ def test_fake_and_github_adapters_expose_only_common_protocol_candidates() -> No
     )
 
     assert real_client.list_protocol_candidates(LEDGER_ISSUE) == (trusted,)
-
-
-def test_comment_size_is_bounded_before_any_adapter_post() -> None:
-    """The size guard lives on `post_comment` itself (issue #176): the one
-    remaining production writer of a GitHub comment body -- `claim_comment`
-    validated this before deletion, but a bound checked at the real I/O
-    boundary is a single owner instead of duplicated per writer."""
-    client = GitHubForge(github._repository_id("example/agent-claim"))
-    oversized_body = "x" * (MAX_COMMENT_BYTES + 1)
-
-    with pytest.raises(ClaimError, match=str(MAX_COMMENT_BYTES)):
-        client.post_comment(LEDGER_ISSUE, oversized_body)
-
-
-def test_post_comment_refuses_a_body_containing_a_nul_byte() -> None:
-    client = GitHubForge(github._repository_id("example/agent-claim"))
-
-    with pytest.raises(ClaimError, match="NUL byte"):
-        client.post_comment(LEDGER_ISSUE, "claim body with a \x00 byte")
-
-
-def test_github_comment_body_uses_stdin_instead_of_process_argument() -> None:
-    observed: dict[str, object] = {}
-
-    def run(arguments: list[str], *, input_data: bytes | None = None) -> str:
-        observed["arguments"] = arguments
-        observed["input"] = input_data
-        return "https://github.com/example/agent-claim/issues/71#issuecomment-1"
-
-    client = GitHubForge(github._repository_id("example/agent-claim"), run=run)
-    body = claim_comment(request())
-
-    client.post_comment(LEDGER_ISSUE, body)
-
-    arguments = observed["arguments"]
-    assert isinstance(arguments, list)
-    assert body not in arguments
-    assert arguments[-2:] == ["--body-file", "-"]
-    assert observed["input"] == body.encode()
 
 
 def test_merged_pull_request_history_warns_when_it_reaches_the_result_cap(
@@ -11381,9 +11306,8 @@ def test_cli_claim_replay_does_not_resurrect_a_released_claim(
     existing = request("released-claim", "Ada", issue=72, branch="codex/issue-72", scope=("src",))
     client = _claims_client(existing)
     released = active_claims(client.list_protocol_candidates(LEDGER_ISSUE))[0]
-    client.post_comment(
-        LEDGER_ISSUE,
-        release_comment(released, "Ada", "builder", "landed"),
+    client.comments[LEDGER_ISSUE].append(
+        comment(2, release_comment(released, "Ada", "builder", "landed"))
     )
     _patch_status_cli(monkeypatch, client)
     monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)

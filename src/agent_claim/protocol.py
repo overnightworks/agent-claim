@@ -40,7 +40,6 @@ BRANCH_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,254}")
 REPOSITORY_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_.-]{1,100}")
 MAX_PROTOCOL_EVENTS = 4096
 MAX_PROTOCOL_BYTES = 8 * 1024 * 1024
-MAX_COMMENT_BYTES = 48 * 1024
 MAX_SCOPE_ENTRIES = 256
 MAX_SCOPE_PATH_LENGTH = 512
 WIDE_SCOPE_PATH_LIMIT = 3
@@ -123,12 +122,10 @@ class ResourceHold:
 class LedgerActiveClaim:
     """One claim id's current standing, derived from the whole ledger walk.
 
-    `quarantined_by` is set when a later comment for this same claim id carried
-    a field this reader's schema does not know (issue #136): the claim still
-    reads. `release`/`pr-check` moved onto the store in this same slice and no
-    longer consult it -- this dataclass and its whole aggregation walk are D-scheduled
-    infrastructure the import reader (`bootstrap --ledger`) still needs whole, kept
-    intact rather than picked apart function by function ahead of that deletion.
+    This dataclass and its whole aggregation walk are D-scheduled
+    infrastructure the import reader (`bootstrap --ledger`) still needs
+    whole, kept intact rather than picked apart function by function ahead
+    of that deletion.
     """
 
     identity: ClaimIdentity
@@ -142,22 +139,24 @@ class LedgerActiveClaim:
     resource: ResourceHold | None = None
     requested_resource: str | None = None
     whole_reason: str | None = None
-    quarantined_by: UnreadableClaim | None = None
 
 
 @dataclass(frozen=True)
 class UnreadableClaim:
     """A trusted claim comment carrying a field this reader's schema does not know.
 
-    A newer `agent-claim` wrote it; this reader fences the record itself and, when
-    its `claim_id` matches a claim already active on the ledger, quarantines that
-    claim too (issue #136) by setting `LedgerActiveClaim.quarantined_by` -- see there for
-    what quarantine refuses. `claim_id` is `None` when the field that would
-    normally identify it is itself missing or malformed -- the comment is still
-    named by `comment_url` in that case, and it quarantines nothing. Missing a
-    field this reader requires is a different, harder failure (a corrupt record,
-    not a newer writer): `_strict_keys` still raises `InvalidClaimMarkerError` for
-    that and never produces an `UnreadableClaim`.
+    A newer `agent-claim` wrote it; this reader fences the record itself
+    instead of letting it corrupt the whole read. `bootstrap --ledger`
+    refuses the whole import by name when any comment is unreadable
+    (`ClaimLedgerAggregate.unreadable`, `_reject_unreadable_claims`) -- an
+    unreadable comment's true content is unknowable to this reader, so
+    nothing downstream can be proven not to conflict with it. `claim_id` is
+    `None` when the field that would normally identify it is itself missing
+    or malformed -- the comment is still named by `comment_url` in that
+    case. Missing a field this reader requires is a different, harder
+    failure (a corrupt record, not a newer writer): `_strict_keys` still
+    raises `InvalidClaimMarkerError` for that and never produces an
+    `UnreadableClaim`.
     """
 
     claim_id: str | None
@@ -318,12 +317,6 @@ class ClaimReader(Protocol):
     """The remaining ledger-comment read: `bootstrap --ledger` import."""
 
     def list_protocol_candidates(self, issue: int) -> tuple[IssueComment, ...]: ...
-
-
-class ClaimWriter(ClaimReader, Protocol):
-    """`ClaimReader` plus posting a comment (step 6 receipt; import does not post)."""
-
-    def post_comment(self, issue: int, body: str) -> str: ...
 
 
 def _has_control_character(text: str) -> bool:
@@ -939,10 +932,9 @@ class ClaimLedgerAggregate:
 
     `unreadable` holds one `UnreadableClaim` per trusted comment the walk could not
     parse because of an unknown field (issue #136); such a comment contributes no
-    event of its own, so it never appears in `occurrences` or `terminated_by`. It
-    can still reach `active` indirectly: when its `claim_id` names a claim that is
-    already active, that claim is carried into `active` with `quarantined_by` set
-    to this record instead of `None`.
+    event of its own, so it never appears in `occurrences`, `terminated_by`, or
+    `active`. `bootstrap --ledger` refuses the whole import by name when this is
+    non-empty (`_reject_unreadable_claims`); `active_claims` tolerates it.
     """
 
     active: tuple[LedgerActiveClaim, ...]
@@ -1000,31 +992,6 @@ def _apply_claim_rescope_event(
     active[event.claim_id] = replace(current, scope=event.scope, whole_reason=new_whole_reason)
 
 
-def _quarantine_active_claims(
-    active: dict[str, LedgerActiveClaim], unreadable: list[UnreadableClaim]
-) -> dict[str, LedgerActiveClaim]:
-    """Attach the earliest matching `UnreadableClaim` to the active claim it names.
-
-    A quarantined claim id has no live `LedgerActiveClaim` to attach to when the
-    unreadable comment is itself the newer writer's `claim` (there was never a
-    readable claim under that id); it only matters, and only changes anything
-    here, when the id already names a claim this reader did parse -- e.g. a
-    newer writer's `rescope` of an existing claim (issue #136 finding 1).
-    """
-    reasons: dict[str, UnreadableClaim] = {}
-    for record in unreadable:
-        if record.claim_id is not None:
-            reasons.setdefault(record.claim_id, record)
-    if not reasons:
-        return active
-    return {
-        claim_id: (
-            replace(claim, quarantined_by=reasons[claim_id]) if claim_id in reasons else claim
-        )
-        for claim_id, claim in active.items()
-    }
-
-
 def _aggregate_claim_events(comments: tuple[IssueComment, ...]) -> ClaimLedgerAggregate:
     """Walk the ledger once, tolerating a reused claim id instead of raising on sight.
 
@@ -1058,11 +1025,10 @@ def _aggregate_claim_events(comments: tuple[IssueComment, ...]) -> ClaimLedgerAg
 
     occurrence_map = {claim_id: tuple(events) for claim_id, events in occurrences.items()}
     derived_active = _apply_derived_resource_holds(active, occurrence_map)
-    quarantined_active = _quarantine_active_claims(derived_active, unreadable)
     return ClaimLedgerAggregate(
         active=tuple(
             sorted(
-                quarantined_active.values(),
+                derived_active.values(),
                 key=lambda event: (event.comment.created_at, event.comment.identifier),
             )
         ),

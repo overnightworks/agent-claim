@@ -120,7 +120,6 @@ class ForgeOperation(StrEnum):
     """Every port operation; each member's value is its Protocol method name."""
 
     LIST_PROTOCOL_CANDIDATES = "list_protocol_candidates"
-    POST_COMMENT = "post_comment"
     ITEM_REFERENCE = "item_reference"
     LANDING = "landing"
     PARENT_ISSUE = "parent_issue"
@@ -208,7 +207,7 @@ class ForgeReader(protocol.ClaimReader, Protocol):
     ) -> tuple[board.PullRequest, ...]: ...
 
 
-class ForgeWriter(ForgeReader, protocol.ClaimWriter, Protocol):
+class ForgeWriter(ForgeReader, Protocol):
     """`ForgeReader` plus every operation that mutates forge state."""
 
     def create_child(self, *, parent: int, title: str, body: str, kind: board.ItemKind) -> int: ...

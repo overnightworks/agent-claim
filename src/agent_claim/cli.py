@@ -18,7 +18,6 @@ from . import __version__, board, checkout, forge, github, protocol, store
 AGENT_CLAIM_AGENT_ENV = checkout.AGENT_CLAIM_AGENT_ENV
 CLAUDE_SESSION_ID_ENV = checkout.CLAUDE_SESSION_ID_ENV
 GROK_SESSION_ID_ENV = checkout.GROK_SESSION_ID_ENV
-MAX_COMMENT_BYTES = protocol.MAX_COMMENT_BYTES
 LedgerActiveClaim = protocol.LedgerActiveClaim
 ClaimError = protocol.ClaimError
 ClaimRequest = protocol.ClaimRequest
