@@ -138,16 +138,38 @@ pushed as a plain fast-forward; an unreachable remote (auth or transport
 failure) fails loud instead of either printing or writing. It refuses when
 the forge target does not match the canonical remote's own repository.
 
-## Landing classification
+## Checking one number
 
-`aco pr-check --pr <n>` reads one pull request of the current
-checkout's repository (or `--repo OWNER/REPOSITORY`) and answers one question:
-which item does this landing close? It prints `PR #<n> by <author> declares
-<classification>` and exits 0, or prints one `REFUSED: pull request #<n> ...`
-line and exits 1. Run it as a required check on every pull request that targets
-the default branch. It needs a working tree of the repository (a shallow
-checkout is enough) to read the repository's `body_contract` pin from
-`.agent-claim/board.toml`, and refuses outright without one.
+`aco check <n>` reads one number of the current checkout's repository (or
+`--repo OWNER/REPOSITORY`) and says whether it is sound. It claims nothing,
+labels nothing, comments nothing and writes nothing. One forge request
+answers whether the number is a pull request, an issue, or in neither number
+space, and each answer asks a different question. `--json` prints it as
+`{"ok": …, "kind": "pull_request"|"issue"|"missing", "number": n}`, with a
+`refused` reason added when `ok` is false. The command needs a working tree of the
+repository (a shallow checkout is enough) to read the repository's
+`body_contract` pin from `.agent-claim/board.toml`, and refuses outright
+without one.
+
+For a **pull request** it answers: which item does this landing close? It
+prints `PR #<n> by <author> declares <classification>` and exits 0, or prints
+one `REFUSED: pull request #<n> ...` line and exits 1. Run it as a required
+check on every pull request that targets the default branch.
+
+For an **issue** it answers: can a builder start from this body? It prints one
+`ISSUE #<n> ...` line — `body ok` and exit 0, or one of `body legacy`,
+`body malformed: <reason>`, `body incomplete: <sections>`, or
+`blocked by #<a>, #<b>` and exit 1. Under the prose pin the blockers are the
+body's own `Blocked by` line; under the block pin they are GitHub's
+`blocked_by` dependencies, so a foreign one renders as `owner/repo#n`. A block
+body has no `Blocked by` section at all, so a body-incomplete line never asks
+for one. The issue mode reads nothing else: it repeats none of `claim`'s
+working-tree, identity, or ordering checks.
+
+A number that is in **neither** number space prints `REFUSED: #<n> does not
+exist in <owner>/<repo>` and exits 1. It names no kind: GitHub gives issues
+and pull requests one number space, so an absent number was never proven to
+be either.
 
 A pull request body carries exactly one classification line:
 
@@ -156,7 +178,7 @@ A pull request body carries exactly one classification line:
   keyword GitHub itself closes on, optionally qualified as `OWNER/REPO#n`; or
 - `No-Item: docs` or `No-Item: fix` for a lane that owns no issue.
 
-`pr-check` refuses a body with no classification line, with more than one, or
+`check` refuses a body with no classification line, with more than one, or
 naming two work items (split the pull request); a work item that lives in
 another repository; a work item with no active claim
 on the pull request's head branch; a closing reference naming anything but the
@@ -167,7 +189,7 @@ target the default branch. A classification line inside a fenced code block is
 documentation, never a declaration. `Advances #n` is read nowhere: a dispatched
 slice is its own item, and its pull request closes it.
 
-Parentage is GitHub's own sub-issue relation, not a line in a body. `pr-check`
+Parentage is GitHub's own sub-issue relation, not a line in a body. `check`
 reads the work item's recorded parent and that parent's open sub-issues. The
 parent must be kind `container` (its own native issue type); any other kind is
 refused by name, since only a container holds children. Closing the parent's
@@ -226,7 +248,12 @@ Item verfeinern`. Once it has a complete contract, its own Next takes over;
 without the configured label, a projectionless item remains `body incomplete`.
 The same file's `body_contract` key pins how a work-item body itself is read
 (prose, the default, or the typed block below); `priority_labels` and
-`idea_label` mean the same thing in either mode.
+`idea_label` mean the same thing in either mode. The file defines exactly
+`priority_labels`, `idea_label`, `body_contract` and `canonical_remote`; any
+other key is refused by name (`board configuration <path> has unknown
+top-level key body_contarct`) rather than read past, since a typo would
+otherwise leave the pin at its default and read every body with the wrong
+grammar.
 The board table's `FREED` column shows `YYYY-MM-DD (N d)` when every listed
 issue blocker has closed, using the latest such UTC closing date and whole days
 since then; it otherwise shows `-`. Every item in `board --json` carries the
@@ -360,7 +387,7 @@ body_contract = "block"
 ```
 
 Under that pin, `board`, `next`, issue-mode `claim`, `cut`, `rulings`, and the
-parent-body part of `pr-check` read a work item's `Now`/`Next`/`Done when`,
+parent-body part of `check` read a work item's `Now`/`Next`/`Done when`,
 freeze, expectations, and undispatched slices from one typed `agent-claim`
 fenced TOML block instead — no regex, no German markers, no slice table.
 

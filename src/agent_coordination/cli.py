@@ -10,6 +10,7 @@ from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import cast
 
@@ -371,18 +372,20 @@ def _add_cut_parser(commands: argparse._SubParsersAction) -> None:
     cut.add_argument("--json", action="store_true", help=JSON_HELP)
 
 
-def _add_pull_request_check_parser(commands: argparse._SubParsersAction) -> None:
-    pull_request_check = commands.add_parser(
-        "pr-check",
-        help="check a pull request's typed work-item classification before it merges",
+def _add_check_parser(commands: argparse._SubParsersAction) -> None:
+    check = commands.add_parser(
+        "check",
+        help=(
+            "read one number -- a pull request's work-item classification, or an "
+            "issue's body contract; claims, labels and writes nothing"
+        ),
     )
-    pull_request_check.add_argument(
-        "--pr",
+    check.add_argument(
+        "number",
         type=int,
-        required=True,
-        metavar="NUMBER",
-        help="the pull request to check",
+        help="the pull request or issue to read; the forge says which one it is",
     )
+    check.add_argument("--json", action="store_true", help=JSON_HELP)
 
 
 def _add_protect_parser(commands: argparse._SubParsersAction) -> None:
@@ -399,7 +402,7 @@ _SUBPARSER_BUILDERS: tuple[Callable[[argparse._SubParsersAction], None], ...] = 
     _add_release_parser,
     _add_rescope_parser,
     _add_cut_parser,
-    _add_pull_request_check_parser,
+    _add_check_parser,
     _add_protect_parser,
 )
 
@@ -1165,7 +1168,9 @@ def _legacy_or_malformed_checks(item: board.BoardItem) -> tuple[SliceCheck, ...]
 
 
 def _body_contract_checks(
-    item: board.BoardItem, blocker_references: tuple[board.BlockerReference, ...]
+    item: board.BoardItem,
+    blocker_references: tuple[board.BlockerReference, ...],
+    mode: board.BodyContractMode,
 ) -> tuple[SliceCheck, ...]:
     legacy_or_malformed = _legacy_or_malformed_checks(item)
     if legacy_or_malformed is not None:
@@ -1200,7 +1205,7 @@ def _body_contract_checks(
     # but defect-free skeleton) is refused here exactly as it is invisible to
     # `next`, regardless of what else may also be true of it.
     if not item.contract_complete and not item.projectionless_idea:
-        missing = ", ".join(board.missing_or_empty_sections(contract))
+        missing = ", ".join(board.missing_or_empty_sections(contract, mode))
         checks.append(
             SliceCheck(
                 "error",
@@ -1249,7 +1254,9 @@ def _slice_rule_checks(
             SliceCheck("error", "missing-issue", f"issue #{issue} does not exist here", issue=issue)
         )
     if item is not None:
-        checks.extend(_body_contract_checks(item, projected.blocker_references))
+        checks.extend(
+            _body_contract_checks(item, projected.blocker_references, projected.body_contract)
+        )
     if title is not None:
         parent_check = _parent_checks(lookup.client, lookup.repository, issue, title)
         if parent_check is not None:
@@ -1490,21 +1497,127 @@ def _checked_classification(
     return classification if defect is None else defect
 
 
+class CheckKind(StrEnum):
+    """Which subject one `check` run read -- the `--json` discriminator.
+
+    Three values, because that is what the one dispatch request actually
+    distinguishes: GitHub gives issues and pull requests a single number
+    space, so a number that is not there was never proven to be either.
+    """
+
+    PULL_REQUEST = "pull_request"
+    ISSUE = "issue"
+    MISSING = "missing"
+
+
+@dataclass(frozen=True)
+class CheckOutcome:
+    """One `check` answer: the line a human reads, and the reason a caller
+    acts on -- `None` when the subject passed."""
+
+    kind: CheckKind
+    number: int
+    line: str
+    refused: str | None = None
+
+    def as_json(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "ok": self.refused is None,
+            "kind": self.kind.value,
+            "number": self.number,
+        }
+        if self.refused is not None:
+            payload["refused"] = self.refused
+        return payload
+
+    def report(self, *, as_json: bool) -> int:
+        if as_json:
+            print(json.dumps(self.as_json()))
+        else:
+            print(self.line, file=sys.stderr if self.refused is not None else sys.stdout)
+        return 1 if self.refused is not None else 0
+
+
 def _pull_request_check(
     client: forge.ForgeReader,
     claims: tuple[protocol.ActiveClaim, ...],
     repository: str,
     number: int,
     mode: board.BodyContractMode,
-) -> int:
+) -> CheckOutcome:
     detail = client.landing(number)
     context = _LandingCheckContext(client, repository, mode)
     checked = _checked_classification(context, claims, detail)
     if isinstance(checked, board.ClassificationDefect):
-        print(f"REFUSED: pull request #{detail.number} {checked.message}", file=sys.stderr)
-        return 1
-    print(f"PR #{detail.number} by {detail.author} declares {checked}")
-    return 0
+        return CheckOutcome(
+            CheckKind.PULL_REQUEST,
+            detail.number,
+            f"REFUSED: pull request #{detail.number} {checked.message}",
+            checked.message,
+        )
+    return CheckOutcome(
+        CheckKind.PULL_REQUEST,
+        detail.number,
+        f"PR #{detail.number} by {detail.author} declares {checked}",
+    )
+
+
+def _missing_number(repository: str, number: int) -> CheckOutcome:
+    """A number neither mode can read, named without claiming which of the
+    two it would have been."""
+    finding = f"does not exist in {repository}"
+    return CheckOutcome(CheckKind.MISSING, number, f"REFUSED: #{number} {finding}", finding)
+
+
+def _issue_line(number: int, finding: str) -> str:
+    """The one shape every issue-mode answer takes."""
+    return f"ISSUE #{number} {finding}"
+
+
+def _refused_issue(number: int, finding: str) -> CheckOutcome:
+    return CheckOutcome(CheckKind.ISSUE, number, _issue_line(number, finding), finding)
+
+
+def _open_issue_blockers(
+    client: forge.ForgeReader,
+    repository: str,
+    number: int,
+    contract: board.Contract,
+    mode: board.BodyContractMode,
+) -> tuple[board.IssueReference, ...]:
+    """What still blocks this issue, from whichever source its pin owns:
+    GitHub's own `blocked_by` dependencies under the block pin, the body's
+    own `Blocked by` line under prose -- which needs no second request,
+    since prose states its open blockers itself."""
+    if mode is board.BodyContractMode.BLOCK:
+        return board.open_dependency_blockers(client.list_board_dependencies(number), repository)
+    return tuple(
+        board.IssueReference(repository, blocker) for blocker in sorted(contract.blocker_issues)
+    )
+
+
+def _issue_check(
+    client: forge.ForgeReader,
+    repository: str,
+    body: str,
+    number: int,
+    mode: board.BodyContractMode,
+) -> CheckOutcome:
+    """Whether this issue's body is the contract a builder can start from:
+    readable under the repository's pin, complete, and unblocked."""
+    parsed = board.parse_body(body, mode)
+    if parsed.read_state is board.BodyReadState.LEGACY:
+        return _refused_issue(number, "body legacy")
+    if parsed.read_state is board.BodyReadState.MALFORMED:
+        return _refused_issue(number, board.body_defect_text(parsed.contract.defects[0]))
+    missing = board.missing_or_empty_sections(parsed.contract, mode)
+    if missing:
+        return _refused_issue(number, f"body incomplete: {', '.join(missing)}")
+    blockers = _open_issue_blockers(client, repository, number, parsed.contract, mode)
+    if blockers:
+        named = ", ".join(board.open_blocker_label(blocker, repository) for blocker in blockers)
+        return _refused_issue(number, f"blocked by {named}")
+    return CheckOutcome(CheckKind.ISSUE, number, _issue_line(number, "body ok"))
 
 
 def _release_outcome(merged: int | None, abandoned: str | None) -> protocol.ReleaseOutcome:
@@ -1885,17 +1998,32 @@ def _rescope_command(parsed: argparse.Namespace) -> protocol.RescopeRequest:
     )
 
 
-def _cmd_pull_request_check(parsed: argparse.Namespace, session: _ReadSession) -> int:
-    pull_request_number = int(parsed.pr)
-    config = _load_board_config(session.forge, _resolve_toplevel())
-    _worktree, _remote, observed = _store_observation(parsed)
-    return _pull_request_check(
-        session.forge,
-        tuple(observed.claims.values()),
-        session.forge.repository.path,
-        pull_request_number,
-        config.body_contract,
-    )
+def _cmd_check(parsed: argparse.Namespace, session: _ReadSession) -> int:
+    """One number, one dispatch request into one of three answers: a pull
+    request to classify, an issue whose body contract to read, or a number
+    that is in neither number space. Only the pull-request side needs the
+    live claims, so the issue side never fetches the state ref."""
+    number = int(parsed.number)
+    client = session.forge
+    repository = client.repository.path
+    config = _load_board_config(client, _resolve_toplevel())
+    reference = client.item_reference(number)
+    if reference.state is forge.ItemState.MISSING:
+        outcome = _missing_number(repository, number)
+    elif reference.is_landing:
+        _worktree, _remote, observed = _store_observation(parsed)
+        outcome = _pull_request_check(
+            client,
+            tuple(observed.claims.values()),
+            repository,
+            number,
+            config.body_contract,
+        )
+    else:
+        outcome = _issue_check(
+            client, repository, reference.body or "", number, config.body_contract
+        )
+    return outcome.report(as_json=parsed.json)
 
 
 def _cmd_status(parsed: argparse.Namespace) -> int:
@@ -2378,7 +2506,7 @@ def _cmd_cut(parsed: argparse.Namespace, session: _WriteSession) -> int:
 
 
 _READ_HANDLERS: dict[str, Callable[[argparse.Namespace, _ReadSession], int | None]] = {
-    "pr-check": _cmd_pull_request_check,
+    "check": _cmd_check,
     "board": _cmd_board,
     "rulings": _cmd_rulings,
     "next": _cmd_next,
