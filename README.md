@@ -567,12 +567,15 @@ an existing hook file. The CLI does not write `~/.grok`.
 }
 ```
 
-## v0.5 boundary
+## Scope and boundaries
 
-GitHub via the `gh` CLI is supported today. Invocations set `NO_COLOR=1`
-and `GH_NO_UPDATE_NOTIFIER=1`, strip ANSI from output, and parse pretty or
-compact JSON, so a wrapping `gh` shim is not required. The tool does not
-automatically allocate work, merge code, or operate a lease server. Omitted `--agent` follows
-the documented else-chain; it does not invent an identity. It intentionally
-leaves non-GitHub adapters for a later release, and writes no provider
-configuration of its own: not `~/.claude`, `~/.codex`, and not `~/.grok`.
+GitHub through the `gh` CLI is the one adapter that exists. A second forge
+attaches at the port — `ForgeReader`/`ForgeWriter`, with a `Capability` answer
+per operation — and not in the commands; the GitHub adapter itself refuses no
+operation. Invocations set `NO_COLOR=1` and `GH_NO_UPDATE_NOTIFIER=1`, strip
+ANSI from output, and parse pretty or compact JSON, so a wrapping `gh` shim is
+not required. The tool does not automatically allocate work, merge code, or
+operate a lease server. Omitted `--agent` follows the documented else-chain; it
+does not invent an identity. It writes no file outside the repository's own git
+directory: no provider configuration, and never `~/.claude`, `~/.codex`, or
+`~/.grok`.
