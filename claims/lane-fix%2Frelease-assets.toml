@@ -1,0 +1,7 @@
+claim_id = "0435b5a73d6749339b57dd1371df4d43"
+agent = "Claude Fable 5.1"
+role = "builder"
+base = "0d28bc1637173285156c1b7984a343ca9845e8e4"
+branch = "fix/release-assets"
+scope = [".github/workflows/release.yml"]
+opened_commit = "05cc2cdd64623812ac2cefd985816e3b318f18d4"
