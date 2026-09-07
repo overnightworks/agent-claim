@@ -392,12 +392,26 @@ class BoardConfig:
     priority_labels: tuple[str, ...] = DEFAULT_PRIORITY_LABELS
     idea_label: str | None = None
     body_contract: BodyContractMode = BodyContractMode.PROSE
+    # The remote `refs/aco/state` lives on (issue #176, §1); every store and
+    # import refusal is phrased in its terms. The store's own default is
+    # already "origin" (`store.DEFAULT_CANONICAL_REMOTE`) -- this is the one
+    # place a repository overrides it.
+    canonical_remote: str = "origin"
 
 
 @dataclass(frozen=True)
 class ContractDefect:
     field: str
     message: str
+
+
+def body_defect_text(defect: ContractDefect) -> str:
+    """The one rendering of a malformed body defect (issue #176 H3).
+
+    `cut` and the board/claim checks share this; a second renderer is a
+    defect. `check` in slice F reuses it.
+    """
+    return f"body malformed: {defect.field}: {defect.message}"
 
 
 def _contract_fields(contract: Contract) -> tuple[tuple[str, str | None], ...]:
@@ -521,6 +535,55 @@ class Board:
     requests: int
 
 
+def _validated_priority_labels(raw: dict[str, object]) -> tuple[str, ...]:
+    labels = raw.get("priority_labels")
+    if labels is None:
+        return DEFAULT_PRIORITY_LABELS
+    if (
+        not isinstance(labels, list)
+        or not labels
+        or not all(isinstance(label, str) and label.strip() == label and label for label in labels)
+        or len(set(labels)) != len(labels)
+    ):
+        raise protocol.ClaimError(
+            "board configuration priority_labels must be a non-empty list of unique labels"
+        )
+    return tuple(labels)
+
+
+def _validated_idea_label(raw: dict[str, object]) -> str | None:
+    idea_label = raw.get("idea_label")
+    if idea_label is not None and (
+        not isinstance(idea_label, str) or idea_label.strip() != idea_label or not idea_label
+    ):
+        raise protocol.ClaimError("board configuration idea_label must be a non-empty label")
+    return idea_label
+
+
+def _validated_body_contract(raw: dict[str, object], path: Path) -> BodyContractMode:
+    body_contract_raw = raw.get("body_contract")
+    if body_contract_raw is None:
+        return BodyContractMode.PROSE
+    if isinstance(body_contract_raw, str) and body_contract_raw in set(BodyContractMode):
+        return BodyContractMode(body_contract_raw)
+    raise protocol.ClaimError(f"board configuration {path} body_contract must be prose or block")
+
+
+def _validated_canonical_remote(raw: dict[str, object], path: Path) -> str:
+    canonical_remote_raw = raw.get("canonical_remote")
+    if canonical_remote_raw is None:
+        return "origin"
+    if (
+        isinstance(canonical_remote_raw, str)
+        and canonical_remote_raw.strip() == canonical_remote_raw
+        and canonical_remote_raw
+    ):
+        return canonical_remote_raw
+    raise protocol.ClaimError(
+        f"board configuration {path} canonical_remote must be a non-empty remote name"
+    )
+
+
 def load_config(path: Path = CONFIG_PATH) -> BoardConfig:
     if not path.exists():
         return BoardConfig()
@@ -529,37 +592,12 @@ def load_config(path: Path = CONFIG_PATH) -> BoardConfig:
             raw = tomllib.load(stream)
     except (OSError, tomllib.TOMLDecodeError) as error:
         raise protocol.ClaimError(f"cannot read board configuration {path}: {error}") from error
-    labels = raw.get("priority_labels")
-    if labels is None:
-        priority_labels = DEFAULT_PRIORITY_LABELS
-    else:
-        if (
-            not isinstance(labels, list)
-            or not labels
-            or not all(
-                isinstance(label, str) and label.strip() == label and label for label in labels
-            )
-            or len(set(labels)) != len(labels)
-        ):
-            raise protocol.ClaimError(
-                "board configuration priority_labels must be a non-empty list of unique labels"
-            )
-        priority_labels = tuple(labels)
-    idea_label = raw.get("idea_label")
-    if idea_label is not None and (
-        not isinstance(idea_label, str) or idea_label.strip() != idea_label or not idea_label
-    ):
-        raise protocol.ClaimError("board configuration idea_label must be a non-empty label")
-    body_contract_raw = raw.get("body_contract")
-    if body_contract_raw is None:
-        body_contract = BodyContractMode.PROSE
-    elif isinstance(body_contract_raw, str) and body_contract_raw in set(BodyContractMode):
-        body_contract = BodyContractMode(body_contract_raw)
-    else:
-        raise protocol.ClaimError(
-            f"board configuration {path} body_contract must be prose or block"
-        )
-    return BoardConfig(priority_labels, idea_label, body_contract)
+    return BoardConfig(
+        priority_labels=_validated_priority_labels(raw),
+        idea_label=_validated_idea_label(raw),
+        body_contract=_validated_body_contract(raw, path),
+        canonical_remote=_validated_canonical_remote(raw, path),
+    )
 
 
 def _contract_field_value(
@@ -1889,10 +1927,6 @@ def _dependency_freed_on(
     )
 
 
-def claim_age(created_at: str, now: datetime) -> timedelta:
-    return now.astimezone(UTC) - _timestamp(created_at)
-
-
 def _floored_claim_minutes(age: timedelta) -> int:
     return max(0, int(age.total_seconds())) // 60
 
@@ -1940,7 +1974,9 @@ def has_further_work(next_line: str | None) -> bool:
     return next_line is not None and next_line.casefold() not in _NO_FURTHER_WORK_VALUES
 
 
-def _claim_by_issue(claims: tuple[protocol.ActiveClaim, ...]) -> dict[int, protocol.ActiveClaim]:
+def _claim_by_issue(
+    claims: tuple[protocol.ScopedClaim, ...],
+) -> dict[int, protocol.ScopedClaim]:
     return {
         claim.identity.issue: claim
         for claim in claims
@@ -2138,7 +2174,8 @@ class _BoardBuildContext:
     blockers: dict[int, tuple[IssueReference, ...]]
     freed_on: dict[int, datetime | None]
     unblocks: dict[int, int]
-    claims_by_issue: dict[int, protocol.ActiveClaim]
+    claims_by_issue: dict[int, protocol.ScopedClaim]
+    claim_ages: Mapping[str, datetime]
     in_flight_references: frozenset[int]
     landed_references: frozenset[int]
     open_branches: frozenset[str]
@@ -2150,7 +2187,7 @@ class _BoardBuildContext:
 
 def _board_stage(
     issue: Issue,
-    claim: protocol.ActiveClaim | None,
+    claim: protocol.ScopedClaim | None,
     *,
     in_flight_references: frozenset[int],
     landed_references: frozenset[int],
@@ -2167,12 +2204,18 @@ def _board_stage(
 
 
 def _claim_projection(
-    claim: protocol.ActiveClaim | None, observed_at: datetime
+    claim: protocol.ScopedClaim | None,
+    claim_ages: Mapping[str, datetime],
+    observed_at: datetime,
 ) -> tuple[str | None, str | None, bool]:
-    """The (active_claim, claim_age, claim_old) trio a `BoardItem` shows for `claim`."""
+    """The (active_claim, claim_age, claim_old) trio a `BoardItem` shows for
+    `claim`. `opened_at` is the caller's own git-history read (issue #176,
+    §1) -- never derived here, so this stays a pure function of its inputs.
+    """
     if claim is None:
         return None, None, False
-    age = claim_age(claim.comment.created_at, observed_at)
+    opened_at = claim_ages[claim.claim_id]
+    age = observed_at.astimezone(UTC) - opened_at.astimezone(UTC)
     return f"{claim.agent} ({claim.role})", format_claim_age(age), claim_is_old(age)
 
 
@@ -2281,7 +2324,9 @@ def _board_item(
         kind=issue.kind,
         completes_container=completes_container,
     )
-    active_claim, claim_age_text, claim_old = _claim_projection(claim, observed_at)
+    active_claim, claim_age_text, claim_old = _claim_projection(
+        claim, context.claim_ages, observed_at
+    )
     open_blockers = context.blockers[issue.number]
     container_progress = context.container_progress.get(issue.number)
     actionable_reason = _actionable_reason(
@@ -2294,8 +2339,8 @@ def _board_item(
             contract_complete=parsed.contract_complete,
             projectionless_idea=projectionless_idea,
             read_state=parsed.read_state,
-            malformed_defect_field=(
-                contract.defects[0].field if parsed.read_state is BodyReadState.MALFORMED else None
+            malformed_defect=(
+                contract.defects[0] if parsed.read_state is BodyReadState.MALFORMED else None
             ),
             malformed_uncut=_malformed_only_uncut(
                 contract, parsed.slice_findings, container_progress
@@ -2343,7 +2388,7 @@ class BoardBuildInputs:
     issues: tuple[Issue, ...]
     open_pull_requests: tuple[PullRequest, ...]
     recent_merged_pull_requests: tuple[PullRequest, ...]
-    claims: tuple[protocol.ActiveClaim, ...]
+    claims: tuple[protocol.ScopedClaim, ...]
     config: BoardConfig
     repository: str
     blocker_references: tuple[BlockerReference, ...] | None = None
@@ -2352,6 +2397,10 @@ class BoardBuildInputs:
     children: Mapping[int, tuple[ChildItem, ...]] = field(default_factory=dict)
     dependencies: Mapping[int, tuple[IssueDependency, ...]] = field(default_factory=dict)
     requests: int = 0
+    # Each live claim's age (issue #176, §1): a committer date the caller
+    # already read from the store's git history, since board.py's own build
+    # stays pure and never reaches for git itself. Keyed by claim_id.
+    claim_ages: Mapping[str, datetime] = field(default_factory=dict)
 
 
 def build_board(inputs: BoardBuildInputs) -> Board:
@@ -2361,18 +2410,7 @@ def build_board(inputs: BoardBuildInputs) -> Board:
     config = inputs.config
     repository = inputs.repository
     observed_at = (inputs.now or datetime.now(UTC)).astimezone(UTC)
-    # `protocol.LEDGER_ISSUE` is the one per-item exception to the
-    # repository's pin (#150): its body belongs to ledger discovery, not the
-    # work-item grammar, so it is always read as prose regardless of
-    # `body_contract`, and never reports body legacy/malformed.
-    modes = {
-        issue.number: (
-            BodyContractMode.PROSE
-            if issue.number == protocol.LEDGER_ISSUE
-            else config.body_contract
-        )
-        for issue in issues
-    }
+    modes = {issue.number: config.body_contract for issue in issues}
     parsed_bodies = {issue.number: parse_body(issue.body, modes[issue.number]) for issue in issues}
     contracts = {number: parsed.contract for number, parsed in parsed_bodies.items()}
     blocker_by_number, blocker_references = _validated_blocker_by_number(
@@ -2421,6 +2459,7 @@ def build_board(inputs: BoardBuildInputs) -> Board:
         },
         unblocks=unblocks,
         claims_by_issue=_claim_by_issue(inputs.claims),
+        claim_ages=inputs.claim_ages,
         in_flight_references=_associated_issues(open_pull_requests, repository)
         | _touched_without_closing(open_pull_requests),
         landed_references=_associated_issues(recent_merged_pull_requests, repository)
@@ -2455,11 +2494,7 @@ def build_board(inputs: BoardBuildInputs) -> Board:
             for item in ordered
             if item.idle_days > STALE_IDLE_DAYS and item.stage is Stage.TEXT_ONLY
         ),
-        recovery=tuple(
-            item
-            for item in ordered
-            if item.number in landed_work_items and item.number != protocol.LEDGER_ISSUE
-        ),
+        recovery=tuple(item for item in ordered if item.number in landed_work_items),
         uncut=uncut,
         blocker_references=blocker_references,
         repository=repository,
@@ -2750,7 +2785,7 @@ class _ActionabilityFacts:
     contract_complete: bool
     projectionless_idea: bool
     read_state: BodyReadState = BodyReadState.VALID
-    malformed_defect_field: str | None = None
+    malformed_defect: ContractDefect | None = None
     malformed_uncut: tuple[MalformedSliceRow, ...] = ()
 
 
@@ -2767,8 +2802,8 @@ def _read_state_actionable_reason(facts: _ActionabilityFacts) -> str | None:
     itself cannot be read is never offered as "claim a child" (#150 §5)."""
     if facts.read_state is BodyReadState.LEGACY:
         return "body legacy"
-    if facts.read_state is BodyReadState.MALFORMED:
-        return f"body malformed: {facts.malformed_defect_field}"
+    if facts.read_state is BodyReadState.MALFORMED and facts.malformed_defect is not None:
+        return body_defect_text(facts.malformed_defect)
     return None
 
 

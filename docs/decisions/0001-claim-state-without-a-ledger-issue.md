@@ -30,7 +30,8 @@ Five costs are measured or read from the v0.9.0 source, not assumed.
 
 ## 2. Decision
 
-**One state ref.** `refs/agent-claim/state` on one configured canonical remote points at a
+**One state ref.** `refs/aco/state` (named by ruling, issue #176) on one configured canonical
+remote points at a
 commit whose tree *is* the current state: `claims/<key>.toml`, `resources/<name>.toml`, a
 schema `version`. The tree owns current state; the commit message owns the transition. A
 released claim is simply absent from the new tree and readable at the parent commit — there
@@ -79,9 +80,11 @@ capability. Forge failures are typed (`ForgeUnsupported`, `ForgePermissionDenied
 `ForgeNotFound`, `ForgeTransient`, `ForgeMalformedResponse`) instead of substring-matched.
 
 **Configuration stays in `.agent-claim/board.toml`,** extended only with settings that have a
-caller today: the pinned body contract (`body_contract`, issue #150) and a canonical-remote
-override. The separately reserved state-storage strategy remains unnamed until step 5 has a
-caller. Renaming the file is rejected — it would cost a migration to buy a better name.
+caller today: the pinned body contract (`body_contract`, issue #150) and `canonical_remote`
+(default `origin`, issue #176) naming the remote `refs/aco/state` lives on — every store and
+import refusal is worded in its terms. No separate state-storage-strategy key was ever added;
+the ref and its tree shape are the only storage decision, and both are named above. Renaming
+the file is rejected — it would cost a migration to buy a better name.
 
 ## 3. Rejected alternatives
 
@@ -144,7 +147,8 @@ plan review must satisfy. The direction in §2 is ruled; these are not.
    `pr-check` and merged-release verification contract, which also reads an author, PR body
    and classification, target and default branch, source repository, closing references, and
    the no-item case. The port must preserve that contract before anything is rewired to it.
-10. **The typed-model gaps.** A collision-free reversible codec for `LaneKey.branch` as a
+10. **The typed-model gaps — mapped, not wholesale (resolved 07.09.2026, issue #176 C1+C2).**
+    A collision-free reversible codec for `LaneKey.branch` as a
     file name; a claim transition carrying a resource *intent* rather than a preallocated
     allocation, with one allocation owner instead of the hold appearing in both the claim and
     the ledger; an acting identity carrying agent *and* validated role, since `apply` must
@@ -156,9 +160,21 @@ plan review must satisfy. The direction in §2 is ruled; these are not.
     rejection and from ambiguous push completion. The item-body portion of this criterion is
     resolved by issue #150 (step 4): each expectation is an exclusive union, `default: yes |
     no | later` (proposed) *or* `ruling: yes | no` with `ruled_on` (ruled), never both and
-    never neither — the typed `RuledExpectation.default` gap above is this union. The
-    state-model remainder (the transition-carried resource intent, the runtime-validating OID
-    type, immutable frozen-state collections, and the rest of this list) stays open for step 5.
+    never neither — the typed `RuledExpectation.default` gap above is this union.
+    The state-model remainder: six of the ten sub-items above are resolved by the state-ref
+    cut (C1+C2) and no others — do not read this criterion as satisfied wholesale. Resolved:
+    the claim-key codec (`store.claim_key`/`parse_claim_key`), the resource intent with one
+    allocation owner (`apply` plus `resources/<name>.toml`), acting identity carrying agent and
+    role (`protocol.ClaimIntent` and its siblings), the runtime-validating OID type
+    (`protocol.ObjectId`), immutable collections inside the frozen state
+    (`ClaimState.claims`/`consumed_ids`/`resources`), and the typed schema-failure pair
+    (`MalformedStateTreeError` / `UnsupportedStateSchemaError`). Still open, each with its
+    current owner: item created/updated timestamps (GitHub issue timestamps via the port, not
+    claim state); the body-update operation the migration needs (`UPDATE_ITEM_BODY` on the
+    port; `cut` is its caller; D6 killed `migrate-body`); the provider-neutral kind mapping
+    (`board.py`'s `idea_label` still competes with the native issue type — leftover of #112,
+    not this cut); and a typed `RuledExpectation.default` (`board.py` still carries only
+    `ExpectationState`'s `NONE`/`PROPOSED`/`RULED` — step 7 or a later item).
 11. **GitHub custom-ref probe re-run — satisfied for GitHub.** The live re-run of the
     custom-ref push/fetch/CAS probe against GitHub — create-if-absent, fast-forward update,
     non-fast-forward rejection, concurrent rejection, and delete — landed 05.09.2026 (results
@@ -251,5 +267,5 @@ Recorded verbatim.
 | D4 | Wide-scope thresholds are protocol constants, not configuration | No caller for repository-specific thresholds, and configuration would let two fleets in one repository disagree on what "too wide" means |
 | D5 | The migration machinery is deleted in the first release after every supported repository is proven migrated and old clients are fenced | Release distance does not decide safety; the proof does. A fixed "next release" is right only if that proof already exists |
 | D6 | One reviewed AI session per repository performs the body/relation hand migration (issue #150); the typed reader and the real CLI validate its result; GitHub's edit history is the undo. Does not repeal D1 or step 6, which concern later state-transition receipts | A migration command or module would be machinery with one caller and one run per repository — the hand-reviewed edit plus the existing typed reader already proves it without adding that surface |
-| D7 | The package renames to `agent-coordination` and the command to `aco`, one name each with no alias kept for the old ones, in the same release as the state-ref cut (step 5). Ruled 06.09.2026 | Command, package, and storage model already break together in that release, so carrying an alias forward would promise a continuity step 5 does not otherwise offer |
+| D7 | The package renames to `agent-coordination` and the command to `aco`, one name each with no alias kept for the old ones. Ruled 06.09.2026; timing amended 07.09.2026 (H1, issue #176): the rename lands in slice F, after the state-ref cut (step 5) and its one-time ledger import, not in the same release as the cut — the import checklist still runs `agent-claim bootstrap --ledger N` from a 1.0-but-not-yet-renamed build, since renaming the console script the import itself depends on would break the checklist mid-migration | Command, package, and storage model already break together at the rename release, so carrying an alias forward would promise a continuity that release does not otherwise offer; H1 separates "the storage model breaks" (step 5) from "the name breaks" (slice F) so the import has one fixed tool name to run under, not a moving target |
 | D8 | `pr-check` becomes `check <number>`, taking its number positionally: against a pull request it reports the landing classification `pr-check` performs today; against an issue it reports the body contract, missing sections, blockers, and legacy body, in the same release as D7. Ruled 06.09.2026 | An agent asks one question of a number — what stands between it and its next step — and GitHub answers what kind it is on the payload the adapter already fetches; the rename release teaches the port to carry that one field instead of adding a second lookup or a second command |

@@ -15,11 +15,16 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-
-# `test_cli.py`'s own ledger-onboarding double, reused for the ledger half of
-# `bootstrap` rather than duplicated, so both test files exercise
-# `bootstrap_ledger` against one maintained fake.
-from test_cli import FakeForge
+from test_cli import (
+    FakeForge,
+    LedgerActiveClaim,
+    _identity_marker_value,
+    comment,
+    marker,
+    parse_claim_event,
+    request,
+    rescope_comment,
+)
 
 from agent_claim import cli as issue_claim
 from agent_claim import github, process, protocol, store
@@ -193,6 +198,42 @@ def _raw_tree(worktree: Path, entries: list[tuple[str, str, str, str]]) -> str:
     )
 
 
+def _blob(worktree: Path, content: bytes) -> str:
+    return (
+        subprocess.run(
+            ["git", "-C", str(worktree), "hash-object", "-w", "--stdin"],
+            input=content,
+            check=True,
+            capture_output=True,
+        )
+        .stdout.decode()
+        .strip()
+    )
+
+
+def _push_raw_state_tree(
+    remote: Path, worktree: Path, entries: list[tuple[str, str, str, str]]
+) -> str:
+    """Push an arbitrary top-level tree (built via `_raw_tree`) onto `STATE_REF`,
+    for the malformed shapes `store`'s own write path can never produce."""
+    tree = _raw_tree(worktree, entries)
+    commit = (
+        subprocess.run(
+            ["git", "-C", str(worktree), "commit-tree", tree, "-m", "test fixture"],
+            check=True,
+            capture_output=True,
+        )
+        .stdout.decode()
+        .strip()
+    )
+    subprocess.run(
+        ["git", "-C", str(worktree), "push", "--force", str(remote), f"{commit}:{store.STATE_REF}"],
+        check=True,
+        capture_output=True,
+    )
+    return commit
+
+
 class _AcceptThenRaiseTransport:
     """A `PushTransport` that performs the real push once, then raises --
     reproducing a lost response after the remote actually advanced
@@ -282,7 +323,7 @@ def test_fetch_state_reads_via_fetch_head_without_creating_a_local_ref(
         pytest.param(
             {"schema.toml": b"version = 1\n", "extra.txt": b"stray\n"},
             protocol.MalformedStateTreeError,
-            "must contain exactly schema.toml",
+            "unknown entries",
             id="extra-file",
         ),
         pytest.param(
@@ -321,6 +362,87 @@ def test_fetch_state_rejects_a_malformed_or_unsupported_tree(
     _push_custom_tree(bare_remote, worktree, parent=None, files=files)
 
     with pytest.raises(expected_error, match=match):
+        store.fetch_state(worktree=worktree, remote=str(bare_remote))
+
+
+def test_fetch_state_rejects_a_tree_missing_schema_toml(bare_remote: Path, worktree: Path) -> None:
+    empty_tree = _raw_tree(worktree, [])
+    _push_raw_state_tree(
+        bare_remote, worktree, [("040000", "tree", empty_tree, store.CLAIMS_DIRECTORY)]
+    )
+
+    with pytest.raises(protocol.MalformedStateTreeError, match=r"missing schema\.toml"):
+        store.fetch_state(worktree=worktree, remote=str(bare_remote))
+
+
+def test_fetch_state_rejects_a_claims_entry_that_is_not_a_directory(
+    bare_remote: Path, worktree: Path
+) -> None:
+    schema_blob = _blob(worktree, b"version = 1\n")
+    claims_blob = _blob(worktree, b"not a tree\n")
+    _push_raw_state_tree(
+        bare_remote,
+        worktree,
+        [
+            ("100644", "blob", schema_blob, "schema.toml"),
+            ("100644", "blob", claims_blob, store.CLAIMS_DIRECTORY),
+        ],
+    )
+
+    with pytest.raises(protocol.MalformedStateTreeError, match="is not a directory"):
+        store.fetch_state(worktree=worktree, remote=str(bare_remote))
+
+
+def test_fetch_state_rejects_a_non_toml_entry_in_claims(bare_remote: Path, worktree: Path) -> None:
+    schema_blob = _blob(worktree, b"version = 1\n")
+    stray_blob = _blob(worktree, b"junk\n")
+    claims_tree = _raw_tree(worktree, [("100644", "blob", stray_blob, "issue-42.txt")])
+    _push_raw_state_tree(
+        bare_remote,
+        worktree,
+        [
+            ("100644", "blob", schema_blob, "schema.toml"),
+            ("040000", "tree", claims_tree, store.CLAIMS_DIRECTORY),
+        ],
+    )
+
+    with pytest.raises(protocol.MalformedStateTreeError, match="is not a claim file"):
+        store.fetch_state(worktree=worktree, remote=str(bare_remote))
+
+
+def test_fetch_state_rejects_an_invalid_id_entry(bare_remote: Path, worktree: Path) -> None:
+    schema_blob = _blob(worktree, b"version = 1\n")
+    empty_blob = _blob(worktree, b"")
+    ids_tree = _raw_tree(worktree, [("100644", "blob", empty_blob, "not valid!")])
+    _push_raw_state_tree(
+        bare_remote,
+        worktree,
+        [
+            ("100644", "blob", schema_blob, "schema.toml"),
+            ("040000", "tree", ids_tree, store.IDS_DIRECTORY),
+        ],
+    )
+
+    with pytest.raises(protocol.MalformedStateTreeError, match="is not a claim id"):
+        store.fetch_state(worktree=worktree, remote=str(bare_remote))
+
+
+def test_fetch_state_rejects_a_non_toml_entry_in_resources(
+    bare_remote: Path, worktree: Path
+) -> None:
+    schema_blob = _blob(worktree, b"version = 1\n")
+    stray_blob = _blob(worktree, b"junk\n")
+    resources_tree = _raw_tree(worktree, [("100644", "blob", stray_blob, "display.txt")])
+    _push_raw_state_tree(
+        bare_remote,
+        worktree,
+        [
+            ("100644", "blob", schema_blob, "schema.toml"),
+            ("040000", "tree", resources_tree, store.RESOURCES_DIRECTORY),
+        ],
+    )
+
+    with pytest.raises(protocol.MalformedStateTreeError, match="is not a resource file"):
         store.fetch_state(worktree=worktree, remote=str(bare_remote))
 
 
@@ -529,26 +651,28 @@ def test_serialize_and_parse_schema_toml_round_trip() -> None:
     assert parsed == protocol.ClaimState(tip=tip)
 
 
-def test_cli_bootstrap_creates_both_a_ledger_and_a_state_ref_from_scratch(
+def test_cli_bootstrap_creates_the_empty_state_ref_without_a_ledger(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     bare_remote: Path,
     worktree: Path,
 ) -> None:
-    """A fresh repository has neither a ledger nor `refs/aco/state`.
-    `bootstrap` must still create both, in that order, until the state-ref
-    cut (issue #164 slice C2) retires the ledger half for good."""
+    """Without `--ledger`, bootstrap only creates `refs/aco/state` (issue #176)."""
     client = FakeForge()
     monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
+    monkeypatch.setattr(
+        issue_claim.checkout,
+        "remote_url",
+        lambda remote: "git@github.com:example/agent-claim.git",
+    )
     _git("remote", "add", "origin", str(bare_remote), cwd=worktree)
     monkeypatch.chdir(worktree)
 
     status = issue_claim.main(["--repo", "example/agent-claim", "bootstrap"])
 
     assert status == 0
-    created_ledger = next(iter(client.ledger_items)).number
-    lines = capsys.readouterr().out.splitlines()
-    assert lines == [f"LEDGER #{created_ledger}", _state_ref_oid(bare_remote)]
+    assert client.comments == {}
+    assert capsys.readouterr().out.splitlines() == [_state_ref_oid(bare_remote)]
 
 
 def test_cli_bootstrap_is_idempotent_on_a_second_run(
@@ -559,6 +683,11 @@ def test_cli_bootstrap_is_idempotent_on_a_second_run(
 ) -> None:
     client = FakeForge()
     monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
+    monkeypatch.setattr(
+        issue_claim.checkout,
+        "remote_url",
+        lambda remote: "git@github.com:example/agent-claim.git",
+    )
     _git("remote", "add", "origin", str(bare_remote), cwd=worktree)
     monkeypatch.chdir(worktree)
     issue_claim.main(["--repo", "example/agent-claim", "bootstrap"])
@@ -570,12 +699,12 @@ def test_cli_bootstrap_is_idempotent_on_a_second_run(
     assert capsys.readouterr().out == first_output
 
 
-def test_read_schema_blob_fails_loud_when_the_tree_is_unresolvable(worktree: Path) -> None:
+def test_list_tree_fails_loud_when_the_tree_is_unresolvable(worktree: Path) -> None:
     with pytest.raises(protocol.MalformedStateTreeError, match="cannot list the state tree"):
-        store._read_schema_blob(worktree, _UNRESOLVABLE_OBJECT_ID, tip=_PLACEHOLDER_TIP)
+        store._list_tree(worktree, _UNRESOLVABLE_OBJECT_ID, tip=_PLACEHOLDER_TIP, context="state")
 
 
-def test_read_schema_blob_fails_loud_when_schema_toml_is_not_a_blob(worktree: Path) -> None:
+def test_read_schema_toml_fails_loud_when_schema_toml_is_not_a_blob(worktree: Path) -> None:
     inner_blob = (
         subprocess.run(
             ["git", "-C", str(worktree), "hash-object", "-w", "--stdin"],
@@ -587,14 +716,16 @@ def test_read_schema_blob_fails_loud_when_schema_toml_is_not_a_blob(worktree: Pa
         .strip()
     )
     inner_tree = _raw_tree(worktree, [("100644", "blob", inner_blob, "x")])
-    outer_tree_oid = _raw_tree(worktree, [("040000", "tree", inner_tree, "schema.toml")])
-    outer_tree = protocol.ObjectId(outer_tree_oid)
+    outer_tree_oid = protocol.ObjectId(
+        _raw_tree(worktree, [("040000", "tree", inner_tree, "schema.toml")])
+    )
+    top_entries = store._list_tree(worktree, outer_tree_oid, tip=_PLACEHOLDER_TIP, context="state")
 
     with pytest.raises(protocol.MalformedStateTreeError, match="is not a blob"):
-        store._read_schema_blob(worktree, outer_tree, tip=_PLACEHOLDER_TIP)
+        store._read_schema_toml(worktree, top_entries, tip=_PLACEHOLDER_TIP)
 
 
-def test_read_schema_blob_fails_loud_when_the_blob_is_unresolvable(worktree: Path) -> None:
+def test_read_schema_toml_fails_loud_when_the_blob_is_unresolvable(worktree: Path) -> None:
     # `git mktree` itself refuses a fabricated oid, so the dangling reference
     # this exercises is built the only way one can occur against a real
     # object database: reference a real blob, then remove its loose object,
@@ -612,9 +743,10 @@ def test_read_schema_blob_fails_loud_when_the_blob_is_unresolvable(worktree: Pat
     tree = protocol.ObjectId(_raw_tree(worktree, [("100644", "blob", blob_oid, "schema.toml")]))
     loose_object = worktree / ".git" / "objects" / blob_oid[:2] / blob_oid[2:]
     loose_object.unlink()
+    top_entries = store._list_tree(worktree, tree, tip=_PLACEHOLDER_TIP, context="state")
 
     with pytest.raises(protocol.MalformedStateTreeError, match=r"cannot read schema\.toml blob"):
-        store._read_schema_blob(worktree, tree, tip=_PLACEHOLDER_TIP)
+        store._read_schema_toml(worktree, top_entries, tip=_PLACEHOLDER_TIP)
 
 
 def test_write_lineage_stamp_cleans_up_its_temp_file_on_failure(
@@ -706,3 +838,1277 @@ def test_commit_tree_fails_loud_on_an_unresolvable_tree(worktree: Path) -> None:
         store._commit_tree(
             worktree, tree_oid=_UNRESOLVABLE_OBJECT_ID, parent=None, message="test\n"
         )
+
+
+# --- `commit_transition`: `apply` wired to the real git transport ----------
+
+
+def _issue_claim_intent(
+    issue: int,
+    *,
+    claim_id: str = "a1",
+    operation_id: str = "op-1",
+    agent: str = "Ada",
+    role: str = "builder",
+    resource_name: str | None = None,
+    resource_value: int | None = None,
+) -> protocol.ClaimIntent:
+    return protocol.ClaimIntent(
+        identity=protocol.IssueIdentity(issue),
+        agent=agent,
+        role=role,
+        base=protocol.ObjectId("c" * 40),
+        branch=f"claude/issue-{issue}-cut",
+        scope=(f"src/issue-{issue}.py",),
+        claim_id=protocol.ClaimId(claim_id),
+        operation_id=operation_id,
+        resource_name=resource_name,
+        resource_value=resource_value,
+    )
+
+
+def test_committer_date_reads_the_commit_that_introduced_a_claim(
+    bare_remote: Path, worktree: Path
+) -> None:
+    tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
+
+    date = store.committer_date(worktree=worktree, tip=tip, commit=tip)
+
+    assert date.tzinfo is not None
+
+
+def test_committer_date_refuses_a_commit_that_is_not_an_ancestor_of_the_tip(
+    bare_remote: Path, worktree: Path
+) -> None:
+    tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    orphan_tree = store._write_empty_state_tree(worktree)
+    orphan_commit = store._commit_tree(
+        worktree, tree_oid=orphan_tree, parent=None, message="unrelated root commit\n"
+    )
+
+    with pytest.raises(protocol.StateLineageError, match="is not an ancestor"):
+        store.committer_date(worktree=worktree, tip=tip, commit=orphan_commit)
+
+
+def test_committer_date_fails_loud_when_the_commit_is_unresolvable(worktree: Path) -> None:
+    with pytest.raises(protocol.StateLineageError):
+        store.committer_date(
+            worktree=worktree, tip=_PLACEHOLDER_TIP, commit=_UNRESOLVABLE_OBJECT_ID
+        )
+
+
+def _fake_git_log_result(
+    monkeypatch: pytest.MonkeyPatch, *, exit_status: int, stdout: bytes
+) -> None:
+    """Let every real git subprocess run except `log`, which returns a fixed
+    result -- isolates `committer_date`'s date-read/parse steps from its
+    ancestry check, which a real `merge-base` call still proves."""
+    real_run_captured = process.run_captured
+
+    def fake_run_captured(arguments: list[str]) -> process.CapturedResult:
+        if "log" in arguments:
+            return process.CapturedResult(exit_status=exit_status, stdout=stdout, stderr=b"")
+        return real_run_captured(arguments)
+
+    monkeypatch.setattr(store.process, "run_captured", fake_run_captured)
+
+
+def test_committer_date_fails_loud_when_the_log_read_fails(
+    monkeypatch: pytest.MonkeyPatch, bare_remote: Path, worktree: Path
+) -> None:
+    tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    _fake_git_log_result(monkeypatch, exit_status=1, stdout=b"")
+
+    with pytest.raises(protocol.ClaimError, match="cannot read the committer date"):
+        store.committer_date(worktree=worktree, tip=tip, commit=tip)
+
+
+def test_committer_date_fails_loud_on_a_malformed_date(
+    monkeypatch: pytest.MonkeyPatch, bare_remote: Path, worktree: Path
+) -> None:
+    tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    _fake_git_log_result(monkeypatch, exit_status=0, stdout=b"not-a-date\n")
+
+    with pytest.raises(protocol.ClaimError, match="malformed committer date"):
+        store.committer_date(worktree=worktree, tip=tip, commit=tip)
+
+
+def test_commit_transition_and_fetch_state_round_trip_a_claim_with_a_resource(
+    bare_remote: Path, worktree: Path
+) -> None:
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    intent = _issue_claim_intent(42, resource_name="display")
+
+    result = store.commit_transition(
+        worktree=worktree, remote=str(bare_remote), subject="claim issue 42", intent=intent
+    )
+
+    refetched = store.fetch_state(worktree=worktree, remote=str(bare_remote))
+    assert refetched == result
+    assert refetched.claims["issue-42"].agent == "Ada"
+    assert refetched.claims["issue-42"].resource == protocol.ResourceHold("display", 1)
+    assert refetched.consumed_ids == frozenset({protocol.ClaimId("a1")})
+    assert refetched.resources["display"].occupied == (1,)
+
+
+def test_commit_transition_rescope_and_release_round_trip(
+    bare_remote: Path, worktree: Path
+) -> None:
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    store.commit_transition(
+        worktree=worktree,
+        remote=str(bare_remote),
+        subject="claim issue 42",
+        intent=_issue_claim_intent(42),
+    )
+    rescope = protocol.RescopeIntent(
+        claim_id=protocol.ClaimId("a1"),
+        agent="Ada",
+        role="builder",
+        scope=("README.md",),
+        operation_id="op-2",
+    )
+    store.commit_transition(
+        worktree=worktree, remote=str(bare_remote), subject="rescope issue 42", intent=rescope
+    )
+
+    rescoped = store.fetch_state(worktree=worktree, remote=str(bare_remote))
+    assert rescoped.claims["issue-42"].scope == ("README.md",)
+
+    release = protocol.ReleaseIntent(
+        claim_id=protocol.ClaimId("a1"),
+        agent="Ada",
+        role="builder",
+        outcome=protocol.AbandonedRelease("done"),
+        operation_id="op-3",
+    )
+    store.commit_transition(
+        worktree=worktree, remote=str(bare_remote), subject="release issue 42", intent=release
+    )
+
+    released = store.fetch_state(worktree=worktree, remote=str(bare_remote))
+    assert "issue-42" not in released.claims
+    assert protocol.ClaimId("a1") in released.consumed_ids
+
+
+def test_commit_transition_a_local_two_racer_claim_on_different_keys_both_land(
+    bare_remote: Path, worktree: Path
+) -> None:
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+
+    store.commit_transition(
+        worktree=worktree,
+        remote=str(bare_remote),
+        subject="claim issue 1",
+        intent=_issue_claim_intent(1),
+    )
+    store.commit_transition(
+        worktree=worktree,
+        remote=str(bare_remote),
+        subject="claim issue 2",
+        intent=_issue_claim_intent(2, claim_id="a2", operation_id="op-2"),
+    )
+
+    state = store.fetch_state(worktree=worktree, remote=str(bare_remote))
+    assert set(state.claims) == {"issue-1", "issue-2"}
+
+
+def test_commit_transition_same_key_second_racer_names_the_holder(
+    bare_remote: Path, worktree: Path
+) -> None:
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    store.commit_transition(
+        worktree=worktree,
+        remote=str(bare_remote),
+        subject="claim issue 42",
+        intent=_issue_claim_intent(42),
+    )
+
+    intent = _issue_claim_intent(42, agent="Grace", claim_id="a2", operation_id="op-2")
+    with pytest.raises(protocol.ClaimUnavailableError, match="is claimed by Ada"):
+        store.commit_transition(
+            worktree=worktree,
+            remote=str(bare_remote),
+            subject="claim issue 42",
+            intent=intent,
+        )
+
+
+def test_commit_transition_a_different_key_loser_that_exhausts_retries_names_no_holder(
+    bare_remote: Path, worktree: Path
+) -> None:
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    transport = _AlwaysRejectingTransport()
+
+    intent = _issue_claim_intent(42)
+    with pytest.raises(protocol.ClaimUnavailableError, match="moved 32 times; retry the command"):
+        store.commit_transition(
+            worktree=worktree,
+            remote=str(bare_remote),
+            subject="claim issue 42",
+            intent=intent,
+            transport=transport,
+        )
+
+
+def test_commit_transition_lost_response_does_not_apply_twice(
+    bare_remote: Path, worktree: Path
+) -> None:
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    transport = _AcceptThenRaiseTransport()
+    intent = _issue_claim_intent(42)
+
+    result = store.commit_transition(
+        worktree=worktree,
+        remote=str(bare_remote),
+        subject="claim issue 42",
+        intent=intent,
+        transport=transport,
+    )
+
+    assert transport.calls == 1
+    assert result.claims["issue-42"].claim_id == "a1"
+    log = subprocess.run(
+        ["git", "--git-dir", str(bare_remote), "rev-list", "--count", store.STATE_REF],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    # The bootstrap commit, plus this one claim commit -- never a duplicate
+    # second commit for the same operation_id.
+    assert log.stdout.strip() == "2"
+
+
+def test_commit_transition_ten_thread_contention_lands_every_distinct_key(
+    tmp_path: Path, bare_remote: Path
+) -> None:
+    """Criterion 3 contention (C2): ten threads, a barrier, no sleeps,
+    against a local bare repo, bound at 30 seconds."""
+    main_repo = tmp_path / "main"
+    main_repo.mkdir()
+    _git("init", "-b", "main", cwd=main_repo)
+    (main_repo / "README").write_text("placeholder\n")
+    _git("add", "README", cwd=main_repo)
+    _git("commit", "-m", "initial", cwd=main_repo)
+    store.bootstrap(worktree=main_repo, remote=str(bare_remote))
+
+    issue_numbers = range(1, 11)
+    worktrees: dict[int, Path] = {}
+    for issue in issue_numbers:
+        linked = tmp_path / f"linked-{issue}"
+        _git("worktree", "add", "-b", f"lane-{issue}", str(linked), cwd=main_repo)
+        worktrees[issue] = linked
+
+    barrier = threading.Barrier(10)
+    errors: list[BaseException] = []
+
+    def claim(issue: int, linked_worktree: Path) -> None:
+        barrier.wait()
+        try:
+            store.commit_transition(
+                worktree=linked_worktree,
+                remote=str(bare_remote),
+                subject=f"claim issue {issue}",
+                intent=_issue_claim_intent(
+                    issue, claim_id=f"a{issue}", operation_id=f"op-{issue:03d}"
+                ),
+            )
+        except BaseException as error:
+            errors.append(error)
+
+    threads = [
+        threading.Thread(target=claim, args=(issue, linked)) for issue, linked in worktrees.items()
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+        assert not thread.is_alive()
+
+    assert errors == []
+    state = store.fetch_state(worktree=main_repo, remote=str(bare_remote))
+    assert set(state.claims) == {f"issue-{issue}" for issue in issue_numbers}
+
+
+# --- `prepare_import_parent` / `push_import`: the one-time import's own
+# git-transport pair, parallel to `bootstrap`/`commit_transition` above.
+
+_IMPORT_TIP = protocol.ObjectId("d" * 40)
+
+
+def _imported_state(tip: protocol.ObjectId) -> protocol.ClaimState:
+    claim = protocol.ActiveClaim(
+        identity=protocol.IssueIdentity(10),
+        claim_id=protocol.ClaimId("imported-a"),
+        agent="Ada",
+        role="builder",
+        base=protocol.ObjectId("c" * 40),
+        branch="claude/issue-10-cut",
+        scope=("src/a.py",),
+        opened_commit=tip,
+    )
+    return protocol.ClaimState(
+        tip=tip,
+        claims={"issue-10": claim},
+        consumed_ids=frozenset({protocol.ClaimId("imported-a")}),
+    )
+
+
+def test_push_import_lands_the_first_import_commit(bare_remote: Path, worktree: Path) -> None:
+    parent = store.prepare_import_parent(worktree=worktree)
+    pending = store.PendingImport(
+        imported=_imported_state(_IMPORT_TIP),
+        parent=parent,
+        subject="import ledger 5",
+        operation_id="import-op-1",
+    )
+
+    result = store.push_import(worktree=worktree, remote=str(bare_remote), pending=pending)
+
+    assert result.tip == _state_ref_oid(bare_remote)
+    refetched = store.fetch_state(worktree=worktree, remote=str(bare_remote))
+    assert refetched.claims["issue-10"].claim_id == "imported-a"
+    assert refetched.consumed_ids == frozenset({protocol.ClaimId("imported-a")})
+
+
+def test_push_import_refuses_when_the_ref_is_no_longer_empty(
+    bare_remote: Path, worktree: Path
+) -> None:
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    parent = store.prepare_import_parent(worktree=worktree)
+    pending = store.PendingImport(
+        imported=_imported_state(_IMPORT_TIP),
+        parent=parent,
+        subject="import ledger 5",
+        operation_id="import-op-1",
+    )
+
+    with pytest.raises(protocol.ClaimUnavailableError, match="no longer empty"):
+        store.push_import(worktree=worktree, remote=str(bare_remote), pending=pending)
+
+
+def test_push_import_lost_response_does_not_reimport_twice(
+    bare_remote: Path, worktree: Path
+) -> None:
+    parent = store.prepare_import_parent(worktree=worktree)
+    pending = store.PendingImport(
+        imported=_imported_state(_IMPORT_TIP),
+        parent=parent,
+        subject="import ledger 5",
+        operation_id="import-op-1",
+    )
+    transport = _AcceptThenRaiseTransport()
+
+    result = store.push_import(
+        worktree=worktree, remote=str(bare_remote), pending=pending, transport=transport
+    )
+
+    assert transport.calls == 1
+    assert result.tip == _state_ref_oid(bare_remote)
+    assert result.claims["issue-10"].claim_id == "imported-a"
+
+
+def test_push_import_fails_loud_when_a_competing_write_lands_first(
+    bare_remote: Path, worktree: Path
+) -> None:
+    parent = store.prepare_import_parent(worktree=worktree)
+    pending = store.PendingImport(
+        imported=_imported_state(_IMPORT_TIP),
+        parent=parent,
+        subject="import ledger 5",
+        operation_id="import-op-1",
+    )
+    transport = _AlwaysRejectingTransport()
+
+    with pytest.raises(protocol.ClaimUnavailableError, match="moved before the import landed"):
+        store.push_import(
+            worktree=worktree, remote=str(bare_remote), pending=pending, transport=transport
+        )
+
+
+# --- `apply`, the claim-key codec, and the claim/resource TOML codecs ------
+#
+# Pure logic (issue #176, slice C2): no git subprocess needed, so these
+# exercise `protocol.apply` and its codecs directly rather than through a
+# bare repository -- the thin git-transport integration layer above stays
+# reserved for what actually needs a real repository.
+
+_TIP = protocol.ObjectId("a" * 40)
+_OTHER_TIP = protocol.ObjectId("b" * 40)
+_BASE = protocol.ObjectId("c" * 40)
+_STATE_WITH_TIP = protocol.ClaimState(tip=_TIP)
+_DEFAULT_IDENTITY = protocol.IssueIdentity(42)
+
+
+def _claim_intent(
+    *,
+    identity: protocol.ClaimIdentity = _DEFAULT_IDENTITY,
+    agent: str = "Ada",
+    role: str = "builder",
+    base: protocol.ObjectId = _BASE,
+    branch: str = "claude/issue-42-cut",
+    scope: tuple[str, ...] = ("src/agent_claim/store.py",),
+    claim_id: str = "a1",
+    operation_id: str = "op-1",
+    whole_reason: str | None = None,
+    resource_name: str | None = None,
+    resource_value: int | None = None,
+) -> protocol.ClaimIntent:
+    return protocol.ClaimIntent(
+        identity=identity,
+        agent=agent,
+        role=role,
+        base=base,
+        branch=branch,
+        scope=scope,
+        claim_id=protocol.ClaimId(claim_id),
+        operation_id=operation_id,
+        whole_reason=whole_reason,
+        resource_name=resource_name,
+        resource_value=resource_value,
+    )
+
+
+def test_apply_claim_intent_adds_a_live_claim_and_consumes_its_id() -> None:
+    state = protocol.apply(_STATE_WITH_TIP, _claim_intent())
+
+    claim = state.claims["issue-42"]
+    assert claim.identity == protocol.IssueIdentity(42)
+    assert claim.agent == "Ada"
+    assert claim.role == "builder"
+    assert claim.base == _BASE
+    assert claim.branch == "claude/issue-42-cut"
+    assert claim.scope == ("src/agent_claim/store.py",)
+    assert claim.opened_commit == _TIP
+    assert claim.resource is None
+    assert claim.whole_reason is None
+    assert state.consumed_ids == frozenset({protocol.ClaimId("a1")})
+
+
+def test_apply_claim_intent_refuses_against_a_missing_state_ref() -> None:
+    intent = _claim_intent()
+    with pytest.raises(protocol.ClaimError, match="does not exist yet"):
+        protocol.apply(protocol.EMPTY_STATE, intent)
+
+
+def test_apply_claim_intent_replays_idempotently_for_the_same_claim_id_and_fields() -> None:
+    once = protocol.apply(_STATE_WITH_TIP, _claim_intent())
+
+    replayed = protocol.apply(once, _claim_intent(operation_id="a-different-operation-id"))
+
+    assert replayed == once
+
+
+def test_apply_claim_intent_replays_idempotently_for_a_lane_identity() -> None:
+    """Same criterion 2 replay as above, but for a `LaneIdentity` claim: it
+    carries no field of its own (`_same_identity`'s other branch, next to
+    `IssueIdentity`'s), so two independently constructed `LaneIdentity()`
+    instances must still compare equal for the replay to match."""
+    lane_intent = _claim_intent(identity=protocol.LaneIdentity(), branch="docs/tidy-readme")
+    once = protocol.apply(_STATE_WITH_TIP, lane_intent)
+
+    replayed = protocol.apply(
+        once,
+        _claim_intent(
+            identity=protocol.LaneIdentity(),
+            branch="docs/tidy-readme",
+            operation_id="a-different-operation-id",
+        ),
+    )
+
+    assert replayed == once
+
+
+def test_apply_claim_intent_refuses_a_reused_claim_id_with_different_fields() -> None:
+    once = protocol.apply(_STATE_WITH_TIP, _claim_intent())
+    reused = _claim_intent(scope=("README.md",))
+
+    with pytest.raises(protocol.ClaimUnavailableError, match="already on this ledger"):
+        protocol.apply(once, reused)
+
+
+def test_apply_claim_intent_refuses_a_reused_claim_id_after_release() -> None:
+    claimed = protocol.apply(_STATE_WITH_TIP, _claim_intent())
+    release = protocol.ReleaseIntent(
+        claim_id=protocol.ClaimId("a1"),
+        agent="Ada",
+        role="builder",
+        outcome=protocol.AbandonedRelease("done"),
+        operation_id="op-2",
+    )
+    released = protocol.apply(claimed, release)
+    reclaim = _claim_intent(operation_id="op-3")
+
+    with pytest.raises(protocol.ClaimUnavailableError, match="already on this ledger"):
+        protocol.apply(released, reclaim)
+
+
+def test_apply_claim_intent_refuses_an_identity_conflict() -> None:
+    claimed = protocol.apply(_STATE_WITH_TIP, _claim_intent())
+    conflicting = _claim_intent(agent="Grace", claim_id="a2", operation_id="op-2")
+
+    with pytest.raises(protocol.ClaimUnavailableError, match="is claimed by Ada"):
+        protocol.apply(claimed, conflicting)
+
+
+def test_apply_rescope_intent_replaces_scope_and_preserves_opened_commit() -> None:
+    claimed = protocol.apply(_STATE_WITH_TIP, _claim_intent())
+    rescope = protocol.RescopeIntent(
+        claim_id=protocol.ClaimId("a1"),
+        agent="Ada",
+        role="builder",
+        scope=("README.md",),
+        operation_id="op-2",
+    )
+
+    rescoped = protocol.apply(claimed, rescope)
+
+    claim = rescoped.claims["issue-42"]
+    assert claim.scope == ("README.md",)
+    assert claim.opened_commit == _TIP
+    assert rescoped.consumed_ids == claimed.consumed_ids
+
+
+def test_apply_rescope_intent_refuses_a_non_claimant() -> None:
+    claimed = protocol.apply(_STATE_WITH_TIP, _claim_intent())
+    rescope = protocol.RescopeIntent(
+        claim_id=protocol.ClaimId("a1"),
+        agent="Grace",
+        role="builder",
+        scope=("README.md",),
+        operation_id="op-2",
+    )
+
+    with pytest.raises(protocol.ClaimUnavailableError, match="original claimant"):
+        protocol.apply(claimed, rescope)
+
+
+def test_apply_rescope_intent_refuses_rescoping_a_claim_that_does_not_exist() -> None:
+    rescope = protocol.RescopeIntent(
+        claim_id=protocol.ClaimId("nonexistent"),
+        agent="Ada",
+        role="builder",
+        scope=("README.md",),
+        operation_id="op-1",
+    )
+
+    with pytest.raises(protocol.ClaimUnavailableError, match="no active claim"):
+        protocol.apply(_STATE_WITH_TIP, rescope)
+
+
+def test_apply_rescope_intent_can_clear_the_whole_reason() -> None:
+    claimed = protocol.apply(_STATE_WITH_TIP, _claim_intent(whole_reason="repo-wide rename"))
+    clear = protocol.RescopeIntent(
+        claim_id=protocol.ClaimId("a1"),
+        agent="Ada",
+        role="builder",
+        scope=("README.md",),
+        operation_id="op-2",
+        clear_whole_reason=True,
+    )
+
+    cleared = protocol.apply(claimed, clear)
+
+    assert cleared.claims["issue-42"].whole_reason is None
+
+
+def test_apply_rescope_intent_keeps_the_whole_reason_when_omitted() -> None:
+    claimed = protocol.apply(_STATE_WITH_TIP, _claim_intent(whole_reason="repo-wide rename"))
+    rescope = protocol.RescopeIntent(
+        claim_id=protocol.ClaimId("a1"),
+        agent="Ada",
+        role="builder",
+        scope=("README.md",),
+        operation_id="op-2",
+    )
+
+    rescoped = protocol.apply(claimed, rescope)
+
+    assert rescoped.claims["issue-42"].whole_reason == "repo-wide rename"
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        pytest.param(protocol.MergedRelease(108), id="merged"),
+        pytest.param(protocol.AbandonedRelease("no longer needed"), id="abandoned"),
+    ],
+)
+def test_apply_release_intent_removes_the_claim(outcome: protocol.ReleaseOutcome) -> None:
+    claimed = protocol.apply(_STATE_WITH_TIP, _claim_intent())
+    release = protocol.ReleaseIntent(
+        claim_id=protocol.ClaimId("a1"),
+        agent="Ada",
+        role="builder",
+        outcome=outcome,
+        operation_id="op-2",
+    )
+
+    released = protocol.apply(claimed, release)
+
+    assert "issue-42" not in released.claims
+    assert protocol.ClaimId("a1") in released.consumed_ids
+
+
+def test_apply_release_intent_refuses_releasing_a_claim_that_does_not_exist() -> None:
+    release = protocol.ReleaseIntent(
+        claim_id=protocol.ClaimId("nonexistent"),
+        agent="Ada",
+        role="builder",
+        outcome=protocol.AbandonedRelease("done"),
+        operation_id="op-1",
+    )
+
+    with pytest.raises(protocol.ClaimUnavailableError, match="no active claim"):
+        protocol.apply(_STATE_WITH_TIP, release)
+
+
+def test_apply_release_intent_refuses_a_non_claimant_without_override() -> None:
+    claimed = protocol.apply(_STATE_WITH_TIP, _claim_intent())
+    release = protocol.ReleaseIntent(
+        claim_id=protocol.ClaimId("a1"),
+        agent="Grace",
+        role="builder",
+        outcome=protocol.AbandonedRelease("stealing it"),
+        operation_id="op-2",
+    )
+
+    with pytest.raises(protocol.ClaimUnavailableError, match="original claimant"):
+        protocol.apply(claimed, release)
+
+
+def test_apply_release_intent_allows_a_coordinator_override() -> None:
+    claimed = protocol.apply(_STATE_WITH_TIP, _claim_intent())
+    release = protocol.ReleaseIntent(
+        claim_id=protocol.ClaimId("a1"),
+        agent="Coordinator",
+        role="coordinator",
+        outcome=protocol.AbandonedRelease("stale takeover"),
+        operation_id="op-2",
+        coordinator_override=True,
+    )
+
+    released = protocol.apply(claimed, release)
+
+    assert "issue-42" not in released.claims
+
+
+def test_apply_release_intent_refuses_a_coordinator_override_without_coordinator_role() -> None:
+    claimed = protocol.apply(_STATE_WITH_TIP, _claim_intent())
+    release = protocol.ReleaseIntent(
+        claim_id=protocol.ClaimId("a1"),
+        agent="Ada",
+        role="builder",
+        outcome=protocol.AbandonedRelease("stale takeover"),
+        operation_id="op-2",
+        coordinator_override=True,
+    )
+
+    with pytest.raises(protocol.ClaimUnavailableError, match="requires role coordinator"):
+        protocol.apply(claimed, release)
+
+
+def test_apply_claim_intent_assigns_the_least_free_auto_resource_value() -> None:
+    first = protocol.apply(_STATE_WITH_TIP, _claim_intent(claim_id="a1", resource_name="display"))
+    second = protocol.apply(
+        first,
+        _claim_intent(
+            identity=protocol.IssueIdentity(43),
+            claim_id="a2",
+            operation_id="op-2",
+            resource_name="display",
+        ),
+    )
+
+    assert first.claims["issue-42"].resource == protocol.ResourceHold("display", 1)
+    assert second.claims["issue-43"].resource == protocol.ResourceHold("display", 2)
+    assert second.resources["display"].occupied == (1, 2)
+
+
+def test_apply_claim_intent_refuses_an_explicit_resource_value_already_held() -> None:
+    held = protocol.apply(
+        _STATE_WITH_TIP,
+        _claim_intent(claim_id="a1", resource_name="display", resource_value=2),
+    )
+
+    conflicting = _claim_intent(
+        identity=protocol.IssueIdentity(43),
+        claim_id="a2",
+        operation_id="op-2",
+        agent="Grace",
+        resource_name="display",
+        resource_value=2,
+    )
+    with pytest.raises(protocol.ClaimUnavailableError, match="display 2 is held by Ada"):
+        protocol.apply(held, conflicting)
+
+
+def test_apply_claim_intent_never_reuses_a_released_auto_resource_value() -> None:
+    """Done-when 2: the import (and every later reader) must be able to
+    derive `occupied` from this run's own history, not from active claims
+    alone -- a released auto value must stay occupied forever."""
+    claimed = protocol.apply(_STATE_WITH_TIP, _claim_intent(claim_id="a1", resource_name="display"))
+    release = protocol.ReleaseIntent(
+        claim_id=protocol.ClaimId("a1"),
+        agent="Ada",
+        role="builder",
+        outcome=protocol.AbandonedRelease("done"),
+        operation_id="op-2",
+    )
+    released = protocol.apply(claimed, release)
+
+    reclaimed = protocol.apply(
+        released, _claim_intent(claim_id="a2", operation_id="op-3", resource_name="display")
+    )
+
+    assert reclaimed.claims["issue-42"].resource == protocol.ResourceHold("display", 2)
+    assert reclaimed.resources["display"].occupied == (1, 2)
+
+
+def test_apply_claim_intent_never_reuses_a_released_explicit_resource_value() -> None:
+    claimed = protocol.apply(
+        _STATE_WITH_TIP,
+        _claim_intent(claim_id="a1", resource_name="display", resource_value=1),
+    )
+    release = protocol.ReleaseIntent(
+        claim_id=protocol.ClaimId("a1"),
+        agent="Ada",
+        role="builder",
+        outcome=protocol.AbandonedRelease("done"),
+        operation_id="op-2",
+    )
+    released = protocol.apply(claimed, release)
+
+    reclaim = _claim_intent(
+        claim_id="a2", operation_id="op-3", resource_name="display", resource_value=1
+    )
+    with pytest.raises(protocol.ClaimUnavailableError, match="already consumed"):
+        protocol.apply(released, reclaim)
+
+
+def test_stale_takeover_is_release_then_claim_and_does_not_reuse_the_occupied_integer() -> None:
+    """Coordinator stale-takeover: override-release then claim, two `apply`
+    calls -- never a `TakeoverIntent`. The freed integer stays retired."""
+    claimed = protocol.apply(_STATE_WITH_TIP, _claim_intent(claim_id="a1", resource_name="display"))
+    override_release = protocol.ReleaseIntent(
+        claim_id=protocol.ClaimId("a1"),
+        agent="Coordinator",
+        role="coordinator",
+        outcome=protocol.AbandonedRelease("stale, no activity for 3 days"),
+        operation_id="op-2",
+        coordinator_override=True,
+    )
+    freed = protocol.apply(claimed, override_release)
+
+    retaken = protocol.apply(
+        freed,
+        _claim_intent(claim_id="a3", operation_id="op-3", agent="Grace", resource_name="display"),
+    )
+
+    assert retaken.claims["issue-42"].claim_id == "a3"
+    assert retaken.claims["issue-42"].resource == protocol.ResourceHold("display", 2)
+
+
+def test_apply_resource_value_requires_a_resource_name() -> None:
+    intent = _claim_intent(resource_value=3)
+    with pytest.raises(protocol.ClaimError, match="resource value requires a resource name"):
+        protocol.apply(_STATE_WITH_TIP, intent)
+
+
+def test_apply_resource_value_must_be_a_positive_integer() -> None:
+    intent = _claim_intent(resource_name="display", resource_value=0)
+    with pytest.raises(protocol.ClaimError, match="positive integer"):
+        protocol.apply(_STATE_WITH_TIP, intent)
+
+
+# --- Claim key codec (criterion 10) ----------------------------------------
+
+
+def test_claim_key_round_trips_an_issue_identity() -> None:
+    key = protocol.claim_key(protocol.IssueIdentity(42), "claude/issue-42-cut")
+
+    assert key == "issue-42"
+    assert protocol.parse_claim_key(key) == protocol.IssueIdentity(42)
+
+
+def test_claim_key_round_trips_a_lane_branch_with_slash_and_percent() -> None:
+    branch = "docs/rename-100%-done"
+
+    key = protocol.claim_key(protocol.LaneIdentity(), branch)
+
+    assert key == "lane-docs%2Frename-100%25-done"
+    assert protocol.parse_claim_key(key) == protocol.LaneIdentity()
+
+
+def test_claim_key_round_trips_a_255_character_lane_branch() -> None:
+    branch = "docs/" + "a" * 248 + "/z"
+    assert len(branch) == 255
+
+    key = protocol.claim_key(protocol.LaneIdentity(), branch)
+
+    assert "/" not in key
+    assert protocol.parse_claim_key(key) == protocol.LaneIdentity()
+    # The tree-entry name is one segment, safe for `hash-object`/`mktree`/`ls-tree`
+    # (`--missing`: this placeholder blob need not itself exist).
+    entries = subprocess.run(
+        ["git", "mktree", "--missing"],
+        input=f"100644 blob {'0' * 40}\t{key}\n".encode(),
+        check=False,
+        capture_output=True,
+    )
+    assert entries.returncode == 0
+
+
+def test_claim_key_issue_and_lane_prefixes_never_collide() -> None:
+    issue_key = protocol.claim_key(protocol.IssueIdentity(1), "irrelevant")
+    lane_key = protocol.claim_key(protocol.LaneIdentity(), "issue-1")
+
+    assert issue_key != lane_key
+    assert protocol.parse_claim_key(issue_key) == protocol.IssueIdentity(1)
+    assert protocol.parse_claim_key(lane_key) == protocol.LaneIdentity()
+
+
+@pytest.mark.parametrize(
+    ("key", "match"),
+    [
+        pytest.param("resource-display", "neither the issue nor lane prefix", id="unknown-prefix"),
+        pytest.param("issue-0", "malformed issue number", id="issue-zero"),
+        pytest.param("issue-01", "malformed issue number", id="issue-leading-zero"),
+        pytest.param("issue-abc", "malformed issue number", id="issue-not-a-number"),
+        pytest.param("lane-%2", "malformed percent-escape", id="lane-incomplete-escape"),
+        pytest.param("lane-%zz", "malformed percent-escape", id="lane-invalid-escape"),
+    ],
+)
+def test_parse_claim_key_rejects_a_malformed_key(key: str, match: str) -> None:
+    with pytest.raises(protocol.MalformedStateTreeError, match=match):
+        protocol.parse_claim_key(key)
+
+
+# --- `claims/<key>.toml` and `resources/<name>.toml` codecs ----------------
+
+
+def _sample_claim(
+    *,
+    scope: tuple[str, ...] = ("src/agent_claim/store.py",),
+    resource: protocol.ResourceHold | None = None,
+    whole_reason: str | None = None,
+) -> protocol.ActiveClaim:
+    return protocol.ActiveClaim(
+        identity=protocol.IssueIdentity(42),
+        claim_id=protocol.ClaimId("a1"),
+        agent="Ada",
+        role="builder",
+        base=_BASE,
+        branch="claude/issue-42-cut",
+        scope=scope,
+        opened_commit=_TIP,
+        resource=resource,
+        whole_reason=whole_reason,
+    )
+
+
+def test_serialize_and_parse_claim_toml_round_trips_the_minimal_claim() -> None:
+    claim = _sample_claim()
+
+    parsed = protocol.parse_claim_toml(
+        protocol.serialize_claim_toml(claim), key="issue-42", tip=_OTHER_TIP
+    )
+
+    assert parsed == claim
+
+
+def test_serialize_and_parse_claim_toml_round_trips_resource_and_whole_reason() -> None:
+    claim = _sample_claim(
+        resource=protocol.ResourceHold("display", 2), whole_reason="repo-wide rename"
+    )
+
+    parsed = protocol.parse_claim_toml(
+        protocol.serialize_claim_toml(claim), key="issue-42", tip=_OTHER_TIP
+    )
+
+    assert parsed == claim
+
+
+def test_serialize_and_parse_claim_toml_round_trips_a_quote_in_a_scope_path() -> None:
+    claim = _sample_claim(scope=('weird "quoted" path.py',))
+
+    parsed = protocol.parse_claim_toml(
+        protocol.serialize_claim_toml(claim), key="issue-42", tip=_OTHER_TIP
+    )
+
+    assert parsed.scope == ('weird "quoted" path.py',)
+
+
+def test_parse_claim_toml_rejects_an_unknown_key() -> None:
+    content = protocol.serialize_claim_toml(_sample_claim()) + 'comment = "stray"\n'
+
+    with pytest.raises(protocol.MalformedStateTreeError, match="unknown keys"):
+        protocol.parse_claim_toml(content, key="issue-42", tip=_OTHER_TIP)
+
+
+def test_parse_claim_toml_rejects_a_missing_required_key() -> None:
+    with pytest.raises(protocol.MalformedStateTreeError, match="is missing"):
+        protocol.parse_claim_toml('claim_id = "a1"\n', key="issue-42", tip=_OTHER_TIP)
+
+
+def test_parse_claim_toml_rejects_resource_value_without_resource_name() -> None:
+    content = protocol.serialize_claim_toml(_sample_claim()) + "resource_value = 3\n"
+
+    with pytest.raises(protocol.MalformedStateTreeError, match="resource_value without"):
+        protocol.parse_claim_toml(content, key="issue-42", tip=_OTHER_TIP)
+
+
+def test_parse_claim_toml_rejects_a_malformed_commit_id() -> None:
+    content = protocol.serialize_claim_toml(_sample_claim()).replace(str(_BASE), "not-a-sha")
+
+    with pytest.raises(protocol.MalformedStateTreeError, match="malformed commit id"):
+        protocol.parse_claim_toml(content, key="issue-42", tip=_OTHER_TIP)
+
+
+def test_parse_claim_toml_rejects_malformed_toml() -> None:
+    with pytest.raises(protocol.MalformedStateTreeError, match="malformed claim file"):
+        protocol.parse_claim_toml("not = valid = toml\n", key="issue-42", tip=_OTHER_TIP)
+
+
+def test_serialize_and_parse_resource_toml_round_trips() -> None:
+    record = protocol.ResourceRecord(name="display", occupied=(1, 2, 5))
+
+    parsed = protocol.parse_resource_toml(
+        protocol.serialize_resource_toml(record), name="display", tip=_OTHER_TIP
+    )
+
+    assert parsed == record
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        pytest.param('name = "display"\n', id="wrong-key"),
+        pytest.param("occupied = [1, 0]\n", id="non-positive-value"),
+        pytest.param('occupied = ["1"]\n', id="non-integer-value"),
+        pytest.param("occupied = 1\n", id="not-a-list"),
+    ],
+)
+def test_parse_resource_toml_rejects_a_malformed_record(content: str) -> None:
+    with pytest.raises(protocol.MalformedStateTreeError):
+        protocol.parse_resource_toml(content, name="display", tip=_OTHER_TIP)
+
+
+def test_parse_resource_toml_rejects_malformed_toml() -> None:
+    with pytest.raises(protocol.MalformedStateTreeError, match="malformed resource file"):
+        protocol.parse_resource_toml("not = valid = toml\n", name="display", tip=_OTHER_TIP)
+
+
+def test_claim_id_rejects_a_value_that_is_not_a_valid_claim_id() -> None:
+    with pytest.raises(protocol.ClaimError, match="not a valid claim id"):
+        protocol.ClaimId("not a claim id")
+
+
+def test_parse_claim_key_rejects_a_lane_key_whose_escape_does_not_decode_as_utf8() -> None:
+    # `%FF` is a valid two-hex-digit escape but not a valid standalone UTF-8
+    # byte, so the codec's decode step (not its hex-digit syntax check) fails.
+    with pytest.raises(protocol.MalformedStateTreeError, match="does not decode as utf-8"):
+        protocol.parse_claim_key("lane-%FF")
+
+
+def test_apply_rescope_intent_can_set_a_new_whole_reason() -> None:
+    claimed = protocol.apply(_STATE_WITH_TIP, _claim_intent())
+    rescope = protocol.RescopeIntent(
+        claim_id=protocol.ClaimId("a1"),
+        agent="Ada",
+        role="builder",
+        scope=("README.md",),
+        operation_id="op-2",
+        whole_reason="repo-wide rename",
+    )
+
+    rescoped = protocol.apply(claimed, rescope)
+
+    assert rescoped.claims["issue-42"].whole_reason == "repo-wide rename"
+
+
+def _minimal_claim_toml_fields(**overrides: str) -> dict[str, str]:
+    fields = {
+        "claim_id": '"a1"',
+        "agent": '"Ada"',
+        "role": '"builder"',
+        "base": f'"{_BASE}"',
+        "branch": '"claude/issue-42-cut"',
+        "scope": '["README.md"]',
+        "opened_commit": f'"{_TIP}"',
+    }
+    fields.update(overrides)
+    return fields
+
+
+def _claim_toml_content(**overrides: str) -> str:
+    fields = _minimal_claim_toml_fields(**overrides)
+    return "\n".join(f"{key} = {value}" for key, value in fields.items()) + "\n"
+
+
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        pytest.param({"agent": "123"}, "must be non-empty text", id="agent-not-text"),
+        pytest.param({"agent": '""'}, "must be non-empty text", id="agent-empty"),
+        pytest.param({"scope": "[]"}, "non-empty list of text", id="scope-empty"),
+        pytest.param({"scope": "[1]"}, "non-empty list of text", id="scope-not-text"),
+        pytest.param({"claim_id": '"not valid!"'}, "invalid claim id", id="claim-id-invalid"),
+    ],
+)
+def test_parse_claim_toml_rejects_a_malformed_field(overrides: dict[str, str], match: str) -> None:
+    content = _claim_toml_content(**overrides)
+    with pytest.raises(protocol.MalformedStateTreeError, match=match):
+        protocol.parse_claim_toml(content, key="issue-42", tip=_OTHER_TIP)
+
+
+def test_parse_claim_toml_rejects_a_non_positive_resource_value() -> None:
+    content = _claim_toml_content() + 'resource_name = "display"\nresource_value = 0\n'
+
+    with pytest.raises(protocol.MalformedStateTreeError, match="positive integer"):
+        protocol.parse_claim_toml(content, key="issue-42", tip=_OTHER_TIP)
+
+
+def test_parse_claim_toml_rejects_a_non_text_whole_reason() -> None:
+    content = _claim_toml_content() + "whole_reason = 3\n"
+
+    with pytest.raises(protocol.MalformedStateTreeError, match="must be text"):
+        protocol.parse_claim_toml(content, key="issue-42", tip=_OTHER_TIP)
+
+
+def test_fetch_state_refuses_a_deleted_ref_this_worktree_has_observed(
+    bare_remote: Path, worktree: Path
+) -> None:
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    _git("update-ref", "-d", store.STATE_REF, cwd=bare_remote)
+
+    with pytest.raises(protocol.StateLineageError, match="now absent"):
+        store.fetch_state(worktree=worktree, remote=str(bare_remote))
+
+
+def test_bootstrap_refuses_a_deleted_ref_this_worktree_has_observed(
+    bare_remote: Path, worktree: Path
+) -> None:
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    _git("update-ref", "-d", store.STATE_REF, cwd=bare_remote)
+
+    with pytest.raises(protocol.StateLineageError, match="now absent"):
+        store.bootstrap(worktree=worktree, remote=str(bare_remote))
+
+
+def test_commit_transition_refuses_a_missing_state_ref(worktree: Path, tmp_path: Path) -> None:
+    empty_remote = tmp_path / "empty.git"
+    empty_remote.mkdir()
+    _git("init", "--bare", "-b", "main", cwd=empty_remote)
+
+    intent = _claim_intent()
+    with pytest.raises(protocol.ClaimError, match="does not exist yet"):
+        store.commit_transition(
+            worktree=worktree,
+            remote=str(empty_remote),
+            subject="claim issue 42",
+            intent=intent,
+        )
+
+
+def _tombstone_body() -> str:
+    return marker(
+        {
+            "action": protocol.STATE_CUT_ACTION,
+            "claim_id": "state-cut",
+            "agent": "coordinator",
+            "role": "coordinator",
+        }
+    )
+
+
+def _ledger_claim_body(claimed: protocol.ClaimRequest) -> str:
+    payload: dict[str, object] = {
+        "action": "claim",
+        "agent": claimed.agent,
+        "base": claimed.base,
+        "branch": claimed.branch,
+        "claim_id": claimed.claim_id,
+        protocol._identity_marker_key(claimed.identity): _identity_marker_value(claimed.identity),
+        "role": claimed.role,
+        "scope": list(claimed.scope),
+    }
+    if claimed.resource is not None:
+        payload["resource"] = claimed.resource
+        if claimed.resource_value is not None:
+            payload["resource_value"] = claimed.resource_value
+    return marker(payload)
+
+
+def _ledger_release_body(claimed: protocol.ClaimRequest) -> str:
+    payload: dict[str, object] = {
+        "action": "release",
+        "agent": claimed.agent,
+        "claim_id": claimed.claim_id,
+        protocol._identity_marker_key(claimed.identity): _identity_marker_value(claimed.identity),
+        "role": claimed.role,
+        "reason": "abandoned: imported",
+    }
+    return marker(payload)
+
+
+def test_import_reader_keeps_claims_after_a_mid_ledger_tombstone() -> None:
+    first = request("claim-a", issue=10, scope=("src/a.py",))
+    second = request("claim-b", issue=11, scope=("src/b.py",))
+    comments = (
+        comment(1, _ledger_claim_body(first)),
+        comment(2, _tombstone_body()),
+        comment(3, _ledger_claim_body(second)),
+    )
+
+    imported = protocol.state_from_ledger_aggregate(comments, opened_commit=_TIP)
+
+    assert set(imported.claims) == {"issue-10", "issue-11"}
+    assert imported.claims["issue-11"].claim_id == "claim-b"
+    assert imported.consumed_ids == frozenset(
+        {protocol.ClaimId("claim-a"), protocol.ClaimId("claim-b")}
+    )
+
+
+def test_import_reader_assigns_distinct_auto_resource_values_to_two_active_claims() -> None:
+    """Two still-active auto (unnumbered) resource intents on the same name:
+    the second must skip past the first's assigned value, and both surviving
+    claims carry their assigned hold onto the imported store record."""
+    first = request("auto-1", issue=10, scope=("src/a.py",), resource="display")
+    second = request("auto-2", issue=11, scope=("src/b.py",), resource="display")
+    comments = (
+        comment(1, _ledger_claim_body(first)),
+        comment(2, _ledger_claim_body(second)),
+        comment(3, _tombstone_body()),
+    )
+
+    imported = protocol.state_from_ledger_aggregate(comments, opened_commit=_TIP)
+
+    assert imported.claims["issue-10"].resource == protocol.ResourceHold("display", 1)
+    assert imported.claims["issue-11"].resource == protocol.ResourceHold("display", 2)
+    assert imported.resources["display"].occupied == (1, 2)
+
+
+def test_import_reader_skips_ordinary_comments_that_carry_no_marker() -> None:
+    claimed = request("claim-a", issue=10, scope=("src/a.py",))
+    comments = (
+        comment(1, _ledger_claim_body(claimed)),
+        comment(2, "Looks good, landing shortly."),
+        comment(3, _tombstone_body()),
+    )
+
+    imported = protocol.state_from_ledger_aggregate(comments, opened_commit=_TIP)
+
+    assert set(imported.claims) == {"issue-10"}
+
+
+def test_import_reader_carries_a_rescoped_claims_current_scope() -> None:
+    """A live case in hopin: a migration right on claim id and branch but
+    wrong on scope would silently misfence the very work it is supposed to
+    protect. The claim comment's own scope is stale the moment a rescope
+    lands after it; the import reader must carry the ledger's *current*
+    scope -- the aggregate walk's `active` state after every rescope event
+    -- onto the store record, never the original claim comment's."""
+    claimed_request = request("claim-a", issue=10, scope=("src/a.py",))
+    claimed_body = _ledger_claim_body(claimed_request)
+    claimed = parse_claim_event(comment(1, claimed_body))
+    assert isinstance(claimed, LedgerActiveClaim)
+    widened = rescope_comment(claimed, ("src/a.py", "src/b.py"), claimed.agent, claimed.role)
+    comments = (
+        comment(1, claimed_body),
+        comment(2, widened),
+        comment(3, _tombstone_body()),
+    )
+
+    imported = protocol.state_from_ledger_aggregate(comments, opened_commit=_TIP)
+
+    assert imported.claims["issue-10"].scope == ("src/a.py", "src/b.py")
+
+
+def test_import_reader_carries_a_rescoped_claims_current_whole_reason() -> None:
+    """The same staleness risk applies to `whole_reason`: setting one, and
+    clearing one, must both survive the import as the ledger's current
+    state, never the original claim comment's."""
+    claimed_request = request("claim-a", issue=11, scope=("src/a.py",))
+    claimed_body = _ledger_claim_body(claimed_request)
+    claimed = parse_claim_event(comment(1, claimed_body))
+    assert isinstance(claimed, LedgerActiveClaim)
+    set_reason = rescope_comment(
+        claimed,
+        claimed.scope,
+        claimed.agent,
+        claimed.role,
+        whole_reason="repo-wide rename",
+    )
+    cleared_reason = rescope_comment(
+        claimed, claimed.scope, claimed.agent, claimed.role, clear_whole_reason=True
+    )
+
+    set_comments = (comment(1, claimed_body), comment(2, set_reason), comment(3, _tombstone_body()))
+    set_imported = protocol.state_from_ledger_aggregate(set_comments, opened_commit=_TIP)
+    assert set_imported.claims["issue-11"].whole_reason == "repo-wide rename"
+
+    cleared_comments = (
+        comment(1, claimed_body),
+        comment(2, set_reason),
+        comment(3, cleared_reason),
+        comment(4, _tombstone_body()),
+    )
+    cleared_imported = protocol.state_from_ledger_aggregate(cleared_comments, opened_commit=_TIP)
+    assert cleared_imported.claims["issue-11"].whole_reason is None
+
+
+def test_import_reader_refuses_an_unreadable_claim_comment() -> None:
+    unreadable = marker(
+        {
+            "action": "claim",
+            "agent": "Codex Sol",
+            "base": _TIP,
+            "branch": "codex/issue-10",
+            "claim_id": "claim-a",
+            "issue": 10,
+            "role": "builder",
+            "scope": ["src/a.py"],
+            "surprise": True,
+        }
+    )
+    comments = (comment(1, unreadable), comment(2, _tombstone_body()))
+
+    with pytest.raises(protocol.ClaimUnavailableError, match="import refused: claim 'claim-a'"):
+        protocol.state_from_ledger_aggregate(comments, opened_commit=_TIP)
+
+
+def test_import_reader_occupies_a_released_auto_resource_value() -> None:
+    claimed = request("auto-1", issue=10, scope=("src/a.py",), resource="display")
+    comments = (
+        comment(1, _ledger_claim_body(claimed)),
+        comment(2, _ledger_release_body(claimed)),
+        comment(3, _tombstone_body()),
+    )
+
+    imported = protocol.state_from_ledger_aggregate(comments, opened_commit=_TIP)
+
+    assert imported.claims == {}
+    assert imported.resources["display"].occupied == (1,)
+    assert imported.consumed_ids == frozenset({protocol.ClaimId("auto-1")})
+
+
+def test_import_reader_occupies_a_released_explicit_resource_value() -> None:
+    claimed = request(
+        "explicit-5",
+        issue=10,
+        scope=("src/a.py",),
+        resource="display",
+        resource_value=5,
+    )
+    comments = (
+        comment(1, _ledger_claim_body(claimed)),
+        comment(2, _ledger_release_body(claimed)),
+        comment(3, _tombstone_body()),
+    )
+
+    imported = protocol.state_from_ledger_aggregate(comments, opened_commit=_TIP)
+
+    assert imported.claims == {}
+    assert imported.resources["display"].occupied == (5,)
+    assert imported.consumed_ids == frozenset({protocol.ClaimId("explicit-5")})
