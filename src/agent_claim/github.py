@@ -15,14 +15,18 @@ from typing import TypeVar
 
 from . import board, forge, process, protocol
 from .protocol import (
-    MAX_COMMENT_BYTES,
     MAX_PROTOCOL_BYTES,
     MAX_PROTOCOL_EVENTS,
+    PROJECTION_MARKER_PATTERN,
     REPOSITORY_PATTERN,
     TRUSTED_ASSOCIATIONS,
     ClaimError,
     ClaimUnavailableError,
     IssueComment,
+    _projection_ledger,
+    _projection_marker,
+    _validated_comment,
+    claim_label,
     is_protocol_candidate,
 )
 
@@ -78,6 +82,10 @@ _ISSUE_TYPE_KINDS: dict[str, board.ItemKind] = {
 # type name has a single owner, capitalized the way GitHub itself names them.
 _ITEM_KIND_TYPE_NAMES: dict[board.ItemKind, str] = {
     kind: name.capitalize() for name, kind in _ISSUE_TYPE_KINDS.items()
+}
+_LEDGER_ITEM_STATES: dict[str, forge.ItemState] = {
+    "open": forge.ItemState.OPEN,
+    "closed": forge.ItemState.CLOSED,
 }
 # GitHub's issues-list pagination fills every page but the last, so a result
 # strictly under this count could only have come from one request -- one live
@@ -237,6 +245,8 @@ def _bounded_command(command: list[str], *, purpose: str, input_data: bytes | No
 
 _READ_ONLY_OPERATIONS = (
     forge.ForgeOperation.LIST_PROTOCOL_CANDIDATES,
+    forge.ForgeOperation.LIST_CLAIMED_ISSUES,
+    forge.ForgeOperation.VALIDATE_SUCCESSOR,
     forge.ForgeOperation.ITEM_REFERENCE,
     forge.ForgeOperation.LANDING,
     forge.ForgeOperation.PARENT_ISSUE,
@@ -247,9 +257,19 @@ _READ_ONLY_OPERATIONS = (
     forge.ForgeOperation.LIST_BOARD_DEPENDENCIES,
     forge.ForgeOperation.LIST_OPEN_BOARD_PULL_REQUESTS,
     forge.ForgeOperation.LIST_RECENT_MERGED_BOARD_PULL_REQUESTS,
+    forge.ForgeOperation.LIST_ITEMS,
+    forge.ForgeOperation.OPEN_ITEM_COUNT,
 )
 _READ_WRITE_OPERATIONS = (
     forge.ForgeOperation.POST_COMMENT,
+    forge.ForgeOperation.ADD_LABEL,
+    forge.ForgeOperation.REMOVE_LABEL,
+    forge.ForgeOperation.UPSERT_PROJECTION,
+    forge.ForgeOperation.NEUTRALIZE_CLAIM_COMMENT,
+    forge.ForgeOperation.ENSURE_LABEL,
+    forge.ForgeOperation.CREATE_ITEM,
+    forge.ForgeOperation.LOCK_ITEM,
+    forge.ForgeOperation.CLOSE_ITEM,
     forge.ForgeOperation.CREATE_CHILD,
     forge.ForgeOperation.UPDATE_ITEM_BODY,
 )
@@ -433,6 +453,20 @@ class GitHubForge:
                 )
             comments.append(parsed)
         return tuple(comments)
+
+    def _projection_comments(self, issue: int) -> tuple[IssueComment, ...]:
+        projections: list[IssueComment] = []
+        for page in range(1, MAX_LEDGER_PAGES + 1):
+            page_comments = self._comment_page(issue, page)
+            projections.extend(
+                comment
+                for comment in page_comments
+                if comment.author_association in TRUSTED_ASSOCIATIONS
+                and PROJECTION_MARKER_PATTERN.fullmatch(comment.body.partition("\n")[0]) is not None
+            )
+            if len(page_comments) < COMMENTS_PER_PAGE:
+                return tuple(projections)
+        raise ClaimError("owning issue comment limit reached during projection update")
 
     def _parse_comment(self, value: object) -> IssueComment:
         if not isinstance(value, dict):
@@ -933,18 +967,268 @@ class GitHubForge:
                 recent.append(pull_request)
         return tuple(recent)
 
-    def post_comment(self, issue: int, body: str) -> str:
-        if "\x00" in body:
-            raise ClaimError("GitHub comment body contains a NUL byte")
-        encoded = body.encode("utf-8")
-        if len(encoded) > MAX_COMMENT_BYTES:
-            raise ClaimError(
-                f"GitHub comment body exceeds the {MAX_COMMENT_BYTES}-byte safety limit"
+    def list_claimed_issues(self) -> tuple[int, ...]:
+        raw = self._run(
+            [
+                "api",
+                "--paginate",
+                f"repos/{self.repository}/issues?state=all&labels={claim_label()}&per_page=100",
+                "--jq",
+                '.[] | select(has("pull_request") | not) | .number',
+            ]
+        )
+        issues: list[int] = []
+        for value in self._json_lines(raw, "claimed-issue"):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise forge.ForgeMalformedResponseError(
+                    "GitHub returned a malformed claimed-issue entry"
+                )
+            issues.append(value)
+        return tuple(issues)
+
+    def validate_successor(self, issue: int) -> None:
+        raw = self._run(
+            [
+                "api",
+                f"repos/{self.repository}/issues/{issue}",
+                "--jq",
+                '{number,state,locked,comments,is_pull_request:has("pull_request")}',
+            ]
+        )
+        values = self._json_lines(raw, "successor-issue")
+        if len(values) != 1 or not isinstance(values[0], dict):
+            raise forge.ForgeMalformedResponseError("GitHub returned a malformed successor issue")
+        successor = values[0]
+        number = successor.get("number")
+        comments = successor.get("comments")
+        if (
+            isinstance(number, bool)
+            or number != issue
+            or successor.get("state") != "open"
+            or successor.get("locked") is not True
+            or isinstance(comments, bool)
+            or comments != 0
+            or successor.get("is_pull_request") is not False
+        ):
+            raise ClaimUnavailableError(
+                f"successor #{issue} must be an open, empty, collaborator-locked issue"
             )
+
+    def _patch_comment_body(self, comment_id: int, body: str) -> None:
+        self._run(
+            [
+                "api",
+                "--method",
+                "PATCH",
+                f"repos/{self.repository}/issues/comments/{comment_id}",
+                "--input",
+                "-",
+            ],
+            input_data=json.dumps({"body": body}).encode("utf-8"),
+        )
+
+    def upsert_projection(
+        self,
+        issue: int,
+        body: str,
+        *,
+        create: bool = True,
+        adopt_stale: bool = False,
+    ) -> bool:
+        validated = _validated_comment(body)
+        all_projections = self._projection_comments(issue)
+        current_marker = _projection_marker()
+        projections = tuple(
+            comment
+            for comment in all_projections
+            if comment.body.partition("\n")[0] == current_marker
+        )
+        adoptable_projections = tuple(
+            comment
+            for comment in all_projections
+            if (_projection_ledger(comment) or 0) <= protocol.LEDGER_ISSUE
+        )
+        has_newer_projection = any(
+            (_projection_ledger(comment) or 0) > protocol.LEDGER_ISSUE
+            for comment in all_projections
+        )
+        if adopt_stale and adoptable_projections:
+            projections = adoptable_projections
+        if not projections:
+            if has_newer_projection:
+                raise ClaimError("owning issue has a projection from a newer ledger generation")
+            if not create:
+                return False
+            self.post_comment(issue, validated)
+            projections = tuple(
+                comment
+                for comment in self._projection_comments(issue)
+                if comment.body.partition("\n")[0] == current_marker
+            )
+        if not projections:
+            raise ClaimError(f"issue #{issue} did not expose its posted claim projection")
+        ordered = sorted(
+            projections,
+            key=lambda comment: (comment.created_at, comment.identifier),
+        )
+        owner, *duplicates = ordered
+        if owner.body != validated:
+            self._patch_comment_body(owner.identifier, validated)
+        for duplicate in duplicates:
+            self._run(
+                [
+                    "api",
+                    "--method",
+                    "DELETE",
+                    f"repos/{self.repository}/issues/comments/{duplicate.identifier}",
+                ]
+            )
+        return True
+
+    def neutralize_claim_comment(self, comment_id: int, body: str) -> None:
+        self._patch_comment_body(comment_id, _validated_comment(body))
+
+    def post_comment(self, issue: int, body: str) -> str:
+        encoded = _validated_comment(body).encode("utf-8")
         return self._run(
             ["issue", "comment", str(issue), "--repo", self.repository.path, "--body-file", "-"],
             input_data=encoded,
         )
+
+    def add_label(self, issue: int, label: str) -> None:
+        self._run(
+            ["issue", "edit", str(issue), "--repo", self.repository.path, "--add-label", label]
+        )
+
+    def remove_label(self, issue: int, label: str) -> None:
+        self._run(
+            ["issue", "edit", str(issue), "--repo", self.repository.path, "--remove-label", label]
+        )
+
+    def _ledger_item(self, value: object) -> forge.LedgerItem:
+        if not isinstance(value, dict):
+            raise forge.ForgeMalformedResponseError("GitHub returned a malformed ledger issue")
+        number = value.get("number")
+        author_association = value.get("author_association")
+        raw_state = value.get("state")
+        item_state = _LEDGER_ITEM_STATES.get(raw_state) if isinstance(raw_state, str) else None
+        if (
+            isinstance(number, bool)
+            or not isinstance(number, int)
+            or number < 1
+            or item_state is None
+            or not isinstance(value.get("locked"), bool)
+            or not isinstance(value.get("body"), str)
+            or not isinstance(author_association, str)
+            or not isinstance(value.get("is_landing"), bool)
+        ):
+            raise forge.ForgeMalformedResponseError("GitHub returned a malformed ledger issue")
+        return forge.LedgerItem(
+            number,
+            item_state,
+            value["locked"],
+            value["body"],
+            author_association in TRUSTED_ASSOCIATIONS,
+            value["is_landing"],
+        )
+
+    def _ledger_items_page(
+        self, page_number: int, *, query_state: str, label_filter: str
+    ) -> tuple[object, ...]:
+        raw = self._run(
+            [
+                "api",
+                f"repos/{self.repository}/issues?state={query_state}{label_filter}"
+                f"&per_page={ISSUES_PER_PAGE}&page={page_number}",
+                "--jq",
+                (
+                    ".[] | {number,state,locked,body,author_association,"
+                    'is_landing:has("pull_request")}'
+                ),
+            ]
+        )
+        return self._json_lines(raw, "ledger-issue")
+
+    def list_items(
+        self, *, state: forge.ItemState | None = None, label: str | None = None
+    ) -> forge.Listing:
+        """Every matching issue, plus the true count of pages this fetch took.
+
+        Fetched one page at a time (never `--paginate`, which would hide that
+        count inside `gh`) so `pages_fetched` is the fact it claims to be, not
+        a guess derived from `len(items)` against the per-page size: a full
+        page is never assumed to be the last one, so an exact multiple of
+        `ISSUES_PER_PAGE` still costs the extra page that proves nothing
+        follows.
+        """
+        query_state = "all" if state is None else state.value
+        label_filter = f"&labels={label}" if label else ""
+        items: list[forge.LedgerItem] = []
+        pages_fetched = 0
+        page_number = 1
+        while True:
+            page_values = self._ledger_items_page(
+                page_number, query_state=query_state, label_filter=label_filter
+            )
+            pages_fetched += 1
+            items.extend(self._ledger_item(value) for value in page_values)
+            if len(page_values) < ISSUES_PER_PAGE:
+                return forge.Listing(tuple(items), pages_fetched)
+            page_number += 1
+
+    def open_item_count(self) -> int:
+        raw = self._run(["api", f"repos/{self.repository}", "--jq", ".open_issues_count"])
+        try:
+            count = int(raw)
+        except ValueError as error:
+            raise forge.ForgeMalformedResponseError(
+                "GitHub returned a malformed open-issue count"
+            ) from error
+        if count < 0:
+            raise forge.ForgeMalformedResponseError("GitHub returned a malformed open-issue count")
+        return count
+
+    def ensure_label(self, name: str, *, colour: str, description: str) -> None:
+        self._run(
+            [
+                "label",
+                "create",
+                name,
+                "--repo",
+                self.repository.path,
+                "--color",
+                colour,
+                "--description",
+                description,
+                "--force",
+            ]
+        )
+
+    def create_item(self, *, title: str, body: str) -> int:
+        raw = self._run(
+            ["api", "--method", "POST", f"repos/{self.repository}/issues", "--input", "-"],
+            input_data=json.dumps({"title": title, "body": body}).encode("utf-8"),
+        )
+        try:
+            created = json.loads(raw)
+        except json.JSONDecodeError as error:
+            raise forge.ForgeMalformedResponseError(
+                "GitHub returned invalid created-ledger JSON"
+            ) from error
+        if (
+            not isinstance(created, dict)
+            or isinstance(created.get("number"), bool)
+            or not isinstance(created.get("number"), int)
+            or created["number"] < 1
+        ):
+            raise forge.ForgeMalformedResponseError("GitHub did not return a created ledger number")
+        return created["number"]
+
+    def lock_item(self, number: int) -> None:
+        self._run(["api", "--method", "PUT", f"repos/{self.repository}/issues/{number}/lock"])
+
+    def close_item(self, number: int) -> None:
+        self._run(["issue", "close", str(number), "--repo", self.repository.path])
 
     def create_child(self, *, parent: int, title: str, body: str, kind: board.ItemKind) -> int:
         """Create a fresh issue of `kind` and record it as `parent`'s sub-issue.

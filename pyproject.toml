@@ -63,7 +63,7 @@ type = "layers"
 containers = ["agent_claim"]
 layers = [
     "cli",
-    "checkout | store",
+    "checkout | discovery | store",
     "github",
     "forge",
     "board",

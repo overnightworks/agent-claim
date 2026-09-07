@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
-from . import __version__, board, checkout, forge, github, protocol, store
+from . import __version__, board, checkout, discovery, forge, github, protocol, store
 
 AGENT_CLAIM_AGENT_ENV = checkout.AGENT_CLAIM_AGENT_ENV
 CLAUDE_SESSION_ID_ENV = checkout.CLAUDE_SESSION_ID_ENV
@@ -24,24 +24,46 @@ ClaimError = protocol.ClaimError
 ClaimRequest = protocol.ClaimRequest
 ClaimUnavailableError = protocol.ClaimUnavailableError
 ClaimantRelease = protocol.ClaimantRelease
+DuplicateClaimConflictError = protocol.DuplicateClaimConflictError
+DuplicateClaimRepair = protocol.DuplicateClaimRepair
 InvalidClaimMarkerError = protocol.InvalidClaimMarkerError
 IssueComment = protocol.IssueComment
 IssueIdentity = protocol.IssueIdentity
 LaneIdentity = protocol.LaneIdentity
 ISSUELESS_LANE_BRANCH_PREFIXES = protocol.ISSUELESS_LANE_BRANCH_PREFIXES
 LEDGER_BODY_MARKER = protocol.LEDGER_BODY_MARKER
+LEDGER_LABEL = protocol.LEDGER_LABEL
 LedgerSupersede = protocol.LedgerSupersede
 LedgerSupersededError = protocol.LedgerSupersededError
+PROJECTION_MARKER_PATTERN = protocol.PROJECTION_MARKER_PATTERN
+_active_projection = protocol._active_projection
 _git_output = checkout._git_output
+_projection_ledger = protocol._projection_ledger
+_projection_marker = protocol._projection_marker
 _resolved_agent = checkout._resolved_agent
 _timestamp = board._timestamp
+_unclaimed_projection = protocol._unclaimed_projection
 _validate_checkout = checkout._validate_checkout
+acquire_claim = protocol.acquire_claim
 active_claims = protocol.active_claims
+bootstrap_ledger = discovery.bootstrap_ledger
+claim_comment = protocol.claim_comment
+claim_label = protocol.claim_label
 claims_conflict = protocol.claims_conflict
 claims_holding_path = protocol.claims_holding_path
 configure_ledger = protocol.configure_ledger
+discover_ledger = discovery.discover_ledger
 is_protocol_candidate = protocol.is_protocol_candidate
 parse_claim_event = protocol.parse_claim_event
+reconcile_all_labels = protocol.reconcile_all_labels
+reconcile_issue_label = protocol.reconcile_issue_label
+repair_duplicate_claims = protocol.repair_duplicate_claims
+release_claim = protocol.release_claim
+rescope_claim = protocol.rescope_claim
+release_comment = protocol.release_comment
+rescope_comment = protocol.rescope_comment
+supersede_comment = protocol.supersede_comment
+supersede_ledger = protocol.supersede_ledger
 
 POLICY_LOADER = (
     "<!-- agent-claim-policy:v1 -->\n"
@@ -153,7 +175,7 @@ def _reject_wide_scope(
     return n, total, share
 
 
-def _touch_json(claim: protocol.ScopedClaim) -> dict[str, object]:
+def _touch_json(claim: protocol.LedgerActiveClaim) -> dict[str, object]:
     return {
         **_identity_json(claim.identity),
         "claim_id": claim.claim_id,
@@ -162,7 +184,7 @@ def _touch_json(claim: protocol.ScopedClaim) -> dict[str, object]:
     }
 
 
-def _touch_summary(touches: tuple[protocol.ScopedClaim, ...]) -> str:
+def _touch_summary(touches: tuple[protocol.LedgerActiveClaim, ...]) -> str:
     if not touches:
         return "overlaps no other open claims"
     return "overlaps " + ", ".join(
@@ -170,40 +192,59 @@ def _touch_summary(touches: tuple[protocol.ScopedClaim, ...]) -> str:
     )
 
 
-def _claim_cost_line(n: int, total: int, touches: tuple[protocol.ScopedClaim, ...]) -> str:
+def _claim_cost_line(n: int, total: int, touches: tuple[protocol.LedgerActiveClaim, ...]) -> str:
     percent = 0 if total == 0 else round(100 * n / total)
     return f"{n} of {total} versioned files ({percent}%); {_touch_summary(touches)}"
 
 
 def _request(arguments: argparse.Namespace) -> protocol.ClaimRequest:
-    agent = protocol._outbound_text(
-        checkout._resolved_agent(arguments.agent), "agent", maximum=128
-    )
-    role = protocol._outbound_text(arguments.role, "role", maximum=64)
+    agent = checkout._resolved_agent(arguments.agent)
     base = checkout._git_output(["rev-parse", "HEAD"]) if arguments.base is None else arguments.base
-    if protocol.COMMIT_PATTERN.fullmatch(base) is None:
-        raise protocol.ClaimError("base must be a full lowercase commit SHA")
     if arguments.branch is None:
         branch = checkout._git_output(["branch", "--show-current"])
     else:
         branch = arguments.branch
-    branch = protocol._valid_branch({"branch": branch})
     issue = _optional_issue_number(arguments.issue)
     identity = _resolved_identity(issue, branch)
-    claim_id = arguments.claim_id or uuid.uuid4().hex
-    protocol.ClaimId(claim_id)
+    payload: dict[str, object] = {
+        "action": "claim",
+        "agent": agent,
+        "base": base,
+        "branch": branch,
+        "claim_id": arguments.claim_id or uuid.uuid4().hex,
+        protocol._identity_marker_key(identity): protocol._identity_marker_value(identity),
+        "role": arguments.role,
+        "scope": arguments.scope,
+    }
+    synthetic = protocol.IssueComment(
+        1,
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T00:00:00Z",
+        f"{protocol._marker(payload)}\n\nAgent: {agent} ({arguments.role})",
+        "OWNER",
+        "https://github.com/local/request",
+    )
+    parsed = protocol.parse_claim_event(synthetic)
+    # `payload["action"]` is hardcoded to "claim" two lines above, and
+    # `parse_claim_event`'s "claim" branch unconditionally returns
+    # `_parse_active_claim`'s result -- typed `LedgerActiveClaim`, never another
+    # member of the wider `ClaimEvent` union it declares for its other four
+    # actions. A malformed payload fails loud from inside that parse instead
+    # of coming back as some other event type, so this narrows a guarantee
+    # the callee's own return type already gives, not a real runtime outcome.
+    parsed = cast(protocol.LedgerActiveClaim, parsed)
     whole_reason = _optional_whole_reason(arguments)
     resource = getattr(arguments, "resource", None)
     if resource is not None:
         resource = protocol._outbound_resource_name(resource)
     request = protocol.ClaimRequest(
-        identity=identity,
-        agent=agent,
-        role=role,
-        base=base,
-        branch=branch,
-        scope=protocol._valid_scope(arguments.scope),
-        claim_id=claim_id,
+        identity=parsed.identity,
+        agent=parsed.agent,
+        role=parsed.role,
+        base=parsed.base,
+        branch=parsed.branch,
+        scope=parsed.scope,
+        claim_id=parsed.claim_id,
         out_of_order_reason=arguments.out_of_order,
         whole_reason=whole_reason,
         resource=resource,
@@ -216,17 +257,10 @@ LANE_ISSUE_HELP = "omit for lane mode, derived from a docs/ or fix/ checkout bra
 
 
 def _add_bootstrap_parser(commands: argparse._SubParsersAction) -> None:
-    bootstrap = commands.add_parser(
+    commands.add_parser(
         "bootstrap",
-        help="create refs/aco/state if absent, or import a ledger with --ledger N",
-    )
-    bootstrap.add_argument(
-        "--ledger",
-        type=int,
-        metavar="N",
         help=(
-            "import ledger issue N into refs/aco/state; run "
-            "agent-claim bootstrap --ledger from that repository's checkout"
+            "create or adopt this repository's locked ledger, then create or report refs/aco/state"
         ),
     )
 
@@ -358,6 +392,22 @@ def _add_rescope_parser(commands: argparse._SubParsersAction) -> None:
     rescope.add_argument("--json", action="store_true")
 
 
+def _add_reconcile_parser(commands: argparse._SubParsersAction) -> None:
+    reconcile = commands.add_parser("reconcile", help="repair claimed-label projections")
+    reconcile.add_argument("issue", type=int, nargs="?")
+
+
+def _add_supersede_parser(commands: argparse._SubParsersAction) -> None:
+    supersede = commands.add_parser(
+        "supersede", help="atomically freeze a drained ledger for its successor"
+    )
+    supersede.add_argument("successor_issue", type=int)
+    supersede.add_argument("--agent", required=True)
+    supersede.add_argument("--role", required=True)
+    supersede.add_argument("--reason", required=True)
+    supersede.add_argument("--claim-id", required=True)
+
+
 def _add_cut_parser(commands: argparse._SubParsersAction) -> None:
     cut = commands.add_parser("cut", help="create a container's next slice as a fresh child issue")
     cut.add_argument("issue", type=int, help="the container to cut")
@@ -397,6 +447,8 @@ _SUBPARSER_BUILDERS: tuple[Callable[[argparse._SubParsersAction], None], ...] = 
     _add_claim_parser,
     _add_release_parser,
     _add_rescope_parser,
+    _add_reconcile_parser,
+    _add_supersede_parser,
     _add_cut_parser,
     _add_pull_request_check_parser,
     _add_policy_parser,
@@ -616,7 +668,7 @@ def _status_path_json(claims: tuple[protocol.ActiveClaim, ...], path: str) -> in
     return 0
 
 
-def _rescope_json(claimed: protocol.ActiveClaim) -> None:
+def _rescope_json(claimed: protocol.LedgerActiveClaim) -> None:
     print(
         json.dumps(
             {
@@ -643,10 +695,10 @@ class ScopeVersioning:
 
 
 def _claim_json(
-    claimed: protocol.ActiveClaim,
+    claimed: protocol.LedgerActiveClaim,
     *,
     versioning: ScopeVersioning,
-    touches: tuple[protocol.ActiveClaim, ...],
+    touches: tuple[protocol.LedgerActiveClaim, ...],
     checks: tuple[SliceCheck, ...],
 ) -> int:
     print(
@@ -654,6 +706,7 @@ def _claim_json(
             {
                 **_identity_json(claimed.identity),
                 "claim_id": claimed.claim_id,
+                "url": claimed.comment.url,
                 "agent": claimed.agent,
                 "role": claimed.role,
                 "base": claimed.base,
@@ -672,7 +725,7 @@ def _claim_json(
 
 
 def _release_json(
-    released: protocol.ActiveClaim,
+    released: protocol.LedgerActiveClaim,
     agent: str,
     role: str | None,
     outcome: protocol.ReleaseOutcome,
@@ -809,10 +862,9 @@ def _load_board_config(client: forge.BoardSource, toplevel: Path) -> board.Board
 
 def _board(
     client: forge.BoardSource,
-    claims: tuple[protocol.ActiveClaim, ...],
+    claims: tuple[protocol.LedgerActiveClaim, ...],
     *,
     issues: tuple[board.Issue, ...] | None = None,
-    claim_ages: Mapping[str, datetime] | None = None,
 ) -> board.Board:
     now = datetime.now(UTC)
     config = _load_board_config(client, _resolve_toplevel())
@@ -874,7 +926,6 @@ def _board(
             children=children,
             dependencies=dependencies,
             requests=client.requests,
-            claim_ages=claim_ages or {},
         )
     )
 
@@ -1160,7 +1211,7 @@ def _legacy_or_malformed_checks(item: board.BoardItem) -> tuple[SliceCheck, ...]
     if item.read_state is board.BodyReadState.MALFORMED:
         return tuple(
             SliceCheck(
-                "error", "body-contract", board.body_defect_text(defect)
+                "error", "body-contract", f"body malformed: {defect.field}: {defect.message}"
             )
             for defect in item.contract.defects
         )
@@ -1270,15 +1321,15 @@ def _refuse_claim(json_mode: bool, issue: int | None, checks: tuple[SliceCheck, 
 
 
 def _claim_defect(
-    claims: tuple[protocol.ActiveClaim, ...],
+    client: forge.ForgeReader,
     detail: forge.Landing,
     identity: protocol.ClaimIdentity,
 ) -> board.ClassificationDefect | None:
-    """A landing declares only what its own head branch holds a live store claim on."""
+    """A landing declares only what its own head branch holds a live, unquarantined claim on."""
     matching = next(
         (
             claim
-            for claim in claims
+            for claim in protocol._ledger_claims(client)
             if claim.identity == identity and claim.branch == detail.source_branch
         ),
         None,
@@ -1292,11 +1343,19 @@ def _claim_defect(
         return board.ClassificationDefect(
             f"has no active {subject} on branch {detail.source_branch!r}"
         )
+    if matching.quarantined_by is not None:
+        # Issue #136 finding 1: a claim a later unreadable comment quarantined
+        # cannot be trusted to still mean what this reader parsed it as.
+        return board.ClassificationDefect(
+            f"has a quarantined claim on branch {detail.source_branch!r}: "
+            f"{protocol._unreadable_claim_reason(matching.quarantined_by)}; "
+            "upgrade the installed tool"
+        )
     return None
 
 
 def _no_item_defect(
-    claims: tuple[protocol.ActiveClaim, ...],
+    client: forge.ForgeReader,
     repository: str,
     detail: forge.Landing,
 ) -> board.ClassificationDefect | None:
@@ -1306,7 +1365,7 @@ def _no_item_defect(
     retire nothing: a closing reference here would close an item no claim and
     no `Work-Item:` line ever named.
     """
-    claim_defect = _claim_defect(claims, detail, protocol.LaneIdentity())
+    claim_defect = _claim_defect(client, detail, protocol.LaneIdentity())
     if claim_defect is not None:
         return claim_defect
     closing = board.closing_references(detail.body, repository)
@@ -1339,7 +1398,7 @@ def _parent_body_finding(reference: board.IssueReference, parsed: board.ParsedBo
     if parsed.read_state is board.BodyReadState.LEGACY:
         return f"has parent {reference} with a legacy body"
     defect = parsed.contract.defects[0]
-    return f"has parent {reference} with a {board.body_defect_text(defect)}"
+    return f"has parent {reference} with a malformed body: {defect.field}: {defect.message}"
 
 
 def _parent_reference_defect(
@@ -1437,7 +1496,6 @@ def _closing_defect(
 
 def _work_item_defect(
     client: forge.ForgeReader,
-    claims: tuple[protocol.ActiveClaim, ...],
     repository: str,
     detail: forge.Landing,
     item: board.IssueReference,
@@ -1448,7 +1506,11 @@ def _work_item_defect(
         return board.ClassificationDefect(
             f"names work item {item} of another repository, which holds no claim here"
         )
-    claim_defect = _claim_defect(claims, detail, protocol.IssueIdentity(item.number))
+    if item.number == protocol.LEDGER_ISSUE:
+        return board.ClassificationDefect(
+            f"names the claim ledger #{protocol.LEDGER_ISSUE} as its work item"
+        )
+    claim_defect = _claim_defect(client, detail, protocol.IssueIdentity(item.number))
     if claim_defect is not None:
         return claim_defect
     requirement = _parent_requirement(client, repository, item, mode)
@@ -1458,11 +1520,7 @@ def _work_item_defect(
 
 
 def _checked_classification(
-    client: forge.ForgeReader,
-    claims: tuple[protocol.ActiveClaim, ...],
-    repository: str,
-    detail: forge.Landing,
-    mode: board.BodyContractMode,
+    client: forge.ForgeReader, repository: str, detail: forge.Landing, mode: board.BodyContractMode
 ) -> board.Classification | board.ClassificationDefect:
     if detail.source_repository.path != repository:
         return board.ClassificationDefect(
@@ -1478,22 +1536,18 @@ def _checked_classification(
             f"targets {detail.target_branch!r}, not the default branch {default_branch!r}"
         )
     defect = (
-        _no_item_defect(claims, repository, detail)
+        _no_item_defect(client, repository, detail)
         if isinstance(classification, board.NoItemClassification)
-        else _work_item_defect(client, claims, repository, detail, classification.item, mode)
+        else _work_item_defect(client, repository, detail, classification.item, mode)
     )
     return classification if defect is None else defect
 
 
 def _pull_request_check(
-    client: forge.ForgeReader,
-    claims: tuple[protocol.ActiveClaim, ...],
-    repository: str,
-    number: int,
-    mode: board.BodyContractMode,
+    client: forge.ForgeReader, repository: str, number: int, mode: board.BodyContractMode
 ) -> int:
     detail = client.landing(number)
-    checked = _checked_classification(client, claims, repository, detail, mode)
+    checked = _checked_classification(client, repository, detail, mode)
     if isinstance(checked, board.ClassificationDefect):
         print(f"REFUSED: pull request #{detail.number} {checked.message}", file=sys.stderr)
         return 1
@@ -1590,131 +1644,24 @@ def _resolved_canonical_remote(repository: str | None, toplevel: Path) -> str:
     return config.canonical_remote
 
 
-def _claim_ages(worktree: Path, state: protocol.ClaimState) -> dict[str, datetime]:
-    """Each live claim's age in an already-fetched state (its `opened_commit`'s
-    committer date, from the same fetched tip's ancestry -- §1 "Status age
-    ..."). Split from `_fetched_claims_and_ages` so a caller that already
-    holds a `ClaimState` (`claim`/`rescope`/`release`/`board`/`rulings`/
-    `next`) never fetches twice just to get ages too.
-    """
-    if state.tip is None:
-        return {}
-    tip = state.tip
-    return {
-        claim.claim_id: store.committer_date(worktree=worktree, tip=tip, commit=claim.opened_commit)
-        for claim in state.claims.values()
-    }
-
-
 def _fetched_claims_and_ages(
     worktree: Path, canonical_remote: str
 ) -> tuple[tuple[protocol.ActiveClaim, ...], dict[str, datetime]]:
-    """The store's live claims, plus each one's age -- for a caller (`status`)
-    that has not already fetched the state itself."""
+    """The store's live claims, plus each one's age (its `opened_commit`'s
+    committer date, from the same fetched tip's ancestry -- §1 "Status age
+    ...") -- shared by `status` and, later, `protect`/`claim`/`rescope`/
+    `release`.
+    """
     state = store.fetch_state(worktree=worktree, remote=canonical_remote)
-    return tuple(state.claims.values()), _claim_ages(worktree, state)
-
-
-def _store_observation(
-    parsed: argparse.Namespace,
-) -> tuple[Path, str, protocol.ClaimState]:
-    """One fetch of `refs/aco/state` for a store command, after the shared
-    forge-target / canonical-remote refusal."""
-    toplevel = Path(checkout._git_output(["rev-parse", "--show-toplevel"])).resolve()
-    canonical_remote = _resolved_canonical_remote(parsed.repo, toplevel)
-    worktree = Path.cwd()
-    return worktree, canonical_remote, store.fetch_state(worktree=worktree, remote=canonical_remote)
-
-
-def _require_state_ref(state: protocol.ClaimState) -> None:
+    claims = tuple(state.claims.values())
     if state.tip is None:
-        raise protocol.ClaimError(protocol.MISSING_STATE_REF)
-
-
-def _transition_subject(action: str, identity: protocol.ClaimIdentity, branch: str) -> str:
-    """The commit message's first line (§1 "Commit message"): `claim issue 42`,
-    `rescope lane docs/lane-cleanup`, and so on."""
-    if isinstance(identity, protocol.LaneIdentity):
-        return f"{action} lane {branch}"
-    return f"{action} issue {identity.issue}"
-
-
-def _claim_intent_from_request(
-    request: protocol.ClaimRequest, operation_id: str
-) -> protocol.ClaimIntent:
-    """`_request`'s validated `ClaimRequest`, converted to the store's own
-    intent (issue #176, §1: `ClaimRequest` stays the CLI-facing input,
-    `ClaimIntent` is what `apply` actually consumes)."""
-    resource_name = None
-    resource_value = None
-    if request.resource is not None:
-        resource_name = request.resource
-        resource_value = request.resource_value
-    return protocol.ClaimIntent(
-        identity=request.identity,
-        agent=request.agent,
-        role=request.role,
-        base=protocol.ObjectId(request.base),
-        branch=request.branch,
-        scope=request.scope,
-        claim_id=protocol.ClaimId(request.claim_id),
-        operation_id=operation_id,
-        whole_reason=request.whole_reason,
-        resource_name=resource_name,
-        resource_value=resource_value,
-    )
-
-
-def _matching_store_claim(
-    observed: protocol.ClaimState, request: protocol.ClaimRequest
-) -> protocol.ActiveClaim | None:
-    """The live store claim an interrupted, replayed `claim` invocation may
-    reuse (criterion 2): same identity, agent, role, branch, scope, *and*
-    claim id -- `apply` itself only replays on an exact claim-id match
-    (§1 "Retry of an interrupted identical request"), so a CLI-level replay
-    check that skips this slice's dispatch rules must use the same test, not
-    the ledger's looser field-only match. Issueless lanes keep today's
-    one-claim-per-branch contract; only a numbered item gets replay
-    detection at all.
-    """
-    if not isinstance(request.identity, protocol.IssueIdentity):
-        return None
-    existing = observed.claims.get(protocol.claim_key(request.identity, request.branch))
-    if (
-        existing is not None
-        and existing.claim_id == request.claim_id
-        and existing.agent == request.agent
-        and existing.role == request.role
-        and existing.branch == request.branch
-        and existing.scope == request.scope
-    ):
-        return existing
-    return None
-
-
-def _selected_store_claim(
-    observed: protocol.ClaimState,
-    identity: protocol.ClaimIdentity,
-    branch: str | None,
-    claim_id: str | None,
-) -> protocol.ActiveClaim:
-    """The one live store claim `rescope`/`release` names: at most one claim
-    is ever live per identity (the store's own invariant), so this is a
-    direct key lookup, never the ledger's filter-then-disambiguate walk.
-    `claim_id`, when given, is a safety check against that one claim, not a
-    selector among several -- there are never several.
-    """
-    if isinstance(identity, protocol.LaneIdentity) and not branch:
-        raise protocol.ClaimUnavailableError(
-            "lane release requires a non-empty current branch; check out the "
-            "docs/ or fix/ lane branch, or pass an issue number"
-        )
-    selected = observed.claims.get(protocol.claim_key(identity, branch or ""))
-    if selected is None or (claim_id is not None and selected.claim_id != claim_id):
-        raise protocol.ClaimUnavailableError(
-            f"{protocol._identity_summary(identity, branch or '')} has no active build claim"
-        )
-    return selected
+        return claims, {}
+    tip = state.tip
+    ages: dict[str, datetime] = {
+        claim.claim_id: store.committer_date(worktree=worktree, tip=tip, commit=claim.opened_commit)
+        for claim in claims
+    }
+    return claims, ages
 
 
 MUTATING_HOOK_TOOLS = frozenset({"Edit", "MultiEdit", "Write", "search_replace", "write"})
@@ -1796,8 +1743,6 @@ def _protect_store_verdict(agent: str, branch: str, relative: str, canonical_rem
         state = store.fetch_state(worktree=Path.cwd(), remote=canonical_remote)
     except protocol.ClaimError as error:
         return _hook_deny(f"cannot reach {store.STATE_REF}: {error}")
-    if state.tip is None:
-        return _hook_deny(f"cannot reach {store.STATE_REF}: {protocol.MISSING_STATE_REF}")
     for claim in state.claims.values():
         if (
             claim.agent == agent
@@ -1850,6 +1795,7 @@ class _ReadSession:
     """What a dispatched read-only subcommand needs beyond its parsed arguments."""
 
     forge: forge.ForgeReader
+    ledger: int
 
 
 @dataclass(frozen=True)
@@ -1857,6 +1803,7 @@ class _WriteSession:
     """What a dispatched write subcommand needs beyond its parsed arguments."""
 
     forge: forge.ForgeWriter
+    ledger: int
     release_branch: str | None
 
 
@@ -1883,13 +1830,8 @@ def _rescope_command(parsed: argparse.Namespace) -> protocol.RescopeRequest:
 def _cmd_pull_request_check(parsed: argparse.Namespace, session: _ReadSession) -> int:
     pull_request_number = int(parsed.pr)
     config = _load_board_config(session.forge, _resolve_toplevel())
-    _worktree, _remote, observed = _store_observation(parsed)
     return _pull_request_check(
-        session.forge,
-        tuple(observed.claims.values()),
-        session.forge.repository.path,
-        pull_request_number,
-        config.body_contract,
+        session.forge, session.forge.repository.path, pull_request_number, config.body_contract
     )
 
 
@@ -1912,32 +1854,16 @@ def _cmd_status(parsed: argparse.Namespace) -> int:
     return _status(claims, issue, ages, now=now)
 
 
-def _observed_board(
-    parsed: argparse.Namespace,
-    session: _ReadSession,
-    *,
-    issues: tuple[board.Issue, ...] | None = None,
-) -> board.Board:
-    """`board`/`rulings`/`next` share this: the store's live claims, projected
-    onto forge board data (issue #176 -- claims no longer come from the
-    ledger; the forge is still the board's own data source)."""
-    worktree, _remote, observed = _store_observation(parsed)
-    return _board(
-        session.forge,
-        tuple(observed.claims.values()),
-        issues=issues,
-        claim_ages=_claim_ages(worktree, observed),
-    )
-
-
 def _cmd_board(parsed: argparse.Namespace, session: _ReadSession) -> None:
-    projected = _observed_board(parsed, session)
+    comments = session.forge.list_protocol_candidates(protocol.LEDGER_ISSUE)
+    projected = _board(session.forge, protocol.active_claims(comments))
     print(board.board_json(projected) if parsed.json else board.render(projected))
 
 
 def _cmd_rulings(parsed: argparse.Namespace, session: _ReadSession) -> None:
+    comments = session.forge.list_protocol_candidates(protocol.LEDGER_ISSUE)
     issues = session.forge.list_open_board_issues()
-    projected = _observed_board(parsed, session, issues=issues)
+    projected = _board(session.forge, protocol.active_claims(comments), issues=issues)
     _rulings(projected, as_json=parsed.json)
 
 
@@ -1950,7 +1876,8 @@ def _next_action_container_number(action: board.NextAction | None) -> int | None
 
 
 def _cmd_next(parsed: argparse.Namespace, session: _ReadSession) -> int:
-    projected = _observed_board(parsed, session)
+    comments = session.forge.list_protocol_candidates(protocol.LEDGER_ISSUE)
+    projected = _board(session.forge, protocol.active_claims(comments))
     action = board.next_action(projected)
     chosen_container = _next_action_container_number(action)
     skipped = tuple(item for item in _unworkable(projected) if item.number != chosen_container)
@@ -1966,33 +1893,21 @@ def _cmd_next(parsed: argparse.Namespace, session: _ReadSession) -> int:
     return _next(action, skipped, recovery)
 
 
-def _cmd_rescope(parsed: argparse.Namespace, _session: _WriteSession) -> None:
+def _cmd_rescope(parsed: argparse.Namespace, session: _WriteSession) -> None:
+    client = session.forge
     requested = _rescope_command(parsed)
-    worktree, canonical_remote, observed = _store_observation(parsed)
-    _require_state_ref(observed)
-    selected = _selected_store_claim(
-        observed, requested.identity, requested.branch, requested.claim_id
-    )
-    if requested.agent != selected.agent:
-        raise protocol.ClaimUnavailableError("only the original claimant may rescope")
-    combined = protocol._combined_scope(selected.scope, requested.add, requested.drop)
-    versioned = checkout.versioned_paths()
-    _reject_wide_scope(combined, versioned, requested.whole_reason or selected.whole_reason)
-    intent = protocol.RescopeIntent(
-        claim_id=selected.claim_id,
-        agent=requested.agent,
-        role=selected.role,
-        scope=combined,
-        operation_id=uuid.uuid4().hex,
-        whole_reason=requested.whole_reason,
-    )
-    new_state = store.commit_transition(
-        worktree=worktree,
-        remote=canonical_remote,
-        subject=_transition_subject("rescope", selected.identity, selected.branch),
-        intent=intent,
-    )
-    rescoped = new_state.claims[protocol.claim_key(selected.identity, selected.branch)]
+    if requested.add or requested.drop:
+        versioned = checkout.versioned_paths()
+        selected = protocol._select_rescope_claim(
+            protocol._ledger_claims(client),
+            requested.identity,
+            requested.agent,
+            requested.claim_id,
+            branch=requested.branch,
+        )
+        combined = protocol._combined_scope(selected.scope, requested.add, requested.drop)
+        _reject_wide_scope(combined, versioned, requested.whole_reason)
+    rescoped = protocol.rescope_claim(client, requested)
     if parsed.json:
         _rescope_json(rescoped)
         return
@@ -2004,23 +1919,15 @@ def _cmd_claim(parsed: argparse.Namespace, session: _WriteSession) -> int:
     requested = _request(parsed)
     versioned = checkout.versioned_paths()
     n, total, share = _reject_wide_scope(requested.scope, versioned, requested.whole_reason)
-    worktree, canonical_remote, observed = _store_observation(parsed)
-    _require_state_ref(observed)
     checks: tuple[SliceCheck, ...] = ()
     target_issue: int | None = None
-    replayed = None
     if isinstance(requested.identity, protocol.IssueIdentity):
         target_issue = requested.identity.issue
-        replayed = _matching_store_claim(observed, requested)
+        replayed = protocol.matching_claim_retry(protocol._ledger_claims(client), requested)
         if replayed is None:
             open_issues = client.list_open_board_issues()
             open_by_number = {issue.number: issue for issue in open_issues}
-            projected = _board(
-                client,
-                tuple(observed.claims.values()),
-                issues=open_issues,
-                claim_ages=_claim_ages(worktree, observed),
-            )
+            projected = _board(client, protocol._ledger_claims(client), issues=open_issues)
             checks = _slice_rule_checks(
                 BoardReferenceLookup(client, client.repository.path, open_by_number),
                 target_issue,
@@ -2032,20 +1939,33 @@ def _cmd_claim(parsed: argparse.Namespace, session: _WriteSession) -> int:
         return 2
     for check in checks:
         print(check.render(), file=sys.stderr if parsed.json else sys.stdout)
-    if replayed is None:
-        intent = _claim_intent_from_request(requested, uuid.uuid4().hex)
-        new_state = store.commit_transition(
-            worktree=worktree,
-            remote=canonical_remote,
-            subject=_transition_subject("claim", requested.identity, requested.branch),
-            intent=intent,
+    # `_acquire_claim_with_observed` already reads the ledger once,
+    # right after posting, to detect a claim race; that same snapshot
+    # is what the "touches" note below needs, so reusing it (instead
+    # of a fresh `protocol._ledger_claims(client)` call) removes the
+    # slowest step of `claim` — the wait was reported as a hang that
+    # landed after the mutation was already visible on the ledger.
+    try:
+        claimed, observed = protocol._acquire_claim_with_observed(client, requested)
+    except protocol.ClaimPostedReconcileFailedError as error:
+        # The claim comment already exists and already won the
+        # ledger; a failure in the post-claim label/projection
+        # reconcile must never read as a refusal — that would leave
+        # the operator believing nothing happened while a live claim
+        # sits on the ledger. Print the claim plainly even under
+        # --json: there is no well-formed claim payload to emit when
+        # the reconcile itself is what failed.
+        print(
+            f"CLAIMED {_claim_subject(error.claim)}: "
+            f"{error.claim.claim_id} {error.claim.comment.url}"
         )
-        claimed = new_state.claims[protocol.claim_key(requested.identity, requested.branch)]
-        live = tuple(new_state.claims.values())
-    else:
-        claimed = replayed
-        live = tuple(observed.claims.values())
-    touches = protocol.conflicting_claims(live, claimed)
+        print(
+            f"ERROR: the claim above exists, but the post-claim "
+            f"reconcile failed: {error.reconcile_error}",
+            file=sys.stderr,
+        )
+        return 2
+    touches = protocol.conflicting_claims(observed, claimed)
     if parsed.json:
         return _claim_json(
             claimed,
@@ -2053,7 +1973,7 @@ def _cmd_claim(parsed: argparse.Namespace, session: _WriteSession) -> int:
             touches=touches,
             checks=checks,
         )
-    print(f"CLAIMED {_claim_subject(claimed)}: {claimed.claim_id}")
+    print(f"CLAIMED {_claim_subject(claimed)}: {claimed.claim_id} {claimed.comment.url}")
     print(_claim_cost_line(n, total, touches))
     return 0
 
@@ -2066,36 +1986,49 @@ def _cmd_release(parsed: argparse.Namespace, session: _WriteSession) -> None:
     outcome = _release_outcome(merged, parsed.abandoned)
     if isinstance(outcome, protocol.MergedRelease):
         _verify_merged_release(client, client.repository.path, identity, outcome)
-    worktree, canonical_remote, observed = _store_observation(parsed)
-    _require_state_ref(observed)
-    selected = _selected_store_claim(observed, identity, session.release_branch, parsed.claim_id)
-    role = parsed.role
-    if not parsed.coordinator_override:
-        if role is None:
-            role = selected.role
-        if (parsed.agent, role) != (selected.agent, selected.role):
-            raise protocol.ClaimUnavailableError(
-                "only the original claimant may release; use an explicit coordinator override"
-            )
-    resolved_role = role if role is not None else selected.role
-    intent = protocol.ReleaseIntent(
-        claim_id=selected.claim_id,
-        agent=parsed.agent,
-        role=resolved_role,
-        outcome=outcome,
-        operation_id=uuid.uuid4().hex,
-        coordinator_override=parsed.coordinator_override,
+    released = protocol.release_claim(
+        client,
+        protocol.ReleaseContext(
+            identity=identity,
+            agent=parsed.agent,
+            role=parsed.role,
+            outcome=outcome,
+            claim_id=parsed.claim_id,
+            branch=session.release_branch,
+            coordinator_override=parsed.coordinator_override,
+        ),
     )
-    store.commit_transition(
-        worktree=worktree,
-        remote=canonical_remote,
-        subject=_transition_subject("release", selected.identity, selected.branch),
-        intent=intent,
-    )
+    if released.quarantined_by is not None:
+        # The coordinator-override exception just released a quarantined claim
+        # (issue #136): the refusal it bypassed must still reach the operator,
+        # not vanish because the override skipped raising it.
+        print(
+            f"WARNING: this claim was quarantined: "
+            f"{protocol._unreadable_claim_reason(released.quarantined_by)}",
+            file=sys.stderr,
+        )
     if parsed.json:
-        _release_json(selected, parsed.agent, resolved_role, outcome)
+        _release_json(released, parsed.agent, parsed.role, outcome)
         return
-    print(f"RELEASED {_claim_subject(selected)}: {selected.claim_id}")
+    print(f"RELEASED {_claim_subject(released)}: {released.claim_id}")
+
+
+def _cmd_supersede(parsed: argparse.Namespace, session: _WriteSession) -> None:
+    successor_issue = int(parsed.successor_issue)
+    frozen = protocol.supersede_ledger(
+        session.forge,
+        protocol.SupersedeRequest(
+            successor_issue=successor_issue,
+            agent=parsed.agent,
+            role=parsed.role,
+            reason=parsed.reason,
+            claim_id=parsed.claim_id,
+        ),
+    )
+    print(
+        f"SUPERSEDED ledger #{protocol.LEDGER_ISSUE} successor "
+        f"#{successor_issue}: {frozen.claim_id}"
+    )
 
 
 def _cut_target(client: forge.ForgeWriter, number: int) -> board.Issue:
@@ -2318,7 +2251,7 @@ def _block_cut_target(number: int, target: board.Issue) -> board.LocatedBlock:
     if parsed.read_state is board.BodyReadState.MALFORMED:
         defect = parsed.contract.defects[0]
         raise protocol.ClaimUnavailableError(
-            f"#{number} {board.body_defect_text(defect)}; "
+            f"#{number} body malformed: {defect.field}: {defect.message}; "
             "cut needs a valid agent-claim block"
         )
     return board.locate_agent_claim_block(target.body)
@@ -2373,6 +2306,32 @@ def _cmd_cut(parsed: argparse.Namespace, session: _WriteSession) -> int:
     return _cmd_cut_prose(client, target, parsed)
 
 
+def _cmd_reconcile(parsed: argparse.Namespace, session: _WriteSession) -> None:
+    client = session.forge
+    try:
+        for repair in protocol.repair_duplicate_claims(client):
+            superseded = ", ".join(f"#{cid}" for cid in repair.superseded_comment_ids)
+            print(
+                f"REPAIRED claim {repair.claim_id!r}: superseded {superseded} "
+                f"-> survivor #{repair.survivor_comment_id}"
+            )
+    except protocol.LedgerSupersededError:
+        # A frozen ledger has nothing left for duplicate repair to fix; let the
+        # label reconciliation below observe the freeze and run its own cleanup.
+        pass
+    issue = _optional_issue_number(parsed.issue)
+    if issue is None:
+        reconciled = protocol.reconcile_all_labels(client)
+    else:
+        protocol.reconcile_issue_label(client, issue)
+        reconciled = tuple(
+            claim.identity.issue
+            for claim in protocol._ledger_claims(client)
+            if isinstance(claim.identity, protocol.IssueIdentity) and claim.identity.issue == issue
+        )
+    print("RECONCILED " + (", ".join(f"#{issue}" for issue in reconciled) or "no claims"))
+
+
 _READ_HANDLERS: dict[str, Callable[[argparse.Namespace, _ReadSession], int | None]] = {
     "pr-check": _cmd_pull_request_check,
     "board": _cmd_board,
@@ -2383,6 +2342,8 @@ _WRITE_HANDLERS: dict[str, Callable[[argparse.Namespace, _WriteSession], int | N
     "rescope": _cmd_rescope,
     "claim": _cmd_claim,
     "release": _cmd_release,
+    "supersede": _cmd_supersede,
+    "reconcile": _cmd_reconcile,
     "cut": _cmd_cut,
 }
 
@@ -2406,89 +2367,21 @@ def _release_branch_for(parsed: argparse.Namespace) -> str | None:
     )
 
 
-def _require_trailing_tombstone(
-    ledger_n: int, comments: tuple[protocol.IssueComment, ...]
-) -> None:
-    """`bootstrap --ledger` preconditions (issue #176, §2): a `state_cut`
-    tombstone exists, it is last, and it was never edited."""
-    ordered = tuple(sorted(comments, key=lambda comment: (comment.created_at, comment.identifier)))
-    try:
-        last_cut = next(
-            (
-                index
-                for index in range(len(ordered) - 1, -1, -1)
-                if protocol._comment_is_state_cut(ordered[index])
-            ),
-            None,
-        )
-    except protocol.InvalidClaimMarkerError as error:
-        if "edited after publication" not in str(error):
-            raise
-        raise protocol.ClaimUnavailableError(
-            f"ledger #{ledger_n} tombstone was edited; delete the comment and post a new one"
-        ) from error
-    if last_cut is None:
-        raise protocol.ClaimUnavailableError(f"ledger #{ledger_n} has no state_cut tombstone")
-    if last_cut != len(ordered) - 1:
-        raise protocol.ClaimUnavailableError(
-            f"ledger #{ledger_n} carries a protocol comment after its tombstone; "
-            "drain again and repost the tombstone"
-        )
+def _bootstrap_state(forge_handle: forge.ForgeWriter) -> int:
+    """Adopt or create this repository's locked ledger, then create or adopt
+    `refs/aco/state`, printing each in turn.
 
-
-def _import_existing_ref(ledger_n: int, observed: protocol.ClaimState) -> int | None:
-    """Idempotent already-imported vs empty-ref-created-by-mistake (done-when 1)."""
-    if observed.claims or observed.consumed_ids or observed.resources:
-        print(observed.tip)
-        return 0
-    raise protocol.ClaimUnavailableError(
-        f"state ref exists but carries no import of ledger #{ledger_n}; "
-        "delete refs/aco/state on the canonical remote and re-run"
-    )
-
-
-def _import_ledger(
-    parsed: argparse.Namespace, forge_handle: forge.ForgeWriter, canonical_remote: str
-) -> int:
-    ledger_n = int(parsed.ledger)
-    if ledger_n < 1:
-        raise protocol.ClaimError("ledger issue must be a positive integer")
-    protocol.configure_ledger(ledger_n)
-    comments = forge_handle.list_protocol_candidates(ledger_n)
-    _require_trailing_tombstone(ledger_n, comments)
-    worktree = Path.cwd()
-    observed = store.fetch_state(worktree=worktree, remote=canonical_remote)
-    if observed.tip is not None:
-        return _import_existing_ref(ledger_n, observed)
-    parent = store.prepare_import_parent(worktree=worktree)
-    try:
-        imported = protocol.state_from_ledger_aggregate(comments, opened_commit=parent)
-    except protocol.LedgerSupersededError as error:
-        raise protocol.ClaimUnavailableError(
-            f"ledger #{ledger_n} was superseded by #{error.successor_issue}; "
-            "this importer does not walk predecessors"
-        ) from error
-    result = store.push_import(
-        worktree=worktree,
-        remote=canonical_remote,
-        imported=imported,
-        parent=parent,
-        subject=f"import ledger {ledger_n}",
-        operation_id=uuid.uuid4().hex,
-    )
-    print(result.tip)
-    return 0
-
-
-def _bootstrap_state(parsed: argparse.Namespace, forge_handle: forge.ForgeWriter) -> int:
-    """Create `refs/aco/state` if proven absent, or import ledger N with
-    `--ledger`. Never searches for a ledger (issue #176: `discovery.py` dies).
+    Two onboarding paths in one command until the state-ref cut (issue #164
+    slice C2) deletes the ledger outright: today, a repository with neither
+    still needs a ledger (every other command reads and writes it) as well as
+    the state ref `store` will eventually replace it with. The ledger half is
+    the last production caller of `discovery.bootstrap_ledger`; the state-ref
+    half is `store`'s sole production caller.
     """
-    toplevel = Path(checkout._git_output(["rev-parse", "--show-toplevel"])).resolve()
-    canonical_remote = _resolved_canonical_remote(parsed.repo, toplevel)
-    if parsed.ledger is not None:
-        return _import_ledger(parsed, forge_handle, canonical_remote)
-    oid = store.bootstrap(worktree=Path.cwd(), remote=canonical_remote)
+    ledger = discovery.bootstrap_ledger(forge_handle)
+    protocol.configure_ledger(ledger)
+    print(f"LEDGER #{ledger}")
+    oid = store.bootstrap(worktree=Path.cwd())
     print(oid)
     return 0
 
@@ -2500,13 +2393,21 @@ def _dispatch(parsed: argparse.Namespace) -> int:
     repository = github.discover_repository(parsed.repo, remote_url=checkout.origin_remote_url)
     forge_handle = github.GitHubForge(repository)
     if parsed.command == "bootstrap":
-        return _bootstrap_state(parsed, forge_handle)
-    if parsed.command in _READ_HANDLERS:
-        result = _READ_HANDLERS[parsed.command](parsed, _ReadSession(forge=forge_handle))
-    else:
-        result = _WRITE_HANDLERS[parsed.command](
-            parsed, _WriteSession(forge=forge_handle, release_branch=release_branch)
+        return _bootstrap_state(forge_handle)
+    ledger = discovery.discover_ledger(forge_handle)
+    if ledger is None:
+        raise protocol.ClaimUnavailableError(
+            "no agent-claim ledger exists; run agent-claim bootstrap"
         )
+    protocol.configure_ledger(ledger)
+    if parsed.command in _READ_HANDLERS:
+        read_session = _ReadSession(forge=forge_handle, ledger=ledger)
+        result = _READ_HANDLERS[parsed.command](parsed, read_session)
+    else:
+        write_session = _WriteSession(
+            forge=forge_handle, ledger=ledger, release_branch=release_branch
+        )
+        result = _WRITE_HANDLERS[parsed.command](parsed, write_session)
     return 0 if result is None else result
 
 
@@ -2521,6 +2422,20 @@ def main(arguments: list[str] | None = None) -> int:
         if parsed.command == "status":
             return _cmd_status(parsed)
         return _dispatch(parsed)
+    except protocol.CompensationFailedError as error:
+        # A post-mutation race's own repair could not be posted (issue #136
+        # finding 2): the original mutation is still live and untracked by this
+        # refusal, so print a recovery warning naming it and how to finish the
+        # repair by hand, instead of the generic ERROR line a plain refusal gets.
+        print(
+            f"ERROR: claim {error.live_claim.claim_id!r} is still live; its "
+            f"automatic repair failed to post: {error.cause}",
+            file=sys.stderr,
+        )
+        print(f"RECOVERY: run `{error.attempted_repair}` to finish the repair", file=sys.stderr)
+        for hint in error.hints:
+            print(f"RECOVERY: {hint}", file=sys.stderr)
+        return 2
     except protocol.ClaimError as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 2

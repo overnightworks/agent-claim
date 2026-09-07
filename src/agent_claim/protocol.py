@@ -13,27 +13,20 @@ from pathlib import PurePosixPath, PureWindowsPath
 from types import MappingProxyType
 from typing import Protocol, TypeVar
 
-# The protocol core is configured by bootstrap --ledger before the one-time import.
+CLAIM_LABEL_PREFIX = "agent-claim:active:"
+# The protocol core is configured by discovery/bootstrap before every CLI action.
 LEDGER_ISSUE = 0
 LEGACY_MARKER_PREFIX = "<!-- agent-claim:v1 "
 MARKER_PREFIX = "<!-- agent-claim:v2 "
 MARKER_SUFFIX = " -->"
-# The tombstone action a 0.12.x (and older) client fences on. Not in
-# `parse_claim_event`'s allow-list: that omission *is* the fence. The import
-# reader skips it by reading `_marker_payload` and never calling
-# `parse_claim_event` (issue #176, §2).
-STATE_CUT_ACTION = "state_cut"
-# Named refusal when a write-path command would otherwise create
-# `refs/aco/state` as a side effect (issue #176 done-when 1). One owner so
-# `apply`, `store.commit_transition`, and `protect` cannot drift.
-MISSING_STATE_REF = (
-    "the claim state ref does not exist yet; run bootstrap before claim, "
-    "rescope, or release"
-)
 # Coordination-contract convention: the only branch prefixes an issueless lane claim
 # may use, so a builder that forgot its issue number never gets a silent, unlabeled,
 # non-projected claim instead of a loud refusal.
 ISSUELESS_LANE_BRANCH_PREFIXES = ("docs/", "fix/")
+PROJECTION_MARKER_PREFIX = "<!-- agent-claim-projection:v1 ledger="
+PROJECTION_MARKER_PATTERN = re.compile(
+    rf"{re.escape(PROJECTION_MARKER_PREFIX)}(?P<ledger>[1-9][0-9]*){re.escape(MARKER_SUFFIX)}"
+)
 TRUSTED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 CLAIM_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 RESOURCE_NAME_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9._-]{0,63}")
@@ -317,29 +310,48 @@ class ClaimRequest:
     resource_value: int | None = None
 
 
-@dataclass(frozen=True)
-class RescopeRequest:
-    """CLI-facing rescope input; converted to `RescopeIntent` before `apply`."""
-
-    identity: ClaimIdentity
-    agent: str
-    add: tuple[str, ...]
-    drop: tuple[str, ...]
-    claim_id: str | None
-    branch: str | None
-    whole_reason: str | None = None
-
-
 class ClaimReader(Protocol):
-    """The remaining ledger-comment read: `bootstrap --ledger` import."""
+    """The claim-ledger operations a read-only command may call."""
 
     def list_protocol_candidates(self, issue: int) -> tuple[IssueComment, ...]: ...
 
+    def list_claimed_issues(self) -> tuple[int, ...]: ...
+
+    def validate_successor(self, issue: int) -> None: ...
+
 
 class ClaimWriter(ClaimReader, Protocol):
-    """`ClaimReader` plus posting a comment (step 6 receipt; import does not post)."""
+    """`ClaimReader` plus the operations that mutate the claim ledger."""
 
     def post_comment(self, issue: int, body: str) -> str: ...
+
+    def add_label(self, issue: int, label: str) -> None: ...
+
+    def remove_label(self, issue: int, label: str) -> None: ...
+
+    def upsert_projection(
+        self,
+        issue: int,
+        body: str,
+        *,
+        create: bool = True,
+        adopt_stale: bool = False,
+    ) -> bool: ...
+
+    def neutralize_claim_comment(self, comment_id: int, body: str) -> None: ...
+
+
+def claim_label(ledger_issue: int | None = None) -> str:
+    return f"{CLAIM_LABEL_PREFIX}{ledger_issue or LEDGER_ISSUE}"
+
+
+def _projection_marker(ledger_issue: int | None = None) -> str:
+    return f"{PROJECTION_MARKER_PREFIX}{ledger_issue or LEDGER_ISSUE}{MARKER_SUFFIX}"
+
+
+def _projection_ledger(comment: IssueComment) -> int | None:
+    match = PROJECTION_MARKER_PATTERN.fullmatch(comment.body.partition("\n")[0])
+    return int(match["ledger"]) if match is not None else None
 
 
 def _has_control_character(text: str) -> bool:
@@ -1108,13 +1120,8 @@ def _aggregate_claim_events(comments: tuple[IssueComment, ...]) -> ClaimLedgerAg
 
 def _assign_resource_values(
     derived: dict[str, LedgerActiveClaim], first_occurrences: list[LedgerActiveClaim], name: str
-) -> tuple[int, ...]:
-    """Occupy `name`'s posted values, then fill auto intents with the next free integer.
-
-    Returns the occupied set for this name, including released autos and
-    explicit posts -- the same first-occurrence walk the import reader
-    writes to `resources/<name>.toml` (issue #176 done-when 2).
-    """
+) -> None:
+    """Occupy `name`'s posted values, then fill auto intents with the next free integer."""
     intents = sorted(
         (event for event in first_occurrences if event.requested_resource == name),
         key=lambda event: (event.comment.created_at, event.comment.identifier),
@@ -1132,29 +1139,6 @@ def _assign_resource_values(
         if current is None:
             continue
         derived[intent.claim_id] = replace(current, resource=ResourceHold(name, value))
-    return tuple(sorted(occupied))
-
-
-def _occupied_resources_from_occurrences(
-    occurrences: Mapping[str, tuple[LedgerActiveClaim, ...]],
-) -> dict[str, tuple[int, ...]]:
-    """Occupied integers per resource name from the first-occurrence walk.
-
-    Drives the import reader's `resources/<name>.toml` (done-when 2): a
-    released auto and a released explicit post both stay occupied. The walk
-    is `_assign_resource_values` itself, against an empty derived map so
-    released claims still occupy without needing a live holder.
-    """
-    first_occurrences = [events[0] for events in occurrences.values()]
-    names = sorted(
-        {
-            event.requested_resource
-            for event in first_occurrences
-            if event.requested_resource is not None
-        }
-    )
-    derived: dict[str, LedgerActiveClaim] = {}
-    return {name: _assign_resource_values(derived, first_occurrences, name) for name in names}
 
 
 def _group_active_holders(
@@ -1462,6 +1446,770 @@ def _overlap_peer_ids(index: ClaimConflictIndex, claim: ScopedClaim) -> set[str]
     return related
 
 
+def _marker(payload: dict[str, object]) -> str:
+    encoded = json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+    return f"{MARKER_PREFIX}{encoded}{MARKER_SUFFIX}"
+
+
+def _validated_comment(body: str) -> str:
+    if "\x00" in body:
+        raise ClaimError("GitHub comment body contains a NUL byte")
+    size = len(body.encode("utf-8"))
+    if size > MAX_COMMENT_BYTES:
+        raise ClaimError(f"GitHub comment body exceeds the {MAX_COMMENT_BYTES}-byte safety limit")
+    return body
+
+
+def claim_comment(request: ClaimRequest) -> str:
+    agent = _outbound_text(request.agent, "agent", maximum=128)
+    role = _outbound_text(request.role, "role", maximum=64)
+    payload: dict[str, object] = {
+        "action": "claim",
+        "agent": agent,
+        "base": request.base,
+        "branch": request.branch,
+        "claim_id": request.claim_id,
+        _identity_marker_key(request.identity): _identity_marker_value(request.identity),
+        "role": role,
+        "scope": list(request.scope),
+    }
+    resource_line = ""
+    if request.resource is not None:
+        name = _outbound_resource_name(request.resource)
+        payload["resource"] = name
+        if request.resource_value is None:
+            resource_line = f"- Resource: `{name}`\n"
+        else:
+            if (
+                isinstance(request.resource_value, bool)
+                or not isinstance(request.resource_value, int)
+                or request.resource_value < 1
+            ):
+                raise ClaimError("resource value must be a positive integer")
+            payload["resource_value"] = request.resource_value
+            resource_line = f"- Resource: `{name}` = {request.resource_value}\n"
+    scope = "\n".join(f"- `{path}`" for path in request.scope)
+    out_of_order = ""
+    if request.out_of_order_reason is not None:
+        reason = _outbound_text(request.out_of_order_reason, "out-of-order reason", maximum=512)
+        out_of_order = f"- Out-of-order reason: {reason}\n"
+    whole = ""
+    if request.whole_reason is not None:
+        reason = _outbound_text(request.whole_reason, "whole reason", maximum=512)
+        payload["whole"] = reason
+        whole = f"- Whole: {reason}\n"
+    return _validated_comment(
+        f"{_marker(payload)}\n"
+        "## CLAIM — build lane\n\n"
+        f"- {_identity_label(request.identity, request.branch)}\n"
+        f"- Owner: {agent} ({role})\n"
+        f"- Base: `{request.base}`\n"
+        f"- Branch: `{request.branch}`\n"
+        f"- Claim ID: `{request.claim_id}`\n"
+        f"{resource_line}"
+        f"{out_of_order}"
+        f"{whole}"
+        "- Write scope:\n"
+        f"{scope}\n\n"
+        "Repository-wide ledger event. No edit starts before this claim is re-read live. "
+        "Read-only review remains parallel. No Auto-Runner.\n\n"
+        f"Agent: {agent} ({role})"
+    )
+
+
+def _rescope_base_payload(
+    claim: LedgerActiveClaim, scope: tuple[str, ...], validated_agent: str, validated_role: str
+) -> dict[str, object]:
+    return {
+        "action": "rescope",
+        "agent": validated_agent,
+        "claim_id": claim.claim_id,
+        _identity_marker_key(claim.identity): _identity_marker_value(claim.identity),
+        "role": validated_role,
+        "scope": list(scope),
+    }
+
+
+def _rescope_whole_line(payload: dict[str, object]) -> str:
+    if WHOLE_CLEAR_MARKER_KEY in payload:
+        return "- Whole: (cleared)\n"
+    if "whole" in payload:
+        return f"- Whole: {payload['whole']}\n"
+    return ""
+
+
+def _rescope_comment_body(
+    claim: LedgerActiveClaim,
+    validated_agent: str,
+    validated_role: str,
+    scope: tuple[str, ...],
+    payload: dict[str, object],
+) -> str:
+    scope_lines = "\n".join(f"- `{path}`" for path in scope)
+    return _validated_comment(
+        f"{_marker(payload)}\n"
+        "## RESCOPE — build lane\n\n"
+        f"- {_identity_label(claim.identity, claim.branch)}\n"
+        f"- Owner: {validated_agent} ({validated_role})\n"
+        f"- Base: `{claim.base}`\n"
+        f"- Branch: `{claim.branch}`\n"
+        f"- Claim ID: `{claim.claim_id}`\n"
+        f"{_rescope_whole_line(payload)}"
+        "- Write scope:\n"
+        f"{scope_lines}\n\n"
+        "Repository-wide ledger event. Claim id and base are unchanged. "
+        "No Auto-Runner.\n\n"
+        f"Agent: {validated_agent} ({validated_role})"
+    )
+
+
+def rescope_comment(
+    claim: LedgerActiveClaim,
+    scope: tuple[str, ...],
+    agent: str,
+    role: str,
+    *,
+    whole_reason: str | None = None,
+) -> str:
+    validated_agent = _outbound_text(agent, "agent", maximum=128)
+    validated_role = _outbound_text(role, "role", maximum=64)
+    payload = _rescope_base_payload(claim, scope, validated_agent, validated_role)
+    if whole_reason is not None:
+        payload["whole"] = _outbound_text(whole_reason, "whole reason", maximum=512)
+    return _rescope_comment_body(claim, validated_agent, validated_role, scope, payload)
+
+
+def rescope_clear_whole_reason_comment(
+    claim: LedgerActiveClaim, scope: tuple[str, ...], agent: str, role: str
+) -> str:
+    """A rescope that also explicitly drops the claim's whole-reason back to
+    unset -- the only way back, since an ordinary rescope's omitted `whole`
+    field means "leave it alone" (issue #136). A distinct function, not a
+    `clear_whole_reason` flag on `rescope_comment`, makes setting and clearing
+    at once structurally impossible instead of a runtime check.
+    """
+    validated_agent = _outbound_text(agent, "agent", maximum=128)
+    validated_role = _outbound_text(role, "role", maximum=64)
+    payload = _rescope_base_payload(claim, scope, validated_agent, validated_role)
+    payload[WHOLE_CLEAR_MARKER_KEY] = True
+    return _rescope_comment_body(claim, validated_agent, validated_role, scope, payload)
+
+
+def release_comment(
+    claim: LedgerActiveClaim,
+    agent: str,
+    role: str,
+    reason: str,
+    *,
+    coordinator_override: bool = False,
+) -> str:
+    validated_agent = _outbound_text(agent, "agent", maximum=128)
+    validated_role = _outbound_text(role, "role", maximum=64)
+    validated_reason = _outbound_text(reason, "reason", maximum=512)
+    action = "override_release" if coordinator_override else "release"
+    payload: dict[str, object] = {
+        "action": action,
+        "agent": validated_agent,
+        "claim_id": claim.claim_id,
+        _identity_marker_key(claim.identity): _identity_marker_value(claim.identity),
+        "reason": validated_reason,
+        "role": validated_role,
+    }
+    if coordinator_override:
+        payload["claim_comment_id"] = claim.comment.identifier
+    return _validated_comment(
+        f"{_marker(payload)}\n"
+        "## RELEASE — build lane\n\n"
+        f"- {_identity_label(claim.identity, claim.branch)}\n"
+        f"- Claim ID: `{claim.claim_id}`\n"
+        f"- Previous owner: {claim.agent} ({claim.role})\n"
+        f"- Released by: {validated_agent} ({validated_role})\n"
+        f"- Reason: {validated_reason}\n\n"
+        f"Agent: {validated_agent} ({validated_role})"
+    )
+
+
+def supersede_comment(
+    claim: LedgerActiveClaim,
+    successor_issue: int,
+    agent: str,
+    role: str,
+    reason: str,
+) -> str:
+    if successor_issue <= LEDGER_ISSUE:
+        raise ClaimError("ledger successor must be greater than the current ledger")
+    if not isinstance(claim.identity, IssueIdentity):
+        # Guardrail (Entschieden #6): supersede stays ledger-issue-only, never a lane.
+        raise ClaimError("ledger supersede requires an issue-identified claim")
+    validated_agent = _outbound_text(agent, "agent", maximum=128)
+    validated_role = _outbound_text(role, "role", maximum=64)
+    validated_reason = _outbound_text(reason, "reason", maximum=512)
+    payload: dict[str, object] = {
+        "action": "supersede",
+        "agent": validated_agent,
+        "claim_comment_id": claim.comment.identifier,
+        "claim_id": claim.claim_id,
+        "issue": claim.identity.issue,
+        "reason": validated_reason,
+        "role": validated_role,
+        "successor_issue": successor_issue,
+    }
+    return _validated_comment(
+        f"{_marker(payload)}\n"
+        "## SUPERSEDE — claim ledger frozen\n\n"
+        f"- Ledger: #{LEDGER_ISSUE}\n"
+        f"- Successor: #{successor_issue}\n"
+        f"- Rollover claim: `{claim.claim_id}`\n"
+        f"- Frozen by: {validated_agent} ({validated_role})\n"
+        f"- Reason: {validated_reason}\n\n"
+        "This terminal event rejects every later operation through helpers that still "
+        "target this ledger. Update before coordinating more work.\n\n"
+        f"Agent: {validated_agent} ({validated_role})"
+    )
+
+
+def _neutralized_claim_body(claim_id: str, survivor: LedgerActiveClaim) -> str:
+    """Neutralize a duplicate claim-id event so it stops parsing as a claim marker.
+
+    The edited body deliberately does not start with a claim marker prefix, so
+    `is_protocol_candidate` excludes it: the ledger's "was edited after publication"
+    guard for trusted protocol comments never sees it again.
+    """
+    return _validated_comment(
+        "## SUPERSEDED — duplicate claim id neutralized by reconcile\n\n"
+        f"- Claim ID: `{claim_id}` (reused; a ledger claim id must stay unique)\n"
+        f"- Superseded by: {survivor.agent} ({survivor.role}) — {survivor.comment.url}\n\n"
+        "`agent-claim reconcile` neutralized this comment because its claim id was "
+        "reused by the surviving claim linked above; the ledger reads that claim as "
+        "the sole event for this id."
+    )
+
+
+def _active_projection(claim: LedgerActiveClaim) -> str:
+    return _validated_comment(
+        f"{_projection_marker()}\n"
+        f"🔒 **Claimed** · {claim.agent} ({claim.role}) · `{claim.branch}`\n\n"
+        f"[Ledger details]({claim.comment.url})"
+    )
+
+
+def _unclaimed_projection(ledger_url: str | None = None, reason: str | None = None) -> str:
+    detail = f" · {reason}" if reason else ""
+    ledger = f"[Ledger]({ledger_url})" if ledger_url else f"Ledger: #{LEDGER_ISSUE}"
+    return _validated_comment(f"{_projection_marker()}\n🔓 **Unclaimed**{detail}\n\n{ledger}")
+
+
+def _ledger_claims(client: ClaimReader) -> tuple[LedgerActiveClaim, ...]:
+    return active_claims(client.list_protocol_candidates(LEDGER_ISSUE))
+
+
+def _issue_claim(claims: tuple[LedgerActiveClaim, ...], issue: int) -> LedgerActiveClaim | None:
+    matching = tuple(
+        claim
+        for claim in claims
+        if isinstance(claim.identity, IssueIdentity) and claim.identity.issue == issue
+    )
+    if not matching:
+        return None
+    return min(
+        matching,
+        key=lambda claim: (claim.comment.created_at, claim.comment.identifier),
+    )
+
+
+def _apply_issue_projection(
+    client: ClaimWriter,
+    issue: int,
+    claim: LedgerActiveClaim | None,
+    *,
+    unclaimed_body: str | None = None,
+) -> None:
+    if issue == LEDGER_ISSUE:
+        return
+    if claim is None:
+        client.upsert_projection(
+            issue,
+            unclaimed_body or _unclaimed_projection(),
+            create=False,
+        )
+        return
+    client.upsert_projection(
+        issue,
+        _active_projection(claim),
+        adopt_stale=True,
+    )
+
+
+def reconcile_issue_label(
+    client: ClaimWriter,
+    issue: int,
+    *,
+    unclaimed_body: str | None = None,
+) -> None:
+    for _ in range(3):
+        try:
+            expected = _issue_claim(_ledger_claims(client), issue)
+        except LedgerSupersededError:
+            client.remove_label(issue, claim_label())
+            raise
+        _apply_issue_projection(
+            client,
+            issue,
+            expected,
+            unclaimed_body=unclaimed_body,
+        )
+        if expected is not None:
+            client.add_label(issue, claim_label())
+        else:
+            client.remove_label(issue, claim_label())
+        try:
+            observed = _issue_claim(_ledger_claims(client), issue)
+        except LedgerSupersededError:
+            client.remove_label(issue, claim_label())
+            raise
+        if (observed.claim_id if observed else None) == (expected.claim_id if expected else None):
+            return
+    raise ClaimError(f"issue #{issue} claim label changed repeatedly during reconciliation")
+
+
+def reconcile_all_labels(client: ClaimWriter) -> tuple[int, ...]:
+    # `discover_ledger` trusts `LEDGER_LABEL` on the ledger issue itself to find
+    # it in one atomic request instead of scanning every open issue (#74); an
+    # older ledger, bootstrapped before that label existed, never got it
+    # attached, so reconcile is what backfills it going forward.
+    client.add_label(LEDGER_ISSUE, LEDGER_LABEL)
+    try:
+        active_issues = {
+            claim.identity.issue
+            for claim in _ledger_claims(client)
+            if isinstance(claim.identity, IssueIdentity)
+        }
+    except LedgerSupersededError:
+        for issue in client.list_claimed_issues():
+            client.remove_label(issue, claim_label())
+        raise
+    known_issues = active_issues | set(client.list_claimed_issues())
+    for issue in sorted(known_issues):
+        reconcile_issue_label(client, issue)
+    return tuple(sorted(active_issues))
+
+
+def _duplicate_lifecycles(
+    aggregate: ClaimLedgerAggregate, claim_id: str
+) -> tuple[tuple[LedgerActiveClaim, tuple[IssueComment, ...]], ...]:
+    """Pair each occurrence of a duplicated claim id with every comment that honored
+    its termination (a release retry or claimant-then-coordinator pair both land here).
+
+    Derived entirely from `ClaimLedgerAggregate.occurrences`/`terminated_by`, i.e. from
+    what `_apply_terminal_event` itself did during the shared walk — never from an
+    independent re-parse. An inert or foreign terminal event (one `_apply_terminal_event`
+    did not honor, such as a `LedgerSupersede` posted outside its narrow window) never
+    shows up here, so it can never be mistaken for a real release.
+    """
+    occurrences = aggregate.occurrences[claim_id]
+    terminating_comments = aggregate.terminated_by.get(claim_id, ())
+    return tuple(
+        (occurrence, terminating_comments if index == 0 else ())
+        for index, occurrence in enumerate(occurrences)
+    )
+
+
+@dataclass(frozen=True)
+class DuplicateClaimRepair:
+    """One duplicated claim id reconcile neutralized, for the operator-visible report."""
+
+    claim_id: str
+    superseded_comment_ids: tuple[int, ...]
+    survivor_comment_id: int
+
+
+def repair_duplicate_claims(client: ClaimWriter) -> tuple[DuplicateClaimRepair, ...]:
+    """Tolerant reconcile pre-pass: neutralize safely-superseded duplicate claim ids.
+
+    A same-claim-id re-claim poisons every strict reader (status/claim/release) with
+    `claim id ... was reused`. This runs before those strict reads so `reconcile` can
+    heal the ledger instead of erroring. For each duplicated id, the newest occurrence
+    is kept as the survivor: for a released-then-reused id it is the only occurrence
+    still live; for a same-agent self-re-claim, keeping the newest is deliberate
+    because it reflects that agent's latest intent (this is not applied across
+    identities: a same-agent duplicate that spans two different issues, two different
+    lanes, or an issue and a lane still only keeps the newer identity's workstream,
+    silently ending the older one). An older occurrence only auto-neutralizes when it
+    is already released, or when it shares the survivor's agent and role. A
+    still-active duplicate from a different agent is a real ownership conflict:
+    reconcile refuses it loudly instead of picking a winner.
+    Every duplicated id on the ledger is validated before any comment is edited, so
+    one unsafe conflict never leaves a different, otherwise-safe repair half-applied.
+    """
+    aggregate = _aggregate_claim_events(client.list_protocol_candidates(LEDGER_ISSUE))
+    plans: list[tuple[str, LedgerActiveClaim, tuple[IssueComment, ...]]] = []
+    for claim_id in aggregate.duplicate_claim_ids:
+        lifecycles = _duplicate_lifecycles(aggregate, claim_id)
+        survivor, _ = lifecycles[-1]
+        superseded_comments: list[IssueComment] = []
+        for occurrence, terminal_comments in lifecycles[:-1]:
+            same_claimant = (occurrence.agent, occurrence.role) == (
+                survivor.agent,
+                survivor.role,
+            )
+            if not (terminal_comments or same_claimant):
+                raise DuplicateClaimConflictError(claim_id, occurrence, survivor)
+            superseded_comments.append(occurrence.comment)
+            superseded_comments.extend(terminal_comments)
+        plans.append((claim_id, survivor, tuple(superseded_comments)))
+
+    repairs: list[DuplicateClaimRepair] = []
+    for claim_id, survivor, comments_to_neutralize in plans:
+        body = _neutralized_claim_body(claim_id, survivor)
+        for superseded_comment in comments_to_neutralize:
+            client.neutralize_claim_comment(superseded_comment.identifier, body)
+        repairs.append(
+            DuplicateClaimRepair(
+                claim_id=claim_id,
+                superseded_comment_ids=tuple(entry.identifier for entry in comments_to_neutralize),
+                survivor_comment_id=survivor.comment.identifier,
+            )
+        )
+    return tuple(repairs)
+
+
+def _reconcile_identity(
+    client: ClaimWriter, identity: ClaimIdentity, *, unclaimed_body: str | None = None
+) -> None:
+    """Reconcile the issue label/projection this identity owns, if it owns one.
+
+    A lane claim owns no GitHub issue, so it has no label or projection to
+    reconcile; reconcile_all_labels/reconcile_issue_label stay issue-only.
+    """
+    if isinstance(identity, IssueIdentity):
+        reconcile_issue_label(client, identity.issue, unclaimed_body=unclaimed_body)
+
+
+def _resource_holders(
+    claims: tuple[LedgerActiveClaim, ...], hold: ResourceHold, *, except_id: str
+) -> tuple[LedgerActiveClaim, ...]:
+    return tuple(
+        claim
+        for claim in claims
+        if claim.claim_id != except_id
+        and claim.resource is not None
+        and claim.resource.name == hold.name
+        and claim.resource.value == hold.value
+    )
+
+
+def _assigned_request(request: ClaimRequest) -> ClaimRequest:
+    if request.resource is None:
+        if request.resource_value is not None:
+            raise ClaimError("resource value requires a resource name")
+        return request
+    name = _outbound_resource_name(request.resource)
+    if request.resource_value is None:
+        return replace(request, resource=name)
+    if (
+        isinstance(request.resource_value, bool)
+        or not isinstance(request.resource_value, int)
+        or request.resource_value < 1
+    ):
+        raise ClaimError("resource value must be a positive integer")
+    return replace(request, resource=name)
+
+
+def acquire_claim(client: ClaimWriter, request: ClaimRequest) -> LedgerActiveClaim:
+    claimed, _observed = _acquire_claim_with_observed(client, request)
+    return claimed
+
+
+class ClaimPostedReconcileFailedError(ClaimError):
+    """The requested claim is live on the ledger, but the label/projection
+    reconcile that normally follows a winning post failed.
+
+    `acquire_claim` only reaches this step after confirming its own post won
+    the ledger, so the claim itself is not in doubt — a caller must report it
+    as live (never as a refusal), and separately surface what the reconcile
+    failed on.
+    """
+
+    def __init__(
+        self, claim: LedgerActiveClaim, observed: tuple[LedgerActiveClaim, ...], error: Exception
+    ):
+        self.claim = claim
+        self.observed = observed
+        self.reconcile_error = error
+        super().__init__(str(error))
+
+
+class CompensationFailedError(ClaimError):
+    """A post-mutation race's own compensating repair failed to post (issue #136
+    finding 2): `live_claim` is still exactly as it was before the repair was
+    attempted -- the race that should have been undone is instead now the
+    caller's problem, so this is never rendered as a plain refusal. `cause` is
+    the underlying failure from posting the repair; `attempted_repair` is a
+    ready-to-run `agent-claim` command that finishes the repair -- always a
+    release, since a manual `claim`/`rescope` retry would itself be refused by
+    the very unreadable-claim fence that caused this race in the first place,
+    while a release of this reader's own live claim is not (a same-id race that
+    quarantined `live_claim` itself uses the documented coordinator-override
+    exception instead of a plain release). `hints` are additional,
+    non-executable notes a release alone cannot finish -- e.g. re-claiming a
+    rescope's pre-race scope afterwards, or that a lane claim's release must
+    run from its own checkout.
+    """
+
+    def __init__(
+        self,
+        live_claim: LedgerActiveClaim,
+        attempted_repair: str,
+        cause: Exception,
+        *,
+        hints: tuple[str, ...] = (),
+    ):
+        self.live_claim = live_claim
+        self.attempted_repair = attempted_repair
+        self.cause = cause
+        self.hints = hints
+        super().__init__(
+            f"claim id {live_claim.claim_id!r} is still live; its automatic repair "
+            f"failed to post: {cause}"
+        )
+
+
+def _reject_unavailable_claim(aggregate: ClaimLedgerAggregate, request: ClaimRequest) -> None:
+    """Raise if `request` cannot be posted against the ledger's current standing."""
+    if request.claim_id in aggregate.seen_claim_ids:
+        raise ClaimUnavailableError(
+            f"claim id {request.claim_id!r} is already on this ledger, active or "
+            "released; release it, then claim again with a fresh --claim-id"
+        )
+    standing = aggregate.active
+    blocked_by = blocking_claims(standing, request)
+    if blocked_by:
+        owner = blocked_by[0]
+        raise ClaimUnavailableError(
+            f"{_identity_summary(request.identity, request.branch)} is "
+            f"claimed by {owner.agent} ({owner.role}) on "
+            f"{_identity_summary(owner.identity, owner.branch)} branch {owner.branch}"
+        )
+    if request.resource is not None and request.resource_value is not None:
+        hold = ResourceHold(request.resource, request.resource_value)
+        holder = _resource_holders(standing, hold, except_id=request.claim_id)
+        if holder:
+            owner = holder[0]
+            raise ClaimUnavailableError(
+                f"{hold.name} {hold.value} is held by {owner.agent} ({owner.role}) on "
+                f"{_identity_summary(owner.identity, owner.branch)}"
+            )
+
+
+def _post_claim_and_observe(client: ClaimWriter, request: ClaimRequest) -> ClaimLedgerAggregate:
+    client.post_comment(LEDGER_ISSUE, claim_comment(request))
+    post_aggregate = _aggregate_claim_events(client.list_protocol_candidates(LEDGER_ISSUE))
+    if request.claim_id in post_aggregate.duplicate_claim_ids:
+        raise ClaimUnavailableError(
+            f"claim id {request.claim_id!r} claim race detected: another post reused "
+            "this id while it was being posted; run agent-claim reconcile, then claim "
+            "again with a fresh --claim-id"
+        )
+    _reject_duplicate_claim_ids(post_aggregate)
+    return post_aggregate
+
+
+# The release reason posted by every compensating release below (identity,
+# resource, and post-mutation unreadable-comment races): one literal owner so
+# the three call sites and the repair command they point at cannot drift.
+CLAIM_RACE_LOST_REASON = "claim race lost"
+
+
+def _resolve_identity_race(
+    client: ClaimWriter,
+    request: ClaimRequest,
+    own: LedgerActiveClaim,
+    observed: tuple[LedgerActiveClaim, ...],
+) -> None:
+    identity_competitors = blocking_claims(observed, own)
+    if not identity_competitors:
+        return
+    winner = min(
+        (own, *identity_competitors),
+        key=lambda claim: (claim.comment.created_at, claim.comment.identifier),
+    )
+    if winner.claim_id == request.claim_id:
+        return
+    client.post_comment(
+        LEDGER_ISSUE, release_comment(own, request.agent, request.role, CLAIM_RACE_LOST_REASON)
+    )
+    _reconcile_identity(client, request.identity)
+    _reconcile_identity(client, winner.identity)
+    raise ClaimUnavailableError(
+        f"{_identity_summary(request.identity, request.branch)} claim race lost to "
+        f"{winner.agent} ({winner.role}) on "
+        f"{_identity_summary(winner.identity, winner.branch)} branch {winner.branch}"
+    )
+
+
+def _resolve_resource_race(
+    client: ClaimWriter,
+    request: ClaimRequest,
+    own: LedgerActiveClaim,
+    observed: tuple[LedgerActiveClaim, ...],
+) -> None:
+    if request.resource is None:
+        return
+    if request.resource_value is None:
+        # No "derivation produced no hold" guard here: `own` is already known
+        # live (an earlier check in the caller requires it), and
+        # `_apply_derived_resource_holds` unconditionally assigns every live
+        # auto intent a hold for its own requested name before this ever runs
+        # -- there is no path back to an unset or misnamed hold to guard.
+        return
+    expected = ResourceHold(request.resource, request.resource_value)
+    if own.resource == expected:
+        return
+    holder = next((claim for claim in observed if claim.resource == expected), None)
+    client.post_comment(
+        LEDGER_ISSUE, release_comment(own, request.agent, request.role, CLAIM_RACE_LOST_REASON)
+    )
+    _reconcile_identity(client, request.identity)
+    # `holder` is never None here: `own.resource != expected` only happens
+    # when `_strip_duplicate_holders` stripped this claim in favor of an
+    # earlier one holding `expected` -- and that earlier claim, still active,
+    # is exactly what `observed` (the same snapshot the strip itself read)
+    # was searched for above.
+    assert holder is not None, "a resource race always names the claim that won it"
+    _reconcile_identity(client, holder.identity)
+    raise ClaimUnavailableError(
+        f"{expected.name} {expected.value} is held by "
+        f"{holder.agent} ({holder.role}) on "
+        f"{_identity_summary(holder.identity, holder.branch)}"
+    )
+
+
+def _claim_race_lost_repair_command(claim: LedgerActiveClaim) -> str:
+    """The one manual repair that always works after a lost race (issue #136):
+    a `claim`/`rescope` retry would itself be refused by the very unreadable
+    comment that caused the race, but releasing this reader's own live claim is
+    not -- it is not the quarantined one, just stuck because the automatic
+    repair could not post.
+
+    Names the issue explicitly for an `IssueIdentity` claim so the repair works
+    from any checkout, not only one on its branch (a lane claim's `--claim-id`
+    cannot do the same -- see `_claim_race_lost_repair_hint`), and pins
+    `--agent`/`--role` to the original claimant so the repair does not depend
+    on whatever identity the recovering shell happens to have.
+
+    When the same unreadable comment that caused the race also names this
+    claim's own id, `claim.quarantined_by` is set: a plain release now refuses
+    a quarantined claim too, so this is the one case where the repair is the
+    documented coordinator-override exception instead.
+    """
+    issue_argument = f" {claim.identity.issue}" if isinstance(claim.identity, IssueIdentity) else ""
+    abandoned_argument = f"--abandoned {shlex.quote(CLAIM_RACE_LOST_REASON)}"
+    if claim.quarantined_by is not None:
+        return (
+            f"agent-claim release{issue_argument} --claim-id {claim.claim_id} "
+            f"--agent {shlex.quote(claim.agent)} --role coordinator --coordinator-override "
+            f"{abandoned_argument}"
+        )
+    return (
+        f"agent-claim release{issue_argument} --claim-id {claim.claim_id} "
+        f"--agent {shlex.quote(claim.agent)} --role {shlex.quote(claim.role)} "
+        f"{abandoned_argument}"
+    )
+
+
+def _claim_race_lost_repair_hint(claim: LedgerActiveClaim) -> str | None:
+    """Non-executable note `_claim_race_lost_repair_command` alone cannot cover,
+    or `None` when the command needs none.
+
+    `release` has no `--branch` selector (issue #136): for an `IssueIdentity`
+    claim the printed command already names the issue and needs no checkout at
+    all, but a lane claim has no such number -- `release` derives the lane
+    from the current checkout regardless of `--claim-id`, so the repair only
+    works run from that lane's own checkout.
+    """
+    if isinstance(claim.identity, LaneIdentity):
+        return f"run from the lane's checkout (branch {claim.branch})"
+    return None
+
+
+def _as_hints(*hints: str | None) -> tuple[str, ...]:
+    return tuple(hint for hint in hints if hint is not None)
+
+
+def _resolve_unreadable_claim_race(
+    client: ClaimWriter,
+    request: ClaimRequest,
+    own: LedgerActiveClaim,
+    post_aggregate: ClaimLedgerAggregate,
+) -> None:
+    """Post-mutation race (issue #136 finding 2): the pre-post check already
+    proved the ledger clean, so an unreadable comment in `post_aggregate` can only
+    be a concurrent post that landed during ours. Compensate exactly like an
+    identity/resource race -- release the just-posted claim -- so a `claim` that
+    reports failure never leaves a live claim behind."""
+    blocker = next(iter(post_aggregate.unreadable), None)
+    if blocker is None:
+        return
+    try:
+        client.post_comment(
+            LEDGER_ISSUE, release_comment(own, request.agent, request.role, CLAIM_RACE_LOST_REASON)
+        )
+    except Exception as error:
+        raise CompensationFailedError(
+            own,
+            _claim_race_lost_repair_command(own),
+            error,
+            hints=_as_hints(_claim_race_lost_repair_hint(own)),
+        ) from error
+    _reconcile_identity(client, request.identity)
+    raise ClaimUnavailableError(
+        f"claim refused: {_unreadable_claim_reason(blocker)} appeared while posting; "
+        "upgrade the installed tool before claiming a scope that could overlap it"
+    )
+
+
+def _acquire_claim_with_observed(
+    client: ClaimWriter, request: ClaimRequest
+) -> tuple[LedgerActiveClaim, tuple[LedgerActiveClaim, ...]]:
+    """`acquire_claim`, plus the active claims its own post-mutation race check already read.
+
+    The caller's advisory "touches" note (`conflicting_claims`) needs exactly
+    that same post-mutation ledger snapshot; returning it here lets the CLI
+    reuse it instead of paying for another full ledger-comments fetch right
+    after this one (the wait `claim` was reported hanging on, since it landed
+    after the mutating post was already visible on the ledger).
+    """
+    aggregate = _aggregate_claim_events(client.list_protocol_candidates(LEDGER_ISSUE))
+    _reject_duplicate_claim_ids(aggregate)
+    request = _assigned_request(request)
+    replayed = matching_claim_retry(aggregate.active, request)
+    if replayed is not None:
+        return replayed, aggregate.active
+    _reject_unreadable_claims(aggregate, action="claim")
+    _reject_unavailable_claim(aggregate, request)
+
+    post_aggregate = _post_claim_and_observe(client, request)
+    observed = post_aggregate.active
+    own = next((claim for claim in observed if claim.claim_id == request.claim_id), None)
+    if own is None:
+        raise ClaimError(
+            f"{_identity_summary(request.identity, request.branch)} did not expose "
+            "the posted claim id"
+        )
+    _resolve_unreadable_claim_race(client, request, own, post_aggregate)
+    _resolve_identity_race(client, request, own, observed)
+    _resolve_resource_race(client, request, own, observed)
+
+    try:
+        _reconcile_identity(client, request.identity)
+    except ClaimError as error:
+        # The claim comment above already won the ledger (the earlier race
+        # checks all passed), so a failure reconciling the issue's label or
+        # projection must never surface as if the claim itself had failed.
+        raise ClaimPostedReconcileFailedError(own, observed, error) from error
+    return own, observed
+
+
 def _combined_scope(
     current: tuple[str, ...], add: tuple[str, ...], drop: tuple[str, ...]
 ) -> tuple[str, ...]:
@@ -1480,9 +2228,347 @@ def _combined_scope(
     return _valid_scope(list(combined))
 
 
+def _observe_rescoped_claim(
+    client: ClaimReader,
+    identity: ClaimIdentity,
+    selected: LedgerActiveClaim,
+    expected_scope: tuple[str, ...],
+) -> tuple[ClaimLedgerAggregate, LedgerActiveClaim]:
+    aggregate = _aggregate_claim_events(client.list_protocol_candidates(LEDGER_ISSUE))
+    _reject_duplicate_claim_ids(aggregate)
+    own = next((claim for claim in aggregate.active if claim.claim_id == selected.claim_id), None)
+    if own is None:
+        raise ClaimError(
+            f"{_identity_summary(identity, selected.branch)} did not expose the rescoped claim id"
+        )
+    if own.scope != expected_scope:
+        raise ClaimError(
+            f"{_identity_summary(identity, selected.branch)} did not observe the posted rescope"
+        )
+    return aggregate, own
+
+
+@dataclass(frozen=True)
+class _ClaimLookup:
+    """Which single active claim a rescope or release names: by id, or the caller's
+    one claim for this identity on the checkout branch."""
+
+    identity: ClaimIdentity
+    agent: str
+    claim_id: str | None
+    branch: str | None
+
+
+def _selected_claim(
+    standing: tuple[LedgerActiveClaim, ...], lookup: _ClaimLookup, *, action: str
+) -> LedgerActiveClaim:
+    if lookup.claim_id is None:
+        if not lookup.branch:
+            raise ClaimUnavailableError(
+                f"{action} without --claim-id requires a non-empty current branch; pass --claim-id"
+            )
+        matches = tuple(
+            claim
+            for claim in standing
+            if claim.agent == lookup.agent and claim.branch == lookup.branch
+        )
+        if len(matches) != 1:
+            raise ClaimUnavailableError(
+                f"{_identity_summary(lookup.identity, lookup.branch)} has no unique claim "
+                f"for this session on branch {lookup.branch!r}; pass --claim-id"
+            )
+        return matches[0]
+    selected = next((claim for claim in standing if claim.claim_id == lookup.claim_id), None)
+    if selected is None:
+        raise ClaimUnavailableError(
+            f"{_identity_summary(lookup.identity, lookup.branch or '')} has no active "
+            f"claim {lookup.claim_id!r}"
+        )
+    return selected
+
+
+def _select_rescope_claim(
+    claims: tuple[LedgerActiveClaim, ...],
+    identity: ClaimIdentity,
+    agent: str,
+    claim_id: str | None,
+    *,
+    branch: str | None,
+) -> LedgerActiveClaim:
+    standing = _claims_for_identity(claims, identity, branch)
+    if not standing:
+        raise ClaimUnavailableError(
+            f"{_identity_summary(identity, branch or '')} has no active build claim"
+        )
+    selected = _selected_claim(
+        standing, _ClaimLookup(identity, agent, claim_id, branch), action="rescope"
+    )
+    if agent != selected.agent:
+        raise ClaimUnavailableError("only the original claimant may rescope")
+    if branch and selected.branch != branch:
+        raise ClaimUnavailableError(
+            f"claim branch {selected.branch!r} does not match checkout branch {branch!r}"
+        )
+    return selected
+
+
+def _rescope_reclaim_hint(selected: LedgerActiveClaim) -> str:
+    """Non-executable note for `CompensationFailedError`'s rescope race: the
+    repair is a release, which drops the claim entirely, so re-claiming
+    `selected`'s pre-race scope -- and whole reason, if it had one -- is a
+    separate, manual second step (issue #136 delta review)."""
+    scope = " ".join(shlex.quote(path) for path in selected.scope)
+    whole = (
+        f" --whole {shlex.quote(selected.whole_reason)}"
+        if selected.whole_reason is not None
+        else ""
+    )
+    return f"then re-claim its pre-race scope: {scope}{whole}"
+
+
+def _resolve_unreadable_rescope_race(
+    client: ClaimWriter,
+    selected: LedgerActiveClaim,
+    own: LedgerActiveClaim,
+    post_aggregate: ClaimLedgerAggregate,
+) -> None:
+    """Post-mutation race (issue #136 finding 2): the pre-post check already
+    proved the ledger clean, so an unreadable comment in `post_aggregate` can only
+    be a concurrent post that landed during ours. Compensate by reverting the
+    scope change -- and, when this rescope just gave the claim its first-ever
+    `--whole` reason, that reason too -- with another rescope back to `selected`'s
+    pre-rescope state, so a `rescope` that reports failure never leaves either
+    live.
+
+    If that revert itself cannot post, no manual rescope retry can stand in for
+    it: the unreadable comment that caused the race would refuse it exactly as
+    it refused the automatic one. The repair is therefore the one command that
+    always works -- release -- plus a hint naming the pre-race scope to
+    re-claim afterwards.
+    """
+    blocker = next(iter(post_aggregate.unreadable), None)
+    if blocker is None:
+        return
+    try:
+        if selected.whole_reason is None:
+            client.post_comment(
+                LEDGER_ISSUE,
+                rescope_clear_whole_reason_comment(
+                    own, selected.scope, selected.agent, selected.role
+                ),
+            )
+        else:
+            client.post_comment(
+                LEDGER_ISSUE,
+                rescope_comment(
+                    own,
+                    selected.scope,
+                    selected.agent,
+                    selected.role,
+                    whole_reason=selected.whole_reason,
+                ),
+            )
+    except Exception as error:
+        raise CompensationFailedError(
+            own,
+            _claim_race_lost_repair_command(own),
+            error,
+            hints=_as_hints(_claim_race_lost_repair_hint(own), _rescope_reclaim_hint(selected)),
+        ) from error
+    _reconcile_identity(client, selected.identity)
+    raise ClaimUnavailableError(
+        f"rescope refused: {_unreadable_claim_reason(blocker)} appeared while posting; "
+        "upgrade the installed tool before claiming a scope that could overlap it"
+    )
+
+
+@dataclass(frozen=True)
+class RescopeRequest:
+    identity: ClaimIdentity
+    agent: str
+    add: tuple[str, ...]
+    drop: tuple[str, ...]
+    claim_id: str | None
+    branch: str | None = None
+    whole_reason: str | None = None
+
+
+def rescope_claim(client: ClaimWriter, request: RescopeRequest) -> LedgerActiveClaim:
+    if not request.add and not request.drop:
+        raise ClaimUnavailableError("rescope requires --add or --drop")
+    add_scope = _valid_scope(list(request.add)) if request.add else ()
+    drop_scope = _valid_scope(list(request.drop)) if request.drop else ()
+    aggregate = _aggregate_claim_events(client.list_protocol_candidates(LEDGER_ISSUE))
+    _reject_duplicate_claim_ids(aggregate)
+    _reject_unreadable_claims(aggregate, action="rescope")
+    selected = _select_rescope_claim(
+        aggregate.active, request.identity, request.agent, request.claim_id, branch=request.branch
+    )
+    new_scope = _combined_scope(selected.scope, add_scope, drop_scope)
+    client.post_comment(
+        LEDGER_ISSUE,
+        rescope_comment(
+            selected,
+            new_scope,
+            request.agent,
+            selected.role,
+            whole_reason=request.whole_reason,
+        ),
+    )
+    post_aggregate, own = _observe_rescoped_claim(client, request.identity, selected, new_scope)
+    _resolve_unreadable_rescope_race(client, selected, own, post_aggregate)
+
+    _reconcile_identity(client, request.identity)
+    return own
+
+
 def _require_coordinator_override(role: str | None) -> None:
     if role != "coordinator":
         raise ClaimUnavailableError("a coordinator override requires --role coordinator")
+
+
+def _claims_for_identity(
+    claims: tuple[LedgerActiveClaim, ...], identity: ClaimIdentity, branch: str | None
+) -> tuple[LedgerActiveClaim, ...]:
+    """Restrict standing claims to the one issue or lane `identity` names.
+
+    An issue identity already carries its number, so no branch is needed. A lane
+    identity carries none (Entschieden #2), so the caller's checkout branch is the
+    only way to tell which lane is meant — required even when `claim_id` is given
+    explicitly, mirroring how issue release still scopes by issue number first.
+    """
+    if isinstance(identity, IssueIdentity):
+        return tuple(
+            claim
+            for claim in claims
+            if isinstance(claim.identity, IssueIdentity) and claim.identity.issue == identity.issue
+        )
+    if not branch:
+        raise ClaimUnavailableError(
+            "lane release requires a non-empty current branch; check out the "
+            "docs/ or fix/ lane branch, or pass an issue number"
+        )
+    return tuple(
+        claim
+        for claim in claims
+        if isinstance(claim.identity, LaneIdentity) and claim.branch == branch
+    )
+
+
+@dataclass(frozen=True)
+class ReleaseContext:
+    identity: ClaimIdentity
+    agent: str
+    role: str | None
+    outcome: ReleaseOutcome
+    claim_id: str | None
+    branch: str | None = None
+    coordinator_override: bool = False
+
+
+def release_claim(client: ClaimWriter, context: ReleaseContext) -> LedgerActiveClaim:
+    """Release a live claim.
+
+    A quarantined claim (issue #136) ordinarily refuses release, since this
+    reader cannot trust what it thinks it knows about a claim a later unknown
+    field also touched. A `coordinator_override` is the one documented
+    exception: it may release a quarantined claim too -- the returned
+    `LedgerActiveClaim` still carries `quarantined_by`, so a caller (`_cmd_release`)
+    can print the refusal it bypassed as a warning rather than losing it
+    silently.
+    """
+    identity, agent, role = context.identity, context.agent, context.role
+    if context.coordinator_override:
+        _require_coordinator_override(role)
+    standing = _claims_for_identity(_ledger_claims(client), identity, context.branch)
+    if not standing:
+        raise ClaimUnavailableError(
+            f"{_identity_summary(identity, context.branch or '')} has no active build claim"
+        )
+    selected = _selected_claim(
+        standing,
+        _ClaimLookup(identity, agent, context.claim_id, context.branch),
+        action="release",
+    )
+    if selected.quarantined_by is not None and not context.coordinator_override:
+        raise ClaimUnavailableError(
+            f"release refused: {_unreadable_claim_reason(selected.quarantined_by)}; "
+            "upgrade the installed tool"
+        )
+    if role is None:
+        role = selected.role
+    if not context.coordinator_override and (agent, role) != (selected.agent, selected.role):
+        raise ClaimUnavailableError(
+            "only the original claimant may release; use an explicit coordinator override"
+        )
+    ledger_url = client.post_comment(
+        LEDGER_ISSUE,
+        release_comment(
+            selected,
+            agent,
+            role,
+            context.outcome.reason,
+            coordinator_override=context.coordinator_override,
+        ),
+    )
+    _reconcile_identity(
+        client,
+        identity,
+        unclaimed_body=_unclaimed_projection(ledger_url, context.outcome.reason),
+    )
+    return selected
+
+
+@dataclass(frozen=True)
+class SupersedeRequest:
+    successor_issue: int
+    agent: str
+    role: str
+    reason: str
+    claim_id: str
+
+
+def supersede_ledger(client: ClaimWriter, request: SupersedeRequest) -> LedgerActiveClaim:
+    if request.role != "coordinator":
+        raise ClaimUnavailableError("ledger supersede requires --role coordinator")
+    if request.successor_issue <= LEDGER_ISSUE:
+        raise ClaimUnavailableError("successor issue must be greater than the current ledger")
+    try:
+        standing = _ledger_claims(client)
+    except LedgerSupersededError as error:
+        if (
+            error.successor_issue != request.successor_issue
+            or error.claim.claim_id != request.claim_id
+        ):
+            raise
+        client.remove_label(LEDGER_ISSUE, claim_label())
+        return error.claim
+    selected = next((claim for claim in standing if claim.claim_id == request.claim_id), None)
+    if (
+        selected is None
+        or not isinstance(selected.identity, IssueIdentity)
+        or selected.identity.issue != LEDGER_ISSUE
+        or len(standing) != 1
+    ):
+        raise ClaimUnavailableError(
+            "ledger supersede requires the named claim to be the only active claim "
+            "and to own the ledger issue"
+        )
+    client.validate_successor(request.successor_issue)
+    client.post_comment(
+        LEDGER_ISSUE,
+        supersede_comment(
+            selected, request.successor_issue, request.agent, request.role, request.reason
+        ),
+    )
+    try:
+        _ledger_claims(client)
+    except LedgerSupersededError as error:
+        if error.successor_issue == request.successor_issue and error.claim == selected:
+            client.remove_label(LEDGER_ISSUE, claim_label())
+            return selected
+        raise
+    raise ClaimError("ledger supersede event was not observed after publication")
 
 
 # --- refs/aco/state: the claim-state tree (issue #164, slice C1) ----------
@@ -1888,7 +2974,10 @@ def _apply_claim_intent(state: ClaimState, intent: ClaimIntent) -> ClaimState:
         # path funnels through here, so this is the one place that must
         # refuse instead of silently creating `refs/aco/state` as a side
         # effect (issue #176 slice-review finding 1).
-        raise ClaimError(MISSING_STATE_REF)
+        raise ClaimError(
+            "the claim state ref does not exist yet; run bootstrap before claim, "
+            "rescope, or release"
+        )
     live = _live_claim_by_id(state, intent.claim_id)
     if intent.claim_id in state.consumed_ids:
         if live is not None and _claim_matches_intent(live[1], intent):
@@ -2145,65 +3234,3 @@ def parse_resource_toml(content: str, *, name: str, tip: ObjectId) -> ResourceRe
             f"resource file {name}.toml at {tip} field 'occupied' must be positive integers"
         )
     return ResourceRecord(name=name, occupied=tuple(occupied))
-
-
-def _comment_is_state_cut(comment: IssueComment) -> bool:
-    """Whether `comment`'s marker action is the tombstone, read without
-    `parse_claim_event` so a mid-ledger `state_cut` cannot abort the walk
-    (issue #176, §2 skip mechanism)."""
-    parsed = _marker_payload(comment)
-    if parsed is None:
-        return False
-    return parsed[0].get("action") == STATE_CUT_ACTION
-
-
-def _store_claim_from_ledger(claim: LedgerActiveClaim, opened_commit: ObjectId) -> ActiveClaim:
-    """The store record for one still-active ledger claim at import.
-
-    `opened_commit` is the import parent (age resets at the cut -- named
-    cost). `comment` / `requested_resource` / `quarantined_by` stay on the
-    ledger form and do not cross (ruling 9d).
-    """
-    return ActiveClaim(
-        identity=claim.identity,
-        claim_id=ClaimId(claim.claim_id),
-        agent=claim.agent,
-        role=claim.role,
-        base=ObjectId(claim.base),
-        branch=claim.branch,
-        scope=claim.scope,
-        opened_commit=opened_commit,
-        resource=claim.resource,
-        whole_reason=claim.whole_reason,
-    )
-
-
-def state_from_ledger_aggregate(
-    comments: tuple[IssueComment, ...], *, opened_commit: ObjectId
-) -> ClaimState:
-    """Pure import reader (issue #176, §2): pre-filter `state_cut`, then the
-    current aggregator. Never calls `parse_claim_event` on a tombstone, and
-    `_aggregate_claim_events` still catches only `UnreadableClaimError`.
-
-    Occupied resource values come from the same first-occurrence walk as
-    live holds, including released autos and explicit posts (done-when 2).
-    Claim ids are `ClaimLedgerAggregate.seen_claim_ids`. Does not invent
-    ids or occupied integers.
-    """
-    filtered = tuple(comment for comment in comments if not _comment_is_state_cut(comment))
-    aggregate = _aggregate_claim_events(filtered)
-    _reject_duplicate_claim_ids(aggregate)
-    _reject_unreadable_claims(aggregate, action="import")
-    occupied = _occupied_resources_from_occurrences(aggregate.occurrences)
-    claims = {
-        claim_key(claim.identity, claim.branch): _store_claim_from_ledger(claim, opened_commit)
-        for claim in aggregate.active
-    }
-    return ClaimState(
-        tip=opened_commit,
-        claims=MappingProxyType(claims),
-        consumed_ids=frozenset(ClaimId(claim_id) for claim_id in aggregate.seen_claim_ids),
-        resources=MappingProxyType(
-            {name: ResourceRecord(name, values) for name, values in occupied.items()}
-        ),
-    )
