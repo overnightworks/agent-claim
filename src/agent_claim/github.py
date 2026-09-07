@@ -19,9 +19,7 @@ from .protocol import (
     MAX_PROTOCOL_BYTES,
     MAX_PROTOCOL_EVENTS,
     REPOSITORY_PATTERN,
-    TRUSTED_ASSOCIATIONS,
     ClaimError,
-    ClaimUnavailableError,
     IssueComment,
     is_protocol_candidate,
 )

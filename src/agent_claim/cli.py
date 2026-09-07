@@ -176,9 +176,7 @@ def _claim_cost_line(n: int, total: int, touches: tuple[protocol.ScopedClaim, ..
 
 
 def _request(arguments: argparse.Namespace) -> protocol.ClaimRequest:
-    agent = protocol._outbound_text(
-        checkout._resolved_agent(arguments.agent), "agent", maximum=128
-    )
+    agent = protocol._outbound_text(checkout._resolved_agent(arguments.agent), "agent", maximum=128)
     role = protocol._outbound_text(arguments.role, "role", maximum=64)
     base = checkout._git_output(["rev-parse", "HEAD"]) if arguments.base is None else arguments.base
     if protocol.COMMIT_PATTERN.fullmatch(base) is None:
@@ -1159,9 +1157,7 @@ def _legacy_or_malformed_checks(item: board.BoardItem) -> tuple[SliceCheck, ...]
         return (SliceCheck("error", "body-legacy", "body legacy", issue=item.number),)
     if item.read_state is board.BodyReadState.MALFORMED:
         return tuple(
-            SliceCheck(
-                "error", "body-contract", board.body_defect_text(defect)
-            )
+            SliceCheck("error", "body-contract", board.body_defect_text(defect))
             for defect in item.contract.defects
         )
     return None
@@ -1319,6 +1315,20 @@ def _no_item_defect(
 
 
 @dataclass(frozen=True)
+class _LandingCheckContext:
+    """What every landing-classification helper needs beyond the pull
+    request's own detail and the store's live claims: which forge to read,
+    which repository owns the check, and which body-contract mode to parse
+    a parent's body with -- grouped so the cluster of helpers below stays
+    under the five-argument limit as claims moved from a `client`-read
+    ledger walk to a separately threaded store snapshot."""
+
+    client: forge.ForgeReader
+    repository: str
+    mode: board.BodyContractMode
+
+
+@dataclass(frozen=True)
 class _ParentRequirement:
     """What an item's parent demands of the pull request that lands the item.
 
@@ -1362,10 +1372,8 @@ def _parent_reference_defect(
 
 
 def _parent_requirement(
-    client: forge.ForgeReader,
-    repository: str,
+    context: _LandingCheckContext,
     item: board.IssueReference,
-    mode: board.BodyContractMode,
 ) -> _ParentRequirement | board.ClassificationDefect | None:
     """The parent's demand, read from GitHub's sub-issue relation and its
     body under the repository's own pin (#150).
@@ -1376,18 +1384,18 @@ def _parent_requirement(
     remaining child) but need not. A parent keeping other open children
     stays open, and must say what happens next.
     """
-    parent = client.parent_issue(item.number)
+    parent = context.client.parent_issue(item.number)
     if parent is None:
         return None
-    reference_defect = _parent_reference_defect(parent, repository)
+    reference_defect = _parent_reference_defect(parent, context.repository)
     if reference_defect is not None:
         return reference_defect
-    parsed_parent = board.parse_body(parent.body, mode)
+    parsed_parent = board.parse_body(parent.body, context.mode)
     if parsed_parent.read_state is not board.BodyReadState.VALID:
         return board.ClassificationDefect(_parent_body_finding(parent.reference, parsed_parent))
     remaining = tuple(
         child
-        for child in client.list_children(parent.reference.number)
+        for child in context.client.list_children(parent.reference.number)
         if child.state is board.ChildState.OPEN and child.number != item.number
     )
     if not remaining:
@@ -1436,51 +1444,47 @@ def _closing_defect(
 
 
 def _work_item_defect(
-    client: forge.ForgeReader,
+    context: _LandingCheckContext,
     claims: tuple[protocol.ActiveClaim, ...],
-    repository: str,
     detail: forge.Landing,
     item: board.IssueReference,
-    mode: board.BodyContractMode,
 ) -> board.ClassificationDefect | None:
     """Why this repository does not accept `item` as the landing pull request's work item."""
-    if item.repository != repository:
+    if item.repository != context.repository:
         return board.ClassificationDefect(
             f"names work item {item} of another repository, which holds no claim here"
         )
     claim_defect = _claim_defect(claims, detail, protocol.IssueIdentity(item.number))
     if claim_defect is not None:
         return claim_defect
-    requirement = _parent_requirement(client, repository, item, mode)
+    requirement = _parent_requirement(context, item)
     if isinstance(requirement, board.ClassificationDefect):
         return requirement
-    return _closing_defect(detail, repository, item, requirement)
+    return _closing_defect(detail, context.repository, item, requirement)
 
 
 def _checked_classification(
-    client: forge.ForgeReader,
+    context: _LandingCheckContext,
     claims: tuple[protocol.ActiveClaim, ...],
-    repository: str,
     detail: forge.Landing,
-    mode: board.BodyContractMode,
 ) -> board.Classification | board.ClassificationDefect:
-    if detail.source_repository.path != repository:
+    if detail.source_repository.path != context.repository:
         return board.ClassificationDefect(
             f"proposes a branch of {detail.source_repository}; cross-repository pull "
             "requests are not classified"
         )
-    classification = board.parse_pull_request_classification(detail.body, repository)
+    classification = board.parse_pull_request_classification(detail.body, context.repository)
     if isinstance(classification, board.ClassificationDefect):
         return classification
-    default_branch = client.default_branch()
+    default_branch = context.client.default_branch()
     if detail.target_branch != default_branch:
         return board.ClassificationDefect(
             f"targets {detail.target_branch!r}, not the default branch {default_branch!r}"
         )
     defect = (
-        _no_item_defect(claims, repository, detail)
+        _no_item_defect(claims, context.repository, detail)
         if isinstance(classification, board.NoItemClassification)
-        else _work_item_defect(client, claims, repository, detail, classification.item, mode)
+        else _work_item_defect(context, claims, detail, classification.item)
     )
     return classification if defect is None else defect
 
@@ -1493,7 +1497,8 @@ def _pull_request_check(
     mode: board.BodyContractMode,
 ) -> int:
     detail = client.landing(number)
-    checked = _checked_classification(client, claims, repository, detail, mode)
+    context = _LandingCheckContext(client, repository, mode)
+    checked = _checked_classification(context, claims, detail)
     if isinstance(checked, board.ClassificationDefect):
         print(f"REFUSED: pull request #{detail.number} {checked.message}", file=sys.stderr)
         return 1
@@ -2318,8 +2323,7 @@ def _block_cut_target(number: int, target: board.Issue) -> board.LocatedBlock:
     if parsed.read_state is board.BodyReadState.MALFORMED:
         defect = parsed.contract.defects[0]
         raise protocol.ClaimUnavailableError(
-            f"#{number} {board.body_defect_text(defect)}; "
-            "cut needs a valid agent-claim block"
+            f"#{number} {board.body_defect_text(defect)}; cut needs a valid agent-claim block"
         )
     return board.locate_agent_claim_block(target.body)
 
@@ -2406,9 +2410,7 @@ def _release_branch_for(parsed: argparse.Namespace) -> str | None:
     )
 
 
-def _require_trailing_tombstone(
-    ledger_n: int, comments: tuple[protocol.IssueComment, ...]
-) -> None:
+def _require_trailing_tombstone(ledger_n: int, comments: tuple[protocol.IssueComment, ...]) -> None:
     """`bootstrap --ledger` preconditions (issue #176, §2): a `state_cut`
     tombstone exists, it is last, and it was never edited."""
     ordered = tuple(sorted(comments, key=lambda comment: (comment.created_at, comment.identifier)))
@@ -2436,7 +2438,7 @@ def _require_trailing_tombstone(
         )
 
 
-def _import_existing_ref(ledger_n: int, observed: protocol.ClaimState) -> int | None:
+def _import_existing_ref(ledger_n: int, observed: protocol.ClaimState) -> int:
     """Idempotent already-imported vs empty-ref-created-by-mistake (done-when 1)."""
     if observed.claims or observed.consumed_ids or observed.resources:
         print(observed.tip)
@@ -2468,14 +2470,13 @@ def _import_ledger(
             f"ledger #{ledger_n} was superseded by #{error.successor_issue}; "
             "this importer does not walk predecessors"
         ) from error
-    result = store.push_import(
-        worktree=worktree,
-        remote=canonical_remote,
+    pending = store.PendingImport(
         imported=imported,
         parent=parent,
         subject=f"import ledger {ledger_n}",
         operation_id=uuid.uuid4().hex,
     )
+    result = store.push_import(worktree=worktree, remote=canonical_remote, pending=pending)
     print(result.tip)
     return 0
 

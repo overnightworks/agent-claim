@@ -15,8 +15,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-
-from test_cli import FakeForge, comment, marker, request
+from test_cli import FakeForge, _identity_marker_value, comment, marker, request
 
 from agent_claim import cli as issue_claim
 from agent_claim import github, process, protocol, store
@@ -663,7 +662,7 @@ def test_cli_bootstrap_creates_the_empty_state_ref_without_a_ledger(
     status = issue_claim.main(["--repo", "example/agent-claim", "bootstrap"])
 
     assert status == 0
-    assert client.ledger_items == []
+    assert client.comments == {}
     assert capsys.readouterr().out.splitlines() == [_state_ref_oid(bare_remote)]
 
 
@@ -1111,6 +1110,102 @@ def test_commit_transition_ten_thread_contention_lands_every_distinct_key(
     assert errors == []
     state = store.fetch_state(worktree=main_repo, remote=str(bare_remote))
     assert set(state.claims) == {f"issue-{issue}" for issue in issue_numbers}
+
+
+# --- `prepare_import_parent` / `push_import`: the one-time import's own
+# git-transport pair, parallel to `bootstrap`/`commit_transition` above.
+
+_IMPORT_TIP = protocol.ObjectId("d" * 40)
+
+
+def _imported_state(tip: protocol.ObjectId) -> protocol.ClaimState:
+    claim = protocol.ActiveClaim(
+        identity=protocol.IssueIdentity(10),
+        claim_id=protocol.ClaimId("imported-a"),
+        agent="Ada",
+        role="builder",
+        base=protocol.ObjectId("c" * 40),
+        branch="claude/issue-10-cut",
+        scope=("src/a.py",),
+        opened_commit=tip,
+    )
+    return protocol.ClaimState(
+        tip=tip,
+        claims={"issue-10": claim},
+        consumed_ids=frozenset({protocol.ClaimId("imported-a")}),
+    )
+
+
+def test_push_import_lands_the_first_import_commit(bare_remote: Path, worktree: Path) -> None:
+    parent = store.prepare_import_parent(worktree=worktree)
+    pending = store.PendingImport(
+        imported=_imported_state(_IMPORT_TIP),
+        parent=parent,
+        subject="import ledger 5",
+        operation_id="import-op-1",
+    )
+
+    result = store.push_import(worktree=worktree, remote=str(bare_remote), pending=pending)
+
+    assert result.tip == _state_ref_oid(bare_remote)
+    refetched = store.fetch_state(worktree=worktree, remote=str(bare_remote))
+    assert refetched.claims["issue-10"].claim_id == "imported-a"
+    assert refetched.consumed_ids == frozenset({protocol.ClaimId("imported-a")})
+
+
+def test_push_import_refuses_when_the_ref_is_no_longer_empty(
+    bare_remote: Path, worktree: Path
+) -> None:
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    parent = store.prepare_import_parent(worktree=worktree)
+    pending = store.PendingImport(
+        imported=_imported_state(_IMPORT_TIP),
+        parent=parent,
+        subject="import ledger 5",
+        operation_id="import-op-1",
+    )
+
+    with pytest.raises(protocol.ClaimUnavailableError, match="no longer empty"):
+        store.push_import(worktree=worktree, remote=str(bare_remote), pending=pending)
+
+
+def test_push_import_lost_response_does_not_reimport_twice(
+    bare_remote: Path, worktree: Path
+) -> None:
+    parent = store.prepare_import_parent(worktree=worktree)
+    pending = store.PendingImport(
+        imported=_imported_state(_IMPORT_TIP),
+        parent=parent,
+        subject="import ledger 5",
+        operation_id="import-op-1",
+    )
+    transport = _AcceptThenRaiseTransport()
+
+    result = store.push_import(
+        worktree=worktree, remote=str(bare_remote), pending=pending, transport=transport
+    )
+
+    assert transport.calls == 1
+    assert result.tip == _state_ref_oid(bare_remote)
+    assert result.claims["issue-10"].claim_id == "imported-a"
+
+
+def test_push_import_fails_loud_when_a_competing_write_lands_first(
+    bare_remote: Path, worktree: Path
+) -> None:
+    parent = store.prepare_import_parent(worktree=worktree)
+    pending = store.PendingImport(
+        imported=_imported_state(_IMPORT_TIP),
+        parent=parent,
+        subject="import ledger 5",
+        operation_id="import-op-1",
+    )
+    transport = _AlwaysRejectingTransport()
+
+    with pytest.raises(protocol.ClaimUnavailableError, match="moved before the import landed"):
+        store.push_import(
+            worktree=worktree, remote=str(bare_remote), pending=pending, transport=transport
+        )
 
 
 # --- `apply`, the claim-key codec, and the claim/resource TOML codecs ------
@@ -1789,9 +1884,7 @@ def _ledger_claim_body(claimed: protocol.ClaimRequest) -> str:
         "base": claimed.base,
         "branch": claimed.branch,
         "claim_id": claimed.claim_id,
-        protocol._identity_marker_key(claimed.identity): protocol._identity_marker_value(
-            claimed.identity
-        ),
+        protocol._identity_marker_key(claimed.identity): _identity_marker_value(claimed.identity),
         "role": claimed.role,
         "scope": list(claimed.scope),
     }
@@ -1807,9 +1900,7 @@ def _ledger_release_body(claimed: protocol.ClaimRequest) -> str:
         "action": "release",
         "agent": claimed.agent,
         "claim_id": claimed.claim_id,
-        protocol._identity_marker_key(claimed.identity): protocol._identity_marker_value(
-            claimed.identity
-        ),
+        protocol._identity_marker_key(claimed.identity): _identity_marker_value(claimed.identity),
         "role": claimed.role,
         "reason": "abandoned: imported",
     }
@@ -1834,10 +1925,60 @@ def test_import_reader_keeps_claims_after_a_mid_ledger_tombstone() -> None:
     )
 
 
-def test_import_reader_occupies_a_released_auto_resource_value() -> None:
-    claimed = request(
-        "auto-1", issue=10, scope=("src/a.py",), resource="display"
+def test_import_reader_assigns_distinct_auto_resource_values_to_two_active_claims() -> None:
+    """Two still-active auto (unnumbered) resource intents on the same name:
+    the second must skip past the first's assigned value, and both surviving
+    claims carry their assigned hold onto the imported store record."""
+    first = request("auto-1", issue=10, scope=("src/a.py",), resource="display")
+    second = request("auto-2", issue=11, scope=("src/b.py",), resource="display")
+    comments = (
+        comment(1, _ledger_claim_body(first)),
+        comment(2, _ledger_claim_body(second)),
+        comment(3, _tombstone_body()),
     )
+
+    imported = protocol.state_from_ledger_aggregate(comments, opened_commit=_TIP)
+
+    assert imported.claims["issue-10"].resource == protocol.ResourceHold("display", 1)
+    assert imported.claims["issue-11"].resource == protocol.ResourceHold("display", 2)
+    assert imported.resources["display"].occupied == (1, 2)
+
+
+def test_import_reader_skips_ordinary_comments_that_carry_no_marker() -> None:
+    claimed = request("claim-a", issue=10, scope=("src/a.py",))
+    comments = (
+        comment(1, _ledger_claim_body(claimed)),
+        comment(2, "Looks good, landing shortly."),
+        comment(3, _tombstone_body()),
+    )
+
+    imported = protocol.state_from_ledger_aggregate(comments, opened_commit=_TIP)
+
+    assert set(imported.claims) == {"issue-10"}
+
+
+def test_import_reader_refuses_an_unreadable_claim_comment() -> None:
+    unreadable = marker(
+        {
+            "action": "claim",
+            "agent": "Codex Sol",
+            "base": _TIP,
+            "branch": "codex/issue-10",
+            "claim_id": "claim-a",
+            "issue": 10,
+            "role": "builder",
+            "scope": ["src/a.py"],
+            "surprise": True,
+        }
+    )
+    comments = (comment(1, unreadable), comment(2, _tombstone_body()))
+
+    with pytest.raises(protocol.ClaimUnavailableError, match="import refused: claim 'claim-a'"):
+        protocol.state_from_ledger_aggregate(comments, opened_commit=_TIP)
+
+
+def test_import_reader_occupies_a_released_auto_resource_value() -> None:
+    claimed = request("auto-1", issue=10, scope=("src/a.py",), resource="display")
     comments = (
         comment(1, _ledger_claim_body(claimed)),
         comment(2, _ledger_release_body(claimed)),

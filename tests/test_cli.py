@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import io
 import json
 import os
@@ -40,14 +41,10 @@ from agent_claim.cli import (
     IssueIdentity,
     LaneIdentity,
     LedgerActiveClaim,
-    LedgerSupersede,
-    LedgerSupersededError,
     _status,
     _status_json,
     active_claims,
     claims_conflict,
-    claims_holding_path,
-    is_protocol_candidate,
     parse_claim_event,
 )
 
@@ -147,55 +144,11 @@ def request(
     )
 
 
-def rescope_request(
-    identity: protocol.ClaimIdentity,
-    agent: str,
-    add: tuple[str, ...],
-    drop: tuple[str, ...],
-    claim_id: str | None,
-    *,
-    branch: str | None = None,
-    whole_reason: str | None = None,
-) -> protocol.RescopeRequest:
-    return protocol.RescopeRequest(
-        identity=identity,
-        agent=agent,
-        add=add,
-        drop=drop,
-        claim_id=claim_id,
-        branch=branch,
-        whole_reason=whole_reason,
-    )
-
-
-def release_context(
-    identity: protocol.ClaimIdentity,
-    agent: str,
-    role: str | None,
-    outcome: protocol.ReleaseOutcome,
-    claim_id: str | None,
-    *,
-    branch: str | None = None,
-    coordinator_override: bool = False,
-) -> protocol.ReleaseContext:
-    return protocol.ReleaseContext(
-        identity=identity,
-        agent=agent,
-        role=role,
-        outcome=outcome,
-        claim_id=claim_id,
-        branch=branch,
-        coordinator_override=coordinator_override,
-    )
-
-
-
-
 def projected_board(
     issues: tuple[board.Issue, ...],
     open_pull_requests: tuple[board.PullRequest, ...],
     recent_merged_pull_requests: tuple[board.PullRequest, ...],
-    claims: tuple[LedgerActiveClaim, ...],
+    claims: tuple[protocol.ScopedClaim, ...],
     config: board.BoardConfig,
     *,
     repository: str = REPOSITORY,
@@ -206,6 +159,7 @@ def projected_board(
     dependencies: Mapping[int, tuple[board.IssueDependency, ...]] = MappingProxyType({}),
 ) -> board.Board:
     """`board.build_board` for scenarios that do not turn on which repository is projected."""
+    observed_at = now or datetime(2026, 8, 21, tzinfo=UTC)
     return board.build_board(
         board.BoardBuildInputs(
             issues=issues,
@@ -219,7 +173,7 @@ def projected_board(
             trunk_landings=trunk_landings,
             children=children,
             dependencies=dependencies,
-            claim_ages={claim.claim_id: (now or datetime(2026, 8, 21, tzinfo=UTC)) for claim in claims},
+            claim_ages={claim.claim_id: observed_at for claim in claims},
         )
     )
 
@@ -233,7 +187,6 @@ def _claims_client(*standing: ClaimRequest) -> FakeForge:
             ]
         }
     )
-
 
 
 def _store_claim_from_request(
@@ -266,16 +219,8 @@ def _live_store_claim() -> protocol.ActiveClaim:
 @dataclass
 class FakeForge:
     comments: dict[int, list[IssueComment]] = field(default_factory=dict)
-    labels: set[int] = field(default_factory=set)
-    other_labels: dict[str, set[int]] = field(default_factory=dict)
-    ledger_labelled_issues: set[int] = field(default_factory=set)
-    valid_successors: set[int] = field(default_factory=set)
     inject_before_next_ledger_post: IssueComment | None = None
     inject_after_next_ledger_post: IssueComment | None = None
-    inject_during_next_add: IssueComment | None = None
-    inject_during_next_remove: IssueComment | None = None
-    fail_add_label: bool = False
-    fail_remove_label: bool = False
     # 1-indexed: the Nth post_comment(LEDGER_ISSUE, ...) call raises instead of
     # posting -- simulates a compensating repair write itself failing (#136).
     fail_ledger_post_at_call: int | None = None
@@ -294,12 +239,6 @@ class FakeForge:
     children: dict[int, tuple[board.ChildItem, ...]] = field(default_factory=dict)
     closed_issues: set[int] = field(default_factory=set)
     issue_reference_lookups: list[int] = field(default_factory=list)
-    ledger_items: list[forge.LedgerItem] = field(default_factory=list)
-    live_open_item_count: int | None = None
-    ledger_pages_fetched: int = 1
-    item_labels: dict[int, frozenset[str]] = field(default_factory=dict)
-    list_items_calls: list[tuple[forge.ItemState | None, str | None]] = field(default_factory=list)
-    list_items_error: Exception | None = None
     created_children: list[tuple[int, str, str, board.ItemKind]] = field(default_factory=list)
     next_created_child_number: int = 900
     item_bodies: dict[int, str] = field(default_factory=dict)
@@ -322,47 +261,6 @@ class FakeForge:
 
     def capability(self, operation: forge.ForgeOperation) -> forge.Capability:
         return self.capability_overrides.get(operation, github.GITHUB_CAPABILITIES[operation])
-
-    def list_items(
-        self, *, state: forge.ItemState | None = None, label: str | None = None
-    ) -> forge.Listing:
-        self.list_items_calls.append((state, label))
-        if self.list_items_error is not None:
-            raise self.list_items_error
-        items = tuple(
-            item
-            for item in self.ledger_items
-            if (state is None or item.state is state)
-            and (label is None or label in self.item_labels.get(item.number, frozenset()))
-        )
-        return forge.Listing(items, self.ledger_pages_fetched)
-
-    def open_item_count(self) -> int:
-        if self.live_open_item_count is not None:
-            return self.live_open_item_count
-        return sum(1 for item in self.ledger_items if item.state is forge.ItemState.OPEN)
-
-    def ensure_label(self, name: str, *, colour: str, description: str) -> None:
-        self.other_labels.setdefault(name, set())
-
-    def create_item(self, *, title: str, body: str) -> int:
-        number = max((item.number for item in self.ledger_items), default=0) + 1
-        self.ledger_items.append(
-            forge.LedgerItem(number, forge.ItemState.OPEN, False, body, True, False)
-        )
-        return number
-
-    def lock_item(self, number: int) -> None:
-        self.ledger_items = [
-            replace(item, locked=True) if item.number == number else item
-            for item in self.ledger_items
-        ]
-
-    def close_item(self, number: int) -> None:
-        self.ledger_items = [
-            replace(item, state=forge.ItemState.CLOSED) if item.number == number else item
-            for item in self.ledger_items
-        ]
 
     def create_child(self, *, parent: int, title: str, body: str, kind: board.ItemKind) -> int:
         number = self.next_created_child_number
@@ -413,47 +311,6 @@ class FakeForge:
             )
             self.inject_after_next_ledger_post = None
         return posted.url
-
-    def add_label(self, issue: int, label: str) -> None:
-        if label == protocol.LEDGER_LABEL:
-            self.ledger_labelled_issues.add(issue)
-            return
-        assert label == claim_label()
-        if self.fail_add_label:
-            raise ClaimError("label add failed")
-        if self.inject_during_next_add is not None:
-            self.comments.setdefault(protocol.LEDGER_ISSUE, []).append(self.inject_during_next_add)
-            self.inject_during_next_add = None
-        self.labels.add(issue)
-
-    def remove_label(self, issue: int, label: str) -> None:
-        assert label == claim_label()
-        if self.fail_remove_label:
-            raise ClaimError("label remove failed")
-        if self.inject_during_next_remove is not None:
-            self.comments.setdefault(protocol.LEDGER_ISSUE, []).append(
-                self.inject_during_next_remove
-            )
-            injected = self.inject_during_next_remove_event
-            assert not isinstance(injected, protocol.LedgerSupersede), (
-                "this fake only injects issue-scoped claim events"
-            )
-            assert isinstance(injected.identity, protocol.IssueIdentity), (
-                "this fake only injects issue-scoped claim events"
-            )
-            self.labels.add(injected.identity.issue)
-            self.inject_during_next_remove = None
-        self.labels.discard(issue)
-
-    @property
-    def inject_during_next_remove_event(self) -> protocol.ClaimEvent:
-        assert self.inject_during_next_remove is not None
-        event = parse_claim_event(self.inject_during_next_remove)
-        assert event is not None
-        return event
-
-    def list_claimed_issues(self) -> tuple[int, ...]:
-        return tuple(sorted(self.labels))
 
     def list_open_board_issues(self) -> tuple[board.Issue, ...]:
         self._run()
@@ -520,72 +377,6 @@ class FakeForge:
         self._run()
         return self.board_merged_pull_requests
 
-    def validate_successor(self, issue: int) -> None:
-        if issue not in self.valid_successors:
-            raise ClaimUnavailableError(
-                f"successor #{issue} must be an open, empty, collaborator-locked issue"
-            )
-
-    def upsert_projection(
-        self,
-        issue: int,
-        body: str,
-        *,
-        create: bool = True,
-        adopt_stale: bool = False,
-    ) -> bool:
-        entries = self.comments.setdefault(issue, [])
-        all_projections = [
-            entry
-            for entry in entries
-            if issue_claim.PROJECTION_MARKER_PATTERN.fullmatch(entry.body.partition("\n")[0])
-            is not None
-        ]
-        projections = [
-            entry
-            for entry in all_projections
-            if entry.body.partition("\n")[0] == issue_claim._projection_marker()
-        ]
-        adoptable_projections = [
-            entry
-            for entry in all_projections
-            if (issue_claim._projection_ledger(entry) or 0) <= protocol.LEDGER_ISSUE
-        ]
-        has_newer_projection = any(
-            (issue_claim._projection_ledger(entry) or 0) > protocol.LEDGER_ISSUE
-            for entry in all_projections
-        )
-        if adopt_stale and adoptable_projections:
-            projections = adoptable_projections
-        if not projections:
-            if has_newer_projection:
-                raise ClaimError("owning issue has a projection from a newer ledger generation")
-            if not create:
-                return False
-            self.post_comment(issue, body)
-            projections = [self.comments[issue][-1]]
-        owner, *duplicates = sorted(
-            projections,
-            key=lambda entry: (entry.created_at, entry.identifier),
-        )
-        owner_index = entries.index(owner)
-        entries[owner_index] = replace(owner, body=body, updated_at=owner.created_at)
-        duplicate_ids = {entry.identifier for entry in duplicates}
-        entries[:] = [entry for entry in entries if entry.identifier not in duplicate_ids]
-        return True
-
-    def neutralize_claim_comment(self, comment_id: int, body: str) -> None:
-        for entries in self.comments.values():
-            for index, entry in enumerate(entries):
-                if entry.identifier == comment_id:
-                    # A real PATCH bumps updated_at; mirror that so the "was edited
-                    # after publication" guard stays live for anything a caller
-                    # neutralizes without also stripping its claim marker prefix.
-                    edited_at = f"2026-08-22T00:00:{entry.identifier:02d}Z"
-                    entries[index] = replace(entry, body=body, updated_at=edited_at)
-                    return
-        raise ClaimError(f"comment {comment_id} not found for neutralization")
-
 
 class ReaderOnlyForge(FakeForge):
     """A `FakeForge` whose write operations fail the test instead of quietly
@@ -596,44 +387,11 @@ class ReaderOnlyForge(FakeForge):
     def post_comment(self, issue: int, body: str) -> str:
         pytest.fail("a read-only command must never post a comment")
 
-    def add_label(self, issue: int, label: str) -> None:
-        pytest.fail("a read-only command must never add a label")
-
-    def remove_label(self, issue: int, label: str) -> None:
-        pytest.fail("a read-only command must never remove a label")
-
-    def upsert_projection(
-        self,
-        issue: int,
-        body: str,
-        *,
-        create: bool = True,
-        adopt_stale: bool = False,
-    ) -> bool:
-        pytest.fail("a read-only command must never upsert a projection")
-
-    def neutralize_claim_comment(self, comment_id: int, body: str) -> None:
-        pytest.fail("a read-only command must never neutralize a comment")
-
-    def ensure_label(self, name: str, *, colour: str, description: str) -> None:
-        pytest.fail("a read-only command must never ensure a label")
-
-    def create_item(self, *, title: str, body: str) -> int:
-        pytest.fail("a read-only command must never create an item")
-
-    def lock_item(self, number: int) -> None:
-        pytest.fail("a read-only command must never lock an item")
-
-    def close_item(self, number: int) -> None:
-        pytest.fail("a read-only command must never close an item")
-
     def create_child(self, *, parent: int, title: str, body: str, kind: board.ItemKind) -> int:
         pytest.fail("a read-only command must never create a child")
 
     def update_item_body(self, number: int, body: str) -> None:
         pytest.fail("a read-only command must never update an item body")
-
-
 
 
 _LIVE_VERSIONED_PATHS = checkout.versioned_paths
@@ -664,21 +422,41 @@ TWELVE_VERSIONED_FILES = (
 )
 
 
+def release_comment(
+    claim,
+    agent: str,
+    role: str,
+    reason: str,
+    *,
+    coordinator_override: bool = False,
+    claim_comment_id: int | None = None,
+    identity: protocol.ClaimIdentity | None = None,
+) -> str:
+    """A parseable release marker for remaining ledger-parser tests.
 
-def release_comment(claim, agent: str, role: str, reason: str) -> str:
+    Production `release_comment` died in this slice; the reason string is
+    carried verbatim, exactly as the original production writer did (it
+    never imposed an "abandoned:"/"merged" prefix convention -- that
+    formatting belongs to `ReleaseOutcome.reason`, a real caller elsewhere).
+    `coordinator_override` switches the wire action to `override_release`
+    (`claim_comment_id` binds it to the claim comment it targets, defaulting
+    to the claim's own); `identity` overrides `claim.identity` only for
+    building a deliberately mismatched marker.
+    """
+    resolved_identity = identity if identity is not None else claim.identity
     payload: dict[str, object] = {
-        "action": "release",
+        "action": "override_release" if coordinator_override else "release",
         "agent": agent,
         "claim_id": claim.claim_id,
-        protocol._identity_marker_key(claim.identity): protocol._identity_marker_value(
-            claim.identity
-        ),
+        protocol._identity_marker_key(resolved_identity): _identity_marker_value(resolved_identity),
         "role": role,
-        "reason": reason if reason.startswith("abandoned:") or reason.startswith("merged") else f"abandoned: {reason}",
+        "reason": reason,
     }
+    if coordinator_override:
+        payload["claim_comment_id"] = (
+            claim_comment_id if claim_comment_id is not None else claim.comment.identifier
+        )
     return marker(payload)
-
-
 
 
 @pytest.mark.parametrize("bad_issue", [0, -1, True])
@@ -691,22 +469,6 @@ def test_configure_ledger_requires_a_positive_integer(bad_issue: int) -> None:
 def test_issue_identity_requires_a_positive_integer(bad_issue: int) -> None:
     with pytest.raises(ClaimError, match="issue identity must be a positive integer"):
         protocol.IssueIdentity(bad_issue)
-
-
-def test_untrusted_exact_and_arbitrary_markers_have_no_authority() -> None:
-    client = FakeForge(
-        ledger_items=[
-            ledger_item(1, author_is_trusted=False),
-            ledger_item(2),
-            ledger_item(3, body="<!-- arbitrary-claim-ledger:v1 -->", author_is_trusted=False),
-        ]
-    )
-
-    assert issue_claim.discover_ledger(client) == 2
-    assert issue_claim.bootstrap_ledger(client) == 2
-    states_by_number = {item.number: item.state for item in client.ledger_items}
-    assert states_by_number[1] is forge.ItemState.OPEN
-    assert states_by_number[3] is forge.ItemState.OPEN
 
 
 def test_forge_operation_exhaustiveness_matches_the_declared_reader_and_writer_methods() -> None:
@@ -735,12 +497,6 @@ def test_only_the_github_adapter_speaks_gh_argv() -> None:
     assert len(other_modules) >= 7
     for module in other_modules:
         assert '"gh"' not in module.read_text(), f"{module.name} must not construct a gh argv"
-
-
-
-
-
-
 
 
 def board_issue_page_client(*rows: dict[str, object]) -> GitHubForge:
@@ -898,16 +654,6 @@ def test_github_adapter_fails_loud_when_a_board_pull_request_is_not_an_object() 
         client.list_open_board_pull_requests()
 
 
-
-
-
-
-
-
-
-
-
-
 def test_github_adapter_creates_a_child_and_links_it_as_a_sub_issue() -> None:
     observed: list[tuple[list[str], bytes | None]] = []
 
@@ -996,7 +742,7 @@ def test_read_only_commands_never_write_through_a_reader_only_forge(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     claimed = comment(1, claim_comment(request("cli-claim", issue=72, scope=("src",))))
-    client = ReaderOnlyForge({LEDGER_ISSUE: [claimed]}, {72})
+    client = ReaderOnlyForge({LEDGER_ISSUE: [claimed]})
     client.board_issues = (board_issue(72, "Work", complete_contract("Ship it.")),)
     client.landings[12] = landing_pull_request(body="Work-Item: #72\n\nCloses #72")
     monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
@@ -1610,9 +1356,7 @@ def _configured_board_client(
     # comments `_claims_client` posted above (still needed for board's own
     # non-claim data and for tests that check what claim/release/rescope
     # would have posted under the pre-migration ledger path).
-    _patch_store_write(
-        monkeypatch, *(_store_claim_from_request(claimed) for claimed in standing)
-    )
+    _patch_store_write(monkeypatch, *(_store_claim_from_request(claimed) for claimed in standing))
     return client
 
 
@@ -2005,7 +1749,7 @@ def test_claim_accepts_a_body_with_no_blockers(
         complete_contract("Claim #10.", blocked_by="nichts"),
         labels=("security",),
     )
-    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(issue,))
+    _configured_board_client(monkeypatch, tmp_path, open_issues=(issue,))
     monkeypatch.setattr(
         issue_claim, "_request", lambda _arguments: request(issue=10, scope=("src/work.py",))
     )
@@ -2097,7 +1841,7 @@ def test_claim_allows_an_open_issue_blocker_with_out_of_order_and_records_it(
         complete_contract("Claim #10.", blocked_by="#9"),
         labels=("security",),
     )
-    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(issue, blocker))
+    _configured_board_client(monkeypatch, tmp_path, open_issues=(issue, blocker))
     monkeypatch.setattr(
         issue_claim,
         "_request",
@@ -2180,7 +1924,7 @@ def test_claim_ignores_body_size_and_closed_next_references(
         "Work",
         complete_contract("#9 follow up.") + "\n\n" + "x" * 50_000,
     )
-    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(issue,))
+    _configured_board_client(monkeypatch, tmp_path, open_issues=(issue,))
     monkeypatch.setattr(
         issue_claim,
         "_fetch_issue_reference",
@@ -2542,7 +2286,7 @@ def test_claim_does_not_require_out_of_order_for_the_top_ranked_item(
 ) -> None:
     top = board_issue(10, "Top work", complete_contract("Claim #10."))
     lower = board_issue(11, "Lower work", complete_contract("Claim #11."))
-    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(top, lower))
+    _configured_board_client(monkeypatch, tmp_path, open_issues=(top, lower))
     monkeypatch.setattr(
         issue_claim, "_request", lambda _arguments: request(issue=10, scope=("src/top.py",))
     )
@@ -3660,7 +3404,7 @@ def test_claim_does_not_corridor_on_a_slice_table(
 ) -> None:
     body = complete_contract("Ship it.") + "\n\n" + slice_table(("1", "First slice", "—", "—"))
     target = board_issue(72, "Epic", body)
-    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(target,))
+    _configured_board_client(monkeypatch, tmp_path, open_issues=(target,))
     monkeypatch.setattr(
         issue_claim, "_request", lambda _arguments: request(issue=72, scope=("src/work.py",))
     )
@@ -3870,6 +3614,21 @@ def test_locate_slice_row_skips_a_fenced_example() -> None:
 def test_parse_ruling_date_fails_loud_on_a_malformed_body(body: str, match: str) -> None:
     with pytest.raises(ClaimError, match=match):
         board.parse_ruling_date(body)
+
+
+@pytest.mark.parametrize(
+    "raw_timestamp",
+    [
+        pytest.param("not-a-timestamp", id="unparsable"),
+        pytest.param("2026-08-20T00:00:00", id="missing-offset"),
+    ],
+)
+def test_timestamp_fails_loud_on_a_malformed_github_timestamp(raw_timestamp: str) -> None:
+    """`board._timestamp` backs an issue's `age_days`/`idle_days` (its
+    `created_at`/`updated_at`); GitHub's own timestamp shape is the only
+    thing it ever trusts."""
+    with pytest.raises(ClaimError, match="GitHub returned a malformed board timestamp"):
+        board._timestamp(raw_timestamp)
 
 
 def test_child_skeleton_is_an_incomplete_contract_with_no_defects() -> None:
@@ -7059,6 +6818,14 @@ def test_claim_treats_a_higher_ranked_configured_idea_as_out_of_order(
     assert client.comments[LEDGER_ISSUE] == []
 
 
+def _identity_marker_value(identity: protocol.ClaimIdentity) -> int | bool:
+    """The wire value `protocol._identity_marker_key` pairs with, for fixture
+    marker payloads. Production `claim_comment` (the encode-side owner)
+    died in this slice, but decode (`_required_identity`) survives until D,
+    so this stays the one place that constructs a valid encoded identity."""
+    return True if isinstance(identity, LaneIdentity) else identity.issue
+
+
 def marker(payload: dict[str, object], *, legacy: bool = False, attributed: bool = True) -> str:
     version = "v1" if legacy else "v2"
     encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True)
@@ -7082,9 +6849,7 @@ def claim_comment(claimed: ClaimRequest) -> str:
         "base": claimed.base,
         "branch": claimed.branch,
         "claim_id": claimed.claim_id,
-        protocol._identity_marker_key(claimed.identity): protocol._identity_marker_value(
-            claimed.identity
-        ),
+        protocol._identity_marker_key(claimed.identity): _identity_marker_value(claimed.identity),
         "role": claimed.role,
         "scope": list(claimed.scope),
     }
@@ -7106,6 +6871,41 @@ def release_event(
         role or claim.role,
         "landed",
     )
+
+
+def rescope_comment(
+    claim: LedgerActiveClaim,
+    scope: tuple[str, ...],
+    agent: str,
+    role: str,
+    *,
+    identity: protocol.ClaimIdentity | None = None,
+    whole_reason: str | None = None,
+    clear_whole_reason: bool = False,
+) -> str:
+    """A parseable rescope marker for remaining ledger-parser tests.
+
+    Production `rescope_comment` died in this slice; the identity/scope/
+    agent/role shape it wrote is unchanged and the importer's aggregation
+    walk (`_apply_claim_rescope_event`) still reads it. `identity` overrides
+    `claim.identity` only for building a deliberately mismatched marker;
+    `whole_reason`/`clear_whole_reason` exercise the same three-state
+    whole-reason contract the original writer carried (never both at once).
+    """
+    resolved_identity = identity if identity is not None else claim.identity
+    payload: dict[str, object] = {
+        "action": "rescope",
+        "agent": agent,
+        "claim_id": claim.claim_id,
+        protocol._identity_marker_key(resolved_identity): _identity_marker_value(resolved_identity),
+        "role": role,
+        "scope": list(scope),
+    }
+    if whole_reason is not None:
+        payload["whole"] = whole_reason
+    if clear_whole_reason:
+        payload[protocol.WHOLE_CLEAR_MARKER_KEY] = True
+    return marker(payload)
 
 
 @pytest.mark.parametrize(
@@ -7159,13 +6959,65 @@ def test_required_text_refuses_a_non_string_marker_field() -> None:
         parse_claim_event(raised_argument_1)
 
 
+def test_required_text_refuses_a_control_character_marker_field() -> None:
+    payload = _valid_claim_payload(agent="Codex\nSol")
+    raised_argument_1 = comment(1, marker(payload))
+    with pytest.raises(
+        InvalidClaimMarkerError,
+        match="claim marker field 'agent' must be one bounded non-empty line",
+    ):
+        parse_claim_event(raised_argument_1)
+
+
+def test_outbound_resource_name_refuses_a_value_that_is_not_a_resource_name() -> None:
+    with pytest.raises(ClaimError, match="resource is not a resource name"):
+        protocol._outbound_resource_name("not a valid name!")
+
+
+def test_merged_release_reason_names_the_pull_request() -> None:
+    assert protocol.MergedRelease(12).reason == "merged #12"
+
+
+def test_claims_holding_path_refuses_more_than_one_path() -> None:
+    with pytest.raises(
+        ClaimError, match="status --path requires a single repository-relative path"
+    ):
+        protocol.claims_holding_path((), "src/a.py,src/b.py")
+
+
+@pytest.mark.parametrize(
+    ("add", "drop", "match"),
+    [
+        pytest.param(
+            ("new.py",), ("missing.py",), "cannot drop 'missing.py'", id="drop-not-present"
+        ),
+        pytest.param((), ("src",), "rescope must leave a non-empty scope", id="empty-after-drop"),
+    ],
+)
+def test_combined_scope_refuses_an_invalid_rescope(
+    add: tuple[str, ...], drop: tuple[str, ...], match: str
+) -> None:
+    with pytest.raises(ClaimUnavailableError, match=match):
+        protocol._combined_scope(("src",), add, drop)
+
+
 def test_outbound_text_refuses_a_non_string_field() -> None:
-    # `replace`'s `**changes` is typed `Any` in the standard library -- the
-    # one boundary this malformed, non-`str` `agent` can enter through
-    # without a field-by-field type lie.
-    raised_argument_1 = replace(request(), agent=123)
     with pytest.raises(ClaimError, match="agent must be text"):
-        claim_comment(raised_argument_1)
+        protocol._outbound_text(123, "agent", maximum=128)
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    ["Codex\nSol", "Codex\x1fSol", " ", "x" * 129],
+)
+def test_outbound_text_rejects_controlled_or_overlong_fields(invalid: str) -> None:
+    """`_outbound_text` is the one owner of this validation since issue #176
+    moved it out of the deleted ledger comment writers (`claim_comment` /
+    `release_comment` / `supersede_comment`) and onto every real call site
+    that builds an intent: `cli._request`'s agent/role, and `release`'s
+    abandoned reason."""
+    with pytest.raises(ClaimError, match="agent must be one bounded non-empty line"):
+        protocol._outbound_text(invalid, "agent", maximum=128)
 
 
 def _marker_payload_keys(body: str) -> frozenset[str]:
@@ -7226,6 +7078,15 @@ def test_protocol_parser_returns_action_specific_types() -> None:
     assert released.reason == "landed"
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        "Review quotes <!-- agent-claim:v1 … --> as evidence.",
+        "> <!-- agent-claim:v2 {} -->",
+        "```html\n<!-- agent-claim:v2 {} -->\n```",
+        "ordinary first line\n<!-- agent-claim:v2 {} -->",
+    ],
+)
 def test_marker_is_protocol_only_as_the_exact_first_line(body: str) -> None:
     assert parse_claim_event(comment(1, body)) is None
 
@@ -7243,8 +7104,6 @@ def test_edited_protocol_comment_fails_loud() -> None:
 
     with pytest.raises(InvalidClaimMarkerError, match="edited after publication"):
         parse_claim_event(edited)
-
-
 
 
 @pytest.mark.parametrize(
@@ -7271,47 +7130,6 @@ def test_protocol_event_requires_exact_final_agent_attribution(
     raised_argument_1 = comment(1, body)
     with pytest.raises(InvalidClaimMarkerError, match="exact agent attribution"):
         parse_claim_event(raised_argument_1)
-
-
-@pytest.mark.parametrize(
-    "invalid",
-    ["Codex\nSol", "Codex\x1fSol", " ", "x" * 129],
-)
-def test_outbound_comment_constructors_reject_controlled_identity_fields(
-    invalid: str,
-) -> None:
-    claimed = parse_claim_event(comment(1, claim_comment(request())))
-    assert isinstance(claimed, LedgerActiveClaim)
-
-    raised_argument_1 = replace(request(), agent=invalid)
-    with pytest.raises(ClaimError, match="agent must be one bounded non-empty line"):
-        claim_comment(raised_argument_1)
-    with pytest.raises(ClaimError, match="agent must be one bounded non-empty line"):
-        release_comment(claimed, invalid, "builder", "landed")
-    with pytest.raises(ClaimError, match="agent must be one bounded non-empty line"):
-        supersede_comment(claimed, 170, invalid, "coordinator", "rollover")
-
-    raised_argument_1 = replace(request(), role=invalid)
-    with pytest.raises(ClaimError, match="role must be one bounded non-empty line"):
-        claim_comment(raised_argument_1)
-    with pytest.raises(ClaimError, match="role must be one bounded non-empty line"):
-        release_comment(claimed, "Codex Sol", invalid, "landed")
-    with pytest.raises(ClaimError, match="role must be one bounded non-empty line"):
-        supersede_comment(claimed, 170, "Codex Sol", invalid, "rollover")
-
-
-@pytest.mark.parametrize(
-    "invalid",
-    ["landed\nwith detail", "landed\x1fdetail", " ", "x" * 513],
-)
-def test_outbound_comment_constructors_reject_controlled_reasons(invalid: str) -> None:
-    claimed = parse_claim_event(comment(1, claim_comment(request())))
-    assert isinstance(claimed, LedgerActiveClaim)
-
-    with pytest.raises(ClaimError, match="reason must be one bounded non-empty line"):
-        release_comment(claimed, "Codex Sol", "builder", invalid)
-    with pytest.raises(ClaimError, match="reason must be one bounded non-empty line"):
-        supersede_comment(claimed, 170, "Codex Sol", "coordinator", invalid)
 
 
 def test_legacy_bootstrap_claim_is_read_only_when_marker_is_first_line() -> None:
@@ -7390,6 +7208,42 @@ def test_ledger_supersede_requires_coordinator_role() -> None:
     raised_argument_1 = comment(1, marker(payload))
     with pytest.raises(InvalidClaimMarkerError, match="ledger supersede requires coordinator role"):
         parse_claim_event(raised_argument_1)
+
+
+def test_ledger_supersede_requires_a_successor_greater_than_the_current_ledger() -> None:
+    payload = _valid_supersede_payload(successor_issue=LEDGER_ISSUE)
+    raised_argument_1 = comment(1, marker(payload))
+    with pytest.raises(
+        InvalidClaimMarkerError, match="ledger successor must be greater than the current ledger"
+    ):
+        parse_claim_event(raised_argument_1)
+
+
+def test_supersede_atomically_terminates_the_only_ledger_claim() -> None:
+    claimed_body = claim_comment(request(issue=LEDGER_ISSUE))
+    claimed = parse_claim_event(comment(1, claimed_body))
+    assert isinstance(claimed, LedgerActiveClaim)
+    frozen = marker(_valid_supersede_payload(claim_comment_id=1))
+
+    raised_argument_1 = comment(1, claimed_body)
+    raised_argument_2 = comment(2, frozen)
+    with pytest.raises(protocol.LedgerSupersededError, match="successor #170"):
+        active_claims((raised_argument_1, raised_argument_2))
+
+
+def test_supersede_is_an_inert_rejected_event_while_another_lane_is_active() -> None:
+    """`_apply_terminal_event`'s narrow freeze window (issue #131 criterion):
+    a supersede posted while a second, unrelated claim is also active never
+    honors -- both claims stay live instead of one silently vanishing."""
+    rollover_body = claim_comment(request(issue=LEDGER_ISSUE, scope=("docs",)))
+    rollover = parse_claim_event(comment(1, rollover_body))
+    assert isinstance(rollover, LedgerActiveClaim)
+    other = comment(2, claim_comment(request("other", issue=72, scope=("frontend",))))
+    frozen = comment(3, marker(_valid_supersede_payload(claim_comment_id=1)))
+
+    observed = active_claims((comment(1, rollover_body), other, frozen))
+
+    assert [claim.claim_id for claim in observed] == [rollover.claim_id, "other"]
 
 
 @pytest.mark.parametrize(
@@ -7649,10 +7503,11 @@ def test_aggregation_fences_an_unknown_field_comment_instead_of_failing_the_ledg
 def test_an_unreadable_rescope_quarantines_its_still_readable_claim() -> None:
     """Finding 1 (issue #136): a claim posted normally, then rescoped by a newer
     writer whose rescope this reader cannot parse, stays active and readable --
-    but `LedgerActiveClaim.quarantined_by` now names the rescope comment that fences it.
-    This internal attachment is what `release`/`pr-check` key their refusal off of
-    (exercised through the CLI below); a raw dataclass field is not something the
-    CLI surfaces directly, so it is pinned here instead."""
+    but `LedgerActiveClaim.quarantined_by` now names the rescope comment that
+    fences it. Nothing in production reads that attachment any more
+    (`release`/`pr-check` moved onto the store in this same slice); it is
+    D-scheduled aggregation-walk infrastructure `bootstrap --ledger` still
+    needs whole, so this pins the walk's own behaviour directly."""
     claimed = claim_comment(request(issue=72, scope=("src",)))
     newer_rescope = marker(
         {
@@ -7678,18 +7533,182 @@ def test_an_unreadable_rescope_quarantines_its_still_readable_claim() -> None:
     assert standing[0].scope == ("src",)
 
 
+def test_release_must_come_from_original_claimant() -> None:
+    claimed_body = claim_comment(request())
+    claimed = parse_claim_event(comment(1, claimed_body))
+    assert isinstance(claimed, LedgerActiveClaim)
+    foreign_release = release_event(claimed, agent="Other", role="builder")
+
+    raised_argument_1 = comment(1, claimed_body)
+    raised_argument_2 = comment(2, foreign_release)
+    with pytest.raises(InvalidClaimMarkerError, match="only be released by its claimant"):
+        active_claims((raised_argument_1, raised_argument_2))
 
 
+def test_rescope_refuses_a_claim_id_rescoped_after_release() -> None:
+    claimed_body = claim_comment(request())
+    claimed = parse_claim_event(comment(1, claimed_body))
+    assert isinstance(claimed, LedgerActiveClaim)
+    released = release_event(claimed)
+    rescope = rescope_comment(claimed, ("src",), claimed.agent, claimed.role)
+
+    raised_argument_1 = comment(1, claimed_body)
+    raised_argument_2 = comment(2, released)
+    raised_argument_3 = comment(3, rescope)
+    with pytest.raises(InvalidClaimMarkerError, match="was rescoped after it was released"):
+        active_claims((raised_argument_1, raised_argument_2, raised_argument_3))
 
 
+def test_rescope_refuses_a_claim_id_never_acquired() -> None:
+    claimed_body = claim_comment(request())
+    claimed = parse_claim_event(comment(1, claimed_body))
+    assert isinstance(claimed, LedgerActiveClaim)
+    rescope = rescope_comment(claimed, ("src",), claimed.agent, claimed.role)
+
+    raised_argument_1 = comment(1, rescope)
+    with pytest.raises(InvalidClaimMarkerError, match="was rescoped before it was acquired"):
+        active_claims((raised_argument_1,))
 
 
+def test_rescope_refuses_a_mismatched_identity() -> None:
+    claimed_body = claim_comment(request(issue=71))
+    claimed = parse_claim_event(comment(1, claimed_body))
+    assert isinstance(claimed, LedgerActiveClaim)
+    rescope = rescope_comment(
+        claimed, ("src",), claimed.agent, claimed.role, identity=IssueIdentity(72)
+    )
+
+    raised_argument_1 = comment(1, claimed_body)
+    raised_argument_2 = comment(2, rescope)
+    with pytest.raises(InvalidClaimMarkerError, match="rescope targets the wrong claim"):
+        active_claims((raised_argument_1, raised_argument_2))
 
 
+def test_rescope_refuses_an_agent_other_than_the_claimant() -> None:
+    claimed_body = claim_comment(request())
+    claimed = parse_claim_event(comment(1, claimed_body))
+    assert isinstance(claimed, LedgerActiveClaim)
+    rescope = rescope_comment(claimed, ("src",), "Other Agent", claimed.role)
+
+    raised_argument_1 = comment(1, claimed_body)
+    raised_argument_2 = comment(2, rescope)
+    with pytest.raises(InvalidClaimMarkerError, match="can only be rescoped by its claimant"):
+        active_claims((raised_argument_1, raised_argument_2))
 
 
+def test_active_claims_skips_ordinary_comments_that_carry_no_marker() -> None:
+    claimed_body = claim_comment(request())
+    ordinary = comment(2, "Looks good, landing shortly.")
+
+    standing = active_claims((comment(1, claimed_body), ordinary))
+
+    assert [claim.claim_id for claim in standing] == ["claim-a"]
 
 
+def test_claim_marker_round_trips_a_whole_reason() -> None:
+    claimed_body = claim_comment(request(whole_reason="one sentence why this is wide"))
+    parsed = parse_claim_event(comment(1, claimed_body))
+    assert isinstance(parsed, LedgerActiveClaim)
+    assert parsed.whole_reason == "one sentence why this is wide"
+
+
+def test_rescope_sets_a_new_whole_reason() -> None:
+    claimed_body = claim_comment(request(whole_reason="original reason"))
+    claimed = parse_claim_event(comment(1, claimed_body))
+    assert isinstance(claimed, LedgerActiveClaim)
+    rescope = rescope_comment(
+        claimed, ("src", "docs"), claimed.agent, claimed.role, whole_reason="updated reason"
+    )
+
+    standing = active_claims((comment(1, claimed_body), comment(2, rescope)))
+
+    assert standing[0].whole_reason == "updated reason"
+
+
+def test_rescope_omitting_whole_keeps_the_current_reason() -> None:
+    claimed_body = claim_comment(request(whole_reason="original reason"))
+    claimed = parse_claim_event(comment(1, claimed_body))
+    assert isinstance(claimed, LedgerActiveClaim)
+    rescope = rescope_comment(claimed, ("src", "docs"), claimed.agent, claimed.role)
+
+    standing = active_claims((comment(1, claimed_body), comment(2, rescope)))
+
+    assert standing[0].whole_reason == "original reason"
+
+
+def test_rescope_can_clear_the_whole_reason() -> None:
+    claimed_body = claim_comment(request(whole_reason="original reason"))
+    claimed = parse_claim_event(comment(1, claimed_body))
+    assert isinstance(claimed, LedgerActiveClaim)
+    rescope = rescope_comment(
+        claimed, ("src", "docs"), claimed.agent, claimed.role, clear_whole_reason=True
+    )
+
+    standing = active_claims((comment(1, claimed_body), comment(2, rescope)))
+
+    assert standing[0].whole_reason is None
+
+
+def test_active_claims_strict_reader_refuses_reused_claim_ids_and_orphan_releases() -> None:
+    """`active_claims` (the strict reader `bootstrap --ledger` builds on) still
+    refuses a poisoned ledger outright."""
+    claimed_body = claim_comment(request())
+    claimed = parse_claim_event(comment(1, claimed_body))
+    assert isinstance(claimed, LedgerActiveClaim)
+    released = release_event(claimed)
+
+    raised_argument_1 = comment(1, claimed_body)
+    raised_argument_2 = comment(2, released)
+    raised_argument_3 = comment(3, claimed_body)
+    with pytest.raises(InvalidClaimMarkerError, match="was reused"):
+        active_claims((raised_argument_1, raised_argument_2, raised_argument_3))
+    raised_argument_1 = comment(1, released)
+    with pytest.raises(InvalidClaimMarkerError, match="released before it was acquired"):
+        active_claims((raised_argument_1,))
+
+
+def test_release_refuses_a_mismatched_identity() -> None:
+    """A release event whose own identity marker names a different issue than
+    the claim it targets by claim_id must fail loud, never silently release
+    the wrong claim."""
+    claimed_body = claim_comment(request(issue=71))
+    claimed = parse_claim_event(comment(1, claimed_body))
+    assert isinstance(claimed, LedgerActiveClaim)
+    wrong_identity_claim = replace(claimed, identity=IssueIdentity(72))
+    released = release_event(wrong_identity_claim)
+
+    raised_argument_1 = comment(1, claimed_body)
+    raised_argument_2 = comment(2, released)
+    with pytest.raises(InvalidClaimMarkerError, match="release targets the wrong claim"):
+        active_claims((raised_argument_1, raised_argument_2))
+
+
+def test_coordinator_override_is_explicit_and_bound_to_claim_comment() -> None:
+    claimed_body = claim_comment(request())
+    claimed = parse_claim_event(comment(1, claimed_body))
+    assert isinstance(claimed, LedgerActiveClaim)
+    override = release_comment(
+        claimed,
+        "Codex Commissioner",
+        "coordinator",
+        "verified abandoned",
+        coordinator_override=True,
+    )
+
+    assert active_claims((comment(1, claimed_body), comment(2, override))) == ()
+
+    wrong_comment = release_comment(
+        claimed,
+        "Codex Commissioner",
+        "coordinator",
+        "verified abandoned",
+        coordinator_override=True,
+        claim_comment_id=999,
+    )
+    raised_argument_1 = comment(1, claimed_body)
+    raised_argument_2 = comment(2, wrong_comment)
+    with pytest.raises(InvalidClaimMarkerError, match="wrong claim comment"):
+        active_claims((raised_argument_1, raised_argument_2))
 
 
 def test_scope_overlap_is_repository_wide_and_path_aware() -> None:
@@ -7727,36 +7746,6 @@ def test_comma_joined_scope_marker_is_read_as_distinct_paths() -> None:
         "docs/PRODUCT.md",
         "src/atelier2/adapters/dbos/run_transitions.py",
     )
-
-
-def test_comma_joined_scope_on_another_issue_is_an_overlap_note_not_a_refusal() -> None:
-    incumbent = comment(
-        1,
-        marker(
-            {
-                "action": "claim",
-                "agent": "Codex Sol",
-                "base": BASE,
-                "branch": "codex/issue-72-claims",
-                "claim_id": "joined",
-                "issue": 72,
-                "role": "builder",
-                "scope": ["docs/PRODUCT.md,src/atelier2/adapters/dbos/run_transitions.py"],
-            }
-        ),
-    )
-    client = FakeForge({LEDGER_ISSUE: [incumbent]}, {72})
-
-    acquired = acquire_claim(
-        client,
-        request("challenger", "Grok 4.6", issue=73, scope=("docs/PRODUCT.md",)),
-    )
-
-    standing = active_claims(client.list_protocol_candidates(LEDGER_ISSUE))
-    assert {claim.claim_id for claim in standing} == {"joined", acquired.claim_id}
-    assert [claim.claim_id for claim in protocol.overlapping_claims(standing, acquired)] == [
-        "joined"
-    ]
 
 
 def test_comma_joined_scope_with_spaces_equals_repeated_entries() -> None:
@@ -7868,92 +7857,6 @@ def test_status_scope_index_never_rescans_scope_pairs(
     assert capsys.readouterr().out.count("CLAIMED") == 50
     assert _status(claims, 100, ages) == 0
     assert capsys.readouterr().out.count("CLAIMED") == 1
-
-
-def test_existing_scope_on_another_issue_is_posted_as_an_overlap() -> None:
-    incumbent = comment(1, claim_comment(request(issue=71, scope=("shared",))))
-    client = FakeForge({LEDGER_ISSUE: [incumbent]}, {71})
-
-    acquired = acquire_claim(
-        client,
-        request("challenger", "Grok 4.6", issue=72, scope=("shared/file.py",)),
-    )
-
-    standing = active_claims(client.list_protocol_candidates(LEDGER_ISSUE))
-    assert {claim.claim_id for claim in standing} == {"claim-a", acquired.claim_id}
-
-
-
-
-
-
-
-
-def test_projection_is_minimal_and_reuses_one_trusted_comment() -> None:
-    client = FakeForge()
-    acquired = acquire_claim(client, request(issue=72, scope=("private/path",)))
-    first_projection = client.comments[72][0]
-    duplicate = replace(first_projection, identifier=first_projection.identifier + 100)
-    client.comments[72].append(duplicate)
-
-    client.upsert_projection(72, issue_claim._active_projection(acquired))
-
-    assert len(client.comments[72]) == 1
-    projection = client.comments[72][0]
-    assert projection.identifier == first_projection.identifier
-    assert "private/path" not in projection.body
-    assert acquired.base not in projection.body
-    assert acquired.branch in projection.body
-
-
-def test_successor_adopts_old_projection_but_old_helper_cannot_mutate_it(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(protocol, "LEDGER_ISSUE", 71)
-    old_projection = comment(1, issue_claim._unclaimed_projection())
-    old_duplicate = replace(old_projection, identifier=2)
-    client = FakeForge({72: [old_projection, old_duplicate]})
-
-    monkeypatch.setattr(protocol, "LEDGER_ISSUE", 170)
-    successor_body = issue_claim._active_projection(
-        LedgerActiveClaim(
-            IssueIdentity(72),
-            "successor",
-            "Codex Sol",
-            "builder",
-            BASE,
-            "codex/issue-72-claims",
-            ("scripts/issue_claim.py",),
-            comment(3, claim_comment(request("successor", issue=72))),
-        )
-    )
-    assert client.upsert_projection(72, successor_body, adopt_stale=True)
-    assert len(client.comments[72]) == 1
-    assert "ledger=170" in client.comments[72][0].body.partition("\n")[0]
-
-    monkeypatch.setattr(protocol, "LEDGER_ISSUE", 71)
-    raised_argument_1 = issue_claim._unclaimed_projection()
-    with pytest.raises(ClaimError, match="newer ledger generation"):
-        client.upsert_projection(72, raised_argument_1, create=False)
-    assert len(client.comments[72]) == 1
-    assert "ledger=170" in client.comments[72][0].body.partition("\n")[0]
-
-
-def test_label_failure_is_loud_while_comment_truth_remains() -> None:
-    client = FakeForge(fail_add_label=True)
-
-    raised_argument_1 = request(issue=72)
-    with pytest.raises(ClaimError, match="label add failed"):
-        acquire_claim(client, raised_argument_1)
-
-    assert [
-        issue_number(claim.identity)
-        for claim in active_claims(client.list_protocol_candidates(LEDGER_ISSUE))
-    ] == [72]
-
-
-
-
 
 
 def test_status_reports_repository_scope_overlaps_as_notes(
@@ -8137,8 +8040,11 @@ def test_github_adapter_runs_gh_when_no_fake_run_is_given(monkeypatch: pytest.Mo
 def test_github_adapter_capability_reads_the_declared_table() -> None:
     client = GitHubForge(github._repository_id("example/agent-claim"))
 
-    assert client.capability(forge.ForgeOperation.LIST_ITEMS) is forge.Capability.READ_ONLY
-    assert client.capability(forge.ForgeOperation.CREATE_ITEM) is forge.Capability.READ_WRITE
+    assert (
+        client.capability(forge.ForgeOperation.LIST_PROTOCOL_CANDIDATES)
+        is forge.Capability.READ_ONLY
+    )
+    assert client.capability(forge.ForgeOperation.POST_COMMENT) is forge.Capability.READ_WRITE
 
 
 def test_github_adapter_item_reference_reads_state_title_and_body() -> None:
@@ -8633,11 +8539,22 @@ def test_fake_and_github_adapters_expose_only_common_protocol_candidates() -> No
 
 
 def test_comment_size_is_bounded_before_any_adapter_post() -> None:
-    widest_scope = tuple(f"p{index:03d}-" + "x" * 507 for index in range(256))
+    """The size guard lives on `post_comment` itself (issue #176): the one
+    remaining production writer of a GitHub comment body -- `claim_comment`
+    validated this before deletion, but a bound checked at the real I/O
+    boundary is a single owner instead of duplicated per writer."""
+    client = GitHubForge(github._repository_id("example/agent-claim"))
+    oversized_body = "x" * (MAX_COMMENT_BYTES + 1)
 
-    raised_argument_1 = request(scope=widest_scope)
     with pytest.raises(ClaimError, match=str(MAX_COMMENT_BYTES)):
-        claim_comment(raised_argument_1)
+        client.post_comment(LEDGER_ISSUE, oversized_body)
+
+
+def test_post_comment_refuses_a_body_containing_a_nul_byte() -> None:
+    client = GitHubForge(github._repository_id("example/agent-claim"))
+
+    with pytest.raises(ClaimError, match="NUL byte"):
+        client.post_comment(LEDGER_ISSUE, "claim body with a \x00 byte")
 
 
 def test_github_comment_body_uses_stdin_instead_of_process_argument() -> None:
@@ -8781,89 +8698,6 @@ def test_recent_merged_pull_requests_fails_loud_on_an_uncalendared_merge_time(
 
     with pytest.raises(ClaimError, match="malformed merged board pull request"):
         client.list_recent_merged_board_pull_requests(since)
-
-
-def test_github_successor_adopts_stale_projection_but_old_generation_skips_it(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(protocol, "LEDGER_ISSUE", 71)
-    stale = comment(10, issue_claim._unclaimed_projection())
-    monkeypatch.setattr(protocol, "LEDGER_ISSUE", 171)
-    future = comment(11, issue_claim._unclaimed_projection())
-    observed: list[tuple[list[str], bytes | None]] = []
-
-    def run(arguments: list[str], *, input_data: bytes | None = None) -> str:
-        observed.append((arguments, input_data))
-        return ""
-
-    client = GitHubForge(github._repository_id("example/agent-claim"), run=run)
-    monkeypatch.setattr(client, "_projection_comments", lambda issue: (stale, future))
-    monkeypatch.setattr(protocol, "LEDGER_ISSUE", 170)
-    successor_body = issue_claim._unclaimed_projection()
-
-    assert client.upsert_projection(72, successor_body, adopt_stale=True)
-    assert observed == [
-        (
-            [
-                "api",
-                "--method",
-                "PATCH",
-                "repos/example/agent-claim/issues/comments/10",
-                "--input",
-                "-",
-            ],
-            json.dumps({"body": successor_body}).encode("utf-8"),
-        )
-    ]
-
-    monkeypatch.setattr(protocol, "LEDGER_ISSUE", 71)
-    successor = replace(stale, body=successor_body)
-    monkeypatch.setattr(client, "_projection_comments", lambda issue: (successor,))
-    observed.clear()
-    raised_argument_1 = issue_claim._unclaimed_projection()
-    with pytest.raises(ClaimError, match="newer ledger generation"):
-        client.upsert_projection(72, raised_argument_1, create=False)
-    assert observed == []
-
-
-def test_github_successor_must_exist_open_empty_locked_and_not_be_a_pr() -> None:
-    repository = github._repository_id("example/agent-claim")
-    valid = {
-        "number": 170,
-        "state": "open",
-        "locked": True,
-        "comments": 0,
-        "is_pull_request": False,
-    }
-    client = GitHubForge(repository, run=lambda arguments: json.dumps(valid))
-
-    client.validate_successor(170)
-
-    for key, value in (
-        ("number", 999999),
-        ("state", "closed"),
-        ("locked", False),
-        ("comments", 1),
-        ("is_pull_request", True),
-    ):
-        invalid = {**valid, key: value}
-        invalid_client = GitHubForge(repository, run=lambda arguments, row=invalid: json.dumps(row))
-        with pytest.raises(ClaimUnavailableError, match="open, empty, collaborator-locked"):
-            invalid_client.validate_successor(170)
-
-
-@pytest.mark.parametrize(
-    "raw",
-    [
-        pytest.param(json.dumps([]), id="no-values"),
-        pytest.param(json.dumps(["not-a-dict"]), id="not-a-dict"),
-    ],
-)
-def test_github_successor_fails_loud_on_a_malformed_shape(raw: str) -> None:
-    client = GitHubForge(github._repository_id("example/agent-claim"), run=lambda arguments: raw)
-
-    with pytest.raises(ClaimError, match="malformed successor issue"):
-        client.validate_successor(170)
 
 
 @pytest.mark.parametrize(
@@ -9780,9 +9614,7 @@ def _patch_release_session(
 ) -> None:
     _set_agent_identity_env(monkeypatch, {issue_claim.AGENT_CLAIM_AGENT_ENV: agent})
     monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
-    _patch_store_write(
-        monkeypatch, *(_store_claim_from_request(claimed) for claimed in standing)
-    )
+    _patch_store_write(monkeypatch, *(_store_claim_from_request(claimed) for claimed in standing))
     if forbid_git:
 
         def git(arguments: list[str]) -> str:
@@ -9884,6 +9716,37 @@ def test_claim_request_binds_omitted_base_and_branch_to_checkout(
     claimed = issue_claim._request(parsed)
     assert claimed.base == git_values[("rev-parse", "HEAD")]
     assert claimed.branch == git_values[("branch", "--show-current")]
+
+
+def test_claim_request_refuses_a_base_that_is_not_a_full_commit_sha() -> None:
+    parsed = _parse_claim_command("--base", "not-a-sha")
+
+    with pytest.raises(ClaimError, match="base must be a full lowercase commit SHA"):
+        issue_claim._request(parsed)
+
+
+def test_matching_store_claim_never_replays_an_issueless_lane() -> None:
+    """Issueless lanes keep the one-claim-per-branch contract: only a
+    numbered item's replay is ever detected, matching `_cmd_claim`'s own
+    `isinstance(requested.identity, IssueIdentity)` guard around this
+    function's sole call site."""
+    lane_request = request(lane=True, branch="docs/lane-claim-a")
+    standing = _store_claim_from_request(lane_request)
+    observed = protocol.ClaimState(
+        tip=protocol.ObjectId(BASE),
+        claims={protocol.claim_key(lane_request.identity, lane_request.branch): standing},
+    )
+
+    assert issue_claim._matching_store_claim(observed, lane_request) is None
+
+
+def test_selected_store_claim_refuses_a_lane_identity_without_a_branch() -> None:
+    """`rescope`/`release` both resolve a non-empty branch before this
+    function ever sees a `LaneIdentity` in production; this pins the
+    function's own boundary check as a direct unit test rather than relying
+    on that upstream guarantee never slipping."""
+    with pytest.raises(ClaimUnavailableError, match="lane release requires a non-empty"):
+        issue_claim._selected_store_claim(protocol.EMPTY_STATE, protocol.LaneIdentity(), "", None)
 
 
 def test_claim_still_requires_scope() -> None:
@@ -10005,8 +9868,6 @@ def test_claim_and_release_parse_omitted_agent(
     _set_agent_identity_env(monkeypatch)
     parsed = issue_claim._parser().parse_args(arguments)
     assert parsed.agent is None
-
-
 
 
 @pytest.mark.parametrize(
@@ -10518,9 +10379,7 @@ def _stub_canonical_remote(monkeypatch: pytest.MonkeyPatch) -> None:
     refused before the behaviour under test. Tests of `remote_url` itself
     rebind `_LIVE_REMOTE_URL`.
     """
-    monkeypatch.setattr(
-        checkout, "remote_url", lambda remote: f"git@github.com:{REPOSITORY}.git"
-    )
+    monkeypatch.setattr(checkout, "remote_url", lambda remote: f"git@github.com:{REPOSITORY}.git")
 
 
 @pytest.fixture(autouse=True)
@@ -10592,6 +10451,11 @@ def test_checkout_git_calls_fail_loud_when_git_is_missing_or_times_out(
     """`versioned_paths` and `origin_remote_url` -- both direct `subprocess.run`
     callers (`_git_output` backs the latter) -- must translate a missing
     executable or a timeout to the same `ClaimError` text."""
+    # `_stub_canonical_remote` (autouse) replaces `checkout.remote_url` with a
+    # fixed string so every other store-command test skips a real git call;
+    # `origin_remote_url` looks that name up dynamically, so this test must
+    # restore the live implementation to actually reach `subprocess.run`.
+    monkeypatch.setattr(checkout, "remote_url", _LIVE_REMOTE_URL)
 
     def fails(*_arguments, **_kwargs):
         raise raised
@@ -10738,9 +10602,7 @@ def _patch_store_write(
     monkeypatch.setattr(store, "fetch_state", fake.fetch_state)
     monkeypatch.setattr(store, "commit_transition", fake.commit_transition)
     monkeypatch.setattr(store, "committer_date", fake.committer_date)
-    monkeypatch.setattr(
-        checkout, "remote_url", lambda remote: f"git@github.com:{REPOSITORY}.git"
-    )
+    monkeypatch.setattr(checkout, "remote_url", lambda remote: f"git@github.com:{REPOSITORY}.git")
     return fake
 
 
@@ -11008,8 +10870,6 @@ def test_cli_status_overlapping_store_claims_print_notes(
         "  shared/file.py\n"
         "  overlaps issue #72 (claim-a)\n"
     )
-
-
 
 
 def test_cli_rescope_requires_a_non_empty_current_branch(
@@ -11528,9 +11388,7 @@ def test_cli_claim_replay_does_not_resurrect_a_released_claim(
     _patch_status_cli(monkeypatch, client)
     monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
     monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
-    _patch_store_write(
-        monkeypatch, consumed_ids=frozenset({protocol.ClaimId("released-claim")})
-    )
+    _patch_store_write(monkeypatch, consumed_ids=frozenset({protocol.ClaimId("released-claim")}))
 
     assert (
         issue_claim.main(
@@ -11716,7 +11574,10 @@ def test_cli_rescope_json_prints_updated_scope_and_same_claim_id(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     client = FakeForge()
-    _patch_store_write(monkeypatch, _store_claim_from_request(request("cli-claim", "Ada", issue=72, branch="codex/issue-72", scope=("src/widget.py",))))
+    standing = request(
+        "cli-claim", "Ada", issue=72, branch="codex/issue-72", scope=("src/widget.py",)
+    )
+    _patch_store_write(monkeypatch, _store_claim_from_request(standing))
     monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
     git_values = _git_checkout()
     monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
@@ -11756,12 +11617,38 @@ def test_cli_rescope_json_prints_updated_scope_and_same_claim_id(
     )
 
 
+def test_cli_rescope_refuses_a_different_agent_than_the_claimant(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    client = FakeForge()
+    claimed_request = request(agent="Ada", issue=72, branch="codex/issue-72", scope=("src",))
+    _patch_store_write(monkeypatch, _store_claim_from_request(claimed_request))
+    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
+    git_values = _git_checkout()
+    monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
+    monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+    _set_agent_identity_env(monkeypatch, {issue_claim.AGENT_CLAIM_AGENT_ENV: "Grok 4.6"})
+
+    status = issue_claim.main(
+        ["--repo", "example/agent-claim", "rescope", "72", "--add", "src/new.py"]
+    )
+
+    assert status == 2
+    assert "only the original claimant may rescope" in capsys.readouterr().err
+
+
 def test_cli_rescope_without_add_or_drop_is_an_error(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     client = FakeForge()
-    _patch_store_write(monkeypatch, _store_claim_from_request(request(issue=72, branch="codex/issue-72", scope=("src/widget.py",))))
+    _patch_store_write(
+        monkeypatch,
+        _store_claim_from_request(
+            request(issue=72, branch="codex/issue-72", scope=("src/widget.py",))
+        ),
+    )
     monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
     git_values = _git_checkout()
     monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
@@ -11781,7 +11668,12 @@ def test_cli_rescope_refuses_primary_checkout(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     client = FakeForge()
-    _patch_store_write(monkeypatch, _store_claim_from_request(request(issue=72, branch="codex/issue-72", scope=("src/widget.py",))))
+    _patch_store_write(
+        monkeypatch,
+        _store_claim_from_request(
+            request(issue=72, branch="codex/issue-72", scope=("src/widget.py",))
+        ),
+    )
     monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
     git_values = _git_checkout(git_directory="/repo/.git", common_directory="/repo/.git")
     monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
@@ -11966,7 +11858,12 @@ def test_cli_rescope_refuses_adding_a_directory_without_whole(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     client = FakeForge()
-    _patch_store_write(monkeypatch, _store_claim_from_request(request(issue=72, branch="codex/issue-72", scope=("src/widget.py",))))
+    _patch_store_write(
+        monkeypatch,
+        _store_claim_from_request(
+            request(issue=72, branch="codex/issue-72", scope=("src/widget.py",))
+        ),
+    )
     monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
     git_values = _git_checkout()
     monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
@@ -12613,7 +12510,8 @@ def test_cli_rescope_add_that_raises_combined_share_requires_whole(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     client = FakeForge()
-    _patch_store_write(monkeypatch, _store_claim_from_request(request(issue=72, branch="codex/issue-72", scope=("src",))))
+    standing = request(issue=72, branch="codex/issue-72", scope=("src",))
+    _patch_store_write(monkeypatch, _store_claim_from_request(standing))
     monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
     git_values = _git_checkout()
     monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
@@ -12647,7 +12545,12 @@ def test_cli_rescope_persists_whole_reason(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client = FakeForge()
-    _patch_store_write(monkeypatch, _store_claim_from_request(request(issue=72, branch="codex/issue-72", scope=("src/widget.py",))))
+    _patch_store_write(
+        monkeypatch,
+        _store_claim_from_request(
+            request(issue=72, branch="codex/issue-72", scope=("src/widget.py",))
+        ),
+    )
     monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
     git_values = _git_checkout()
     monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
@@ -12878,7 +12781,8 @@ def test_cli_rescope_widening_to_four_paths_refuses_without_whole(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     client = FakeForge()
-    _patch_store_write(monkeypatch, _store_claim_from_request(request(issue=72, branch="codex/issue-72", scope=("new_a.py",))))
+    standing = request(issue=72, branch="codex/issue-72", scope=("new_a.py",))
+    _patch_store_write(monkeypatch, _store_claim_from_request(standing))
     monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
     git_values = _git_checkout()
     monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
@@ -13311,6 +13215,21 @@ def test_cli_claim_json_conflict_errors_without_success_json(
     assert captured.err.startswith("ERROR:")
 
 
+def forbid_github_for_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    def unused(*args, **kwargs):
+        pytest.fail("policy must not use GitHub")
+
+    monkeypatch.setattr(github, "GitHubForge", unused)
+    monkeypatch.setattr(github, "discover_repository", unused)
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["policy", "--print"],
+        ["--repo", "OWNER/REPO", "policy", "--print"],
+    ],
+)
 def test_cli_policy_print_emits_the_locked_loader_without_github(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -15164,9 +15083,7 @@ def pr_check_client(
     client = _claims_client(*claims)
     client.landings[detail.number] = detail
     monkeypatch.setattr(github, "GitHubForge", lambda _repository: client)
-    _patch_store_write(
-        monkeypatch, *(_store_claim_from_request(claimed) for claimed in claims)
-    )
+    _patch_store_write(monkeypatch, *(_store_claim_from_request(claimed) for claimed in claims))
     return client
 
 
@@ -15666,7 +15583,7 @@ def test_release_merged_records_the_pull_request_that_landed_the_item(
 def test_release_merged_accepts_an_issueless_lane_that_landed_without_an_item(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    client = merged_release_client(monkeypatch, body="No-Item: docs", lane=True)
+    merged_release_client(monkeypatch, body="No-Item: docs", lane=True)
 
     assert issue_claim.main(["--repo", REPOSITORY, "release", "--merged", "12"]) == 0
 
@@ -15746,7 +15663,7 @@ def test_release_merged_refuses_a_lane_whose_pull_request_names_an_item(
 def test_release_abandoned_records_why_the_lane_stopped(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    client = merged_release_client(monkeypatch, body="Work-Item: #72\n\nCloses #72")
+    merged_release_client(monkeypatch, body="Work-Item: #72\n\nCloses #72")
 
     assert (
         issue_claim.main(["--repo", REPOSITORY, "release", "72", "--abandoned", "overtaken by #80"])
@@ -16301,9 +16218,7 @@ def _ledger_claim_body(claimed: ClaimRequest) -> str:
         "base": claimed.base,
         "branch": claimed.branch,
         "claim_id": claimed.claim_id,
-        protocol._identity_marker_key(claimed.identity): protocol._identity_marker_value(
-            claimed.identity
-        ),
+        protocol._identity_marker_key(claimed.identity): _identity_marker_value(claimed.identity),
         "role": claimed.role,
         "scope": list(claimed.scope),
     }
@@ -16318,6 +16233,18 @@ def _patch_bootstrap_cli(monkeypatch: pytest.MonkeyPatch, client: FakeForge) -> 
     monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
     monkeypatch.setattr(checkout, "_git_output", lambda _arguments: "/repo")
     _patch_store_write(monkeypatch)
+
+
+def test_cli_bootstrap_ledger_refuses_a_non_positive_issue_number(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    client = FakeForge()
+    _patch_bootstrap_cli(monkeypatch, client)
+
+    status = issue_claim.main(["--repo", "example/agent-claim", "bootstrap", "--ledger", "0"])
+
+    assert status == 2
+    assert "ledger issue must be a positive integer" in capsys.readouterr().err
 
 
 def test_cli_bootstrap_ledger_refuses_without_a_tombstone(
@@ -16463,11 +16390,21 @@ def test_body_defect_text_is_the_shared_renderer() -> None:
 
 
 def test_cli_bootstrap_ledger_help_names_agent_claim() -> None:
+    """H1: during the one-time import the console script is still
+    `agent-claim` (the rename lands in slice F, after the import) -- read
+    the `--ledger` action's own help string rather than `format_help()`'s
+    terminal-width-wrapped text, which can fold this exact phrase across a
+    line break depending on the environment's column width."""
     parser = issue_claim._parser()
-    bootstrap = parser._subparsers._group_actions[0].choices["bootstrap"]
-    help_text = bootstrap.format_help()
+    subparsers_action = next(
+        action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
+    )
+    bootstrap = subparsers_action.choices["bootstrap"]
+    ledger_action = next(
+        action for action in bootstrap._actions if "--ledger" in action.option_strings
+    )
     assert parser.prog == "agent-claim"
-    assert "agent-claim bootstrap --ledger" in help_text
+    assert "agent-claim bootstrap --ledger" in ledger_action.help
 
 
 def test_cli_bootstrap_ledger_refuses_an_edited_tombstone(
@@ -16482,6 +16419,23 @@ def test_cli_bootstrap_ledger_refuses_an_edited_tombstone(
 
     assert status == 2
     assert "tombstone was edited" in capsys.readouterr().err
+
+
+def test_cli_bootstrap_ledger_reraises_a_non_edit_marker_defect(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The tombstone precondition only ever rewrites an "edited after
+    publication" `InvalidClaimMarkerError` into its own named refusal; any
+    other marker defect (here: a trusted comment missing its closing
+    `-->`) must reach the operator as the reader's own message instead."""
+    unterminated = comment(1, f"{protocol.MARKER_PREFIX}{{}}")
+    client = FakeForge({5: [unterminated]})
+    _patch_bootstrap_cli(monkeypatch, client)
+
+    status = issue_claim.main(["--repo", "example/agent-claim", "bootstrap", "--ledger", "5"])
+
+    assert status == 2
+    assert "unterminated claim marker" in capsys.readouterr().err
 
 
 def test_cli_bootstrap_ledger_refuses_a_honored_supersede(
@@ -16541,18 +16495,15 @@ def test_cli_bootstrap_ledger_imports_from_proven_empty(
         *,
         worktree: Path,
         remote: str,
-        imported: protocol.ClaimState,
-        parent: protocol.ObjectId,
-        subject: str,
-        operation_id: str,
+        pending: store.PendingImport,
         transport: object = None,
     ) -> protocol.ClaimState:
-        pushed["state"] = imported
+        pushed["state"] = pending.imported
         return protocol.ClaimState(
             tip=protocol.ObjectId("c" * 40),
-            claims=imported.claims,
-            consumed_ids=imported.consumed_ids,
-            resources=imported.resources,
+            claims=pending.imported.claims,
+            consumed_ids=pending.imported.consumed_ids,
+            resources=pending.imported.resources,
         )
 
     monkeypatch.setattr(store, "push_import", fake_push_import)
@@ -16639,4 +16590,3 @@ def test_protect_missing_state_ref_denies_cannot_reach(
         "decision": "deny",
         "reason": f"cannot reach {store.STATE_REF}: {protocol.MISSING_STATE_REF}",
     }
-

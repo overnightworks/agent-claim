@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-import shlex
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
@@ -27,8 +26,7 @@ STATE_CUT_ACTION = "state_cut"
 # `refs/aco/state` as a side effect (issue #176 done-when 1). One owner so
 # `apply`, `store.commit_transition`, and `protect` cannot drift.
 MISSING_STATE_REF = (
-    "the claim state ref does not exist yet; run bootstrap before claim, "
-    "rescope, or release"
+    "the claim state ref does not exist yet; run bootstrap before claim, rescope, or release"
 )
 # Coordination-contract convention: the only branch prefixes an issueless lane claim
 # may use, so a builder that forgot its issue number never gets a silent, unlabeled,
@@ -69,7 +67,6 @@ class InvalidClaimMarkerError(ClaimError):
 
 
 LEDGER_BODY_MARKER = "<!-- agent-claim-ledger:v1 -->"
-LEDGER_LABEL = "agent-claim-ledger"
 
 
 def configure_ledger(issue: int) -> None:
@@ -128,9 +125,10 @@ class LedgerActiveClaim:
 
     `quarantined_by` is set when a later comment for this same claim id carried
     a field this reader's schema does not know (issue #136): the claim still
-    reads and still shows in `board`/`status`, but `release` and this claim's
-    own-branch `pr-check` refuse it, naming the quarantining comment, until the
-    ledger reads clean again.
+    reads. `release`/`pr-check` moved onto the store in this same slice and no
+    longer consult it -- this dataclass and its whole aggregation walk are D-scheduled
+    infrastructure the import reader (`bootstrap --ledger`) still needs whole, kept
+    intact rather than picked apart function by function ahead of that deletion.
     """
 
     identity: ClaimIdentity
@@ -252,20 +250,6 @@ class LedgerSupersede:
 
 
 ClaimEvent = LedgerActiveClaim | ClaimantRelease | OverrideRelease | ClaimRescope | LedgerSupersede
-
-
-class DuplicateClaimConflictError(ClaimError):
-    """A duplicate claim id where reconcile refuses to pick a winner silently."""
-
-    def __init__(self, claim_id: str, superseded: LedgerActiveClaim, survivor: LedgerActiveClaim):
-        self.claim_id = claim_id
-        self.superseded = superseded
-        self.survivor = survivor
-        super().__init__(
-            f"claim id {claim_id!r} has two still-active claims from different agents "
-            f"({superseded.agent} {superseded.comment.url} vs {survivor.agent} "
-            f"{survivor.comment.url}); release one manually, then run reconcile again"
-        )
 
 
 class LedgerSupersededError(ClaimError):
@@ -419,19 +403,8 @@ def _identity_marker_key(identity: ClaimIdentity) -> str:
     return LANE_MARKER_KEY if isinstance(identity, LaneIdentity) else "issue"
 
 
-def _identity_marker_value(identity: ClaimIdentity) -> int | bool:
-    return True if isinstance(identity, LaneIdentity) else identity.issue
-
-
-def _identity_label(identity: ClaimIdentity, branch: str) -> str:
-    """Human-readable subject line for a claim/release comment body."""
-    if isinstance(identity, LaneIdentity):
-        return f"Lane: `{branch}`"
-    return f"Issue: #{identity.issue}"
-
-
 def _identity_summary(identity: ClaimIdentity, branch: str) -> str:
-    """Human-readable subject for error messages, distinct from `_identity_label`."""
+    """Human-readable subject for a claim error message."""
     return f"lane {branch!r}" if isinstance(identity, LaneIdentity) else f"issue #{identity.issue}"
 
 
@@ -1336,30 +1309,6 @@ def blocking_claims(
         claim
         for claim in claims
         if claim.claim_id != candidate.claim_id and claims_conflict(claim, candidate)
-    )
-
-
-def matching_claim_retry(
-    claims: tuple[LedgerActiveClaim, ...], request: ClaimRequest
-) -> LedgerActiveClaim | None:
-    """Return the live item claim an interrupted identical request may replay.
-
-    Issueless lanes retain their existing one-claim-per-branch behavior: only
-    numbered work items have the interrupted-response retry contract.
-    """
-    if not isinstance(request.identity, IssueIdentity):
-        return None
-    return next(
-        (
-            claim
-            for claim in claims
-            if claim.identity == request.identity
-            and claim.agent == request.agent
-            and claim.role == request.role
-            and claim.branch == request.branch
-            and claim.scope == request.scope
-        ),
-        None,
     )
 
 

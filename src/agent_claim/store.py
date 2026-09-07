@@ -719,18 +719,30 @@ def prepare_import_parent(*, worktree: Path) -> ObjectId:
     )
 
 
+@dataclass(frozen=True)
+class PendingImport:
+    """One not-yet-landed one-time ledger import: the state it writes, the
+    local empty-tree commit it is parented on, and the commit message
+    carrying its `operation_id` -- the import's counterpart to
+    `PendingCommit`, kept together so a retry re-applies the same import
+    rather than drifting from it."""
+
+    imported: ClaimState
+    parent: ObjectId
+    subject: str
+    operation_id: str
+
+
 def push_import(
     *,
     worktree: Path,
     remote: str,
-    imported: ClaimState,
-    parent: ObjectId,
-    subject: str,
-    operation_id: str,
+    pending: PendingImport,
     transport: PushTransport | None = None,
 ) -> ClaimState:
-    """Push `imported` as the first tip of `refs/aco/state`, parented on the
-    local empty commit `parent`. Refuses if the ref is no longer empty.
+    """Push `pending.imported` as the first tip of `refs/aco/state`, parented
+    on the local empty commit `pending.parent`. Refuses if the ref is no
+    longer empty.
     """
     transport = transport or GitPushTransport()
     observed = fetch_state(worktree=worktree, remote=remote)
@@ -738,11 +750,11 @@ def push_import(
         raise ClaimUnavailableError(
             f"{STATE_REF} is no longer empty; refuse to overwrite a present ref"
         )
-    message = f"{subject}\n\noperation_id: {operation_id}\nintent: import\n"
+    message = f"{pending.subject}\n\noperation_id: {pending.operation_id}\nintent: import\n"
     new_commit = _commit_tree(
         worktree,
-        tree_oid=_write_state_tree(worktree, imported),
-        parent=parent,
+        tree_oid=_write_state_tree(worktree, pending.imported),
+        parent=pending.parent,
         message=message,
     )
     try:
@@ -754,7 +766,7 @@ def push_import(
                 worktree,
                 since=None,
                 until=refreshed.tip,
-                operation_id=operation_id,
+                operation_id=pending.operation_id,
             )
             if found is not None:
                 return refreshed
@@ -764,7 +776,7 @@ def push_import(
     _write_lineage_stamp(worktree, new_commit)
     return ClaimState(
         tip=new_commit,
-        claims=imported.claims,
-        consumed_ids=imported.consumed_ids,
-        resources=imported.resources,
+        claims=pending.imported.claims,
+        consumed_ids=pending.imported.consumed_ids,
+        resources=pending.imported.resources,
     )

@@ -2483,11 +2483,7 @@ def build_board(inputs: BoardBuildInputs) -> Board:
             for item in ordered
             if item.idle_days > STALE_IDLE_DAYS and item.stage is Stage.TEXT_ONLY
         ),
-        recovery=tuple(
-            item
-            for item in ordered
-            if item.number in landed_work_items
-        ),
+        recovery=tuple(item for item in ordered if item.number in landed_work_items),
         uncut=uncut,
         blocker_references=blocker_references,
         repository=repository,
