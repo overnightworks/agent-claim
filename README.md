@@ -602,6 +602,25 @@ an existing hook file. The CLI does not write `~/.grok`.
 }
 ```
 
+## Refusals and `--json`
+
+Every command's own refusal ends the same way: a `ClaimError` (a forge
+failure, a claim conflict, a missing state ref, too wide a scope, a `cut`/
+`release`/`rescope` refusal, a `check` without a checkout, and more) reaches
+one collection point that prints `ERROR: <sentence>` to stderr and exits 2.
+For a command whose parsed arguments carry a requested `--json`, that same
+point additionally prints `{"ok": false, "error": "<the same sentence>"}` to
+stdout -- so a scripted `--json` caller reads a machine-readable refusal on
+the stream it already parses, without a script watching stderr too. No new
+vocabulary: this is the same `ok`/`refused` discriminator `check` already
+uses, not an error code, a retryable flag, or a mutation-state field. A
+command without a `--json` option (`bootstrap`, `protect`) is unaffected;
+`protect` already prints JSON on every outcome through its own error path
+and this collection point never runs for it. **Deliberate boundary**: an
+argparse failure (a missing issue number, an unknown flag) happens before any
+command -- and therefore any `--json` -- is known, and still only prints
+argparse's usage text to stderr with nothing on stdout.
+
 ## Scope and boundaries
 
 GitHub through the `gh` CLI is the one adapter that exists. A second forge

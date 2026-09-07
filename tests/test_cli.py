@@ -12186,6 +12186,15 @@ def test_cli_release_json_prints_effective_posted_identity(
     assert store.fetch_state(worktree=Path("."), remote="origin").claims == {}
 
 
+def _assert_json_error_object_mirrors_stderr(err: str, out: str) -> None:
+    """`main`'s general `ClaimError` sink (issue #199): a `--json` caller's
+    stdout object states exactly the sentence stderr already printed --
+    never a second, drifting copy of the error text."""
+    assert err.startswith("ERROR: ")
+    message = err.removeprefix("ERROR: ").rstrip("\n")
+    assert json.loads(out) == {"ok": False, "error": message}
+
+
 @pytest.mark.parametrize(
     "arguments",
     [
@@ -12213,7 +12222,7 @@ def test_cli_release_json_prints_effective_posted_identity(
         ],
     ],
 )
-def test_cli_claim_and_release_json_errors_print_no_stdout(
+def test_cli_claim_and_release_json_errors_print_the_stdout_error_object(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     arguments: list[str],
@@ -12222,11 +12231,10 @@ def test_cli_claim_and_release_json_errors_print_no_stdout(
 
     assert issue_claim.main(["--repo", "example/agent-claim", *arguments]) == 2
     captured = capsys.readouterr()
-    assert captured.out == ""
-    assert captured.err.startswith("ERROR:")
+    _assert_json_error_object_mirrors_stderr(captured.err, captured.out)
 
 
-def test_cli_claim_json_conflict_errors_without_success_json(
+def test_cli_claim_json_conflict_prints_the_stdout_error_object_not_a_success_shape(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -12261,8 +12269,7 @@ def test_cli_claim_json_conflict_errors_without_success_json(
     captured = capsys.readouterr()
 
     assert claimed == 2
-    assert captured.out == ""
-    assert captured.err.startswith("ERROR:")
+    _assert_json_error_object_mirrors_stderr(captured.err, captured.out)
 
 
 def test_cli_module_entry_point_exits_with_mains_return_code(
@@ -15287,6 +15294,26 @@ def test_check_reads_a_pull_request_in_one_dispatch_landing_and_classification_r
     assert client.requests == 4
 
 
+def test_check_json_prints_the_stdout_error_object_on_a_real_forge_failure(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A real `GitHubForge` (issue #199), not `FakeForge`: its own `_run`
+    chokepoint raises the forge failure, proving that cause -- not just a
+    conflict or a missing state ref -- reaches `main`'s general sink too."""
+
+    def failing_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
+        raise forge.ForgeTransientError("gh: simulated network failure")
+
+    real_client = GitHubForge(github._repository_id(REPOSITORY), run=failing_run)
+    monkeypatch.setattr(github, "GitHubForge", lambda _repository: real_client)
+
+    status = issue_claim.main(["--repo", REPOSITORY, "check", "12", "--json"])
+
+    captured = capsys.readouterr()
+    assert status == 2
+    _assert_json_error_object_mirrors_stderr(captured.err, captured.out)
+
+
 @pytest.mark.parametrize(
     ("body", "expected"),
     [
@@ -15409,9 +15436,15 @@ def test_a_frozen_line_accepts_three_spaces_around_quote_markers_but_not_four() 
     assert board.frozen_trigger(four_between) is None
 
 
+@pytest.mark.parametrize(
+    "json_flag", [pytest.param(False, id="without-json"), pytest.param(True, id="with-json")]
+)
 def test_cli_claim_refuses_a_missing_state_ref(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], json_flag: bool
 ) -> None:
+    """A missing `refs/aco/state` (issue #199): with `--json`, the stdout
+    error object mirrors the unchanged stderr sentence; without it, stdout
+    stays exactly as empty as it always has."""
     client = FakeForge()
     monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
     monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
@@ -15420,27 +15453,34 @@ def test_cli_claim_refuses_a_missing_state_ref(
     monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
     _patch_store_write(monkeypatch, tip=None)
 
-    status = issue_claim.main(
-        [
-            "--repo",
-            "example/agent-claim",
-            "claim",
-            "72",
-            "--agent",
-            "Ada",
-            "--base",
-            BASE,
-            "--branch",
-            "codex/issue-72",
-            "--scope",
-            "src",
-            "--claim-id",
-            "cli-claim",
-        ]
-    )
+    arguments = [
+        "--repo",
+        "example/agent-claim",
+        "claim",
+        "72",
+        "--agent",
+        "Ada",
+        "--base",
+        BASE,
+        "--branch",
+        "codex/issue-72",
+        "--scope",
+        "src",
+        "--claim-id",
+        "cli-claim",
+    ]
+    if json_flag:
+        arguments.append("--json")
 
+    status = issue_claim.main(arguments)
+
+    captured = capsys.readouterr()
     assert status == 2
-    assert protocol.MISSING_STATE_REF in capsys.readouterr().err
+    assert protocol.MISSING_STATE_REF in captured.err
+    if json_flag:
+        _assert_json_error_object_mirrors_stderr(captured.err, captured.out)
+    else:
+        assert captured.out == ""
 
 
 def test_cli_claim_refuses_canonical_remote_mismatch_and_writes_nothing(
@@ -15505,6 +15545,11 @@ def test_cli_bootstrap_takes_no_ledger_argument() -> None:
 def test_cli_bootstrap_refuses_canonical_remote_mismatch(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """`bootstrap`'s parsed namespace has no `json` attribute at all (issue
+    #199): the general `ClaimError` sink must read it defensively rather
+    than inventing a default that would make `bootstrap` emit JSON it never
+    offered -- stdout stays empty, exactly as before this command grew a
+    `--json`-aware sink."""
     monkeypatch.setattr(github, "GitHubForge", lambda repository: FakeForge())
     monkeypatch.setattr(checkout, "_git_output", lambda _arguments: "/repo")
     _patch_store_write(monkeypatch)
@@ -15512,13 +15557,14 @@ def test_cli_bootstrap_refuses_canonical_remote_mismatch(
 
     status = issue_claim.main(["--repo", "example/agent-claim", "bootstrap"])
 
+    captured = capsys.readouterr()
     assert status == 2
-    error = capsys.readouterr().err
     assert (
         "forge target example/agent-claim does not match canonical remote other/repo; "
         "run aco from that repository's checkout"
-    ) in error
-    assert "--ledger" not in error
+    ) in captured.err
+    assert "--ledger" not in captured.err
+    assert captured.out == ""
 
 
 def test_cli_rescope_refuses_a_missing_state_ref(
