@@ -42,16 +42,10 @@ It names no version number and no new command name -- old clients are
 "0.12.x and older" in the text, never "the 0.13 client" -- so it never needs
 editing to stay accurate; a 0.12.x or older client that still tries to read a
 ledger hits its unknown `state_cut` action and fails loud, telling the
-operator to upgrade. The migration names three rollback windows. Before the
-tombstone, the ledger is still the only truth and nothing about the cut is
-yet irreversible. Between the tombstone and the import, the ledger is closed
-to writers but still holds the truth the import has not yet moved, so a
-stuck import is repaired by deleting the tombstone and reposting it, never by
-editing it in place. After the import lands, the state ref is the truth and
-the ledger issue closes only once that repository's import is proven against
-the `status --json` snapshot taken before its tombstone. A repository not yet
-migrated still runs its old ledger under an installation pinned to 0.12.x or
-earlier.
+operator to upgrade. The one-time import ran on 07.09.2026 and its code has
+been deleted: this release reads and writes the state ref only. A repository
+that never migrated still runs its old ledger under an installation pinned to
+0.12.x or earlier, and has no upgrade path through this release.
 
 ## Five-command quick start
 
@@ -135,25 +129,13 @@ explicit coordinator action; a stale takeover is that same override-release
 followed by an ordinary `claim` -- two commits, no separate verb, and the new
 claim never reuses a resource integer the released claim held.
 
-`bootstrap` does two jobs, never both in the same invocation. Without
-`--ledger`, it creates or reports the state ref: a present ref is a pure
-read (prints the ref's commit id, writes nothing); an absent ref (proven by
-`git ls-remote --exit-code`, never inferred from a fetch failure) gets one
-commit holding an empty state tree (`schema.toml`, `version = 1`) pushed as
-a plain fast-forward; an unreachable remote (auth or transport failure)
-fails loud instead of either printing or writing. `bootstrap --ledger N`
-is the one-time, head-only import of a repository's closed GitHub-issue
-ledger (issue `N`) into a freshly created state ref, run from that
-repository's own checkout after every writer has drained and a `state_cut`
-tombstone comment has been posted on the ledger issue: it refuses when the
-forge target does not match the canonical remote's own repository, when the
-tombstone is missing, edited, or not the ledger's last protocol comment,
-when the ledger was itself superseded by another, and when the ref already
-carries an import of a *different* run (an empty ref created by some other
-command in error is named and left for manual repair, never silently
-overwritten); on success it carries every active claim, every claim id ever
-consumed, and every occupied resource value forward, and pushes the result
-as the ref's very first commit.
+`bootstrap` has one job: it creates or reports the state ref. A present ref
+is a pure read (prints the ref's commit id, writes nothing); an absent ref
+(proven by `git ls-remote --exit-code`, never inferred from a fetch failure)
+gets one commit holding an empty state tree (`schema.toml`, `version = 1`)
+pushed as a plain fast-forward; an unreachable remote (auth or transport
+failure) fails loud instead of either printing or writing. It refuses when
+the forge target does not match the canonical remote's own repository.
 
 ## Landing classification
 

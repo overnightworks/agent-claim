@@ -17,7 +17,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Protocol
 
-from . import board, protocol
+from . import board
 from .protocol import ClaimError
 
 
@@ -119,7 +119,6 @@ class Capability(StrEnum):
 class ForgeOperation(StrEnum):
     """Every port operation; each member's value is its Protocol method name."""
 
-    LIST_PROTOCOL_CANDIDATES = "list_protocol_candidates"
     ITEM_REFERENCE = "item_reference"
     LANDING = "landing"
     PARENT_ISSUE = "parent_issue"
@@ -171,7 +170,7 @@ class BoardSource(Protocol):
     def list_children(self, number: int) -> tuple[board.ChildItem, ...]: ...
 
 
-class ForgeReader(protocol.ClaimReader, Protocol):
+class ForgeReader(Protocol):
     @property
     def repository(self) -> RepositoryId: ...
 

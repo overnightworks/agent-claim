@@ -18,29 +18,19 @@ from . import __version__, board, checkout, forge, github, protocol, store
 AGENT_CLAIM_AGENT_ENV = checkout.AGENT_CLAIM_AGENT_ENV
 CLAUDE_SESSION_ID_ENV = checkout.CLAUDE_SESSION_ID_ENV
 GROK_SESSION_ID_ENV = checkout.GROK_SESSION_ID_ENV
-LedgerActiveClaim = protocol.LedgerActiveClaim
 ClaimError = protocol.ClaimError
 ClaimRequest = protocol.ClaimRequest
 ClaimUnavailableError = protocol.ClaimUnavailableError
-ClaimantRelease = protocol.ClaimantRelease
 InvalidClaimMarkerError = protocol.InvalidClaimMarkerError
-IssueComment = protocol.IssueComment
 IssueIdentity = protocol.IssueIdentity
 LaneIdentity = protocol.LaneIdentity
 ISSUELESS_LANE_BRANCH_PREFIXES = protocol.ISSUELESS_LANE_BRANCH_PREFIXES
-LEDGER_BODY_MARKER = protocol.LEDGER_BODY_MARKER
-LedgerSupersede = protocol.LedgerSupersede
-LedgerSupersededError = protocol.LedgerSupersededError
 _git_output = checkout._git_output
 _resolved_agent = checkout._resolved_agent
 _timestamp = board._timestamp
 _validate_checkout = checkout._validate_checkout
-active_claims = protocol.active_claims
 claims_conflict = protocol.claims_conflict
 claims_holding_path = protocol.claims_holding_path
-configure_ledger = protocol.configure_ledger
-is_protocol_candidate = protocol.is_protocol_candidate
-parse_claim_event = protocol.parse_claim_event
 
 POLICY_LOADER = (
     "<!-- agent-claim-policy:v1 -->\n"
@@ -213,19 +203,7 @@ LANE_ISSUE_HELP = "omit for lane mode, derived from a docs/ or fix/ checkout bra
 
 
 def _add_bootstrap_parser(commands: argparse._SubParsersAction) -> None:
-    bootstrap = commands.add_parser(
-        "bootstrap",
-        help="create refs/aco/state if absent, or import a ledger with --ledger N",
-    )
-    bootstrap.add_argument(
-        "--ledger",
-        type=int,
-        metavar="N",
-        help=(
-            "import ledger issue N into refs/aco/state; run "
-            "agent-claim bootstrap --ledger from that repository's checkout"
-        ),
-    )
+    commands.add_parser("bootstrap", help="create refs/aco/state if it does not exist yet")
 
 
 def _add_status_parser(commands: argparse._SubParsersAction) -> None:
@@ -1579,7 +1557,7 @@ def _refuse_canonical_remote_mismatch(
     if canonical_repository.path != forge_target.path:
         raise protocol.ClaimUnavailableError(
             f"forge target {forge_target.path} does not match canonical remote "
-            f"{canonical_repository.path}; run bootstrap --ledger from that repository's checkout"
+            f"{canonical_repository.path}; run agent-claim from that repository's checkout"
         )
 
 
@@ -2407,86 +2385,11 @@ def _release_branch_for(parsed: argparse.Namespace) -> str | None:
     )
 
 
-def _require_trailing_tombstone(ledger_n: int, comments: tuple[protocol.IssueComment, ...]) -> None:
-    """`bootstrap --ledger` preconditions (issue #176, §2): a `state_cut`
-    tombstone exists, it is last, and it was never edited."""
-    ordered = tuple(sorted(comments, key=lambda comment: (comment.created_at, comment.identifier)))
-    try:
-        last_cut = next(
-            (
-                index
-                for index in range(len(ordered) - 1, -1, -1)
-                if protocol._comment_is_state_cut(ordered[index])
-            ),
-            None,
-        )
-    except protocol.InvalidClaimMarkerError as error:
-        if "edited after publication" not in str(error):
-            raise
-        raise protocol.ClaimUnavailableError(
-            f"ledger #{ledger_n} tombstone was edited; delete the comment and post a new one"
-        ) from error
-    if last_cut is None:
-        raise protocol.ClaimUnavailableError(f"ledger #{ledger_n} has no state_cut tombstone")
-    if last_cut != len(ordered) - 1:
-        raise protocol.ClaimUnavailableError(
-            f"ledger #{ledger_n} carries a protocol comment after its tombstone; "
-            "drain again and repost the tombstone"
-        )
-
-
-def _import_existing_ref(ledger_n: int, observed: protocol.ClaimState) -> int:
-    """Idempotent already-imported vs empty-ref-created-by-mistake (done-when 1)."""
-    if observed.claims or observed.consumed_ids or observed.resources:
-        print(observed.tip)
-        return 0
-    raise protocol.ClaimUnavailableError(
-        f"state ref exists but carries no import of ledger #{ledger_n}; "
-        "delete refs/aco/state on the canonical remote and re-run"
-    )
-
-
-def _import_ledger(
-    parsed: argparse.Namespace, forge_handle: forge.ForgeWriter, canonical_remote: str
-) -> int:
-    ledger_n = int(parsed.ledger)
-    if ledger_n < 1:
-        raise protocol.ClaimError("ledger issue must be a positive integer")
-    protocol.configure_ledger(ledger_n)
-    comments = forge_handle.list_protocol_candidates(ledger_n)
-    _require_trailing_tombstone(ledger_n, comments)
-    worktree = Path.cwd()
-    observed = store.fetch_state(worktree=worktree, remote=canonical_remote)
-    if observed.tip is not None:
-        return _import_existing_ref(ledger_n, observed)
-    parent = store.prepare_import_parent(worktree=worktree)
-    try:
-        imported = protocol.state_from_ledger_aggregate(comments, opened_commit=parent)
-    except protocol.LedgerSupersededError as error:
-        raise protocol.ClaimUnavailableError(
-            f"ledger #{ledger_n} was superseded by #{error.successor_issue}; "
-            "this importer does not walk predecessors"
-        ) from error
-    pending = store.PendingImport(
-        imported=imported,
-        parent=parent,
-        subject=f"import ledger {ledger_n}",
-        operation_id=uuid.uuid4().hex,
-    )
-    result = store.push_import(worktree=worktree, remote=canonical_remote, pending=pending)
-    print(result.tip)
-    return 0
-
-
-def _bootstrap_state(parsed: argparse.Namespace, forge_handle: forge.ForgeWriter) -> int:
-    """Create `refs/aco/state` if proven absent, or import ledger N with
-    `--ledger`. Never searches for a ledger (issue #176: `discovery.py` dies).
-    """
+def _bootstrap_state(parsed: argparse.Namespace) -> int:
+    """Create `refs/aco/state` if proven absent; report the existing tip
+    untouched when it is already there."""
     canonical_remote = _resolved_canonical_remote(parsed.repo, _resolve_toplevel())
-    if parsed.ledger is not None:
-        return _import_ledger(parsed, forge_handle, canonical_remote)
-    oid = store.bootstrap(worktree=Path.cwd(), remote=canonical_remote)
-    print(oid)
+    print(store.bootstrap(worktree=Path.cwd(), remote=canonical_remote))
     return 0
 
 
@@ -2497,7 +2400,7 @@ def _dispatch(parsed: argparse.Namespace) -> int:
     repository = github.discover_repository(parsed.repo, remote_url=checkout.origin_remote_url)
     forge_handle = github.GitHubForge(repository)
     if parsed.command == "bootstrap":
-        return _bootstrap_state(parsed, forge_handle)
+        return _bootstrap_state(parsed)
     if parsed.command in _READ_HANDLERS:
         result = _READ_HANDLERS[parsed.command](parsed, _ReadSession(forge=forge_handle))
     else:
