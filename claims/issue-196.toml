@@ -1,8 +1,0 @@
-claim_id = "38e6e761b8db496e82e0b3bc6541ce2b"
-agent = "Claude Fable 5.1"
-role = "builder"
-base = "d5d1e4b19ef70037476fd7cff6f6b90488af3723"
-branch = "claude/issue-196-refusals-name-the-repair"
-scope = ["src/agent_coordination/checkout.py", "src/agent_coordination/cli.py", "src/agent_coordination/board.py", "src/agent_coordination/protocol.py", "tests"]
-opened_commit = "e0437449200c77ab39b0992de2423987ee569f6f"
-whole_reason = "Fünf Verweigerungstexte, die dieselbe Ursache teilen und deren Tests in derselben Datei liegen; getrennte Spuren würden nur in tests/test_cli.py kollidieren"
