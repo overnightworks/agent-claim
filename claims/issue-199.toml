@@ -1,0 +1,7 @@
+claim_id = "9c57ad069f4e48fcaf9892092f3c5240"
+agent = "Claude Fable 5.1"
+role = "builder"
+base = "eeb43106e3e19efd40483dfaa40d94bbec5be6f6"
+branch = "claude/issue-199-json-error-sink"
+scope = ["src/agent_coordination/cli.py", "tests/test_cli.py", "README.md"]
+opened_commit = "bff1c3049767f7353228ef17eebdad41efadade4"
