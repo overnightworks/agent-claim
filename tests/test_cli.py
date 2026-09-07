@@ -2632,14 +2632,14 @@ def test_cut_refuses_a_row_with_the_wrong_cell_count(
     assert client.item_bodies == {}
 
 
-def test_cut_refuses_an_unlinkable_row_with_the_bare_reason(
+def test_cut_refuses_an_unlinkable_row_by_naming_its_broken_cell(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
     """`--row N` naming a well-formed but unlinkable row (a broken link
-    text, neither the undispatched marker nor a valid `#n` link) falls
-    through every other refusal shape -- not already cut, not the whole
-    table cut, no malformed rows to name -- to the requested row number and
-    the (here empty) list of rows that are still cuttable."""
+    text, neither the undispatched marker nor a valid `#n` link) names that
+    row and its broken item cell -- row 1 is right there in the table, so
+    `has no row 1` would be false; that sentence is reserved for a row
+    number the table truly has none of (below)."""
     body = slice_table(("1", "Broken link slice", "not a link", "—"))
     container = _cut_container_issue(body)
     client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
@@ -2659,7 +2659,41 @@ def test_cut_refuses_an_unlinkable_row_with_the_bare_reason(
 
     assert exit_code == 2
     assert capsys.readouterr().err == (
-        f"ERROR: #{CUT_CONTAINER} has no row 1; cuttable rows: none\n"
+        f"ERROR: #{CUT_CONTAINER} row 1 is not cuttable: item cell 'not a link' "
+        "is not a valid #n link\n"
+    )
+    assert client.created_children == []
+    assert client.item_bodies == {}
+
+
+def test_cut_refuses_a_row_number_the_table_truly_has_none_of(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """`--row N` naming a number absent from the table entirely -- unlike
+    the unlinkable-row case above, no row 9 exists here at all -- names the
+    requested number and the rows that are still cuttable, in the prose
+    grammar (the block grammar's twin is
+    `test_cut_block_refuses_a_row_with_no_cuttable_row`)."""
+    body = slice_table(("1", "Open slice", "—", "—"), ("2", "Another open slice", "—", "—"))
+    container = _cut_container_issue(body)
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
+
+    exit_code = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "cut",
+            str(CUT_CONTAINER),
+            "--title",
+            "Scheibe 9",
+            "--row",
+            "9",
+        ]
+    )
+
+    assert exit_code == 2
+    assert capsys.readouterr().err == (
+        f"ERROR: #{CUT_CONTAINER} has no row 9; cuttable rows: 1, 2\n"
     )
     assert client.created_children == []
     assert client.item_bodies == {}

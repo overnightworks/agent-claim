@@ -2283,12 +2283,17 @@ def _uncuttable_row_refusal(
     target: board.Issue, row_number: int, findings: board.SliceTableFindings
 ) -> protocol.ClaimUnavailableError:
     """Why `--row {row_number}` names no row `cut` can link, in priority
-    order: the row exists but is already cut, the whole table has nothing
-    left uncut, some rows are still malformed and named by `#` cell and
-    reason, or -- the remaining case, a request that matches no row at all
-    while other rows stay cuttable -- the requested number alongside those
-    cuttable rows, instead of the unqualified (and then false) claim that
-    none exist."""
+    order: the row exists but is already cut; the row exists but is
+    unlinkable (`_cut_row` only reaches this refusal when `--row
+    {row_number}` matched nothing in `findings.cuttable`, and the
+    undispatched marker is always cuttable, so an existing, uncut row here
+    can only be an unlinkable one -- named by the broken item cell it
+    already holds, not folded into the "no such row" sentence below); the
+    whole table has nothing left uncut; some rows are still malformed and
+    named by `#` cell and reason; or -- the remaining case, a request that
+    matches no row at all while other rows stay cuttable -- the requested
+    number alongside those cuttable rows, instead of the unqualified (and
+    then false) claim that none exist."""
     all_rows = tuple(
         entry
         for entry in board.parse_slice_table(target.body)
@@ -2300,6 +2305,11 @@ def _uncuttable_row_refusal(
         return protocol.ClaimUnavailableError(
             f"#{target.number} row {row_number} is already cut (#{requested.item_issue}); "
             f"cuttable rows: {cuttable}"
+        )
+    if requested is not None:
+        return protocol.ClaimUnavailableError(
+            f"#{target.number} row {row_number} is not cuttable: item cell "
+            f"{requested.item_cell!r} is not a valid #n link"
         )
     cut_rows = tuple(row.index for row in all_rows if row.item_issue is not None)
     if not findings.cuttable and cut_rows:
