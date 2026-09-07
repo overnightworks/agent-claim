@@ -6,7 +6,7 @@ import json
 import re
 import tomllib
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import PurePosixPath, PureWindowsPath
 from types import MappingProxyType
@@ -1603,9 +1603,9 @@ class ClaimState:
     """
 
     tip: ObjectId | None
-    claims: Mapping[str, ActiveClaim] = MappingProxyType({})
-    consumed_ids: frozenset[ClaimId] = frozenset()
-    resources: Mapping[str, ResourceRecord] = MappingProxyType({})
+    claims: Mapping[str, ActiveClaim] = field(default_factory=lambda: MappingProxyType({}))
+    consumed_ids: frozenset[ClaimId] = field(default_factory=frozenset)
+    resources: Mapping[str, ResourceRecord] = field(default_factory=lambda: MappingProxyType({}))
 
 
 EMPTY_STATE = ClaimState(tip=None)
