@@ -843,6 +843,12 @@ def _same_claimant(
     return (current.agent, current.role) == (intent.agent, intent.role)
 
 
+def _claimant_text(agent: str, role: str) -> str:
+    """Render the `(agent, role)` tuple `_same_claimant` compares, for a
+    refusal that must name which two claimants disagreed."""
+    return f"{agent} ({role})"
+
+
 def _claim_matches_intent(claim: ActiveClaim, intent: ClaimIntent) -> bool:
     """Whether `claim` is the exact live claim an interrupted, replayed
     `intent` would have produced (criterion 2): same identity, claimant,
@@ -975,7 +981,11 @@ def _apply_rescope_intent(state: ClaimState, intent: RescopeIntent) -> ClaimStat
         raise ClaimUnavailableError(f"claim id {intent.claim_id!r} has no active claim to rescope")
     key, current = found
     if not _same_claimant(current, intent):
-        raise ClaimUnavailableError("only the original claimant may rescope")
+        raise ClaimUnavailableError(
+            "only the original claimant may rescope "
+            f"(holder={_claimant_text(current.agent, current.role)!r}, "
+            f"this session={_claimant_text(intent.agent, intent.role)!r})"
+        )
     whole_reason = current.whole_reason if intent.whole_reason is None else intent.whole_reason
     new_claim = replace(current, scope=intent.scope, whole_reason=whole_reason)
     new_claims = {**state.claims, key: new_claim}
@@ -991,7 +1001,9 @@ def _authorize_release(current: ActiveClaim, intent: ReleaseIntent) -> None:
         return
     if not _same_claimant(current, intent):
         raise ClaimUnavailableError(
-            "only the original claimant may release; use an explicit coordinator override"
+            "only the original claimant may release; use an explicit coordinator override "
+            f"(holder={_claimant_text(current.agent, current.role)!r}, "
+            f"this session={_claimant_text(intent.agent, intent.role)!r})"
         )
 
 

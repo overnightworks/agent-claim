@@ -245,7 +245,9 @@ degenerates to plain number order at equal score. The same file may set one
 `idea_label`; an item carrying that label with no Now/Next/Blocked by/Done when
 projection ranks normally, and `next` tells the head `Problem neu prüfen und
 Item verfeinern`. Once it has a complete contract, its own Next takes over;
-without the configured label, a projectionless item remains `body incomplete`.
+without the configured label, a projectionless item remains
+`body incomplete: <missing sections>` — the same rendering `claim` and
+`check` use, detailed below.
 The same file's `body_contract` key pins how a work-item body itself is read
 (prose, the default, or the typed block below); `priority_labels` and
 `idea_label` mean the same thing in either mode. The file defines exactly
@@ -358,10 +360,11 @@ fenced code examples. `Blocked by` is exactly `nichts` or a comma-separated
 refuses with `#<n> body incomplete: <missing sections>` (body order, e.g.
 `#150 body incomplete: Now, Done when`) when any of the four sections is
 empty, unless the issue is a configured projectionless idea (above) — the
-same rule `board` already applies to `actionable` (whose own short
-`body incomplete` form is unchanged), so a freshly `cut` child (its
-`board.CHILD_SKELETON` body has every section present but empty) is refused
-until the head fills it in. The check does not limit body size or inspect
+same rule and the same rendering `board`'s `actionable` and `next`'s
+`SKIPPED` reason use, so a freshly `cut` child (its `board.CHILD_SKELETON`
+body has `Now`/`Next`/`Done when` empty and `Blocked by: nichts`) is named
+`body incomplete: Now, Next, Done when` everywhere until the head fills it
+in. The check does not limit body size or inspect
 references in `Next`, and `release` stays available even when the body's
 contract has since become invalid.
 
@@ -473,11 +476,13 @@ one exists and otherwise creates an untied child (table or not); `--row N`
 selects entry `N` and requires `--title` to equal that entry's own `title`
 exactly, refusing before any write on a mismatch. `cut` removes only the
 selected entry (`slice = []` after removing the last one) and preserves every
-other byte of the body, including CRLF line endings, exactly. The two refusal
-strings are shared with prose/#151: `#N has no slice table; --row needs one
-to select a row from`, and `#N has no cuttable slice row; 0 malformed rows
-need a hand fix` (block mode cannot itself produce malformed rows; the
-string is kept so both modes read the same way).
+other byte of the body, including CRLF line endings, exactly. The "no slice
+table at all" refusal string is shared with prose/#151: `#N has no slice
+table; --row needs one to select a row from`. A `--row N` that names no
+entry refuses `#N has no row <N>; cuttable rows: <list-or-none>`: block mode
+has no malformed or unlinkable state of its own — a linked entry is removed
+from the block the moment it is cut, so every entry still in `[[slice]]` is
+cuttable, and the refusal lists them all.
 
 **Migration is a hand edit, not a command.** There is no migration command,
 module, or receipt: one reviewed AI session per repository transcribes each
@@ -503,8 +508,9 @@ records it as the container's sub-issue, and, when there is a slice-table row
 to link, rewrites the container's slice table so that row now links
 `#<child>` instead of the undispatched `—` marker. The fresh child's body is
 `board.CHILD_SKELETON` — every contract section present, `Now`/`Next`/`Done
-when` empty and `Blocked by: nichts` — so it is `body incomplete` (invisible
-to `next`, refused by `claim`) until the head fills it in.
+when` empty and `Blocked by: nichts` — so it is named
+`body incomplete: Now, Next, Done when` (invisible to `next`, refused by
+`claim`) until the head fills it in.
 
 `cut` without `--row` links into the first still-cuttable row when one exists
 and otherwise creates an untied child, table or not (#151): a container with
@@ -516,10 +522,12 @@ container is always one `cut` accepts. `--row N` requires a table containing
 an uncut row `N` and refuses by name otherwise: no slice table at all, `N`
 already linked (`#122 row 4 is already cut (#150); cuttable rows: 5, 6, 7`),
 no row left uncut anywhere in the table (`#122 has no uncut row; rows 4-7
-are cut`), or no row `N` left cuttable for any other reason, in which case
-any malformed rows are named by their `#` cell and reason instead of only
-counted (`#79 has no cuttable slice row; row "B": index must be a positive
-integer`).
+are cut`), row `N` exists but cannot be linked (`#79 row 1 is not cuttable:
+item cell 'not a link' is not a valid #n link`), row `N` is not in the table
+at all while other rows remain cuttable (`#79 has no row 9; cuttable rows: 1,
+2`), or any malformed rows are named by their `#` cell and reason instead of
+only counted (`#79 has no cuttable slice row; row "B": index must be a
+positive integer`).
 
 Every refusal precedes every write. `cut` refuses when the forge cannot
 create a child issue or update an item body (`capability()` answers anything

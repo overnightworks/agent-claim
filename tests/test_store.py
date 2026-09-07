@@ -1250,6 +1250,8 @@ def test_apply_rescope_intent_replaces_scope_and_preserves_opened_commit() -> No
 
 
 def test_apply_rescope_intent_refuses_a_non_claimant() -> None:
+    """The refusal names both claimants it compared -- the live claim's
+    holder, and the intent's own agent and role -- not just the rule."""
     claimed = protocol.apply(_STATE_WITH_TIP, _claim_intent())
     rescope = protocol.RescopeIntent(
         claim_id=protocol.ClaimId("a1"),
@@ -1259,8 +1261,13 @@ def test_apply_rescope_intent_refuses_a_non_claimant() -> None:
         operation_id="op-2",
     )
 
-    with pytest.raises(protocol.ClaimUnavailableError, match="original claimant"):
+    with pytest.raises(protocol.ClaimUnavailableError) as error:
         protocol.apply(claimed, rescope)
+
+    assert str(error.value) == (
+        "only the original claimant may rescope "
+        "(holder='Ada (builder)', this session='Grace (builder)')"
+    )
 
 
 def test_apply_rescope_intent_refuses_rescoping_a_claim_that_does_not_exist() -> None:
@@ -1328,6 +1335,7 @@ def test_apply_release_intent_refuses_releasing_a_claim_that_does_not_exist() ->
 
 
 def test_apply_release_intent_refuses_a_non_claimant_without_override() -> None:
+    """The refusal names both claimants it compared, like rescope's."""
     claimed = protocol.apply(_STATE_WITH_TIP, _claim_intent())
     release = protocol.ReleaseIntent(
         claim_id=protocol.ClaimId("a1"),
@@ -1337,8 +1345,13 @@ def test_apply_release_intent_refuses_a_non_claimant_without_override() -> None:
         operation_id="op-2",
     )
 
-    with pytest.raises(protocol.ClaimUnavailableError, match="original claimant"):
+    with pytest.raises(protocol.ClaimUnavailableError) as error:
         protocol.apply(claimed, release)
+
+    assert str(error.value) == (
+        "only the original claimant may release; use an explicit coordinator override "
+        "(holder='Ada (builder)', this session='Grace (builder)')"
+    )
 
 
 def test_apply_release_intent_allows_a_coordinator_override() -> None:

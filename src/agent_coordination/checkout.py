@@ -99,6 +99,11 @@ def _scope_directories(paths: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(directories)
 
 
+ISOLATED_WORKTREE_RECIPE = (
+    "git worktree add ../<repo>-worktrees/issue-<n>-<slug> -b <agent>/issue-<n>-<slug>"
+)
+
+
 def _validate_worktree_branch(branch: str) -> None:
     """Require an isolated non-main worktree checked out on `branch`.
 
@@ -106,24 +111,46 @@ def _validate_worktree_branch(branch: str) -> None:
     a clean tree, so a lane can sharpen scope after it has already committed.
     """
     if branch in {"main", "master"}:
-        raise ClaimError("build claims require an isolated non-main worktree branch")
+        raise ClaimError(
+            "build claims require an isolated non-main worktree branch; "
+            f"run {ISOLATED_WORKTREE_RECIPE}"
+        )
     current = _git_output(["branch", "--show-current"])
     git_directory = Path(_git_output(["rev-parse", "--git-dir"])).resolve()
     common_directory = Path(_git_output(["rev-parse", "--git-common-dir"])).resolve()
     if current != branch:
         raise ClaimError(f"claim branch {branch!r} does not match checkout branch {current!r}")
     if git_directory == common_directory:
-        raise ClaimError("build claims require a linked isolated worktree checkout")
+        raise ClaimError(
+            "build claims require a linked isolated worktree checkout; "
+            f"run {ISOLATED_WORKTREE_RECIPE}"
+        )
+
+
+def _dirty_paths(status: str) -> tuple[str, ...]:
+    """The changed paths named by `git status --porcelain`'s short format:
+    each line is two status characters, a space, then the path (or, for a
+    rename, `old -> new`), so dropping the first three characters leaves the
+    path a dirty-tree refusal names."""
+    return tuple(line[3:] for line in status.splitlines() if line)
 
 
 def _validate_checkout(request: ClaimRequest) -> None:
     head = _git_output(["rev-parse", "HEAD"])
     if head != request.base:
-        raise ClaimError(f"claim base {request.base} does not match checkout HEAD {head}")
+        raise ClaimError(
+            f"claim base {request.base} does not match checkout HEAD {head}; "
+            "omit --base to use checkout HEAD"
+        )
     _validate_worktree_branch(request.branch)
     dirty = _git_output(["status", "--porcelain"])
     if dirty:
-        raise ClaimError("claim must be acquired before the first worktree edit")
+        paths = _dirty_paths(dirty)
+        named = ", ".join(paths[:3])
+        remainder = len(paths) - 3
+        if remainder > 0:
+            named += f", and {remainder} more"
+        raise ClaimError(f"claim must be acquired before the first worktree edit: {named}")
 
 
 def _trunk_ref() -> str:
