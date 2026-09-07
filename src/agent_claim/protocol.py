@@ -1469,16 +1469,6 @@ class ClaimId(str):
 COORDINATOR_ROLE = "coordinator"
 
 
-@dataclass(frozen=True)
-class ActingIdentity:
-    """The agent and role acting on a transition (criterion 10: identity
-    carries both). `role` stays an open string -- `COORDINATOR_ROLE` is the
-    one value `apply` treats specially, for a coordinator override."""
-
-    agent: str
-    role: str
-
-
 # --- Claim key codec (criterion 10, issue #176 slice C2) -------------------
 #
 # One path segment, no `/`, collision-free and reversible -- the only owner
@@ -1718,31 +1708,30 @@ ClaimTransitionIntent = ClaimIntent | RescopeIntent | ReleaseIntent
 
 
 def _same_identity(left: ClaimIdentity, right: ClaimIdentity) -> bool:
-    """Structural equality between two `ClaimIdentity` values.
-
-    Written as one explicit case per union member instead of a bare `==`
-    between two differently-typed frozen dataclasses: reliability scanners
-    cannot confirm a cross-type `==` is well-founded and flag it as
-    tautological, even though the generated `__eq__` already handles it
-    correctly at runtime. `IssueIdentity` compares its `issue` number;
-    `LaneIdentity` carries no field of its own -- its branch is compared
-    separately by every caller here (the enclosing `ActiveClaim`/intent
-    already carries `branch` as a sibling field, per `LaneIdentity`'s own
-    docstring)."""
+    """Structural equality between two `ClaimIdentity` values: `IssueIdentity`
+    compares its `issue` number, and `LaneIdentity` carries no field of its
+    own, since every caller here compares branch separately."""
     if isinstance(left, IssueIdentity) and isinstance(right, IssueIdentity):
         return left.issue == right.issue
     return isinstance(left, LaneIdentity) and isinstance(right, LaneIdentity)
 
 
+def _same_claimant(
+    current: ActiveClaim, intent: ClaimIntent | RescopeIntent | ReleaseIntent
+) -> bool:
+    """Whether `intent` names the same claimant as `current`: same agent and
+    role, compared as a tuple so "same claimant" stays one named domain
+    concept everywhere it is checked (claim replay, rescope, release)."""
+    return (current.agent, current.role) == (intent.agent, intent.role)
+
+
 def _claim_matches_intent(claim: ActiveClaim, intent: ClaimIntent) -> bool:
     """Whether `claim` is the exact live claim an interrupted, replayed
-    `intent` would have produced (criterion 2): same identity, agent, role,
-    branch, and scope. Compared as `ActingIdentity` pairs, not raw tuples,
-    so "same claimant" stays one named domain concept everywhere it is
-    checked (here, and in rescope/release below)."""
+    `intent` would have produced (criterion 2): same identity, claimant,
+    branch, and scope."""
     return (
         _same_identity(claim.identity, intent.identity)
-        and ActingIdentity(claim.agent, claim.role) == ActingIdentity(intent.agent, intent.role)
+        and _same_claimant(claim, intent)
         and claim.branch == intent.branch
         and claim.scope == intent.scope
     )
@@ -1882,7 +1871,7 @@ def _apply_rescope_intent(state: ClaimState, intent: RescopeIntent) -> ClaimStat
     if found is None:
         raise ClaimUnavailableError(f"claim id {intent.claim_id!r} has no active claim to rescope")
     key, current = found
-    if ActingIdentity(current.agent, current.role) != ActingIdentity(intent.agent, intent.role):
+    if not _same_claimant(current, intent):
         raise ClaimUnavailableError("only the original claimant may rescope")
     whole_reason = _resolved_whole_reason(
         current.whole_reason, clear=intent.clear_whole_reason, replacement=intent.whole_reason
@@ -1894,16 +1883,12 @@ def _apply_rescope_intent(state: ClaimState, intent: RescopeIntent) -> ClaimStat
 
 def _authorize_release(current: ActiveClaim, intent: ReleaseIntent) -> None:
     """Raises unless `intent` may release `current`: the original claimant,
-    or an explicit coordinator override by role coordinator. `override` is
-    bound to a plain local before the branch, not read as a dataclass
-    attribute inside the condition, so the check is provably on a real
-    value rather than something a scanner has to trust is reachable."""
-    override = intent.coordinator_override
-    if override:
+    or an explicit coordinator override by role coordinator."""
+    if intent.coordinator_override:
         if intent.role != COORDINATOR_ROLE:
             raise ClaimUnavailableError("a coordinator override requires role coordinator")
         return
-    if ActingIdentity(current.agent, current.role) != ActingIdentity(intent.agent, intent.role):
+    if not _same_claimant(current, intent):
         raise ClaimUnavailableError(
             "only the original claimant may release; use an explicit coordinator override"
         )
