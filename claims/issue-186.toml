@@ -1,0 +1,8 @@
+claim_id = "5a0f5aa1bdc24292bd6a350d853c8cd6"
+agent = "Claude Fable 5.1"
+role = "builder"
+base = "24598455006880fbb96bfead4de02339cd7f8a4f"
+branch = "claude/issue-186-python-pin"
+scope = [".python-version", "pyproject.toml", "uv.lock", "scripts/check_root_layout.py", "tests/test_root_layout.py", "README.md"]
+opened_commit = "108fb066f2332018b670104a67b296d119cbed54"
+whole_reason = "Ein Interpreter-Pin berührt Manifest, Lock, Root-Allowlist mit Test und den README-Satz zusammen; sechs Dateien, eine Aussage"
