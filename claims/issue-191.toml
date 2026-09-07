@@ -1,0 +1,8 @@
+claim_id = "dc25ba1bb8684df7a61563e558ef297f"
+agent = "Claude Fable 5.1"
+role = "builder"
+base = "c5c5b0a76c9b498195bf9f8d43ce73a99a608447"
+branch = "claude/issue-191-rename-aco"
+scope = ["src", "tests", "pyproject.toml", "uv.lock", "scripts", ".github", "sonar-project.properties", "README.md", "AGENTS.md", "CLAUDE.md", "docs/decisions"]
+opened_commit = "9895b77cb1cbfa5122d126c2fbc3ca25c867d819"
+whole_reason = "Eine Umbenennung fasst Paket, Manifest, Lock, CI, Skripte und alle Einstiegsdokumente in einem Zug an; getrennt gelandet wären sie eine kaputte Zwischenstufe"
