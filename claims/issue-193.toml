@@ -1,8 +1,0 @@
-claim_id = "2186170d35f94704bff7b675d0b9a909"
-agent = "Claude Fable 5.1"
-role = "builder"
-base = "5c3c218e83776b31323e0166b48e1c610e07594a"
-branch = "claude/issue-193-check-command"
-scope = ["src/agent_coordination/cli.py", "src/agent_coordination/board.py", "src/agent_coordination/forge.py", "src/agent_coordination/github.py", "tests", "README.md"]
-opened_commit = "3b749a79d04284f07a4aa835df9d6e55191b68c6"
-whole_reason = "Ein Befehl wechselt Verb und Subjekt: Parser, Verteilung, Adapterfeld, Konfigurationsprüfung und ihre Tests gehören in einen Zug"
