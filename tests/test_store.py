@@ -16,8 +16,8 @@ from pathlib import Path
 import pytest
 from test_cli import FakeForge
 
-from agent_claim import cli as issue_claim
-from agent_claim import github, process, protocol, store
+from agent_coordination import cli as issue_claim
+from agent_coordination import github, process, protocol, store
 
 # Syntactically valid but locally unresolvable object ids, for tests that
 # exercise a failure path where the actual value never reaches an assertion.
@@ -1127,7 +1127,7 @@ def _claim_intent(
     role: str = "builder",
     base: protocol.ObjectId = _BASE,
     branch: str = "claude/issue-42-cut",
-    scope: tuple[str, ...] = ("src/agent_claim/store.py",),
+    scope: tuple[str, ...] = ("src/agent_coordination/store.py",),
     claim_id: str = "a1",
     operation_id: str = "op-1",
     whole_reason: str | None = None,
@@ -1158,7 +1158,7 @@ def test_apply_claim_intent_adds_a_live_claim_and_consumes_its_id() -> None:
     assert claim.role == "builder"
     assert claim.base == _BASE
     assert claim.branch == "claude/issue-42-cut"
-    assert claim.scope == ("src/agent_claim/store.py",)
+    assert claim.scope == ("src/agent_coordination/store.py",)
     assert claim.opened_commit == _TIP
     assert claim.resource is None
     assert claim.whole_reason is None
@@ -1553,7 +1553,7 @@ def test_parse_claim_key_rejects_a_malformed_key(key: str, match: str) -> None:
 
 def _sample_claim(
     *,
-    scope: tuple[str, ...] = ("src/agent_claim/store.py",),
+    scope: tuple[str, ...] = ("src/agent_coordination/store.py",),
     resource: protocol.ResourceHold | None = None,
     whole_reason: str | None = None,
 ) -> protocol.ActiveClaim:

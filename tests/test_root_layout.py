@@ -51,7 +51,7 @@ def test_allowed_root_layout_has_no_violations(tmp_path: Path) -> None:
         ".python-version",
         "README.md",
         "AGENTS.md",
-        "src/agent_claim/__init__.py",
+        "src/agent_coordination/__init__.py",
         "tests/test_example.py",
         "scripts/check_root_layout.py",
     )

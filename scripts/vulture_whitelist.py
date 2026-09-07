@@ -16,8 +16,8 @@ None of this is speculative: it is the port surface issue #131 declares today,
 each with a named future caller.
 """
 
-from agent_claim.board import NoItemKind
-from agent_claim.forge import Capability, ForgeUnsupportedError, RepositoryId
+from agent_coordination.board import NoItemKind
+from agent_coordination.forge import Capability, ForgeUnsupportedError, RepositoryId
 
 _referenced_only_for_vulture = (
     NoItemKind.DOCS,

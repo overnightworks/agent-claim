@@ -19,7 +19,7 @@ from types import MappingProxyType
 
 import pytest
 
-from agent_claim import (
+from agent_coordination import (
     __version__,
     board,
     checkout,
@@ -29,8 +29,8 @@ from agent_claim import (
     protocol,
     store,
 )
-from agent_claim import cli as issue_claim
-from agent_claim.cli import (
+from agent_coordination import cli as issue_claim
+from agent_coordination.cli import (
     ClaimError,
     ClaimRequest,
     ClaimUnavailableError,
@@ -54,7 +54,7 @@ TWELVE_VERSIONED_FILES = (
     "LICENSE",
     "README.md",
     "pyproject.toml",
-    "src/agent_claim/__init__.py",
+    "src/agent_coordination/__init__.py",
     "src/a.py",
     "docs/b.md",
     "docs/c.md",
@@ -329,7 +329,7 @@ TWELVE_VERSIONED_FILES = (
     "LICENSE",
     "README.md",
     "pyproject.toml",
-    "src/agent_claim/__init__.py",
+    "src/agent_coordination/__init__.py",
     "src/a.py",
     "docs/b.md",
     "docs/c.md",
@@ -368,7 +368,7 @@ def test_only_the_github_adapter_speaks_gh_argv() -> None:
     grepping every other module for the literal command name instead. Every
     module in the package is enumerated, not a fixed list, so a new module
     is covered the day it is added."""
-    package = Path("src/agent_claim")
+    package = Path("src/agent_coordination")
     other_modules = sorted(p for p in package.glob("*.py") if p.name != "github.py")
     assert len(other_modules) >= 7
     for module in other_modules:
@@ -4139,7 +4139,7 @@ def test_board_reads_priority_configuration_from_the_checkout_root(
     configuration_directory = toplevel / ".agent-claim"
     configuration_directory.mkdir(parents=True)
     (configuration_directory / "board.toml").write_text('priority_labels = ["ux", "security"]\n')
-    nested_directory = toplevel / "src" / "agent_claim"
+    nested_directory = toplevel / "src" / "agent_coordination"
     nested_directory.mkdir(parents=True)
     monkeypatch.chdir(nested_directory)
     observed: list[list[str]] = []
@@ -9154,7 +9154,7 @@ def _stub_versioned_paths(monkeypatch: pytest.MonkeyPatch) -> None:
             "LICENSE",
             "README.md",
             "pyproject.toml",
-            "src/agent_claim/__init__.py",
+            "src/agent_coordination/__init__.py",
         ),
     )
 
@@ -9280,7 +9280,7 @@ def _patch_status_cli(monkeypatch: pytest.MonkeyPatch, client: FakeForge) -> Non
             "LICENSE",
             "README.md",
             "pyproject.toml",
-            "src/agent_claim/__init__.py",
+            "src/agent_coordination/__init__.py",
         ),
     )
     monkeypatch.setattr(issue_claim, "datetime", FixedDateTime)
@@ -11980,7 +11980,7 @@ def test_cli_module_entry_point_exits_with_mains_return_code(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """`python -m agent_claim.cli` and the installed console script run the
+    """`python -m agent_coordination.cli` and the installed console script run the
     `if __name__ == "__main__":` guard, not `main()` as a library call --
     exercise that guard directly rather than only ever calling `main()`."""
     home = tmp_path / "home"
@@ -11992,8 +11992,11 @@ def test_cli_module_entry_point_exits_with_mains_return_code(
     forbid_github_for_policy(monkeypatch)
     monkeypatch.setattr(sys, "argv", ["agent-claim", "policy", "--print"])
 
-    with pytest.warns(RuntimeWarning, match="agent_claim.cli"), pytest.raises(SystemExit) as exited:
-        runpy.run_module("agent_claim.cli", run_name="__main__")
+    with (
+        pytest.warns(RuntimeWarning, match="agent_coordination.cli"),
+        pytest.raises(SystemExit) as exited,
+    ):
+        runpy.run_module("agent_coordination.cli", run_name="__main__")
 
     assert exited.value.code == 0
     assert capsys.readouterr().out.startswith("<!-- agent-claim-policy:v1 -->\n")
@@ -12321,7 +12324,7 @@ def test_protect_absolute_file_path_allows_when_claim_scope_covers_it(
     _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
     _patch_protect_git(monkeypatch, work)
     _patch_protect_claim(monkeypatch)
-    target = work / "src" / "agent_claim" / "cli.py"
+    target = work / "src" / "agent_coordination" / "cli.py"
 
     assert (
         _protect_main(
@@ -13666,8 +13669,8 @@ def test_trunk_landing_times_count_a_five_commit_merge_once(
 
 
 def test_no_path_class_list_is_read_or_written() -> None:
-    assert not Path("src/agent_claim").joinpath("single_writer.py").exists()
-    text = Path("src/agent_claim/protocol.py").read_text()
+    assert not Path("src/agent_coordination").joinpath("single_writer.py").exists()
+    text = Path("src/agent_coordination/protocol.py").read_text()
     assert "single-writer" not in text
     assert "single_writer" not in text
 
