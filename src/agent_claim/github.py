@@ -28,9 +28,10 @@ TIMESTAMP_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 # gh 2.45 colorizes --jq output when it believes stdout is a TTY.
 ANSI_ESCAPE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 COMMENTS_PER_PAGE = 100
-# `_projection_comments` still fetches one page per `gh` subprocess call and
-# can stop as soon as a short page ends, so these genuinely bound how much it
-# fetches before giving up and asking for a ledger rollover.
+# `list_protocol_candidates` -- the one remaining ledger read, `bootstrap
+# --ledger`'s one-time import -- still fetches one page per `gh` subprocess
+# call and can stop as soon as a short page ends, so these genuinely bound
+# how much it fetches before giving up and asking for a ledger rollover.
 MAX_LEDGER_PAGES = 100
 LEDGER_ROLLOVER_WARNING_PAGES = 80
 # `list_protocol_candidates` fetches every comment page before it can inspect
@@ -40,15 +41,12 @@ LEDGER_ROLLOVER_WARNING_PAGES = 80
 MAX_LEDGER_COMMENTS = MAX_LEDGER_PAGES * COMMENTS_PER_PAGE
 LEDGER_ROLLOVER_WARNING_COMMENTS = LEDGER_ROLLOVER_WARNING_PAGES * COMMENTS_PER_PAGE
 MAX_RECENT_MERGED_PULL_REQUESTS = 1000
-# GitHub's issue-comments listing is offset-paginated (a page past the last
-# one comes back empty rather than erroring) and its merged-pull-request
-# search accepts an exact-day filter, so both a ledger's comment pages and a
+# GitHub's merged-pull-request search accepts an exact-day filter, so a
 # board's merged-pull-request date shards are independent, order-agnostic
-# fetches. Walking them one `gh` subprocess at a time made a growing ledger
-# the dominant cost of `status`/`board`/`next`/`claim` (measured ~7-8s for an
-# ~18-page ledger; ~0.8s fetched in parallel batches). This bounds how many
-# `gh` subprocesses run at once, comfortably under GitHub's secondary rate
-# limit for concurrent requests.
+# fetches. Walking them one `gh` subprocess at a time made shard count the
+# dominant cost of a wide `board`/`next` read; fetched in parallel batches
+# instead. This bounds how many `gh` subprocesses run at once, comfortably
+# under GitHub's secondary rate limit for concurrent requests.
 PARALLEL_FETCH_CONCURRENCY = 20
 GH_TIMEOUT_SECONDS = 60
 GH_QUIET_ENVIRONMENT = {

@@ -15,7 +15,16 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from test_cli import FakeForge, _identity_marker_value, comment, marker, request
+from test_cli import (
+    FakeForge,
+    LedgerActiveClaim,
+    _identity_marker_value,
+    comment,
+    marker,
+    parse_claim_event,
+    request,
+    rescope_comment,
+)
 
 from agent_claim import cli as issue_claim
 from agent_claim import github, process, protocol, store
@@ -835,20 +844,27 @@ def test_commit_tree_fails_loud_on_an_unresolvable_tree(worktree: Path) -> None:
 
 
 def _issue_claim_intent(
-    issue: int, *, claim_id: str = "a1", operation_id: str = "op-1", **overrides: object
+    issue: int,
+    *,
+    claim_id: str = "a1",
+    operation_id: str = "op-1",
+    agent: str = "Ada",
+    role: str = "builder",
+    resource_name: str | None = None,
+    resource_value: int | None = None,
 ) -> protocol.ClaimIntent:
-    fields: dict[str, object] = {
-        "identity": protocol.IssueIdentity(issue),
-        "agent": "Ada",
-        "role": "builder",
-        "base": protocol.ObjectId("c" * 40),
-        "branch": f"claude/issue-{issue}-cut",
-        "scope": (f"src/issue-{issue}.py",),
-        "claim_id": protocol.ClaimId(claim_id),
-        "operation_id": operation_id,
-    }
-    fields.update(overrides)
-    return protocol.ClaimIntent(**fields)  # type: ignore[arg-type]
+    return protocol.ClaimIntent(
+        identity=protocol.IssueIdentity(issue),
+        agent=agent,
+        role=role,
+        base=protocol.ObjectId("c" * 40),
+        branch=f"claude/issue-{issue}-cut",
+        scope=(f"src/issue-{issue}.py",),
+        claim_id=protocol.ClaimId(claim_id),
+        operation_id=operation_id,
+        resource_name=resource_name,
+        resource_value=resource_value,
+    )
 
 
 def test_committer_date_reads_the_commit_that_introduced_a_claim(
@@ -1647,21 +1663,24 @@ def test_parse_claim_key_rejects_a_malformed_key(key: str, match: str) -> None:
 # --- `claims/<key>.toml` and `resources/<name>.toml` codecs ----------------
 
 
-def _sample_claim(**overrides: object) -> protocol.ActiveClaim:
-    fields: dict[str, object] = {
-        "identity": protocol.IssueIdentity(42),
-        "claim_id": protocol.ClaimId("a1"),
-        "agent": "Ada",
-        "role": "builder",
-        "base": _BASE,
-        "branch": "claude/issue-42-cut",
-        "scope": ("src/agent_claim/store.py",),
-        "opened_commit": _TIP,
-        "resource": None,
-        "whole_reason": None,
-    }
-    fields.update(overrides)
-    return protocol.ActiveClaim(**fields)  # type: ignore[arg-type]
+def _sample_claim(
+    *,
+    scope: tuple[str, ...] = ("src/agent_claim/store.py",),
+    resource: protocol.ResourceHold | None = None,
+    whole_reason: str | None = None,
+) -> protocol.ActiveClaim:
+    return protocol.ActiveClaim(
+        identity=protocol.IssueIdentity(42),
+        claim_id=protocol.ClaimId("a1"),
+        agent="Ada",
+        role="builder",
+        base=_BASE,
+        branch="claude/issue-42-cut",
+        scope=scope,
+        opened_commit=_TIP,
+        resource=resource,
+        whole_reason=whole_reason,
+    )
 
 
 def test_serialize_and_parse_claim_toml_round_trips_the_minimal_claim() -> None:
@@ -1955,6 +1974,62 @@ def test_import_reader_skips_ordinary_comments_that_carry_no_marker() -> None:
     imported = protocol.state_from_ledger_aggregate(comments, opened_commit=_TIP)
 
     assert set(imported.claims) == {"issue-10"}
+
+
+def test_import_reader_carries_a_rescoped_claims_current_scope() -> None:
+    """A live case in hopin: a migration right on claim id and branch but
+    wrong on scope would silently misfence the very work it is supposed to
+    protect. The claim comment's own scope is stale the moment a rescope
+    lands after it; the import reader must carry the ledger's *current*
+    scope -- the aggregate walk's `active` state after every rescope event
+    -- onto the store record, never the original claim comment's."""
+    claimed_request = request("claim-a", issue=10, scope=("src/a.py",))
+    claimed_body = _ledger_claim_body(claimed_request)
+    claimed = parse_claim_event(comment(1, claimed_body))
+    assert isinstance(claimed, LedgerActiveClaim)
+    widened = rescope_comment(claimed, ("src/a.py", "src/b.py"), claimed.agent, claimed.role)
+    comments = (
+        comment(1, claimed_body),
+        comment(2, widened),
+        comment(3, _tombstone_body()),
+    )
+
+    imported = protocol.state_from_ledger_aggregate(comments, opened_commit=_TIP)
+
+    assert imported.claims["issue-10"].scope == ("src/a.py", "src/b.py")
+
+
+def test_import_reader_carries_a_rescoped_claims_current_whole_reason() -> None:
+    """The same staleness risk applies to `whole_reason`: setting one, and
+    clearing one, must both survive the import as the ledger's current
+    state, never the original claim comment's."""
+    claimed_request = request("claim-a", issue=11, scope=("src/a.py",))
+    claimed_body = _ledger_claim_body(claimed_request)
+    claimed = parse_claim_event(comment(1, claimed_body))
+    assert isinstance(claimed, LedgerActiveClaim)
+    set_reason = rescope_comment(
+        claimed,
+        claimed.scope,
+        claimed.agent,
+        claimed.role,
+        whole_reason="repo-wide rename",
+    )
+    cleared_reason = rescope_comment(
+        claimed, claimed.scope, claimed.agent, claimed.role, clear_whole_reason=True
+    )
+
+    set_comments = (comment(1, claimed_body), comment(2, set_reason), comment(3, _tombstone_body()))
+    set_imported = protocol.state_from_ledger_aggregate(set_comments, opened_commit=_TIP)
+    assert set_imported.claims["issue-11"].whole_reason == "repo-wide rename"
+
+    cleared_comments = (
+        comment(1, claimed_body),
+        comment(2, set_reason),
+        comment(3, cleared_reason),
+        comment(4, _tombstone_body()),
+    )
+    cleared_imported = protocol.state_from_ledger_aggregate(cleared_comments, opened_commit=_TIP)
+    assert cleared_imported.claims["issue-11"].whole_reason is None
 
 
 def test_import_reader_refuses_an_unreadable_claim_comment() -> None:

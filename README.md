@@ -25,11 +25,30 @@ whole: an unknown key or a malformed record fails the whole read loud, never
 a single quarantinable claim -- a commit is the unit a writer writes, so a
 broken tree is corrupt state. `version = 1` is the compatibility contract
 this release actually makes; a later tree version is a new cut, not a silent
-patch. Every repository migrated off the old GitHub-issue ledger carries a
-tombstone comment on that closed issue naming the migration; a 0.12.x or
-older client that still tries to read a ledger hits it and fails loud,
-telling the operator to upgrade. A repository not yet migrated still runs
-its old ledger under an installation pinned to 0.12.x or earlier.
+patch. Every repository migrated off the old GitHub-issue ledger carries this
+tombstone, posted once on that now-closed issue and never edited afterward:
+
+```
+<!-- agent-claim:v2 {"action":"state_cut","claim_id":"state-cut","agent":"coordinator","role":"coordinator"} -->
+
+This ledger is closed. Claim state now lives in this repository's state ref; upgrade the tool and re-read its README. Do not post further claim comments.
+Agent: coordinator (coordinator)
+```
+
+It names no version number and no new command name -- old clients are
+"0.12.x and older" in the text, never "the 0.13 client" -- so it never needs
+editing to stay accurate; a 0.12.x or older client that still tries to read a
+ledger hits its unknown `state_cut` action and fails loud, telling the
+operator to upgrade. The migration names three rollback windows. Before the
+tombstone, the ledger is still the only truth and nothing about the cut is
+yet irreversible. Between the tombstone and the import, the ledger is closed
+to writers but still holds the truth the import has not yet moved, so a
+stuck import is repaired by deleting the tombstone and reposting it, never by
+editing it in place. After the import lands, the state ref is the truth and
+the ledger issue closes only once that repository's import is proven against
+the `status --json` snapshot taken before its tombstone. A repository not yet
+migrated still runs its old ledger under an installation pinned to 0.12.x or
+earlier.
 
 ## Five-command quick start
 
