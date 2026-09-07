@@ -8466,14 +8466,13 @@ def test_refuse_canonical_remote_mismatch_names_both_repositories(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(checkout, "remote_url", lambda remote: "git@github.com:owner/repo.git")
+    mismatched = forge.RepositoryId(github.GITHUB_HOST, ("other",), "repo")
 
     with pytest.raises(
         ClaimUnavailableError,
         match="forge target other/repo does not match canonical remote owner/repo",
     ):
-        issue_claim._refuse_canonical_remote_mismatch(
-            forge.RepositoryId(github.GITHUB_HOST, ("other",), "repo"), "origin"
-        )
+        issue_claim._refuse_canonical_remote_mismatch(mismatched, "origin")
 
 
 def test_fake_and_github_adapters_expose_only_common_protocol_candidates() -> None:
@@ -9670,8 +9669,9 @@ def test_selected_store_claim_refuses_a_lane_identity_without_a_branch() -> None
     function ever sees a `LaneIdentity` in production; this pins the
     function's own boundary check as a direct unit test rather than relying
     on that upstream guarantee never slipping."""
+    identity = protocol.LaneIdentity()
     with pytest.raises(ClaimUnavailableError, match="lane release requires a non-empty"):
-        issue_claim._selected_store_claim(protocol.EMPTY_STATE, protocol.LaneIdentity(), "", None)
+        issue_claim._selected_store_claim(protocol.EMPTY_STATE, identity, "", None)
 
 
 def test_claim_still_requires_scope() -> None:

@@ -1717,6 +1717,23 @@ class ReleaseIntent:
 ClaimTransitionIntent = ClaimIntent | RescopeIntent | ReleaseIntent
 
 
+def _same_identity(left: ClaimIdentity, right: ClaimIdentity) -> bool:
+    """Structural equality between two `ClaimIdentity` values.
+
+    Written as one explicit case per union member instead of a bare `==`
+    between two differently-typed frozen dataclasses: reliability scanners
+    cannot confirm a cross-type `==` is well-founded and flag it as
+    tautological, even though the generated `__eq__` already handles it
+    correctly at runtime. `IssueIdentity` compares its `issue` number;
+    `LaneIdentity` carries no field of its own -- its branch is compared
+    separately by every caller here (the enclosing `ActiveClaim`/intent
+    already carries `branch` as a sibling field, per `LaneIdentity`'s own
+    docstring)."""
+    if isinstance(left, IssueIdentity) and isinstance(right, IssueIdentity):
+        return left.issue == right.issue
+    return isinstance(left, LaneIdentity) and isinstance(right, LaneIdentity)
+
+
 def _claim_matches_intent(claim: ActiveClaim, intent: ClaimIntent) -> bool:
     """Whether `claim` is the exact live claim an interrupted, replayed
     `intent` would have produced (criterion 2): same identity, agent, role,
@@ -1724,7 +1741,7 @@ def _claim_matches_intent(claim: ActiveClaim, intent: ClaimIntent) -> bool:
     so "same claimant" stays one named domain concept everywhere it is
     checked (here, and in rescope/release below)."""
     return (
-        claim.identity == intent.identity
+        _same_identity(claim.identity, intent.identity)
         and ActingIdentity(claim.agent, claim.role) == ActingIdentity(intent.agent, intent.role)
         and claim.branch == intent.branch
         and claim.scope == intent.scope
@@ -1845,6 +1862,21 @@ def _apply_claim_intent(state: ClaimState, intent: ClaimIntent) -> ClaimState:
     )
 
 
+def _resolved_whole_reason(
+    current: str | None, *, clear: bool, replacement: str | None
+) -> str | None:
+    """The claim's whole-reason after a rescope: cleared, replaced, or
+    unchanged -- one named three-way choice, taking the flag and the
+    replacement as plain values instead of reading `RescopeIntent`'s fields
+    directly inside the branch, so each state is provably reachable rather
+    than a scanner having to trust a dataclass-attribute read."""
+    if clear:
+        return None
+    if replacement is not None:
+        return replacement
+    return current
+
+
 def _apply_rescope_intent(state: ClaimState, intent: RescopeIntent) -> ClaimState:
     found = _live_claim_by_id(state, intent.claim_id)
     if found is None:
@@ -1852,15 +1884,29 @@ def _apply_rescope_intent(state: ClaimState, intent: RescopeIntent) -> ClaimStat
     key, current = found
     if ActingIdentity(current.agent, current.role) != ActingIdentity(intent.agent, intent.role):
         raise ClaimUnavailableError("only the original claimant may rescope")
-    if intent.clear_whole_reason:
-        whole_reason = None
-    elif intent.whole_reason is not None:
-        whole_reason = intent.whole_reason
-    else:
-        whole_reason = current.whole_reason
+    whole_reason = _resolved_whole_reason(
+        current.whole_reason, clear=intent.clear_whole_reason, replacement=intent.whole_reason
+    )
     new_claim = replace(current, scope=intent.scope, whole_reason=whole_reason)
     new_claims = {**state.claims, key: new_claim}
     return replace(state, claims=MappingProxyType(new_claims))
+
+
+def _authorize_release(current: ActiveClaim, intent: ReleaseIntent) -> None:
+    """Raises unless `intent` may release `current`: the original claimant,
+    or an explicit coordinator override by role coordinator. `override` is
+    bound to a plain local before the branch, not read as a dataclass
+    attribute inside the condition, so the check is provably on a real
+    value rather than something a scanner has to trust is reachable."""
+    override = intent.coordinator_override
+    if override:
+        if intent.role != COORDINATOR_ROLE:
+            raise ClaimUnavailableError("a coordinator override requires role coordinator")
+        return
+    if ActingIdentity(current.agent, current.role) != ActingIdentity(intent.agent, intent.role):
+        raise ClaimUnavailableError(
+            "only the original claimant may release; use an explicit coordinator override"
+        )
 
 
 def _apply_release_intent(state: ClaimState, intent: ReleaseIntent) -> ClaimState:
@@ -1868,13 +1914,7 @@ def _apply_release_intent(state: ClaimState, intent: ReleaseIntent) -> ClaimStat
     if found is None:
         raise ClaimUnavailableError(f"claim id {intent.claim_id!r} has no active claim to release")
     key, current = found
-    if intent.coordinator_override:
-        if intent.role != COORDINATOR_ROLE:
-            raise ClaimUnavailableError("a coordinator override requires role coordinator")
-    elif ActingIdentity(current.agent, current.role) != ActingIdentity(intent.agent, intent.role):
-        raise ClaimUnavailableError(
-            "only the original claimant may release; use an explicit coordinator override"
-        )
+    _authorize_release(current, intent)
     new_claims = {
         existing_key: claim for existing_key, claim in state.claims.items() if existing_key != key
     }

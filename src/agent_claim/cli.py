@@ -567,11 +567,11 @@ def _status_json(
     return 2 if state == "CONFLICT" else 0
 
 
-def _status_path(claims: tuple[protocol.ActiveClaim, ...], path: str) -> int:
+def _status_path(claims: tuple[protocol.ActiveClaim, ...], path: str) -> None:
     holders = protocol.claims_holding_path(claims, path)
     if not holders:
         print(f"UNCLAIMED {path}")
-        return 0
+        return
     for claim in holders:
         print(
             f"CLAIMED {path} {_claim_subject(claim)}: {claim.agent} ({claim.role}) "
@@ -584,7 +584,6 @@ def _status_path(claims: tuple[protocol.ActiveClaim, ...], path: str) -> int:
             "overlap: "
             + ", ".join(f"{_claim_subject(claim)} ({claim.claim_id})" for claim in holders)
         )
-    return 0
 
 
 def _status_path_json(claims: tuple[protocol.ActiveClaim, ...], path: str) -> int:
@@ -1906,7 +1905,8 @@ def _cmd_status(parsed: argparse.Namespace) -> int:
     if parsed.path is not None:
         if parsed.json:
             return _status_path_json(claims, parsed.path)
-        return _status_path(claims, parsed.path)
+        _status_path(claims, parsed.path)
+        return 0
     issue = _optional_issue_number(parsed.issue)
     now = datetime.now(UTC)
     if parsed.json:

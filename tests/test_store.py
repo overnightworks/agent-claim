@@ -1024,12 +1024,13 @@ def test_commit_transition_same_key_second_racer_names_the_holder(
         intent=_issue_claim_intent(42),
     )
 
+    intent = _issue_claim_intent(42, agent="Grace", claim_id="a2", operation_id="op-2")
     with pytest.raises(protocol.ClaimUnavailableError, match="is claimed by Ada"):
         store.commit_transition(
             worktree=worktree,
             remote=str(bare_remote),
             subject="claim issue 42",
-            intent=_issue_claim_intent(42, agent="Grace", claim_id="a2", operation_id="op-2"),
+            intent=intent,
         )
 
 
@@ -1039,12 +1040,13 @@ def test_commit_transition_a_different_key_loser_that_exhausts_retries_names_no_
     store.bootstrap(worktree=worktree, remote=str(bare_remote))
     transport = _AlwaysRejectingTransport()
 
+    intent = _issue_claim_intent(42)
     with pytest.raises(protocol.ClaimUnavailableError, match="moved 32 times; retry the command"):
         store.commit_transition(
             worktree=worktree,
             remote=str(bare_remote),
             subject="claim issue 42",
-            intent=_issue_claim_intent(42),
+            intent=intent,
             transport=transport,
         )
 
@@ -1284,8 +1286,9 @@ def test_apply_claim_intent_adds_a_live_claim_and_consumes_its_id() -> None:
 
 
 def test_apply_claim_intent_refuses_against_a_missing_state_ref() -> None:
+    intent = _claim_intent()
     with pytest.raises(protocol.ClaimError, match="does not exist yet"):
-        protocol.apply(protocol.EMPTY_STATE, _claim_intent())
+        protocol.apply(protocol.EMPTY_STATE, intent)
 
 
 def test_apply_claim_intent_replays_idempotently_for_the_same_claim_id_and_fields() -> None:
@@ -1298,9 +1301,10 @@ def test_apply_claim_intent_replays_idempotently_for_the_same_claim_id_and_field
 
 def test_apply_claim_intent_refuses_a_reused_claim_id_with_different_fields() -> None:
     once = protocol.apply(_STATE_WITH_TIP, _claim_intent())
+    reused = _claim_intent(scope=("README.md",))
 
     with pytest.raises(protocol.ClaimUnavailableError, match="already on this ledger"):
-        protocol.apply(once, _claim_intent(scope=("README.md",)))
+        protocol.apply(once, reused)
 
 
 def test_apply_claim_intent_refuses_a_reused_claim_id_after_release() -> None:
@@ -1313,16 +1317,18 @@ def test_apply_claim_intent_refuses_a_reused_claim_id_after_release() -> None:
         operation_id="op-2",
     )
     released = protocol.apply(claimed, release)
+    reclaim = _claim_intent(operation_id="op-3")
 
     with pytest.raises(protocol.ClaimUnavailableError, match="already on this ledger"):
-        protocol.apply(released, _claim_intent(operation_id="op-3"))
+        protocol.apply(released, reclaim)
 
 
 def test_apply_claim_intent_refuses_an_identity_conflict() -> None:
     claimed = protocol.apply(_STATE_WITH_TIP, _claim_intent())
+    conflicting = _claim_intent(agent="Grace", claim_id="a2", operation_id="op-2")
 
     with pytest.raises(protocol.ClaimUnavailableError, match="is claimed by Ada"):
-        protocol.apply(claimed, _claim_intent(agent="Grace", claim_id="a2", operation_id="op-2"))
+        protocol.apply(claimed, conflicting)
 
 
 def test_apply_rescope_intent_replaces_scope_and_preserves_opened_commit() -> None:
@@ -1505,18 +1511,16 @@ def test_apply_claim_intent_refuses_an_explicit_resource_value_already_held() ->
         _claim_intent(claim_id="a1", resource_name="display", resource_value=2),
     )
 
+    conflicting = _claim_intent(
+        identity=protocol.IssueIdentity(43),
+        claim_id="a2",
+        operation_id="op-2",
+        agent="Grace",
+        resource_name="display",
+        resource_value=2,
+    )
     with pytest.raises(protocol.ClaimUnavailableError, match="display 2 is held by Ada"):
-        protocol.apply(
-            held,
-            _claim_intent(
-                identity=protocol.IssueIdentity(43),
-                claim_id="a2",
-                operation_id="op-2",
-                agent="Grace",
-                resource_name="display",
-                resource_value=2,
-            ),
-        )
+        protocol.apply(held, conflicting)
 
 
 def test_apply_claim_intent_never_reuses_a_released_auto_resource_value() -> None:
@@ -1555,13 +1559,11 @@ def test_apply_claim_intent_never_reuses_a_released_explicit_resource_value() ->
     )
     released = protocol.apply(claimed, release)
 
+    reclaim = _claim_intent(
+        claim_id="a2", operation_id="op-3", resource_name="display", resource_value=1
+    )
     with pytest.raises(protocol.ClaimUnavailableError, match="already consumed"):
-        protocol.apply(
-            released,
-            _claim_intent(
-                claim_id="a2", operation_id="op-3", resource_name="display", resource_value=1
-            ),
-        )
+        protocol.apply(released, reclaim)
 
 
 def test_stale_takeover_is_release_then_claim_and_does_not_reuse_the_occupied_integer() -> None:
@@ -1588,13 +1590,15 @@ def test_stale_takeover_is_release_then_claim_and_does_not_reuse_the_occupied_in
 
 
 def test_apply_resource_value_requires_a_resource_name() -> None:
+    intent = _claim_intent(resource_value=3)
     with pytest.raises(protocol.ClaimError, match="resource value requires a resource name"):
-        protocol.apply(_STATE_WITH_TIP, _claim_intent(resource_value=3))
+        protocol.apply(_STATE_WITH_TIP, intent)
 
 
 def test_apply_resource_value_must_be_a_positive_integer() -> None:
+    intent = _claim_intent(resource_name="display", resource_value=0)
     with pytest.raises(protocol.ClaimError, match="positive integer"):
-        protocol.apply(_STATE_WITH_TIP, _claim_intent(resource_name="display", resource_value=0))
+        protocol.apply(_STATE_WITH_TIP, intent)
 
 
 # --- Claim key codec (criterion 10) ----------------------------------------
@@ -1833,8 +1837,9 @@ def _claim_toml_content(**overrides: str) -> str:
     ],
 )
 def test_parse_claim_toml_rejects_a_malformed_field(overrides: dict[str, str], match: str) -> None:
+    content = _claim_toml_content(**overrides)
     with pytest.raises(protocol.MalformedStateTreeError, match=match):
-        protocol.parse_claim_toml(_claim_toml_content(**overrides), key="issue-42", tip=_OTHER_TIP)
+        protocol.parse_claim_toml(content, key="issue-42", tip=_OTHER_TIP)
 
 
 def test_parse_claim_toml_rejects_a_non_positive_resource_value() -> None:
@@ -1876,12 +1881,13 @@ def test_commit_transition_refuses_a_missing_state_ref(worktree: Path, tmp_path:
     empty_remote.mkdir()
     _git("init", "--bare", "-b", "main", cwd=empty_remote)
 
+    intent = _claim_intent()
     with pytest.raises(protocol.ClaimError, match="does not exist yet"):
         store.commit_transition(
             worktree=worktree,
             remote=str(empty_remote),
             subject="claim issue 42",
-            intent=_claim_intent(),
+            intent=intent,
         )
 
 

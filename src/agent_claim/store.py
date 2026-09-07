@@ -62,8 +62,10 @@ DEFAULT_CANONICAL_REMOTE = "origin"
 CLAIMS_DIRECTORY = "claims"
 IDS_DIRECTORY = "ids"
 RESOURCES_DIRECTORY = "resources"
+SCHEMA_TOML_FILENAME = "schema.toml"
+TOML_SUFFIX = ".toml"
 _STATE_TOP_LEVEL_NAMES = frozenset(
-    {"schema.toml", CLAIMS_DIRECTORY, IDS_DIRECTORY, RESOURCES_DIRECTORY}
+    {SCHEMA_TOML_FILENAME, CLAIMS_DIRECTORY, IDS_DIRECTORY, RESOURCES_DIRECTORY}
 )
 
 # The transition each intent type carries, for the commit message trailer
@@ -310,12 +312,12 @@ def _read_blob(worktree: Path, oid: str, *, tip: ObjectId, context: str) -> str:
 def _read_schema_toml(
     worktree: Path, top_entries: dict[str, tuple[str, str]], *, tip: ObjectId
 ) -> str:
-    if "schema.toml" not in top_entries:
-        raise MalformedStateTreeError(f"state tree at {tip} is missing schema.toml")
-    kind, blob_oid = top_entries["schema.toml"]
+    if SCHEMA_TOML_FILENAME not in top_entries:
+        raise MalformedStateTreeError(f"state tree at {tip} is missing {SCHEMA_TOML_FILENAME}")
+    kind, blob_oid = top_entries[SCHEMA_TOML_FILENAME]
     if kind != "blob":
-        raise MalformedStateTreeError(f"schema.toml at {tip} is not a blob")
-    return _read_blob(worktree, blob_oid, tip=tip, context="schema.toml")
+        raise MalformedStateTreeError(f"{SCHEMA_TOML_FILENAME} at {tip} is not a blob")
+    return _read_blob(worktree, blob_oid, tip=tip, context=SCHEMA_TOML_FILENAME)
 
 
 def _subtree_oid(
@@ -337,9 +339,9 @@ def _parse_claims_subtree(
     claims: dict[str, ActiveClaim] = {}
     listing = _list_tree(worktree, oid, tip=tip, context=CLAIMS_DIRECTORY)
     for name, (kind, blob_oid) in listing.items():
-        if kind != "blob" or not name.endswith(".toml"):
+        if kind != "blob" or not name.endswith(TOML_SUFFIX):
             raise MalformedStateTreeError(f"{CLAIMS_DIRECTORY}/{name} at {tip} is not a claim file")
-        key = name.removesuffix(".toml")
+        key = name.removesuffix(TOML_SUFFIX)
         content = _read_blob(worktree, blob_oid, tip=tip, context=f"{CLAIMS_DIRECTORY}/{name}")
         claims[key] = parse_claim_toml(content, key=key, tip=tip)
     return MappingProxyType(claims)
@@ -368,11 +370,11 @@ def _parse_resources_subtree(
     for name, (kind, blob_oid) in _list_tree(
         worktree, oid, tip=tip, context=RESOURCES_DIRECTORY
     ).items():
-        if kind != "blob" or not name.endswith(".toml"):
+        if kind != "blob" or not name.endswith(TOML_SUFFIX):
             raise MalformedStateTreeError(
                 f"{RESOURCES_DIRECTORY}/{name} at {tip} is not a resource file"
             )
-        resource_name = name.removesuffix(".toml")
+        resource_name = name.removesuffix(TOML_SUFFIX)
         content = _read_blob(worktree, blob_oid, tip=tip, context=f"{RESOURCES_DIRECTORY}/{name}")
         resources[resource_name] = parse_resource_toml(content, name=resource_name, tip=tip)
     return MappingProxyType(resources)
@@ -545,7 +547,12 @@ def _write_claims_subtree(worktree: Path, claims: Mapping[str, ActiveClaim]) -> 
     return _mktree(
         worktree,
         [
-            ("100644", "blob", _write_blob(worktree, serialize_claim_toml(claim)), f"{key}.toml")
+            (
+                "100644",
+                "blob",
+                _write_blob(worktree, serialize_claim_toml(claim)),
+                f"{key}{TOML_SUFFIX}",
+            )
             for key, claim in claims.items()
         ],
     )
@@ -566,7 +573,7 @@ def _write_resources_subtree(worktree: Path, resources: Mapping[str, ResourceRec
                 "100644",
                 "blob",
                 _write_blob(worktree, serialize_resource_toml(record)),
-                f"{name}.toml",
+                f"{name}{TOML_SUFFIX}",
             )
             for name, record in resources.items()
         ],
@@ -579,7 +586,7 @@ def _write_state_tree(worktree: Path, state: ClaimState) -> ObjectId:
     writes only `schema.toml`; these subtrees appear the first time `apply`
     puts something in them (§1)."""
     schema_blob = _write_blob(worktree, serialize_empty_schema_toml())
-    top_entries: list[_TreeEntry] = [("100644", "blob", schema_blob, "schema.toml")]
+    top_entries: list[_TreeEntry] = [("100644", "blob", schema_blob, SCHEMA_TOML_FILENAME)]
     if state.claims:
         top_entries.append(
             ("040000", "tree", _write_claims_subtree(worktree, state.claims), CLAIMS_DIRECTORY)

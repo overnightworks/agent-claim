@@ -535,6 +535,55 @@ class Board:
     requests: int
 
 
+def _validated_priority_labels(raw: dict[str, object]) -> tuple[str, ...]:
+    labels = raw.get("priority_labels")
+    if labels is None:
+        return DEFAULT_PRIORITY_LABELS
+    if (
+        not isinstance(labels, list)
+        or not labels
+        or not all(isinstance(label, str) and label.strip() == label and label for label in labels)
+        or len(set(labels)) != len(labels)
+    ):
+        raise protocol.ClaimError(
+            "board configuration priority_labels must be a non-empty list of unique labels"
+        )
+    return tuple(labels)
+
+
+def _validated_idea_label(raw: dict[str, object]) -> str | None:
+    idea_label = raw.get("idea_label")
+    if idea_label is not None and (
+        not isinstance(idea_label, str) or idea_label.strip() != idea_label or not idea_label
+    ):
+        raise protocol.ClaimError("board configuration idea_label must be a non-empty label")
+    return idea_label
+
+
+def _validated_body_contract(raw: dict[str, object], path: Path) -> BodyContractMode:
+    body_contract_raw = raw.get("body_contract")
+    if body_contract_raw is None:
+        return BodyContractMode.PROSE
+    if isinstance(body_contract_raw, str) and body_contract_raw in set(BodyContractMode):
+        return BodyContractMode(body_contract_raw)
+    raise protocol.ClaimError(f"board configuration {path} body_contract must be prose or block")
+
+
+def _validated_canonical_remote(raw: dict[str, object], path: Path) -> str:
+    canonical_remote_raw = raw.get("canonical_remote")
+    if canonical_remote_raw is None:
+        return "origin"
+    if (
+        isinstance(canonical_remote_raw, str)
+        and canonical_remote_raw.strip() == canonical_remote_raw
+        and canonical_remote_raw
+    ):
+        return canonical_remote_raw
+    raise protocol.ClaimError(
+        f"board configuration {path} canonical_remote must be a non-empty remote name"
+    )
+
+
 def load_config(path: Path = CONFIG_PATH) -> BoardConfig:
     if not path.exists():
         return BoardConfig()
@@ -543,50 +592,12 @@ def load_config(path: Path = CONFIG_PATH) -> BoardConfig:
             raw = tomllib.load(stream)
     except (OSError, tomllib.TOMLDecodeError) as error:
         raise protocol.ClaimError(f"cannot read board configuration {path}: {error}") from error
-    labels = raw.get("priority_labels")
-    if labels is None:
-        priority_labels = DEFAULT_PRIORITY_LABELS
-    else:
-        if (
-            not isinstance(labels, list)
-            or not labels
-            or not all(
-                isinstance(label, str) and label.strip() == label and label for label in labels
-            )
-            or len(set(labels)) != len(labels)
-        ):
-            raise protocol.ClaimError(
-                "board configuration priority_labels must be a non-empty list of unique labels"
-            )
-        priority_labels = tuple(labels)
-    idea_label = raw.get("idea_label")
-    if idea_label is not None and (
-        not isinstance(idea_label, str) or idea_label.strip() != idea_label or not idea_label
-    ):
-        raise protocol.ClaimError("board configuration idea_label must be a non-empty label")
-    body_contract_raw = raw.get("body_contract")
-    if body_contract_raw is None:
-        body_contract = BodyContractMode.PROSE
-    elif isinstance(body_contract_raw, str) and body_contract_raw in set(BodyContractMode):
-        body_contract = BodyContractMode(body_contract_raw)
-    else:
-        raise protocol.ClaimError(
-            f"board configuration {path} body_contract must be prose or block"
-        )
-    canonical_remote_raw = raw.get("canonical_remote")
-    if canonical_remote_raw is None:
-        canonical_remote = "origin"
-    elif (
-        isinstance(canonical_remote_raw, str)
-        and canonical_remote_raw.strip() == canonical_remote_raw
-        and canonical_remote_raw
-    ):
-        canonical_remote = canonical_remote_raw
-    else:
-        raise protocol.ClaimError(
-            f"board configuration {path} canonical_remote must be a non-empty remote name"
-        )
-    return BoardConfig(priority_labels, idea_label, body_contract, canonical_remote)
+    return BoardConfig(
+        priority_labels=_validated_priority_labels(raw),
+        idea_label=_validated_idea_label(raw),
+        body_contract=_validated_body_contract(raw, path),
+        canonical_remote=_validated_canonical_remote(raw, path),
+    )
 
 
 def _contract_field_value(
