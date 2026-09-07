@@ -20,7 +20,6 @@ _Page = TypeVar("_Page")
 TIMESTAMP_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 # gh 2.45 colorizes --jq output when it believes stdout is a TTY.
 ANSI_ESCAPE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
-COMMENTS_PER_PAGE = 100
 MAX_RECENT_MERGED_PULL_REQUESTS = 1000
 # GitHub's merged-pull-request search accepts an exact-day filter, so a
 # board's merged-pull-request date shards are independent, order-agnostic
@@ -609,8 +608,7 @@ class GitHubForge:
         raw = self._run(
             [
                 "api",
-                f"repos/{self.repository}/issues"
-                f"?state=open&per_page={COMMENTS_PER_PAGE}&page={page}",
+                f"repos/{self.repository}/issues?state=open&per_page={ISSUES_PER_PAGE}&page={page}",
                 "--jq",
                 (
                     # No `select` here (unlike the old single `--paginate` call):
@@ -630,7 +628,7 @@ class GitHubForge:
         return self._json_lines(raw, "board issue")
 
     def list_open_board_issues(self) -> tuple[board.Issue, ...]:
-        values = self._fetch_pages(self._open_issue_page, per_page=COMMENTS_PER_PAGE)
+        values = self._fetch_pages(self._open_issue_page, per_page=ISSUES_PER_PAGE)
         return tuple(
             self._board_issue(value)
             for value in values

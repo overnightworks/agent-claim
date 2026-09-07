@@ -1,21 +1,22 @@
-# agent-claim
+# agent-coordination
 
-`agent-claim` is a small installable CLI that gives coding agents one claim
-state per repository: a compare-and-swap git ref, `refs/aco/state`, on the
-repository's own canonical remote. It is provider-neutral: Codex, Claude,
-Grok, people, and future agents use the same contract.
+`agent-coordination` is a small installable CLI that gives coding agents one
+claim state per repository: a compare-and-swap git ref, `refs/aco/state`, on
+the repository's own canonical remote. It is provider-neutral: Codex, Claude,
+Grok, people, and future agents use the same contract. Its command is `aco`.
 
 ## Install and maintain
 
 ```bash
-uv tool install git+https://github.com/FlexOr2/agent-claim.git@v0.10.0
-# or: pipx install git+https://github.com/FlexOr2/agent-claim.git@v0.10.0
-uv tool upgrade agent-claim
-uv tool uninstall agent-claim
+uv tool install git+https://github.com/overnightworks/agent-claim.git@v1.0.0
+# or: pipx install git+https://github.com/overnightworks/agent-claim.git@v1.0.0
+uv tool upgrade agent-coordination
+uv tool uninstall agent-coordination
 ```
 
 To roll back, force-install the previous tag with `uv tool install --force
-git+https://github.com/FlexOr2/agent-claim.git@v0.8.0`.
+git+https://github.com/overnightworks/agent-claim.git@v0.13.1`; that build
+installs the old `agent-claim` command, not `aco`.
 
 Local proofs run under the pinned interpreter named in `.python-version`
 (currently 3.12); `uv sync` creates the development venv from that file.
@@ -50,15 +51,15 @@ that never migrated still runs its old ledger under an installation pinned to
 ## Five-command quick start
 
 ```bash
-agent-claim bootstrap
-agent-claim status
-agent-claim claim 42 --agent "Ada" --scope src/widget.py
-agent-claim release 42 --merged 57
+aco bootstrap
+aco status
+aco claim 42 --agent "Ada" --scope src/widget.py
+aco release 42 --merged 57
 ```
 
 Omitted `--base`/`--branch` bind the current checkout; explicit values must match it.
 Omitted `--agent` on `claim` and `release` is filled from non-empty
-`AGENT_CLAIM_AGENT`, else non-empty `GROK_SESSION_ID` as `Grok {session}`, else
+`ACO_AGENT`, else non-empty `GROK_SESSION_ID` as `Grok {session}`, else
 non-empty `CLAUDE_SESSION_ID` as `Claude {session}`. `GROK_AGENT` is not a name.
 Missing or present-invalid identity fails closed before any write. Omitted
 `--role` on `claim` is `builder`; an explicit `--role` wins. Repeating an
@@ -139,7 +140,7 @@ the forge target does not match the canonical remote's own repository.
 
 ## Landing classification
 
-`agent-claim pr-check --pr <n>` reads one pull request of the current
+`aco pr-check --pr <n>` reads one pull request of the current
 checkout's repository (or `--repo OWNER/REPOSITORY`) and answers one question:
 which item does this landing close? It prints `PR #<n> by <author> declares
 <classification>` and exits 0, or prints one `REFUSED: pull request #<n> ...`
@@ -183,7 +184,7 @@ itself is a container (`claim a child`).
 
 ## Read-only board projection
 
-`agent-claim board` reads the open issues, open PRs, PRs merged since the
+`aco board` reads the open issues, open PRs, PRs merged since the
 oldest open issue was filed, and the live claim state ref, then prints a
 ranked projection with `READY NOW` and `STALE` sections. A pull request that
 advances an issue without closing it — an epic's dispatched slice, typically
@@ -208,7 +209,7 @@ expectations have neither fresh nor old. If a ruled block has no readable date
 or git cannot name the default branch, that is an error, never silently fresh.
 It never writes GitHub.
 The target defaults to the repository of the current checkout;
-for another GitHub repository run `agent-claim --repo FlexOr2/atelier-2 board`.
+for another GitHub repository run `aco --repo overnightworks/atelier-2 board`.
 The current checkout may set `priority_labels` as an ordered non-empty list in
 `.agent-claim/board.toml`; absent configuration uses `security`, `data`, `ci`,
 `product`, `ux`, then `cleanup`. `board_rank` orders every item on five fields:
@@ -270,19 +271,19 @@ carries the same items under `recovery`.
 the command made through the forge port; `board --json` carries the same
 count as a top-level `"requests"` field.
 
-`agent-claim rulings` lists only open board items with open expectation lines
+`aco rulings` lists only open board items with open expectation lines
 as `#NUMBER OPEN/TOTAL: TITLE`; `rulings --json` returns the same `number`,
 `title`, `open`, and `total` values. It is read-only and uses the board's
 priority category and score first, then fewer open expectation lines and the
 issue number. An empty list succeeds.
 
-Use `agent-claim next` (or `agent-claim next --json`) to name the board's
+Use `aco next` (or `aco next --json`) to name the board's
 top-ranked qualifying row — the same `board_rank` order `board` shows.
 `next --json` always carries an `action` field, naming one of three shapes
 or `null` when nothing qualifies. `work_item`: the row is open, free,
 unblocked, not frozen, and has a complete Now/Next/Blocked by/Done when
 contract, or is a configured projectionless idea; its text form also prints
-`Run: agent-claim claim <n> --scope <paths>` (the literal placeholder
+`Run: aco claim <n> --scope <paths>` (the literal placeholder
 `<paths>`, since the scope cannot be derived) and a line pointing at the
 item body for the real paths — the `--json` form is unchanged beyond the
 always-present `action` field. `cut_slice`: a container with no open child
@@ -290,7 +291,7 @@ still names work in its own `Next` line (`{"action": "cut_slice", "number",
 "title", "slice", "cut_title"}`); `slice` is the container's own human step,
 `cut_title` is the exact title `cut` accepts (#177: the first uncut
 `[[slice]]` entry's title when one exists, else `slice`) — the head cuts
-that slice (`agent-claim cut <number> --title "<cut_title>"`) and dispatches
+that slice (`aco cut <number> --title "<cut_title>"`) and dispatches
 it. `close_container`: a container with no
 open child and no further `Next` work (`{"action": "close_container",
 "number", "closed", "total"}`); the head closes it. A container is never
@@ -458,7 +459,7 @@ cannot derive rather than inventing it) and keeps the existing prose in place
 — GitHub's own edit history is the undo. Forge dependencies are added to
 reproduce existing `Blocked by` relations before the pin lands; parentage
 needs no migration since it already lives on sub-issues. **Upgrade every
-active `agent-claim` installation to a release containing this contract
+active `agent-coordination` installation to a release containing this contract
 before a repository sets `body_contract = "block"`** — an older client either
 does not know the key (and keeps reading prose blindly) or, once every open
 item carries a block, would otherwise see a repository it cannot coordinate
@@ -469,7 +470,7 @@ automatically.
 
 ## Cutting a container's next slice
 
-`agent-claim cut <container> --title "…"` dispatches a container's next slice
+`aco cut <container> --title "…"` dispatches a container's next slice
 as a fresh child issue in one step: it creates the issue (native type `Task`),
 records it as the container's sub-issue, and, when there is a slice-table row
 to link, rewrites the container's slice table so that row now links
@@ -518,8 +519,8 @@ silent, unlabeled claim:
 ```bash
 git worktree add ../repo-worktrees/docs-tidy-readme -b docs/tidy-readme
 cd ../repo-worktrees/docs-tidy-readme
-agent-claim claim --agent "Ada" --scope README.md
-agent-claim release --merged 58
+aco claim --agent "Ada" --scope README.md
+aco release --merged 58
 ```
 
 Like an issue claim, a lane claim must begin from a clean linked worktree
@@ -536,17 +537,10 @@ the checkout branch it was claimed from, so releasing it — including a
 coordinator override — always runs from a checkout of that same lane branch.
 If the original worktree is gone or held by another session, re-create a
 worktree on that branch (`git worktree add <path> <lane-branch>`) and run
-`agent-claim release --claim-id <id> --coordinator-override --role coordinator
---abandoned "..."` from inside it, where `<id>` comes from `agent-claim status`
+`aco release --claim-id <id> --coordinator-override --role coordinator
+--abandoned "..."` from inside it, where `<id>` comes from `aco status`
 (omitting `--claim-id` still filters by the releasing agent, coordinator
 override or not, so a foreign stuck claim needs the id).
-
-## Global loader
-
-Run `agent-claim policy --print` and append the block once into the file the
-provider actually loads. Skip the append when `<!-- agent-claim-policy:v1 -->`
-is already present. Never overwrite an existing loader. The CLI does not write
-`~/.claude`, `~/.codex`, or `~/.grok`.
 
 ## PreToolUse write gate
 
@@ -563,7 +557,7 @@ an existing hook file. The CLI does not write `~/.grok`.
         "hooks": [
           {
             "type": "command",
-            "command": "agent-claim protect",
+            "command": "aco protect",
             "timeout": 60
           }
         ]
@@ -573,11 +567,15 @@ an existing hook file. The CLI does not write `~/.grok`.
 }
 ```
 
-## v0.5 boundary
+## Scope and boundaries
 
-GitHub via the `gh` CLI is supported today. Invocations set `NO_COLOR=1`
-and `GH_NO_UPDATE_NOTIFIER=1`, strip ANSI from output, and parse pretty or
-compact JSON, so a wrapping `gh` shim is not required. The tool does not
-automatically allocate work, merge code, or operate a lease server. Omitted `--agent` follows
-the documented else-chain; it does not invent an identity. It intentionally
-leaves policy-file generation and non-GitHub adapters for a later release.
+GitHub through the `gh` CLI is the one adapter that exists. A second forge
+attaches at the port — `ForgeReader`/`ForgeWriter`, with a `Capability` answer
+per operation — and not in the commands; the GitHub adapter itself refuses no
+operation. Invocations set `NO_COLOR=1` and `GH_NO_UPDATE_NOTIFIER=1`, strip
+ANSI from output, and parse pretty or compact JSON, so a wrapping `gh` shim is
+not required. The tool does not automatically allocate work, merge code, or
+operate a lease server. Omitted `--agent` follows the documented else-chain; it
+does not invent an identity. It writes no file outside the repository's own git
+directory: no provider configuration, and never `~/.claude`, `~/.codex`, or
+`~/.grok`.

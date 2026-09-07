@@ -19,7 +19,7 @@ from types import MappingProxyType
 
 import pytest
 
-from agent_claim import (
+from agent_coordination import (
     __version__,
     board,
     checkout,
@@ -29,8 +29,8 @@ from agent_claim import (
     protocol,
     store,
 )
-from agent_claim import cli as issue_claim
-from agent_claim.cli import (
+from agent_coordination import cli as issue_claim
+from agent_coordination.cli import (
     ClaimError,
     ClaimRequest,
     ClaimUnavailableError,
@@ -54,7 +54,7 @@ TWELVE_VERSIONED_FILES = (
     "LICENSE",
     "README.md",
     "pyproject.toml",
-    "src/agent_claim/__init__.py",
+    "src/agent_coordination/__init__.py",
     "src/a.py",
     "docs/b.md",
     "docs/c.md",
@@ -329,7 +329,7 @@ TWELVE_VERSIONED_FILES = (
     "LICENSE",
     "README.md",
     "pyproject.toml",
-    "src/agent_claim/__init__.py",
+    "src/agent_coordination/__init__.py",
     "src/a.py",
     "docs/b.md",
     "docs/c.md",
@@ -368,7 +368,7 @@ def test_only_the_github_adapter_speaks_gh_argv() -> None:
     grepping every other module for the literal command name instead. Every
     module in the package is enumerated, not a fixed list, so a new module
     is covered the day it is added."""
-    package = Path("src/agent_claim")
+    package = Path("src/agent_coordination")
     other_modules = sorted(p for p in package.glob("*.py") if p.name != "github.py")
     assert len(other_modules) >= 7
     for module in other_modules:
@@ -482,7 +482,7 @@ def test_github_adapter_fetches_board_pages_until_one_comes_back_short(
     """A full first page means more may exist, so the listing asks for the
     next batch; the short page inside that batch is what ends it, and pages
     past the last one come back empty exactly as GitHub answers them."""
-    monkeypatch.setattr(github, "COMMENTS_PER_PAGE", 2)
+    monkeypatch.setattr(github, "ISSUES_PER_PAGE", 2)
     pages = {
         1: [raw_board_issue(number=1), raw_board_issue(number=2)],
         2: [raw_board_issue(number=3)],
@@ -497,7 +497,7 @@ def test_github_adapter_asks_for_a_second_batch_when_the_first_is_still_full(
 ) -> None:
     """One concurrent batch is not always enough: a board whose whole first
     batch comes back full must ask for another rather than stopping there."""
-    monkeypatch.setattr(github, "COMMENTS_PER_PAGE", 1)
+    monkeypatch.setattr(github, "ISSUES_PER_PAGE", 1)
     monkeypatch.setattr(github, "PARALLEL_FETCH_CONCURRENCY", 1)
     client = _paged_board_issue_client(
         lambda page: [raw_board_issue(number=page)] if page <= 3 else []
@@ -1324,7 +1324,7 @@ def _stub_issue_reference(
             ("next",),
             0,
             "#11 score 10: Top work\nNext: Claim #11.\n"
-            "Run: agent-claim claim 11 --scope <paths>\n"
+            "Run: aco claim 11 --scope <paths>\n"
             "<paths> cannot be derived; take the files to claim from the item body.\n"
             "\nSKIPPED\n#12: blocked by #11\n",
             id="names_the_highest_scored_actionable_item",
@@ -1376,7 +1376,7 @@ def _stub_issue_reference(
             ("next",),
             0,
             "#9 score 10: Open blocker\nNext: Claim #9.\n"
-            "Run: agent-claim claim 9 --scope <paths>\n"
+            "Run: aco claim 9 --scope <paths>\n"
             "<paths> cannot be derived; take the files to claim from the item body.\n"
             "\nSKIPPED\n#10: blocked by #9\n",
             id="excludes_items_with_open_blockers",
@@ -1429,7 +1429,7 @@ def test_next_reports_the_highest_scored_actionable_item(
 
 PULLED_WITH_REFINING_FIRST = (
     "#10 score -10: Work\nNext: Claim #10.\n"
-    "Run: agent-claim claim 10 --scope <paths>\n"
+    "Run: aco claim 10 --scope <paths>\n"
     "<paths> cannot be derived; take the files to claim from the item body.\n"
     "Erwartungen ungeregelt, beim Ziehen zuerst refinen\n"
 )
@@ -1443,7 +1443,7 @@ PULLED_WITH_REFINING_FIRST = (
             board.ExpectationState.NONE,
             0,
             "#10 score -10: Work\nNext: Claim #10.\n"
-            "Run: agent-claim claim 10 --scope <paths>\n"
+            "Run: aco claim 10 --scope <paths>\n"
             "<paths> cannot be derived; take the files to claim from the item body.\n",
             id="no_expectation_block_remains_actionable",
         ),
@@ -1476,7 +1476,7 @@ PULLED_WITH_REFINING_FIRST = (
             board.ExpectationState.RULED,
             0,
             "#10 score -10: Work\nNext: Claim #10.\n"
-            "Run: agent-claim claim 10 --scope <paths>\n"
+            "Run: aco claim 10 --scope <paths>\n"
             "<paths> cannot be derived; take the files to claim from the item body.\n",
             id="fully_ruled_expectations_remain_actionable",
         ),
@@ -1552,7 +1552,7 @@ def test_next_pulls_an_unruled_item_and_names_only_unworkable_ones_as_skipped(
     assert capsys.readouterr().out == (
         "#11 score 10: Needs rulings\n"
         "Next: Claim #11.\n"
-        "Run: agent-claim claim 11 --scope <paths>\n"
+        "Run: aco claim 11 --scope <paths>\n"
         "<paths> cannot be derived; take the files to claim from the item body.\n"
         "Erwartungen ungeregelt, beim Ziehen zuerst refinen\n"
         "\n"
@@ -3204,7 +3204,7 @@ def test_next_prints_a_cut_command_block_mode_accepts_for_a_valid_container(
 
     assert exit_code == 0
     out = capsys.readouterr().out
-    assert f'agent-claim cut {CUT_CONTAINER} --title "Scheibe 1"' in out
+    assert f'aco cut {CUT_CONTAINER} --title "Scheibe 1"' in out
 
     cut_exit_code = issue_claim.main(
         ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
@@ -3260,7 +3260,7 @@ def test_next_prints_a_cut_command_block_mode_accepts_a_differing_next_line(
     out = capsys.readouterr().out
     assert out.splitlines()[0] == f"cut_slice #{CUT_CONTAINER}: {_DIFFERING_NEXT_LINE}"
     command_line = out.splitlines()[1]
-    cut_arguments = shlex.split(command_line.removeprefix("Next: agent-claim "))
+    cut_arguments = shlex.split(command_line.removeprefix("Next: aco "))
 
     cut_exit_code = issue_claim.main(["--repo", "example/agent-claim", *cut_arguments])
 
@@ -4038,7 +4038,7 @@ def test_next_skips_a_frozen_item_and_names_it_as_such(
     assert capsys.readouterr().out == (
         "#10 score -10: Lower work\n"
         "Next: Claim #10.\n"
-        "Run: agent-claim claim 10 --scope <paths>\n"
+        "Run: aco claim 10 --scope <paths>\n"
         "<paths> cannot be derived; take the files to claim from the item body.\n"
         "\n"
         "SKIPPED\n"
@@ -4139,7 +4139,7 @@ def test_board_reads_priority_configuration_from_the_checkout_root(
     configuration_directory = toplevel / ".agent-claim"
     configuration_directory.mkdir(parents=True)
     (configuration_directory / "board.toml").write_text('priority_labels = ["ux", "security"]\n')
-    nested_directory = toplevel / "src" / "agent_claim"
+    nested_directory = toplevel / "src" / "agent_coordination"
     nested_directory.mkdir(parents=True)
     monkeypatch.chdir(nested_directory)
     observed: list[list[str]] = []
@@ -5153,7 +5153,7 @@ def test_next_names_a_cuttable_container_slice(
     assert exit_code == 0
     assert capsys.readouterr().out == (
         "cut_slice #180: Scheibe B — Kartenraster\n"
-        'Next: agent-claim cut 180 --title "Scheibe B — Kartenraster"\n'
+        'Next: aco cut 180 --title "Scheibe B — Kartenraster"\n'
     )
 
 
@@ -5269,7 +5269,7 @@ def test_next_prints_a_cut_command_that_cut_accepts(
     next_exit_code = issue_claim.main(["--repo", "example/agent-claim", "next"])
     assert next_exit_code == 0
     command_line = capsys.readouterr().out.splitlines()[1]
-    cut_arguments = shlex.split(command_line.removeprefix("Next: agent-claim "))
+    cut_arguments = shlex.split(command_line.removeprefix("Next: aco "))
 
     cut_exit_code = issue_claim.main(["--repo", "example/agent-claim", *cut_arguments])
 
@@ -5349,7 +5349,7 @@ def test_next_prints_a_cut_command_that_cut_accepts_for_every_qualifying_contain
         assert isinstance(action, board.CutSliceAction)
 
         command_line = issue_claim._next_action_lines(action)[1]
-        cut_arguments = shlex.split(command_line.removeprefix("Next: agent-claim "))
+        cut_arguments = shlex.split(command_line.removeprefix("Next: aco "))
         client = _configured_board_client(
             monkeypatch, tmp_path, open_issues=(containers_by_number[item.number],)
         )
@@ -5808,6 +5808,21 @@ def test_board_configuration_reads_and_validates_canonical_remote(tmp_path: Path
     config_path.write_text("canonical_remote = true\n")
     with pytest.raises(ClaimError, match="canonical_remote must be a non-empty remote name"):
         board.load_config(config_path)
+
+
+def test_the_body_fence_and_config_path_keep_their_agent_claim_names() -> None:
+    """The package renamed to `agent-coordination` and the command to `aco`
+    (issue #191); these two strings deliberately did not follow.
+
+    The fence info string is spelled inside the issue bodies of every migrated
+    repository and the configuration file already sits at this path in each
+    checkout. Renaming either would make this release silently stop reading
+    state that is already written -- so they are protocol, not product name,
+    and this test is what says so out loud.
+    """
+    assert board.AGENT_CLAIM_FENCE_INFO == "agent-claim"
+    assert board.BLOCK_CHILD_SKELETON.startswith(f"```{board.AGENT_CLAIM_FENCE_INFO}\n")
+    assert board.CONFIG_PATH.as_posix() == ".agent-claim/board.toml"
 
 
 def agent_claim_body(toml_text: str, *, fence: str = "```") -> str:
@@ -6525,7 +6540,7 @@ def test_next_pulls_a_configured_projectionless_idea_with_refinement_step(
     assert issue_claim.main(["--repo", "example/agent-claim", "next"]) == 0
     assert capsys.readouterr().out == (
         "#10 score -20: Operator idea\nNext: Problem neu prüfen und Item verfeinern\n"
-        "Run: agent-claim claim 10 --scope <paths>\n"
+        "Run: aco claim 10 --scope <paths>\n"
         "<paths> cannot be derived; take the files to claim from the item body.\n"
     )
 
@@ -6623,7 +6638,7 @@ def test_next_keeps_a_configured_idea_with_a_complete_projection_own_next(
     assert issue_claim.main(["--repo", "example/agent-claim", "next"]) == 0
     assert capsys.readouterr().out == (
         "#10 score -10: Refined idea\nNext: Build the chosen direction.\n"
-        "Run: agent-claim claim 10 --scope <paths>\n"
+        "Run: aco claim 10 --scope <paths>\n"
         "<paths> cannot be derived; take the files to claim from the item body.\n"
     )
 
@@ -7561,7 +7576,7 @@ def test_cli_version_exits_before_requiring_a_command(
         issue_claim.main(["--version"])
 
     assert exited.value.code == 0
-    assert capsys.readouterr().out == f"agent-claim {__version__}\n"
+    assert capsys.readouterr().out == f"aco {__version__}\n"
 
 
 @pytest.mark.parametrize(
@@ -8370,7 +8385,7 @@ def _set_agent_identity_env(
     monkeypatch: pytest.MonkeyPatch, environ: dict[str, str] | None = None
 ) -> None:
     for name in (
-        issue_claim.AGENT_CLAIM_AGENT_ENV,
+        issue_claim.ACO_AGENT_ENV,
         issue_claim.GROK_SESSION_ID_ENV,
         issue_claim.CLAUDE_SESSION_ID_ENV,
     ):
@@ -8402,7 +8417,7 @@ def _patch_release_session(
     branch: str | None = "lane-72",
     forbid_git: bool = False,
 ) -> None:
-    _set_agent_identity_env(monkeypatch, {issue_claim.AGENT_CLAIM_AGENT_ENV: agent})
+    _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: agent})
     monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
     _patch_store_write(monkeypatch, *(_store_claim_from_request(claimed) for claimed in standing))
     if forbid_git:
@@ -8423,7 +8438,7 @@ def _patch_release_session(
 
 def _assert_missing_identity_message(message: str) -> None:
     assert "--agent" in message
-    assert issue_claim.AGENT_CLAIM_AGENT_ENV in message
+    assert issue_claim.ACO_AGENT_ENV in message
     assert issue_claim.GROK_SESSION_ID_ENV in message
     assert issue_claim.CLAUDE_SESSION_ID_ENV in message
     assert "GROK_AGENT" not in message
@@ -8666,14 +8681,14 @@ def test_claim_and_release_parse_omitted_agent(
         (
             "Ada",
             {
-                "AGENT_CLAIM_AGENT": "Other",
+                "ACO_AGENT": "Other",
                 "GROK_SESSION_ID": "grok-session",
                 "CLAUDE_SESSION_ID": "claude-session",
             },
             "Ada",
         ),
-        (None, {"AGENT_CLAIM_AGENT": "Ada"}, "Ada"),
-        (None, {"AGENT_CLAIM_AGENT": "", "GROK_SESSION_ID": "sess-1"}, "Grok sess-1"),
+        (None, {"ACO_AGENT": "Ada"}, "Ada"),
+        (None, {"ACO_AGENT": "", "GROK_SESSION_ID": "sess-1"}, "Grok sess-1"),
         (
             None,
             {"GROK_SESSION_ID": "sess-1", "CLAUDE_SESSION_ID": "sess-2"},
@@ -8683,7 +8698,7 @@ def test_claim_and_release_parse_omitted_agent(
         (
             None,
             {
-                "AGENT_CLAIM_AGENT": "",
+                "ACO_AGENT": "",
                 "GROK_SESSION_ID": "",
                 "CLAUDE_SESSION_ID": "sess-2",
             },
@@ -8717,8 +8732,8 @@ def test_request_and_cli_claim_fill_agent_from_documented_else_chain(
 @pytest.mark.parametrize(
     ("explicit", "environ"),
     [
-        ("", {"AGENT_CLAIM_AGENT": "Ada"}),
-        (None, {"AGENT_CLAIM_AGENT": " ", "GROK_SESSION_ID": "sess-1"}),
+        ("", {"ACO_AGENT": "Ada"}),
+        (None, {"ACO_AGENT": " ", "GROK_SESSION_ID": "sess-1"}),
         (None, {"GROK_SESSION_ID": "bad\nid", "CLAUDE_SESSION_ID": "sess-2"}),
         (None, {"GROK_SESSION_ID": "x" * 200, "CLAUDE_SESSION_ID": "sess-2"}),
     ],
@@ -8759,7 +8774,7 @@ def test_invalid_agent_identity_fails_before_git_and_github(
     [
         {},
         {
-            "AGENT_CLAIM_AGENT": "",
+            "ACO_AGENT": "",
             "GROK_SESSION_ID": "",
             "CLAUDE_SESSION_ID": "",
         },
@@ -9002,7 +9017,7 @@ def test_cli_release_override_fails_before_git_and_github(
     capsys: pytest.CaptureFixture[str],
     flags: tuple[str, ...],
 ) -> None:
-    _set_agent_identity_env(monkeypatch, {issue_claim.AGENT_CLAIM_AGENT_ENV: "Ada"})
+    _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Ada"})
     _forbid_github_construction(monkeypatch)
 
     def unused(arguments: list[str]) -> str:
@@ -9023,7 +9038,7 @@ def test_cli_release_omitted_claim_id_fails_closed_on_detached_head(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    _set_agent_identity_env(monkeypatch, {issue_claim.AGENT_CLAIM_AGENT_ENV: "Ada"})
+    _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Ada"})
     _forbid_github_construction(monkeypatch)
     monkeypatch.setattr(checkout, "_git_output", lambda arguments: "")
 
@@ -9127,7 +9142,7 @@ def test_cli_dispatch_adapter_error_denies_with_exit_code_two(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """`main`'s shared `_dispatch` error handling (still the path every
-    command but `status`/`protect`/`policy` takes -- issue #176): a forge
+    command but `status`/`protect` takes -- issue #176): a forge
     adapter construction failure denies loud with exit 2, never a
     traceback."""
     monkeypatch.setattr(
@@ -9154,7 +9169,7 @@ def _stub_versioned_paths(monkeypatch: pytest.MonkeyPatch) -> None:
             "LICENSE",
             "README.md",
             "pyproject.toml",
-            "src/agent_claim/__init__.py",
+            "src/agent_coordination/__init__.py",
         ),
     )
 
@@ -9280,7 +9295,7 @@ def _patch_status_cli(monkeypatch: pytest.MonkeyPatch, client: FakeForge) -> Non
             "LICENSE",
             "README.md",
             "pyproject.toml",
-            "src/agent_claim/__init__.py",
+            "src/agent_coordination/__init__.py",
         ),
     )
     monkeypatch.setattr(issue_claim, "datetime", FixedDateTime)
@@ -9501,7 +9516,7 @@ def test_cli_lane_claim_and_release_round_trip_without_issue_number(
     separately below now that `status` no longer reads what this ledger
     `claim`/`release` pair posts; issue #176 migrates one command at a
     time, and `claim`/`release` have not moved onto the store yet.)"""
-    _set_agent_identity_env(monkeypatch, {"AGENT_CLAIM_AGENT": "Codex Sol"})
+    _set_agent_identity_env(monkeypatch, {"ACO_AGENT": "Codex Sol"})
     client = FakeForge()
     _patch_status_cli(monkeypatch, client)
     monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
@@ -9569,7 +9584,7 @@ def test_cli_lane_mode_refuses_a_non_conventional_branch(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    _set_agent_identity_env(monkeypatch, {"AGENT_CLAIM_AGENT": "Codex Sol"})
+    _set_agent_identity_env(monkeypatch, {"ACO_AGENT": "Codex Sol"})
     client = FakeForge()
     _patch_status_cli(monkeypatch, client)
     monkeypatch.setattr(
@@ -9605,7 +9620,7 @@ def test_cli_release_requires_a_non_empty_current_branch_without_an_issue(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    _set_agent_identity_env(monkeypatch, {"AGENT_CLAIM_AGENT": "Codex Sol"})
+    _set_agent_identity_env(monkeypatch, {"ACO_AGENT": "Codex Sol"})
     client = FakeForge()
     _patch_status_cli(monkeypatch, client)
     monkeypatch.setattr(checkout, "_git_output", lambda arguments: "")
@@ -10316,7 +10331,7 @@ def test_cli_rescope_adds_a_path_without_matching_head_or_a_clean_tree(
     git_values = _git_checkout(head="b" * 40, dirty=" M file")
     monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
     monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
-    _set_agent_identity_env(monkeypatch, {issue_claim.AGENT_CLAIM_AGENT_ENV: "Codex Sol"})
+    _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Codex Sol"})
 
     status = issue_claim.main(
         [
@@ -10350,7 +10365,7 @@ def test_cli_rescope_json_prints_updated_scope_and_same_claim_id(
     git_values = _git_checkout()
     monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
     monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
-    _set_agent_identity_env(monkeypatch, {issue_claim.AGENT_CLAIM_AGENT_ENV: "Ada"})
+    _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Ada"})
 
     status = issue_claim.main(
         [
@@ -10396,7 +10411,7 @@ def test_cli_rescope_refuses_a_different_agent_than_the_claimant(
     git_values = _git_checkout()
     monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
     monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
-    _set_agent_identity_env(monkeypatch, {issue_claim.AGENT_CLAIM_AGENT_ENV: "Grok 4.6"})
+    _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Grok 4.6"})
 
     status = issue_claim.main(
         ["--repo", "example/agent-claim", "rescope", "72", "--add", "src/new.py"]
@@ -10420,7 +10435,7 @@ def test_cli_rescope_without_add_or_drop_is_an_error(
     monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
     git_values = _git_checkout()
     monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
-    _set_agent_identity_env(monkeypatch, {issue_claim.AGENT_CLAIM_AGENT_ENV: "Codex Sol"})
+    _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Codex Sol"})
 
     status = issue_claim.main(["--repo", "example/agent-claim", "rescope", "72"])
     captured = capsys.readouterr()
@@ -10445,7 +10460,7 @@ def test_cli_rescope_refuses_primary_checkout(
     monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
     git_values = _git_checkout(git_directory="/repo/.git", common_directory="/repo/.git")
     monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
-    _set_agent_identity_env(monkeypatch, {issue_claim.AGENT_CLAIM_AGENT_ENV: "Codex Sol"})
+    _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Codex Sol"})
 
     status = issue_claim.main(
         ["--repo", "example/agent-claim", "rescope", "72", "--add", "src/new.py"]
@@ -10634,7 +10649,7 @@ def test_cli_rescope_refuses_adding_a_directory_without_whole(
     git_values = _git_checkout()
     monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
     monkeypatch.setattr(checkout, "_scope_directories", lambda paths: paths)
-    _set_agent_identity_env(monkeypatch, {issue_claim.AGENT_CLAIM_AGENT_ENV: "Codex Sol"})
+    _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Codex Sol"})
 
     status = issue_claim.main(["--repo", "example/agent-claim", "rescope", "72", "--add", "docs"])
     captured = capsys.readouterr()
@@ -11140,7 +11155,7 @@ def test_cli_lane_directory_without_whole_is_wide(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    _set_agent_identity_env(monkeypatch, {"AGENT_CLAIM_AGENT": "Ada"})
+    _set_agent_identity_env(monkeypatch, {"ACO_AGENT": "Ada"})
     client = FakeForge()
     monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
     monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
@@ -11233,7 +11248,7 @@ def test_cli_rescope_add_that_raises_combined_share_requires_whole(
     monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
     monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
     monkeypatch.setattr(checkout, "versioned_paths", lambda: TWELVE_VERSIONED_FILES)
-    _set_agent_identity_env(monkeypatch, {issue_claim.AGENT_CLAIM_AGENT_ENV: "Codex Sol"})
+    _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Codex Sol"})
 
     status = issue_claim.main(
         [
@@ -11271,7 +11286,7 @@ def test_cli_rescope_persists_whole_reason(
     git_values = _git_checkout()
     monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
     monkeypatch.setattr(checkout, "_scope_directories", lambda paths: paths)
-    _set_agent_identity_env(monkeypatch, {issue_claim.AGENT_CLAIM_AGENT_ENV: "Codex Sol"})
+    _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Codex Sol"})
 
     status = issue_claim.main(
         [
@@ -11502,7 +11517,7 @@ def test_cli_rescope_widening_to_four_paths_refuses_without_whole(
     git_values = _git_checkout()
     monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
     monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
-    _set_agent_identity_env(monkeypatch, {issue_claim.AGENT_CLAIM_AGENT_ENV: "Codex Sol"})
+    _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Codex Sol"})
 
     status = issue_claim.main(
         [
@@ -11930,93 +11945,39 @@ def test_cli_claim_json_conflict_errors_without_success_json(
     assert captured.err.startswith("ERROR:")
 
 
-def forbid_github_for_policy(monkeypatch: pytest.MonkeyPatch) -> None:
-    def unused(*args, **kwargs):
-        pytest.fail("policy must not use GitHub")
-
-    monkeypatch.setattr(github, "GitHubForge", unused)
-    monkeypatch.setattr(github, "discover_repository", unused)
-
-
-@pytest.mark.parametrize(
-    "arguments",
-    [
-        ["policy", "--print"],
-        ["--repo", "OWNER/REPO", "policy", "--print"],
-    ],
-)
-def test_cli_policy_print_emits_the_locked_loader_without_github(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-    arguments: list[str],
-) -> None:
-    home = tmp_path / "home"
-    work = tmp_path / "work"
-    home.mkdir()
-    work.mkdir()
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.chdir(work)
-    forbid_github_for_policy(monkeypatch)
-
-    assert issue_claim.main(arguments) == 0
-    captured = capsys.readouterr()
-    assert captured.out == (
-        "<!-- agent-claim-policy:v1 -->\n"
-        "Before the first edit in a Git repository, use live `agent-claim`: "
-        "`status`, then `claim` the issue and write scope. `bootstrap` only when "
-        "the repository's claim state ref does not exist yet. `release` after "
-        "landing or abandoning the lane. Missing `gh` or network is a failure, "
-        "never coordinated success. Read-only review stays free. Do not invent a "
-        "second board.\n"
-    )
-    assert captured.err == ""
-    assert list(home.iterdir()) == []
-    assert list(work.iterdir()) == []
-
-
 def test_cli_module_entry_point_exits_with_mains_return_code(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """`python -m agent_claim.cli` and the installed console script run the
-    `if __name__ == "__main__":` guard, not `main()` as a library call --
-    exercise that guard directly rather than only ever calling `main()`."""
+    """`python -m agent_coordination.cli` and the installed console script run
+    the `if __name__ == "__main__":` guard, not `main()` as a library call --
+    exercise that guard directly rather than only ever calling `main()`.
+
+    `protect` on an unparseable payload is the one command that answers
+    without git, GitHub, or the store, so the exit code this observes is
+    `main`'s own return value and nothing else's."""
     home = tmp_path / "home"
     work = tmp_path / "work"
     home.mkdir()
     work.mkdir()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.chdir(work)
-    forbid_github_for_policy(monkeypatch)
-    monkeypatch.setattr(sys, "argv", ["agent-claim", "policy", "--print"])
+    _forbid_protect_git_github_and_identity(monkeypatch)
+    monkeypatch.setattr(sys, "argv", ["aco", "--repo", "example/agent-claim", "protect"])
+    monkeypatch.setattr(sys, "stdin", io.StringIO("not a hook payload"))
 
-    with pytest.warns(RuntimeWarning, match="agent_claim.cli"), pytest.raises(SystemExit) as exited:
-        runpy.run_module("agent_claim.cli", run_name="__main__")
-
-    assert exited.value.code == 0
-    assert capsys.readouterr().out.startswith("<!-- agent-claim-policy:v1 -->\n")
-
-
-def test_cli_policy_without_print_is_an_argparse_error(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    home = tmp_path / "home"
-    work = tmp_path / "work"
-    home.mkdir()
-    work.mkdir()
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.chdir(work)
-    forbid_github_for_policy(monkeypatch)
-
-    with pytest.raises(SystemExit) as exited:
-        issue_claim.main(["policy"])
+    with (
+        pytest.warns(RuntimeWarning, match="agent_coordination.cli"),
+        pytest.raises(SystemExit) as exited,
+    ):
+        runpy.run_module("agent_coordination.cli", run_name="__main__")
 
     assert exited.value.code == 2
-    assert list(home.iterdir()) == []
-    assert list(work.iterdir()) == []
+    assert json.loads(capsys.readouterr().out) == {
+        "decision": "deny",
+        "reason": "invalid hook payload",
+    }
 
 
 def _isolate_protect_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[Path, Path]:
@@ -12321,7 +12282,7 @@ def test_protect_absolute_file_path_allows_when_claim_scope_covers_it(
     _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
     _patch_protect_git(monkeypatch, work)
     _patch_protect_claim(monkeypatch)
-    target = work / "src" / "agent_claim" / "cli.py"
+    target = work / "src" / "agent_coordination" / "cli.py"
 
     assert (
         _protect_main(
@@ -13467,7 +13428,7 @@ def test_next_names_an_old_ruling_when_the_item_is_pulled(
     assert capsys.readouterr().out == (
         "#10 score -10: Work\n"
         "Next: Claim #10.\n"
-        "Run: agent-claim claim 10 --scope <paths>\n"
+        "Run: aco claim 10 --scope <paths>\n"
         "<paths> cannot be derived; take the files to claim from the item body.\n"
         "vor 10 Landungen geregelt, beim Ziehen neu refinen\n"
     )
@@ -13666,8 +13627,8 @@ def test_trunk_landing_times_count_a_five_commit_merge_once(
 
 
 def test_no_path_class_list_is_read_or_written() -> None:
-    assert not Path("src/agent_claim").joinpath("single_writer.py").exists()
-    text = Path("src/agent_claim/protocol.py").read_text()
+    assert not Path("src/agent_coordination").joinpath("single_writer.py").exists()
+    text = Path("src/agent_coordination/protocol.py").read_text()
     assert "single-writer" not in text
     assert "single_writer" not in text
 
@@ -14921,7 +14882,7 @@ def test_cli_bootstrap_takes_no_ledger_argument() -> None:
     )
     bootstrap = subparsers_action.choices["bootstrap"]
 
-    assert parser.prog == "agent-claim"
+    assert parser.prog == "aco"
     assert all("--ledger" not in action.option_strings for action in bootstrap._actions)
     with pytest.raises(SystemExit):
         parser.parse_args(["bootstrap", "--ledger", "5"])
@@ -14939,7 +14900,10 @@ def test_cli_bootstrap_refuses_canonical_remote_mismatch(
 
     assert status == 2
     error = capsys.readouterr().err
-    assert "forge target example/agent-claim does not match canonical remote other/repo" in error
+    assert (
+        "forge target example/agent-claim does not match canonical remote other/repo; "
+        "run aco from that repository's checkout"
+    ) in error
     assert "--ledger" not in error
 
 
@@ -14950,7 +14914,7 @@ def test_cli_rescope_refuses_a_missing_state_ref(
     monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
     git_values = _git_checkout()
     monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
-    _set_agent_identity_env(monkeypatch, {issue_claim.AGENT_CLAIM_AGENT_ENV: "Codex Sol"})
+    _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Codex Sol"})
     _patch_store_write(monkeypatch, tip=None)
 
     status = issue_claim.main(

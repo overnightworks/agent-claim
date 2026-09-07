@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_claim import checkout
+from agent_coordination import checkout
 
 _SHOW_TOPLEVEL_ARGUMENTS = ["rev-parse", "--show-toplevel"]
 

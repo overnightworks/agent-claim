@@ -3,22 +3,22 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "agent-claim"
+name = "agent-coordination"
 dynamic = ["version"]
 description = "Repository-neutral GitHub issue claims for coding agents"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
 license = "MIT"
-authors = [{name = "agent-claim contributors"}]
+authors = [{name = "agent-coordination contributors"}]
 
 [project.scripts]
-agent-claim = "agent_claim.cli:main"
+aco = "agent_coordination.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.dynamic]
-version = {attr = "agent_claim.__version__"}
+version = {attr = "agent_coordination.__version__"}
 
 # uv invalidates builds of path sources only via pyproject.toml's mtime by
 # default, so `uv tool install --from .` can silently reinstall a cached wheel
@@ -47,13 +47,13 @@ select = ["E", "F", "I", "B", "UP", "SIM", "RUF", "PL", "FURB", "N"]
 "tests/**" = ["PLR2004", "PLR0913", "PLR0917"]
 
 [tool.importlinter]
-root_package = "agent_claim"
+root_package = "agent_coordination"
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
 name = "Layers"
 type = "layers"
-containers = ["agent_claim"]
+containers = ["agent_coordination"]
 layers = [
     "cli",
     "checkout | store",
@@ -67,13 +67,12 @@ layers = [
 [[tool.importlinter.contracts]]
 name = "The claim-state store is git transport only"
 type = "forbidden"
-source_modules = ["agent_claim.store"]
+source_modules = ["agent_coordination.store"]
 forbidden_modules = [
-    "agent_claim.github",
-    "agent_claim.forge",
-    "agent_claim.board",
-    "agent_claim.checkout",
-    "agent_claim.discovery",
+    "agent_coordination.github",
+    "agent_coordination.forge",
+    "agent_coordination.board",
+    "agent_coordination.checkout",
 ]
 allow_indirect_imports = true
 as_packages = false
@@ -81,23 +80,23 @@ as_packages = false
 [[tool.importlinter.contracts]]
 name = "Only the process boundary imports subprocess"
 type = "forbidden"
-source_modules = ["agent_claim", "agent_claim.*"]
+source_modules = ["agent_coordination", "agent_coordination.*"]
 forbidden_modules = ["subprocess"]
 allow_indirect_imports = true
 as_packages = false
-ignore_imports = ["agent_claim.process -> subprocess"]
+ignore_imports = ["agent_coordination.process -> subprocess"]
 
 [[tool.importlinter.contracts]]
 name = "Only the gh and git owners run commands"
 type = "forbidden"
-source_modules = ["agent_claim", "agent_claim.*"]
-forbidden_modules = ["agent_claim.process"]
+source_modules = ["agent_coordination", "agent_coordination.*"]
+forbidden_modules = ["agent_coordination.process"]
 allow_indirect_imports = true
 as_packages = false
 ignore_imports = [
-    "agent_claim.github -> agent_claim.process",
-    "agent_claim.checkout -> agent_claim.process",
-    "agent_claim.store -> agent_claim.process",
+    "agent_coordination.github -> agent_coordination.process",
+    "agent_coordination.checkout -> agent_coordination.process",
+    "agent_coordination.store -> agent_coordination.process",
 ]
 
 [tool.pyright]

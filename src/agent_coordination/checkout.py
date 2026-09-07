@@ -9,7 +9,7 @@ from pathlib import Path
 from . import process
 from .protocol import ClaimError, ClaimRequest, _outbound_text
 
-AGENT_CLAIM_AGENT_ENV = "AGENT_CLAIM_AGENT"
+ACO_AGENT_ENV = "ACO_AGENT"
 GROK_SESSION_ID_ENV = "GROK_SESSION_ID"
 CLAUDE_SESSION_ID_ENV = "CLAUDE_SESSION_ID"
 
@@ -171,7 +171,7 @@ def trunk_landing_times() -> tuple[datetime, ...]:
 def _resolved_agent(explicit: str | None) -> str:
     if explicit is not None:
         return _outbound_text(explicit, "agent", maximum=128)
-    configured = os.environ.get(AGENT_CLAIM_AGENT_ENV)
+    configured = os.environ.get(ACO_AGENT_ENV)
     if configured:
         return _outbound_text(configured, "agent", maximum=128)
     grok_session = os.environ.get(GROK_SESSION_ID_ENV)
@@ -182,5 +182,5 @@ def _resolved_agent(explicit: str | None) -> str:
         return _outbound_text(f"Claude {claude_session}", "agent", maximum=128)
     raise ClaimError(
         "agent identity is required: pass --agent or set "
-        f"{AGENT_CLAIM_AGENT_ENV}, {GROK_SESSION_ID_ENV}, or {CLAUDE_SESSION_ID_ENV}"
+        f"{ACO_AGENT_ENV}, {GROK_SESSION_ID_ENV}, or {CLAUDE_SESSION_ID_ENV}"
     )

@@ -15,7 +15,7 @@ from typing import cast
 
 from . import __version__, board, checkout, forge, github, protocol, store
 
-AGENT_CLAIM_AGENT_ENV = checkout.AGENT_CLAIM_AGENT_ENV
+ACO_AGENT_ENV = checkout.ACO_AGENT_ENV
 CLAUDE_SESSION_ID_ENV = checkout.CLAUDE_SESSION_ID_ENV
 GROK_SESSION_ID_ENV = checkout.GROK_SESSION_ID_ENV
 ClaimError = protocol.ClaimError
@@ -32,15 +32,6 @@ _validate_checkout = checkout._validate_checkout
 claims_conflict = protocol.claims_conflict
 claims_holding_path = protocol.claims_holding_path
 
-POLICY_LOADER = (
-    "<!-- agent-claim-policy:v1 -->\n"
-    "Before the first edit in a Git repository, use live `agent-claim`: "
-    "`status`, then `claim` the issue and write scope. `bootstrap` only when "
-    "the repository's claim state ref does not exist yet. `release` after "
-    "landing or abandoning the lane. Missing `gh` or network is a failure, "
-    "never coordinated success. Read-only review stays free. Do not invent a "
-    "second board."
-)
 DEFAULT_CLAIM_ROLE = "builder"
 NEXT_PULL_DESCRIPTION = (
     "Pulling is not dispatching: an item whose expectations are still unruled is "
@@ -200,6 +191,19 @@ def _request(arguments: argparse.Namespace) -> protocol.ClaimRequest:
 
 
 LANE_ISSUE_HELP = "omit for lane mode, derived from a docs/ or fix/ checkout branch"
+JSON_HELP = "print the result as JSON instead of the human lines"
+AGENT_HELP = (
+    "the acting agent's name; filled from a non-empty ACO_AGENT, GROK_SESSION_ID or "
+    "CLAUDE_SESSION_ID when omitted"
+)
+EXPECTED_CLAIM_ID_HELP = (
+    "assert which claim you are acting on; the issue number or lane branch selects it, and "
+    "a differing id is refused rather than redirected"
+)
+ROLE_ON_LIVE_CLAIM_HELP = (
+    "the acting role; the selected claim's own role when omitted, and required to be "
+    "coordinator with --coordinator-override"
+)
 
 
 def _add_bootstrap_parser(commands: argparse._SubParsersAction) -> None:
@@ -208,23 +212,25 @@ def _add_bootstrap_parser(commands: argparse._SubParsersAction) -> None:
 
 def _add_status_parser(commands: argparse._SubParsersAction) -> None:
     status = commands.add_parser("status", help="show repository-wide build claims")
-    status.add_argument("issue", type=int, nargs="?")
+    status.add_argument(
+        "issue", type=int, nargs="?", help="show only this issue's claims and the ones they overlap"
+    )
     status.add_argument(
         "--path", metavar="PATH", help="list holders of this path instead of by issue"
     )
-    status.add_argument("--json", action="store_true")
+    status.add_argument("--json", action="store_true", help=JSON_HELP)
 
 
 def _add_board_parser(commands: argparse._SubParsersAction) -> None:
     board_command = commands.add_parser("board", help="project the open work board without writes")
-    board_command.add_argument("--json", action="store_true")
+    board_command.add_argument("--json", action="store_true", help=JSON_HELP)
 
 
 def _add_rulings_parser(commands: argparse._SubParsersAction) -> None:
     rulings_command = commands.add_parser(
         "rulings", help="list open expectation lines without writes"
     )
-    rulings_command.add_argument("--json", action="store_true")
+    rulings_command.add_argument("--json", action="store_true", help=JSON_HELP)
 
 
 def _add_next_parser(commands: argparse._SubParsersAction) -> None:
@@ -233,7 +239,7 @@ def _add_next_parser(commands: argparse._SubParsersAction) -> None:
         help="name the board's top-priority item to pull",
         description=NEXT_PULL_DESCRIPTION,
     )
-    next_command.add_argument("--json", action="store_true")
+    next_command.add_argument("--json", action="store_true", help=JSON_HELP)
 
 
 def _add_claim_parser(commands: argparse._SubParsersAction) -> None:
@@ -244,17 +250,32 @@ def _add_claim_parser(commands: argparse._SubParsersAction) -> None:
         nargs="?",
         help=LANE_ISSUE_HELP,
     )
-    claim.add_argument("--agent")
-    claim.add_argument("--role", default=DEFAULT_CLAIM_ROLE)
-    claim.add_argument("--base")
-    claim.add_argument("--branch")
+    claim.add_argument("--agent", help=AGENT_HELP)
+    claim.add_argument(
+        "--role",
+        default=DEFAULT_CLAIM_ROLE,
+        help=f"the claiming role; default {DEFAULT_CLAIM_ROLE}",
+    )
+    claim.add_argument(
+        "--base",
+        help="the full commit SHA this lane starts from; the current HEAD when omitted",
+    )
+    claim.add_argument(
+        "--branch", help="the lane's branch; the current checkout branch when omitted"
+    )
     claim.add_argument(
         "--scope",
         action="append",
         required=True,
         help="repository-relative path; comma-joined values equal repeated --scope",
     )
-    claim.add_argument("--claim-id")
+    claim.add_argument(
+        "--claim-id",
+        help=(
+            "this claim's own id; generated when omitted, and repeating an identical claim "
+            "with it returns the active claim instead of writing a second one"
+        ),
+    )
     claim.add_argument(
         "--out-of-order",
         metavar="REASON",
@@ -273,7 +294,7 @@ def _add_claim_parser(commands: argparse._SubParsersAction) -> None:
         metavar="NAME",
         help="allocate the next free value of this named scarce resource and hold it",
     )
-    claim.add_argument("--json", action="store_true")
+    claim.add_argument("--json", action="store_true", help=JSON_HELP)
 
 
 def _add_release_parser(commands: argparse._SubParsersAction) -> None:
@@ -284,8 +305,8 @@ def _add_release_parser(commands: argparse._SubParsersAction) -> None:
         nargs="?",
         help=LANE_ISSUE_HELP,
     )
-    release.add_argument("--agent")
-    release.add_argument("--role")
+    release.add_argument("--agent", help=AGENT_HELP)
+    release.add_argument("--role", help=ROLE_ON_LIVE_CLAIM_HELP)
     outcome = release.add_mutually_exclusive_group(required=True)
     outcome.add_argument(
         "--merged",
@@ -298,9 +319,13 @@ def _add_release_parser(commands: argparse._SubParsersAction) -> None:
         metavar="REASON",
         help="why this claim ends without a landing",
     )
-    release.add_argument("--claim-id")
-    release.add_argument("--coordinator-override", action="store_true")
-    release.add_argument("--json", action="store_true")
+    release.add_argument("--claim-id", help=EXPECTED_CLAIM_ID_HELP)
+    release.add_argument(
+        "--coordinator-override",
+        action="store_true",
+        help="release another agent's claim as the coordinator; requires --role coordinator",
+    )
+    release.add_argument("--json", action="store_true", help=JSON_HELP)
 
 
 def _add_rescope_parser(commands: argparse._SubParsersAction) -> None:
@@ -313,7 +338,7 @@ def _add_rescope_parser(commands: argparse._SubParsersAction) -> None:
         nargs="?",
         help=LANE_ISSUE_HELP,
     )
-    rescope.add_argument("--agent")
+    rescope.add_argument("--agent", help=AGENT_HELP)
     rescope.add_argument(
         "--add",
         action="append",
@@ -324,13 +349,13 @@ def _add_rescope_parser(commands: argparse._SubParsersAction) -> None:
         action="append",
         help="repository-relative path to drop; comma-joined values equal repeated --drop",
     )
-    rescope.add_argument("--claim-id")
+    rescope.add_argument("--claim-id", help=EXPECTED_CLAIM_ID_HELP)
     rescope.add_argument(
         "--whole",
         metavar="REASON",
         help=WHOLE_HELP,
     )
-    rescope.add_argument("--json", action="store_true")
+    rescope.add_argument("--json", action="store_true", help=JSON_HELP)
 
 
 def _add_cut_parser(commands: argparse._SubParsersAction) -> None:
@@ -343,7 +368,7 @@ def _add_cut_parser(commands: argparse._SubParsersAction) -> None:
         metavar="N",
         help="the slice table's # column value to cut; default is the first cuttable row",
     )
-    cut.add_argument("--json", action="store_true")
+    cut.add_argument("--json", action="store_true", help=JSON_HELP)
 
 
 def _add_pull_request_check_parser(commands: argparse._SubParsersAction) -> None:
@@ -351,12 +376,13 @@ def _add_pull_request_check_parser(commands: argparse._SubParsersAction) -> None
         "pr-check",
         help="check a pull request's typed work-item classification before it merges",
     )
-    pull_request_check.add_argument("--pr", type=int, required=True, metavar="NUMBER")
-
-
-def _add_policy_parser(commands: argparse._SubParsersAction) -> None:
-    policy = commands.add_parser("policy", help="print the provider-neutral loader block")
-    policy.add_argument("--print", action="store_true", required=True, dest="print_loader")
+    pull_request_check.add_argument(
+        "--pr",
+        type=int,
+        required=True,
+        metavar="NUMBER",
+        help="the pull request to check",
+    )
 
 
 def _add_protect_parser(commands: argparse._SubParsersAction) -> None:
@@ -374,13 +400,12 @@ _SUBPARSER_BUILDERS: tuple[Callable[[argparse._SubParsersAction], None], ...] = 
     _add_rescope_parser,
     _add_cut_parser,
     _add_pull_request_check_parser,
-    _add_policy_parser,
     _add_protect_parser,
 )
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="agent-claim", description=__doc__)
+    parser = argparse.ArgumentParser(prog="aco", description=__doc__)
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--repo", help="GitHub repository as OWNER/REPO")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -968,7 +993,7 @@ def _next_action_lines(action: board.NextAction) -> list[str]:
         lines = [
             f"#{item.number} score {item.score}: {item.title}",
             f"Next: {item.next_step}",
-            f"Run: agent-claim claim {item.number} --scope <paths>",
+            f"Run: aco claim {item.number} --scope <paths>",
             "<paths> cannot be derived; take the files to claim from the item body.",
         ]
         hint = _ruling_pull_hint(item)
@@ -978,7 +1003,7 @@ def _next_action_lines(action: board.NextAction) -> list[str]:
     if isinstance(action, board.CutSliceAction):
         return [
             f"cut_slice #{action.container.number}: {action.next_step}",
-            f'Next: agent-claim cut {action.container.number} --title "{action.cut_title}"',
+            f'Next: aco cut {action.container.number} --title "{action.cut_title}"',
         ]
     progress = action.container_progress
     return [
@@ -1557,7 +1582,7 @@ def _refuse_canonical_remote_mismatch(
     if canonical_repository.path != forge_target.path:
         raise protocol.ClaimUnavailableError(
             f"forge target {forge_target.path} does not match canonical remote "
-            f"{canonical_repository.path}; run agent-claim from that repository's checkout"
+            f"{canonical_repository.path}; run aco from that repository's checkout"
         )
 
 
@@ -2412,9 +2437,6 @@ def _dispatch(parsed: argparse.Namespace) -> int:
 
 def main(arguments: list[str] | None = None) -> int:
     parsed = _parser().parse_args(arguments)
-    if parsed.command == "policy":
-        print(POLICY_LOADER)
-        return 0
     if parsed.command == "protect":
         return _protect(parsed.repo)
     try:
