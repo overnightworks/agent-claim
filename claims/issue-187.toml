@@ -1,0 +1,8 @@
+claim_id = "28858e5892b64dc9a434bf49424b3dfa"
+agent = "Claude Fable 5.1"
+role = "builder"
+base = "98e32097c06426276f574edf355a5bb59bae0b5e"
+branch = "claude/issue-187-delete-import"
+scope = ["src/agent_claim", "tests", "README.md", "docs/decisions"]
+opened_commit = "d20f04682efcd59f748afd74256b7e6a93811177"
+whole_reason = "Eine Löschung quer durch Protokoll, CLI, Adapter, Store und ihre Tests; die Ledger-Ära verlässt das Paket in einem Commit"
