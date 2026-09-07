@@ -18,6 +18,7 @@ from pathlib import Path
 ALLOWED_ROOT_FILES = frozenset(
     {
         ".gitignore",
+        ".python-version",
         "AGENTS.md",
         "CLAUDE.md",
         "LICENSE",
