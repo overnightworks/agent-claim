@@ -8509,9 +8509,10 @@ def test_checkout_validation_names_the_base_repair(monkeypatch: pytest.MonkeyPat
         ("status", "--porcelain"): "",
     }
     monkeypatch.setattr(checkout, "_git_output", lambda arguments: values[tuple(arguments)])
+    candidate = request()
 
     with pytest.raises(ClaimError) as error:
-        issue_claim._validate_checkout(request())
+        issue_claim._validate_checkout(candidate)
 
     assert str(error.value) == (
         f"claim base {BASE} does not match checkout HEAD {'b' * 40}; "
@@ -8526,9 +8527,10 @@ def test_checkout_validation_names_the_isolated_worktree_recipe_for_a_trunk_bran
     worktree add` recipe (#52), not just the rule it violates."""
     values = {("rev-parse", "HEAD"): BASE}
     monkeypatch.setattr(checkout, "_git_output", lambda arguments: values[tuple(arguments)])
+    candidate = request(branch="main")
 
     with pytest.raises(ClaimError) as error:
-        issue_claim._validate_checkout(request(branch="main"))
+        issue_claim._validate_checkout(candidate)
 
     assert str(error.value) == (
         "build claims require an isolated non-main worktree branch; "
@@ -8549,9 +8551,10 @@ def test_checkout_validation_names_the_isolated_worktree_recipe_for_a_shared_che
         ("status", "--porcelain"): "",
     }
     monkeypatch.setattr(checkout, "_git_output", lambda arguments: values[tuple(arguments)])
+    candidate = request()
 
     with pytest.raises(ClaimError) as error:
-        issue_claim._validate_checkout(request())
+        issue_claim._validate_checkout(candidate)
 
     assert str(error.value) == (
         "build claims require a linked isolated worktree checkout; "
@@ -8576,9 +8579,10 @@ def test_checkout_validation_names_the_first_three_dirty_paths_and_the_rest_as_a
         ("status", "--porcelain"): porcelain,
     }
     monkeypatch.setattr(checkout, "_git_output", lambda arguments: values[tuple(arguments)])
+    candidate = request()
 
     with pytest.raises(ClaimError) as error:
-        issue_claim._validate_checkout(request())
+        issue_claim._validate_checkout(candidate)
 
     assert str(error.value) == (
         "claim must be acquired before the first worktree edit: "
@@ -8599,9 +8603,10 @@ def test_checkout_validation_names_every_dirty_path_when_three_or_fewer(
         ("status", "--porcelain"): " M src/a.py",
     }
     monkeypatch.setattr(checkout, "_git_output", lambda arguments: values[tuple(arguments)])
+    candidate = request()
 
     with pytest.raises(ClaimError) as error:
-        issue_claim._validate_checkout(request())
+        issue_claim._validate_checkout(candidate)
 
     assert str(error.value) == "claim must be acquired before the first worktree edit: src/a.py"
 
