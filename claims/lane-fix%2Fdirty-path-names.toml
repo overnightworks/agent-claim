@@ -1,0 +1,7 @@
+claim_id = "0b05fef3401f4be48e3db0bd4142230b"
+agent = "Claude Fable 5.1"
+role = "builder"
+base = "82af95de50adfd5ffdf2f81d7523f845def07d34"
+branch = "fix/dirty-path-names"
+scope = ["src/agent_coordination/checkout.py", "tests/test_cli.py"]
+opened_commit = "58754b8de1a265f615d38e53a2f8f1c3aa5fb096"
