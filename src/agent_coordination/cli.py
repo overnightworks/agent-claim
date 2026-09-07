@@ -191,14 +191,14 @@ def _request(arguments: argparse.Namespace) -> protocol.ClaimRequest:
 
 
 LANE_ISSUE_HELP = "omit for lane mode, derived from a docs/ or fix/ checkout branch"
-JSON_HELP = "print the machine-readable object instead of the human lines"
+JSON_HELP = "print the result as JSON instead of the human lines"
 AGENT_HELP = (
     "the acting agent's name; filled from a non-empty ACO_AGENT, GROK_SESSION_ID or "
     "CLAUDE_SESSION_ID when omitted"
 )
-LIVE_CLAIM_ID_HELP = (
-    "act only on the live claim carrying this id; omitted, this agent and the current "
-    "checkout branch select it"
+EXPECTED_CLAIM_ID_HELP = (
+    "assert which claim you are acting on; the issue number or lane branch selects it, and "
+    "a differing id is refused rather than redirected"
 )
 ROLE_ON_LIVE_CLAIM_HELP = (
     "the acting role; the selected claim's own role when omitted, and required to be "
@@ -319,7 +319,7 @@ def _add_release_parser(commands: argparse._SubParsersAction) -> None:
         metavar="REASON",
         help="why this claim ends without a landing",
     )
-    release.add_argument("--claim-id", help=LIVE_CLAIM_ID_HELP)
+    release.add_argument("--claim-id", help=EXPECTED_CLAIM_ID_HELP)
     release.add_argument(
         "--coordinator-override",
         action="store_true",
@@ -349,7 +349,7 @@ def _add_rescope_parser(commands: argparse._SubParsersAction) -> None:
         action="append",
         help="repository-relative path to drop; comma-joined values equal repeated --drop",
     )
-    rescope.add_argument("--claim-id", help=LIVE_CLAIM_ID_HELP)
+    rescope.add_argument("--claim-id", help=EXPECTED_CLAIM_ID_HELP)
     rescope.add_argument(
         "--whole",
         metavar="REASON",
