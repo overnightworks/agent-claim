@@ -36,13 +36,6 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM", "RUF", "PL", "FURB", "N"]
-ignore = [
-    # `configure_ledger` binds the process-wide ledger issue number once, at
-    # startup, before any CLI action runs -- the one deliberate module-level
-    # configuration global in the codebase, not a state bug awaiting a
-    # refactor. Permanent policy.
-    "PLW0603",
-]
 
 [tool.ruff.lint.per-file-ignores]
 # Test literals are scenario data, not domain magic numbers; a pytest test
