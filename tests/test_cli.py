@@ -859,6 +859,7 @@ def test_board_renders_fixture_as_text_without_github_writes(
     assert "ACTIONABLE" in rendered
     assert "#10" in rendered
     assert "no: claimed" in rendered
+    assert "no: body incomplete: Now, Next, Blocked by, Done when" in rendered
     assert all("--method" not in arguments for arguments in observed)
     assert all("--jq" in arguments for arguments in observed)
     merged_days = {
@@ -914,7 +915,7 @@ def test_board_projects_fixture_json_without_github_writes(
     # 14-day floor (2026-08-07) would have admitted it — the oldest-open-
     # issue floor (2026-08-01) correctly still counts it.
     assert fourteen["stage"] == "code-landed"
-    assert fourteen["actionable_reason"] == "body incomplete"
+    assert fourteen["actionable_reason"] == "body incomplete: Now, Next, Blocked by, Done when"
     assert [item["number"] for item in payload["ready_now"]] == [10, 13]
     assert [item["number"] for item in payload["stale"]] == [12]
     assert next(item for item in payload["items"] if item["number"] == 12)["stage"] == "text-only"
@@ -1354,6 +1355,7 @@ def _stub_issue_reference(
                 "score": 10,
                 "title": "Top work",
                 "next": "Claim #11.",
+                "command": "aco claim 11 --scope <paths>",
                 "recovery": [],
                 "skipped": [{"number": 12, "reason": "blocked by #11"}],
                 "ruling_landings": None,
@@ -1366,7 +1368,7 @@ def _stub_issue_reference(
             (),
             ("next",),
             3,
-            "No actionable item.\n\nSKIPPED\n#10: body incomplete\n",
+            "No actionable item.\n\nSKIPPED\n#10: body incomplete: Next, Blocked by, Done when\n",
             id="names_an_incomplete_body_as_the_reason_nothing_is_pullable",
         ),
         pytest.param(
@@ -1578,6 +1580,7 @@ def test_next_pulls_an_unruled_item_and_names_only_unworkable_ones_as_skipped(
         "score": 10,
         "title": "Needs rulings",
         "next": "Claim #11.",
+        "command": "aco claim 11 --scope <paths>",
         "ruling_landings": None,
         "ruling_old": None,
         "ruling_hint": "Erwartungen ungeregelt, beim Ziehen zuerst refinen",
@@ -2635,8 +2638,8 @@ def test_cut_refuses_an_unlinkable_row_with_the_bare_reason(
     """`--row N` naming a well-formed but unlinkable row (a broken link
     text, neither the undispatched marker nor a valid `#n` link) falls
     through every other refusal shape -- not already cut, not the whole
-    table cut, no malformed rows to name -- to the bare `has no cuttable
-    slice row` message."""
+    table cut, no malformed rows to name -- to the requested row number and
+    the (here empty) list of rows that are still cuttable."""
     body = slice_table(("1", "Broken link slice", "not a link", "—"))
     container = _cut_container_issue(body)
     client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
@@ -2655,7 +2658,9 @@ def test_cut_refuses_an_unlinkable_row_with_the_bare_reason(
     )
 
     assert exit_code == 2
-    assert capsys.readouterr().err == f"ERROR: #{CUT_CONTAINER} has no cuttable slice row\n"
+    assert capsys.readouterr().err == (
+        f"ERROR: #{CUT_CONTAINER} has no row 1; cuttable rows: none\n"
+    )
     assert client.created_children == []
     assert client.item_bodies == {}
 
@@ -3081,6 +3086,9 @@ def test_cut_block_refuses_a_row_with_no_slice_table(
 def test_cut_block_refuses_a_row_with_no_cuttable_row(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
+    """`--row 9` names no entry while row 1 is still cuttable: the refusal
+    names the requested row and the row that is actually still cuttable,
+    not the unqualified (and false) claim that none is."""
     toml_text = f'{MINIMAL_BLOCK_TOML}[[slice]]\nindex = 1\ntitle = "Scheibe 1"\n'
     container = _block_cut_container_issue(toml_text)
     client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
@@ -3100,10 +3108,7 @@ def test_cut_block_refuses_a_row_with_no_cuttable_row(
     )
 
     assert exit_code == 2
-    assert (
-        f"ERROR: #{CUT_CONTAINER} has no cuttable slice row; 0 malformed rows need a hand fix"
-        in capsys.readouterr().err
-    )
+    assert capsys.readouterr().err == f"ERROR: #{CUT_CONTAINER} has no row 9; cuttable rows: 1\n"
     assert client.created_children == []
 
 
@@ -3655,7 +3660,7 @@ def test_claim_checks_a_slice_shaped_title_for_its_recorded_parent(
             board_issue(10, "Incomplete", "## Now\nInvestigate."),
             (),
             True,
-            (False, "body incomplete"),
+            (False, "body incomplete: Next, Blocked by, Done when"),
             id="incomplete",
         ),
         pytest.param(
@@ -5395,6 +5400,7 @@ def test_next_json_names_a_cuttable_container_slice(
     assert payload["title"] == "Epic"
     assert payload["slice"] == "Scheibe C"
     assert payload["cut_title"] == "Scheibe C"
+    assert payload["command"] == 'aco cut 181 --title "Scheibe C"'
 
 
 def test_next_names_a_closeable_container(
@@ -5443,6 +5449,7 @@ def test_next_json_names_a_closeable_container(
     assert payload["number"] == 183
     assert payload["closed"] == 4
     assert payload["total"] == 4
+    assert "command" not in payload
 
 
 def test_next_names_the_boards_top_row_even_when_it_is_not_the_highest_score() -> None:
@@ -6623,6 +6630,7 @@ def test_next_pulls_a_configured_projectionless_idea_with_refinement_step(
         "score": -20,
         "title": "Operator idea",
         "next": "Problem neu prüfen und Item verfeinern",
+        "command": "aco claim 10 --scope <paths>",
         "ruling_landings": None,
         "ruling_old": None,
         "recovery": [],
@@ -6639,13 +6647,15 @@ def test_next_keeps_an_unlabelled_projectionless_item_skipped_with_an_active_ide
     _configured_board_client(monkeypatch, tmp_path, open_issues=(incomplete,))
 
     assert issue_claim.main(["--repo", "example/agent-claim", "next"]) == 3
-    assert capsys.readouterr().out == "No actionable item.\n\nSKIPPED\n#10: body incomplete\n"
+    assert capsys.readouterr().out == (
+        "No actionable item.\n\nSKIPPED\n#10: body incomplete: Now, Next, Blocked by, Done when\n"
+    )
 
     assert issue_claim.main(["--repo", "example/agent-claim", "next", "--json"]) == 3
     assert json.loads(capsys.readouterr().out) == {
         "action": None,
         "recovery": [],
-        "skipped": [{"number": 10, "reason": "body incomplete"}],
+        "skipped": [{"number": 10, "reason": "body incomplete: Now, Next, Blocked by, Done when"}],
     }
 
 
@@ -6691,7 +6701,9 @@ def test_next_keeps_a_vision_labelled_projectionless_item_incomplete_without_con
     _configured_board_client(monkeypatch, tmp_path, open_issues=(idea,))
 
     assert issue_claim.main(["--repo", "example/agent-claim", "next"]) == 3
-    assert capsys.readouterr().out == "No actionable item.\n\nSKIPPED\n#10: body incomplete\n"
+    assert capsys.readouterr().out == (
+        "No actionable item.\n\nSKIPPED\n#10: body incomplete: Now, Next, Blocked by, Done when\n"
+    )
 
 
 def test_next_keeps_a_configured_idea_with_a_complete_projection_own_next(
@@ -8452,6 +8464,114 @@ def test_checkout_validation_rejects_false_or_late_claims(
         issue_claim._validate_checkout(candidate)
 
 
+def test_checkout_validation_names_the_base_repair(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The base-mismatch refusal names both SHAs (unchanged) and the repair
+    an agent reading it needs: omitting `--base` binds it to checkout HEAD."""
+    values = {
+        ("rev-parse", "HEAD"): "b" * 40,
+        ("branch", "--show-current"): "codex/issue-71-claims",
+        ("rev-parse", "--git-dir"): "/repo/.git/worktrees/issue-71",
+        ("rev-parse", "--git-common-dir"): "/repo/.git",
+        ("status", "--porcelain"): "",
+    }
+    monkeypatch.setattr(checkout, "_git_output", lambda arguments: values[tuple(arguments)])
+
+    with pytest.raises(ClaimError) as error:
+        issue_claim._validate_checkout(request())
+
+    assert str(error.value) == (
+        f"claim base {BASE} does not match checkout HEAD {'b' * 40}; "
+        "omit --base to use checkout HEAD"
+    )
+
+
+def test_checkout_validation_names_the_isolated_worktree_recipe_for_a_trunk_branch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Claiming from a checkout of `main`/`master` names the exact `git
+    worktree add` recipe (#52), not just the rule it violates."""
+    values = {("rev-parse", "HEAD"): BASE}
+    monkeypatch.setattr(checkout, "_git_output", lambda arguments: values[tuple(arguments)])
+
+    with pytest.raises(ClaimError) as error:
+        issue_claim._validate_checkout(request(branch="main"))
+
+    assert str(error.value) == (
+        "build claims require an isolated non-main worktree branch; "
+        f"run {checkout.ISOLATED_WORKTREE_RECIPE}"
+    )
+
+
+def test_checkout_validation_names_the_isolated_worktree_recipe_for_a_shared_checkout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A checkout whose git-dir is the shared common dir (not a linked
+    worktree) names the same recipe as the trunk-branch refusal above."""
+    values = {
+        ("rev-parse", "HEAD"): BASE,
+        ("branch", "--show-current"): "codex/issue-71-claims",
+        ("rev-parse", "--git-dir"): "/repo/.git",
+        ("rev-parse", "--git-common-dir"): "/repo/.git",
+        ("status", "--porcelain"): "",
+    }
+    monkeypatch.setattr(checkout, "_git_output", lambda arguments: values[tuple(arguments)])
+
+    with pytest.raises(ClaimError) as error:
+        issue_claim._validate_checkout(request())
+
+    assert str(error.value) == (
+        "build claims require a linked isolated worktree checkout; "
+        f"run {checkout.ISOLATED_WORKTREE_RECIPE}"
+    )
+
+
+def test_checkout_validation_names_the_first_three_dirty_paths_and_the_rest_as_a_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The dirty-tree refusal used to discard `git status --porcelain`'s
+    list entirely; it now names the first three changed paths and how many
+    more there are (#52)."""
+    porcelain = "\n".join(
+        [" M src/a.py", " M src/b.py", "?? src/c.py", " M src/d.py", " M src/e.py"]
+    )
+    values = {
+        ("rev-parse", "HEAD"): BASE,
+        ("branch", "--show-current"): "codex/issue-71-claims",
+        ("rev-parse", "--git-dir"): "/repo/.git/worktrees/issue-71",
+        ("rev-parse", "--git-common-dir"): "/repo/.git",
+        ("status", "--porcelain"): porcelain,
+    }
+    monkeypatch.setattr(checkout, "_git_output", lambda arguments: values[tuple(arguments)])
+
+    with pytest.raises(ClaimError) as error:
+        issue_claim._validate_checkout(request())
+
+    assert str(error.value) == (
+        "claim must be acquired before the first worktree edit: "
+        "src/a.py, src/b.py, src/c.py, and 2 more"
+    )
+
+
+def test_checkout_validation_names_every_dirty_path_when_three_or_fewer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No trailing count when every changed path already fits in the first
+    three named."""
+    values = {
+        ("rev-parse", "HEAD"): BASE,
+        ("branch", "--show-current"): "codex/issue-71-claims",
+        ("rev-parse", "--git-dir"): "/repo/.git/worktrees/issue-71",
+        ("rev-parse", "--git-common-dir"): "/repo/.git",
+        ("status", "--porcelain"): " M src/a.py",
+    }
+    monkeypatch.setattr(checkout, "_git_output", lambda arguments: values[tuple(arguments)])
+
+    with pytest.raises(ClaimError) as error:
+        issue_claim._validate_checkout(request())
+
+    assert str(error.value) == "claim must be acquired before the first worktree edit: src/a.py"
+
+
 def _git_checkout(
     *,
     head: str = BASE,
@@ -9067,8 +9187,10 @@ def test_cli_release_wrong_agent_or_branch_or_two_matches_fails_without_post(
 
     assert released == 2
     assert captured.out == ""
-    assert "ERROR:" in captured.err
-    assert "only the original claimant may release" in captured.err
+    assert captured.err == (
+        "ERROR: only the original claimant may release; use an explicit coordinator override "
+        "(holder='Ada (reviewer)', this session='Other (reviewer)')\n"
+    )
     assert "conflicting claims" not in captured.err
 
 
@@ -10509,7 +10631,10 @@ def test_cli_rescope_refuses_a_different_agent_than_the_claimant(
     )
 
     assert status == 2
-    assert "only the original claimant may rescope" in capsys.readouterr().err
+    assert capsys.readouterr().err == (
+        "ERROR: only the original claimant may rescope "
+        "(holder='Ada (builder)', this session='Grok 4.6 (builder)')\n"
+    )
 
 
 def test_cli_rescope_without_add_or_drop_is_an_error(

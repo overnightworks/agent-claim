@@ -930,6 +930,16 @@ def _ruling_pull_hint(item: board.BoardItem) -> str | None:
     return f"vor {item.ruling_landings} Landungen geregelt, beim Ziehen neu refinen"
 
 
+def _next_action_command(action: board.WorkItemAction | board.CutSliceAction) -> str:
+    """The exact `aco` invocation `_next` prints and `_next --json` carries
+    as `command` -- one owner so text and JSON never name a different
+    command for the same action. `close_container` has none: there is no
+    command to run, and neither grammar invents one."""
+    if isinstance(action, board.WorkItemAction):
+        return f"aco claim {action.item.number} --scope <paths>"
+    return f'aco cut {action.container.number} --title "{action.cut_title}"'
+
+
 def _next_action_payload(action: board.NextAction) -> dict[str, object]:
     """The action-specific fields `_next_json` adds beyond `recovery`/`skipped`."""
     if isinstance(action, board.WorkItemAction):
@@ -940,6 +950,7 @@ def _next_action_payload(action: board.NextAction) -> dict[str, object]:
             "score": item.score,
             "title": item.title,
             "next": item.next_step,
+            "command": _next_action_command(action),
             "ruling_landings": item.ruling_landings,
             "ruling_old": item.ruling_old,
         }
@@ -954,6 +965,7 @@ def _next_action_payload(action: board.NextAction) -> dict[str, object]:
             "title": action.container.title,
             "slice": action.next_step,
             "cut_title": action.cut_title,
+            "command": _next_action_command(action),
         }
     return {
         "action": "close_container",
@@ -996,7 +1008,7 @@ def _next_action_lines(action: board.NextAction) -> list[str]:
         lines = [
             f"#{item.number} score {item.score}: {item.title}",
             f"Next: {item.next_step}",
-            f"Run: aco claim {item.number} --scope <paths>",
+            f"Run: {_next_action_command(action)}",
             "<paths> cannot be derived; take the files to claim from the item body.",
         ]
         hint = _ruling_pull_hint(item)
@@ -1006,7 +1018,7 @@ def _next_action_lines(action: board.NextAction) -> list[str]:
     if isinstance(action, board.CutSliceAction):
         return [
             f"cut_slice #{action.container.number}: {action.next_step}",
-            f'Next: aco cut {action.container.number} --title "{action.cut_title}"',
+            f"Next: {_next_action_command(action)}",
         ]
     progress = action.container_progress
     return [
@@ -2107,7 +2119,11 @@ def _cmd_rescope(parsed: argparse.Namespace, _session: _WriteSession) -> None:
         observed, requested.identity, requested.branch, requested.claim_id
     )
     if requested.agent != selected.agent:
-        raise protocol.ClaimUnavailableError("only the original claimant may rescope")
+        raise protocol.ClaimUnavailableError(
+            "only the original claimant may rescope "
+            f"(holder={protocol._claimant_text(selected.agent, selected.role)!r}, "
+            f"this session={protocol._claimant_text(requested.agent, selected.role)!r})"
+        )
     combined = protocol._combined_scope(selected.scope, requested.add, requested.drop)
     versioned = checkout.versioned_paths()
     _reject_wide_scope(combined, versioned, requested.whole_reason or selected.whole_reason)
@@ -2208,7 +2224,9 @@ def _cmd_release(parsed: argparse.Namespace, session: _WriteSession) -> None:
             role = selected.role
         if (parsed.agent, role) != (selected.agent, selected.role):
             raise protocol.ClaimUnavailableError(
-                "only the original claimant may release; use an explicit coordinator override"
+                "only the original claimant may release; use an explicit coordinator override "
+                f"(holder={protocol._claimant_text(selected.agent, selected.role)!r}, "
+                f"this session={protocol._claimant_text(parsed.agent, role)!r})"
             )
     resolved_role = role if role is not None else selected.role
     intent = protocol.ReleaseIntent(
@@ -2266,17 +2284,19 @@ def _uncuttable_row_refusal(
 ) -> protocol.ClaimUnavailableError:
     """Why `--row {row_number}` names no row `cut` can link, in priority
     order: the row exists but is already cut, the whole table has nothing
-    left uncut, or -- the remaining case, a request that matches no row at
-    all while some rows are still malformed -- the malformed rows named by
-    `#` cell and reason instead of only counted."""
+    left uncut, some rows are still malformed and named by `#` cell and
+    reason, or -- the remaining case, a request that matches no row at all
+    while other rows stay cuttable -- the requested number alongside those
+    cuttable rows, instead of the unqualified (and then false) claim that
+    none exist."""
     all_rows = tuple(
         entry
         for entry in board.parse_slice_table(target.body)
         if isinstance(entry, board.SliceTableRow)
     )
+    cuttable = ", ".join(str(row.index) for row in findings.cuttable) or "none"
     requested = next((row for row in all_rows if row.index == row_number), None)
     if requested is not None and requested.item_issue is not None:
-        cuttable = ", ".join(str(row.index) for row in findings.cuttable) or "none"
         return protocol.ClaimUnavailableError(
             f"#{target.number} row {row_number} is already cut (#{requested.item_issue}); "
             f"cuttable rows: {cuttable}"
@@ -2291,7 +2311,9 @@ def _uncuttable_row_refusal(
         return protocol.ClaimUnavailableError(
             f"#{target.number} has no cuttable slice row; {named}"
         )
-    return protocol.ClaimUnavailableError(f"#{target.number} has no cuttable slice row")
+    return protocol.ClaimUnavailableError(
+        f"#{target.number} has no row {row_number}; cuttable rows: {cuttable}"
+    )
 
 
 def _cut_row(target: board.Issue, row_number: int | None) -> board.SliceTableRow | None:
@@ -2417,8 +2439,10 @@ def _block_cut_link(
 ) -> _BlockSliceLink | None:
     """Where block `cut` links its fresh child (#150 §7): without `--row`,
     the first slice entry when present; with `--row N`, the entry `N` names
-    -- refusing by the same two shared prose/#151 strings when there is no
-    slice table at all, or no matching cuttable row in it."""
+    -- refusing by the same "no slice table at all" string prose uses, or,
+    for no matching row, the same "no row N; cuttable rows" grammar prose's
+    `_uncuttable_row_refusal` prints (every remaining entry is cuttable here:
+    a linked entry is removed from `data["slice"]` at the moment it is cut)."""
     entries = _block_slice_entries(data)
     if row_number is None:
         return _block_slice_link(entries[0]) if entries else None
@@ -2428,8 +2452,9 @@ def _block_cut_link(
         )
     match = next((entry for entry in entries if entry["index"] == row_number), None)
     if match is None:
+        cuttable = ", ".join(str(entry["index"]) for entry in entries) or "none"
         raise protocol.ClaimUnavailableError(
-            f"#{number} has no cuttable slice row; 0 malformed rows need a hand fix"
+            f"#{number} has no row {row_number}; cuttable rows: {cuttable}"
         )
     return _block_slice_link(match)
 

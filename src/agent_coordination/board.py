@@ -2365,6 +2365,8 @@ def _board_item(
             active_claim=active_claim,
             open_blockers=open_blockers,
             repository=context.repository,
+            contract=contract,
+            mode=config.body_contract,
             contract_complete=parsed.contract_complete,
             projectionless_idea=projectionless_idea,
             read_state=parsed.read_state,
@@ -2811,6 +2813,8 @@ class _ActionabilityFacts:
     active_claim: str | None
     open_blockers: tuple[IssueReference, ...]
     repository: str
+    contract: Contract
+    mode: BodyContractMode
     contract_complete: bool
     projectionless_idea: bool
     read_state: BodyReadState = BodyReadState.VALID
@@ -2846,7 +2850,8 @@ def _claim_or_completeness_reason(facts: _ActionabilityFacts) -> str | None:
             open_blocker_label(reference, facts.repository) for reference in facts.open_blockers
         )
     if not facts.contract_complete and not facts.projectionless_idea:
-        return "body incomplete"
+        missing = ", ".join(missing_or_empty_sections(facts.contract, facts.mode))
+        return f"body incomplete: {missing}"
     return None
 
 
