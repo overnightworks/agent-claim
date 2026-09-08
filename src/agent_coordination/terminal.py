@@ -116,17 +116,20 @@ class TmuxTerminal:
     ) -> None:
         name = target_name(project)
         self._require_success(
-            self._run("new-session", "-d", "-s", name, "-c", str(directory)),
+            self._run(
+                "new-session",
+                "-d",
+                "-s",
+                name,
+                "-c",
+                str(directory),
+                shlex.join(self._initial_command(name, project, session_id)),
+            ),
             "create tmux target",
         )
-        try:
-            self._set_option(name, "remain-on-exit", "on")
-            self._set_option(name, _PROJECT_OPTION, project)
-            self._set_option(name, _SESSION_OPTION, session_id)
-            self._set_environment(name, launch.environment, launch.removed_environment_names)
-            self._start_command(name, launch.command)
-        except TerminalError:
-            raise
+        self._wait_for_setup(name)
+        self._configure_environment(name, launch)
+        self._start_fresh_window(name, launch, directory)
 
     def retry(
         self,
@@ -134,11 +137,8 @@ class TmuxTerminal:
         launch: Launch,
     ) -> None:
         name = target_name(project)
-        self._set_environment(name, launch.environment, launch.removed_environment_names)
-        self._require_success(
-            self._run("respawn-pane", "-k", "-t", name, shlex.join(["exec", *launch.command])),
-            "retry Codex session",
-        )
+        self._configure_environment(name, launch)
+        self._start_fresh_window(name, launch)
 
     def open_viewer(self, project: str) -> None:
         name = target_name(project)
@@ -175,23 +175,6 @@ class TmuxTerminal:
             self._run("set-option", "-t", target, option, value), "set tmux metadata"
         )
 
-    def _set_environment(
-        self,
-        target: str,
-        environment: Mapping[str, str],
-        removed_environment_names: frozenset[str],
-    ) -> None:
-        for name in removed_environment_names:
-            self._require_success(
-                self._run("set-environment", "-u", "-t", target, name),
-                "clear session identity",
-            )
-        for name, value in environment.items():
-            self._require_success(
-                self._run("set-environment", "-t", target, name, value),
-                "prepare session environment",
-            )
-
     def _option(self, target: str, option: str) -> str:
         result = self._run("show-options", "-t", target, "-v", option)
         if result.exit_status == 1:
@@ -199,11 +182,133 @@ class TmuxTerminal:
         self._require_success(result, "read tmux metadata")
         return self._text(result)
 
-    def _start_command(self, target: str, command: list[str]) -> None:
-        self._require_success(
-            self._run("send-keys", "-t", target, shlex.join(["exec", *command]), "Enter"),
-            "start Codex session",
+    @staticmethod
+    def _environment_command(launch: Launch) -> list[str]:
+        agent = launch.environment.get("ACO_AGENT")
+        if agent is None:
+            raise TerminalError("project launch environment lacks ACO_AGENT")
+        command = ["env"]
+        for name in sorted(launch.removed_environment_names):
+            command.extend(("-u", name))
+        command.append(f"ACO_AGENT={agent}")
+        return [*command, *launch.command]
+
+    def _initial_command(self, target: str, project: str, session_id: str) -> list[str]:
+        metadata_commands = (
+            [
+                "tmux",
+                "-S",
+                str(self._socket_path),
+                "set-option",
+                "-t",
+                target,
+                "remain-on-exit",
+                "on",
+            ],
+            [
+                "tmux",
+                "-S",
+                str(self._socket_path),
+                "set-option",
+                "-t",
+                target,
+                _PROJECT_OPTION,
+                project,
+            ],
+            [
+                "tmux",
+                "-S",
+                str(self._socket_path),
+                "set-option",
+                "-t",
+                target,
+                _SESSION_OPTION,
+                session_id,
+            ],
         )
+        setup = " && ".join(shlex.join(command) for command in metadata_commands)
+        ready_signal = shlex.join(
+            ["tmux", "-S", str(self._socket_path), "wait-for", "-S", f"aco-ready-{target}"]
+        )
+        return [
+            "sh",
+            "-c",
+            f"{setup} && {ready_signal}",
+        ]
+
+    def _wait_for_setup(self, target: str) -> None:
+        self._require_success(
+            self._run("wait-for", f"aco-ready-{target}"), "wait for tmux target setup"
+        )
+
+    def _configure_environment(self, target: str, launch: Launch) -> None:
+        commands = [
+            shlex.join(["set-environment", "-t", target, name, value])
+            for name, value in launch.environment.items()
+        ]
+        commands.extend(
+            shlex.join(["set-environment", "-r", "-t", target, name])
+            for name in launch.removed_environment_names
+            if name not in launch.environment
+        )
+        try:
+            result = process.run_bounded(
+                ["tmux", "-C", "-S", str(self._socket_path)],
+                input_data=("\n".join(commands) + "\n").encode(),
+            )
+        except process.ProcessError as error:
+            raise TerminalError("prepare session environment failed") from error
+        if result.exit_status != 0 or b"%error" in result.output:
+            raise TerminalError("prepare session environment failed")
+
+    def _start_fresh_window(
+        self, target: str, launch: Launch, directory: Path | None = None
+    ) -> None:
+        old_window = self._text(
+            self._successful_result(
+                self._run("display-message", "-p", "-t", target, "#{window_id}"),
+                "inspect tmux window",
+            )
+        )
+        if not old_window:
+            raise TerminalError("inspect tmux window failed: missing window id")
+        command = ["new-window", "-d", "-P", "-F", "#{window_id}", "-t", target]
+        if directory is not None:
+            command.extend(("-c", str(directory)))
+        command.append(shlex.join(self._provider_command(target, launch)))
+        new_window = self._text(self._successful_result(self._run(*command), "start Codex session"))
+        if not new_window:
+            raise TerminalError("start Codex session failed: missing window id")
+        self._require_success(self._run("select-window", "-t", new_window), "select Codex session")
+        self._require_success(self._run("kill-window", "-t", old_window), "discard setup window")
+
+    def _provider_command(self, target: str, launch: Launch) -> list[str]:
+        session_environment = shlex.join(
+            ["tmux", "-S", str(self._socket_path), "show-environment", "-s", "-t", target]
+        )
+        provider = shlex.join(self._environment_command(launch))
+        preserve_dead_pane = (
+            f'tmux -S {shlex.quote(str(self._socket_path))} set-option -w -t "$TMUX_PANE" '
+            "remain-on-exit on"
+        )
+        return [
+            "sh",
+            "-c",
+            " && ".join(
+                (
+                    preserve_dead_pane,
+                    f'eval "$({session_environment})"',
+                    f"exec {provider}",
+                )
+            ),
+        ]
+
+    @classmethod
+    def _successful_result(
+        cls, result: process.CapturedResult, action: str
+    ) -> process.CapturedResult:
+        cls._require_success(result, action)
+        return result
 
     @staticmethod
     def _text(result: process.CapturedResult) -> str:
