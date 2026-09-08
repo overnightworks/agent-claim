@@ -1973,6 +1973,25 @@ def test_claim_refuses_when_the_higher_priority_item_needs_refining(
     assert "--out-of-order REASON" in captured.err
 
 
+def test_claim_parser_description_names_what_refuses_first() -> None:
+    """`claim --help` must not send an agent to the README for what refuses
+    first in practice (issue #201): the parser's own description, pinned at
+    the layer that produces it, names an isolated worktree on a non-main
+    branch, a clean tree before the first edit, and --scope paths being
+    repository-relative."""
+    parser = issue_claim._parser()
+    subparsers_action = next(
+        action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
+    )
+    claim_parser = subparsers_action.choices["claim"]
+
+    assert claim_parser.description == issue_claim.CLAIM_DESCRIPTION
+    assert "isolated" in issue_claim.CLAIM_DESCRIPTION
+    assert "non-main branch" in issue_claim.CLAIM_DESCRIPTION
+    assert "clean" in issue_claim.CLAIM_DESCRIPTION
+    assert "repository-relative" in issue_claim.CLAIM_DESCRIPTION
+
+
 def test_claim_help_names_the_out_of_order_refusal(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -6865,13 +6884,6 @@ def test_merged_release_reason_names_the_pull_request() -> None:
     assert protocol.MergedRelease(12).reason == "merged #12"
 
 
-def test_claims_holding_path_refuses_more_than_one_path() -> None:
-    with pytest.raises(
-        ClaimError, match="status --path requires a single repository-relative path"
-    ):
-        protocol.claims_holding_path((), "src/a.py,src/b.py")
-
-
 @pytest.mark.parametrize(
     ("add", "drop", "match"),
     [
@@ -6937,7 +6949,6 @@ def test_claim_branch_must_be_a_safe_git_ref(branch: object, match: str) -> None
         pytest.param([], "must be a non-empty list", id="empty-list"),
         pytest.param([5], "scope entries must be text", id="entry-not-text"),
         pytest.param([" src"], "canonical bounded paths", id="padded-entry"),
-        pytest.param(["src,,docs"], "canonical bounded paths", id="empty-comma-piece"),
         pytest.param(
             [f"src/file{index}.py" for index in range(protocol.MAX_SCOPE_ENTRIES + 1)],
             "exceeds 256 entries",
@@ -10517,10 +10528,16 @@ def test_cli_claim_replay_does_not_resurrect_a_released_claim(
     assert "already on this ledger, active or released" in capsys.readouterr().err
 
 
-def test_cli_comma_joined_scope_is_stored_as_distinct_paths_and_overlaps(
+def test_cli_claim_scope_keeps_a_comma_inside_one_path(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    """A repository-relative path may itself contain a comma
+    (`docs/report,v2.md`); the removed comma-splitting used to turn that
+    silently into two wrong paths. One --scope occurrence is now exactly one
+    path, comma and all -- proved here end to end through the real store, and
+    by the absence of an overlap with the substring before the comma, which
+    the old splitting would have claimed as its own path."""
     client = FakeForge()
     monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
     monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
@@ -10533,7 +10550,7 @@ def test_cli_comma_joined_scope_is_stored_as_distinct_paths_and_overlaps(
             "claim",
             "72",
             "--agent",
-            "ReproAgentA",
+            "Ada",
             "--role",
             "builder",
             "--base",
@@ -10541,18 +10558,14 @@ def test_cli_comma_joined_scope_is_stored_as_distinct_paths_and_overlaps(
             "--branch",
             "codex/issue-72",
             "--scope",
-            "docs/PRODUCT.md,src/atelier2/adapters/dbos/run_transitions.py",
+            "docs/report,v2.md",
             "--claim-id",
-            "joined",
+            "comma-path",
         ]
     )
 
     assert claimed == 0
-    posted = _live_store_claim()
-    assert posted.scope == (
-        "docs/PRODUCT.md",
-        "src/atelier2/adapters/dbos/run_transitions.py",
-    )
+    assert _live_store_claim().scope == ("docs/report,v2.md",)
 
     second = issue_claim.main(
         [
@@ -10561,7 +10574,7 @@ def test_cli_comma_joined_scope_is_stored_as_distinct_paths_and_overlaps(
             "claim",
             "73",
             "--agent",
-            "ReproAgentB",
+            "Grace",
             "--role",
             "builder",
             "--base",
@@ -10569,22 +10582,25 @@ def test_cli_comma_joined_scope_is_stored_as_distinct_paths_and_overlaps(
             "--branch",
             "codex/issue-73",
             "--scope",
-            "docs/PRODUCT.md",
+            "docs/report",
             "--claim-id",
-            "single",
+            "half-path",
         ]
     )
     captured = capsys.readouterr()
 
     assert second == 0
-    assert "CLAIMED issue #73: single" in captured.out
-    assert "overlaps issue #72 (joined)" in captured.out
+    assert "CLAIMED issue #73: half-path" in captured.out
+    assert "overlaps no other open claims" in captured.out
     assert len(store.fetch_state(worktree=Path("."), remote="origin").claims) == 2
 
 
-def test_cli_comma_joined_scope_flag_equals_repeated_scope_flags(
+def test_cli_claim_scope_comma_differs_from_repeated_scope_flags(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A comma inside one --scope value is no longer equivalent to repeating
+    the flag: the joined form is a single path whose name contains a comma,
+    the repeated form two distinct paths."""
     client = FakeForge()
     monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
     monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
@@ -10633,7 +10649,10 @@ def test_cli_comma_joined_scope_flag_equals_repeated_scope_flags(
 
     assert (joined, repeated) == (0, 0)
     claims = store.fetch_state(worktree=Path("."), remote="origin").claims
-    assert {claim.scope for claim in claims.values()} == {("docs/PRODUCT.md", "src/widget.py")}
+    assert {claim.scope for claim in claims.values()} == {
+        ("docs/PRODUCT.md,src/widget.py",),
+        ("docs/PRODUCT.md", "src/widget.py"),
+    }
 
 
 def test_cli_rescope_adds_a_path_without_matching_head_or_a_clean_tree(
@@ -10669,6 +10688,74 @@ def test_cli_rescope_adds_a_path_without_matching_head_or_a_clean_tree(
     assert standing.scope == ("src/widget.py", "src/new.py")
 
 
+def test_cli_rescope_add_keeps_a_comma_inside_one_path(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`--add` shares `--scope`'s rule: one occurrence is one path, comma and
+    all, never split into two."""
+    client = FakeForge()
+    claimed_request = request(issue=72, branch="codex/issue-72", scope=("src/widget.py",))
+    acquired = _store_claim_from_request(claimed_request)
+    _patch_store_write(monkeypatch, acquired)
+    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
+    git_values = _git_checkout(head="b" * 40, dirty=" M file")
+    monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
+    monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+    _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Codex Sol"})
+
+    status = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "rescope",
+            "72",
+            "--add",
+            "reports/a,b.md",
+        ]
+    )
+
+    assert status == 0
+    assert capsys.readouterr().out == f"RESCOPED issue #72: {acquired.claim_id}\n"
+    assert _live_store_claim().scope == ("src/widget.py", "reports/a,b.md")
+
+
+def test_cli_rescope_drop_matches_a_comma_path_as_one_whole_path(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`--drop` shares the same rule: dropping `reports/a,b.md` removes that
+    one path and leaves an unrelated `reports/a` scope entry untouched --
+    the old comma-splitting would instead have tried, and failed, to drop
+    `reports/a` and `b.md` as two separate paths."""
+    client = FakeForge()
+    claimed_request = request(
+        issue=72, branch="codex/issue-72", scope=("reports/a", "reports/a,b.md")
+    )
+    acquired = _store_claim_from_request(claimed_request)
+    _patch_store_write(monkeypatch, acquired)
+    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
+    git_values = _git_checkout(head="b" * 40, dirty=" M file")
+    monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
+    monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+    _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Codex Sol"})
+
+    status = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "rescope",
+            "72",
+            "--drop",
+            "reports/a,b.md",
+        ]
+    )
+
+    assert status == 0
+    assert capsys.readouterr().out == f"RESCOPED issue #72: {acquired.claim_id}\n"
+    assert _live_store_claim().scope == ("reports/a",)
+
+
 def test_cli_rescope_json_prints_updated_scope_and_same_claim_id(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -10691,7 +10778,9 @@ def test_cli_rescope_json_prints_updated_scope_and_same_claim_id(
             "rescope",
             "72",
             "--add",
-            "docs/PRODUCT.md,src/new.py",
+            "docs/PRODUCT.md",
+            "--add",
+            "src/new.py",
             "--drop",
             "src/widget.py",
             "--json",
