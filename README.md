@@ -88,9 +88,10 @@ base or a clean tree.
 
 Run commands in the repository being coordinated, or pass `--repo
 OWNER/REPOSITORY`. A claim must begin from a clean linked worktree and binds its
-base commit, branch, issue, and repository-relative scope. `--scope a,b` is
-the same as `--scope a --scope b`; each path is stored and compared
-separately. A scope is wide when it declares more than three paths, any directory,
+base commit, branch, issue, and repository-relative scope. Each `--scope` is
+exactly one path, comma and all; a claim with more than one path repeats the
+flag (`--scope a --scope b`), never a comma-joined value. A scope is wide when
+it declares more than three paths, any directory,
 or, once the repository has at least twelve versioned files, more than a
 quarter of them; a single named path in a smaller repository is never wide on
 share. Named new paths count; children of containers are never exempt. The

@@ -39,6 +39,11 @@ NEXT_PULL_DESCRIPTION = (
     "named here with refining as its first step, while dispatching a builder onto "
     "it waits for the operator's ruling."
 )
+CLAIM_DESCRIPTION = (
+    "Refuses before the first edit unless the checkout is a linked, isolated "
+    "worktree on a non-main branch, the tree is clean, and every --scope value is "
+    "a repository-relative path."
+)
 WHOLE_HELP = (
     "one sentence why this wide scope does not split; required for more than "
     "three paths, any directory, or, once the repository has at least twelve "
@@ -244,7 +249,11 @@ def _add_next_parser(commands: argparse._SubParsersAction) -> None:
 
 
 def _add_claim_parser(commands: argparse._SubParsersAction) -> None:
-    claim = commands.add_parser("claim", help="claim an issue and scope before editing")
+    claim = commands.add_parser(
+        "claim",
+        help="claim an issue and scope before editing",
+        description=CLAIM_DESCRIPTION,
+    )
     claim.add_argument(
         "issue",
         type=int,
@@ -268,7 +277,7 @@ def _add_claim_parser(commands: argparse._SubParsersAction) -> None:
         "--scope",
         action="append",
         required=True,
-        help="repository-relative path; comma-joined values equal repeated --scope",
+        help="a repository-relative path; repeat --scope for more than one path",
     )
     claim.add_argument(
         "--claim-id",
@@ -343,12 +352,12 @@ def _add_rescope_parser(commands: argparse._SubParsersAction) -> None:
     rescope.add_argument(
         "--add",
         action="append",
-        help="repository-relative path to add; comma-joined values equal repeated --add",
+        help="a repository-relative path to add; repeat --add for more than one path",
     )
     rescope.add_argument(
         "--drop",
         action="append",
-        help="repository-relative path to drop; comma-joined values equal repeated --drop",
+        help="a repository-relative path to drop; repeat --drop for more than one path",
     )
     rescope.add_argument("--claim-id", help=EXPECTED_CLAIM_ID_HELP)
     rescope.add_argument(

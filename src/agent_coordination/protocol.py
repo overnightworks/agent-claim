@@ -211,27 +211,25 @@ SCOPE_ENTRIES_MUST_BE_CANONICAL = "claim scope entries must be canonical bounded
 
 
 def _scope_list_entries(scope: object) -> list[str]:
-    """Expand a stored or CLI scope list into individual path strings.
+    """Validate a stored or CLI scope list: one list entry, one path.
 
-    Each list entry may itself be comma-joined: `--scope a,b` equals
-    `--scope a --scope b`, so overlap detection sees the same paths however
-    the caller grouped them.
+    A path is taken verbatim, comma and all -- a repository-relative path
+    that contains a comma is otherwise unrepresentable. A caller with more
+    than one path repeats the flag (`--scope a --scope b`); nothing here
+    joins or splits entries.
     """
     if not isinstance(scope, list) or not scope:
         raise InvalidClaimMarkerError("claim marker scope must be a non-empty list")
-    expanded: list[str] = []
+    entries: list[str] = []
     for raw_path in scope:
         if not isinstance(raw_path, str):
             raise InvalidClaimMarkerError("claim scope entries must be text")
         if raw_path.strip() != raw_path or not raw_path:
             raise InvalidClaimMarkerError(SCOPE_ENTRIES_MUST_BE_CANONICAL)
-        pieces = [piece.strip() for piece in raw_path.split(",")]
-        if any(not piece for piece in pieces):
-            raise InvalidClaimMarkerError(SCOPE_ENTRIES_MUST_BE_CANONICAL)
-        expanded.extend(pieces)
-    if len(expanded) > MAX_SCOPE_ENTRIES:
+        entries.append(raw_path)
+    if len(entries) > MAX_SCOPE_ENTRIES:
         raise InvalidClaimMarkerError(f"claim marker scope exceeds {MAX_SCOPE_ENTRIES} entries")
-    return expanded
+    return entries
 
 
 def _valid_scope(scope: object) -> tuple[str, ...]:
@@ -382,8 +380,6 @@ def claims_overlap(left: ScopedClaim, right: ScopedClaim) -> bool:
 
 def claims_holding_path(claims: tuple[_ScopedClaimT, ...], path: str) -> tuple[_ScopedClaimT, ...]:
     target = _valid_scope([path])
-    if len(target) != 1:
-        raise ClaimError("status --path requires a single repository-relative path")
     return tuple(claim for claim in claims if _scopes_overlap(claim.scope, target))
 
 
