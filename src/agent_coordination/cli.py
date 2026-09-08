@@ -139,6 +139,40 @@ def _reject_wide_scope(
     return n, total, share
 
 
+def _reject_ungrounded_comma_scope(
+    scope: tuple[str, ...], versioned: tuple[str, ...], *, flag: str
+) -> None:
+    """Refuse a scope entry that contains a comma and matches no versioned
+    file -- the shape `{flag} a.py,b.py` takes when passed as one flag from
+    habit instead of one path per flag (issue #207). Stored verbatim, that
+    single entry names a path nothing tracks, so the claim protects nothing:
+    the lane's real files stay uncovered and no overlap check can ever fire
+    for them.
+
+    Never call this over `--drop`: a value the live claim already holds is a
+    fact about the claim, not a typo about the checkout, and dropping a value
+    the claim does not hold is already refused by `_combined_scope` with a
+    truer sentence naming the claim rather than the checkout -- adding this
+    check there would either block the very repair this refusal exists to
+    leave open (dropping an already-claimed ungrounded value), or never fire
+    at all (a not-yet-dropped value the claim lacks is refused first).
+
+    Splitting on the comma would be the old, wrong fix (issue #201): it made
+    a real comma-bearing filename unrepresentable. So a real comma-bearing
+    path that names a versioned file, or a directory holding one, still
+    passes here -- `paths_under_scope` matches either. So does a comma-free
+    path that does not exist yet, since a lane routinely claims files it is
+    about to create; only a comma with no match among versioned files is the
+    signature this refuses.
+    """
+    for entry in scope:
+        if "," in entry and not checkout.paths_under_scope(versioned, (entry,)):
+            raise protocol.ClaimError(
+                f"{entry!r} matches no versioned file; one {flag} path per flag, so its comma "
+                f"is read literally -- repeat {flag} for a second path"
+            )
+
+
 def _touch_json(claim: protocol.ScopedClaim) -> dict[str, object]:
     return {
         **_identity_json(claim.identity),
@@ -2076,8 +2110,9 @@ def _cmd_rescope(parsed: argparse.Namespace, _session: _WriteSession) -> None:
             f"(holder={protocol._claimant_text(selected.agent, selected.role)!r}, "
             f"this session={protocol._claimant_text(requested.agent, selected.role)!r})"
         )
-    combined = protocol._combined_scope(selected.scope, requested.add, requested.drop)
     versioned = checkout.versioned_paths()
+    _reject_ungrounded_comma_scope(requested.add, versioned, flag="--add")
+    combined = protocol._combined_scope(selected.scope, requested.add, requested.drop)
     _reject_wide_scope(combined, versioned, requested.whole_reason or selected.whole_reason)
     intent = protocol.RescopeIntent(
         claim_id=selected.claim_id,
@@ -2104,6 +2139,7 @@ def _cmd_claim(parsed: argparse.Namespace, session: _WriteSession) -> int:
     client = session.forge
     requested = _request(parsed)
     versioned = checkout.versioned_paths()
+    _reject_ungrounded_comma_scope(requested.scope, versioned, flag="--scope")
     n, total, share = _reject_wide_scope(requested.scope, versioned, requested.whole_reason)
     worktree, canonical_remote, observed = _store_observation(parsed)
     _require_state_ref(observed)

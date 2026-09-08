@@ -90,7 +90,15 @@ Run commands in the repository being coordinated, or pass `--repo
 OWNER/REPOSITORY`. A claim must begin from a clean linked worktree and binds its
 base commit, branch, issue, and repository-relative scope. Each `--scope` is
 exactly one path, comma and all; a claim with more than one path repeats the
-flag (`--scope a --scope b`), never a comma-joined value. A scope is wide when
+flag (`--scope a --scope b`), never a comma-joined value. A comma-bearing value
+that matches no versioned file is refused before the claim is written, naming
+the one-path-per-flag rule -- the signature of a comma-joined value passed by
+habit, which would otherwise store a path that guards nothing; a real
+comma-bearing filename, and any comma-free path not created yet, still claim
+cleanly. `rescope --add` applies the same refusal to its own values; `--drop`
+never does, since a value the live claim already holds is a fact about the
+claim, not a typo about the checkout, and dropping a value the claim does not
+hold is already refused by its own truer reason. A scope is wide when
 it declares more than three paths, any directory,
 or, once the repository has at least twelve versioned files, more than a
 quarter of them; a single named path in a smaller repository is never wide on
