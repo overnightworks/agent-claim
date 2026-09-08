@@ -5,9 +5,9 @@
 contract and `Capability` answers, per operation, whether an adapter can
 perform it at all. The GitHub adapter never itself refuses an operation.
 `cli._load_board_config` is the one caller that branches on a capability
-answer -- the `body_contract = "block"` pin gate (#150), which requires
-`LIST_BOARD_DEPENDENCIES` at `READ_ONLY` or better before a repository may
-read bodies through the block.
+answer -- reading a work-item body's dependencies (#150) requires
+`LIST_BOARD_DEPENDENCIES` at `READ_ONLY` or better, so a forge without it
+cannot serve a board at all.
 """
 
 from __future__ import annotations
@@ -50,12 +50,12 @@ class ForgePartialChildCreationError(ForgeError):
     recording it there.
 
     Not atomic across `create_child`'s own two writes (the issue and its
-    sub-issue relation), nor across `create_child` and the later slice-table
-    link: retrying either would risk a second child, so the caller recovers
-    `step` by hand instead and never re-runs `cut`. Raised by the GitHub
-    adapter when its own relation write fails, and reused by `cli._cmd_cut`
-    when the later slice-table link fails -- one type, so both failures are
-    recovered the same way.
+    sub-issue relation), nor across `create_child` and the later block
+    rewrite: retrying either would risk a second child, so the caller
+    recovers `step` by hand instead and never re-runs `cut`. Raised by the
+    GitHub adapter when its own relation write fails, and reused by
+    `cli._cmd_cut` when the later block rewrite fails -- one type, so both
+    failures are recovered the same way.
     """
 
     def __init__(self, *, child: int, parent: int, step: str, cause: Exception) -> None:
@@ -135,7 +135,6 @@ class ForgeOperation(StrEnum):
     LIST_CHILDREN = "list_children"
     DEFAULT_BRANCH = "default_branch"
     LIST_OPEN_BOARD_ISSUES = "list_open_board_issues"
-    LIST_BOARD_BLOCKERS = "list_board_blockers"
     LIST_BOARD_DEPENDENCIES = "list_board_dependencies"
     LIST_OPEN_BOARD_PULL_REQUESTS = "list_open_board_pull_requests"
     LIST_RECENT_MERGED_BOARD_PULL_REQUESTS = "list_recent_merged_board_pull_requests"
@@ -164,10 +163,6 @@ class BoardSource(Protocol):
     def capability(self, operation: ForgeOperation) -> Capability: ...
 
     def list_open_board_issues(self) -> tuple[board.Issue, ...]: ...
-
-    def list_board_blockers(
-        self, numbers: frozenset[int]
-    ) -> tuple[board.BlockerReference, ...]: ...
 
     def list_board_dependencies(self, number: int) -> tuple[board.IssueDependency, ...]: ...
 
@@ -202,10 +197,6 @@ class ForgeReader(Protocol):
     def default_branch(self) -> str: ...
 
     def list_open_board_issues(self) -> tuple[board.Issue, ...]: ...
-
-    def list_board_blockers(
-        self, numbers: frozenset[int]
-    ) -> tuple[board.BlockerReference, ...]: ...
 
     def list_board_dependencies(self, number: int) -> tuple[board.IssueDependency, ...]: ...
 

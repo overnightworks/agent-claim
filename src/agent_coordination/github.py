@@ -217,7 +217,6 @@ _READ_ONLY_OPERATIONS = (
     forge.ForgeOperation.LIST_CHILDREN,
     forge.ForgeOperation.DEFAULT_BRANCH,
     forge.ForgeOperation.LIST_OPEN_BOARD_ISSUES,
-    forge.ForgeOperation.LIST_BOARD_BLOCKERS,
     forge.ForgeOperation.LIST_BOARD_DEPENDENCIES,
     forge.ForgeOperation.LIST_OPEN_BOARD_PULL_REQUESTS,
     forge.ForgeOperation.LIST_RECENT_MERGED_BOARD_PULL_REQUESTS,
@@ -644,62 +643,6 @@ class GitHubForge:
             for value in values
             if not (isinstance(value, dict) and value.get("isPullRequest"))
         )
-
-    MALFORMED_BOARD_BLOCKER = "GitHub returned a malformed board blocker"
-
-    def _board_blocker(self, number: int) -> board.BlockerReference:
-        try:
-            raw = self._run(
-                [
-                    "api",
-                    f"repos/{self.repository}/issues/{number}",
-                    "--jq",
-                    '{number,state,closedAt:.closed_at,isPullRequest:has("pull_request")}',
-                ]
-            )
-        except forge.ForgeNotFoundError:
-            return board.BlockerReference(number, board.BlockerState.MISSING, False)
-        values = self._json_lines(raw, "board blocker")
-        if len(values) != 1 or not isinstance(values[0], dict):
-            raise forge.ForgeMalformedResponseError(self.MALFORMED_BOARD_BLOCKER)
-        value = values[0]
-        returned_number = value.get("number")
-        state = value.get("state")
-        closed_at = value.get("closedAt")
-        is_pull_request = value.get("isPullRequest")
-        blocker_state = API_ISSUE_STATES.get(state) if isinstance(state, str) else None
-        if (
-            isinstance(returned_number, bool)
-            or returned_number != number
-            or blocker_state is None
-            or not isinstance(is_pull_request, bool)
-            or (closed_at is not None and not isinstance(closed_at, str))
-            or (isinstance(closed_at, str) and TIMESTAMP_PATTERN.fullmatch(closed_at) is None)
-            or (blocker_state is board.BlockerState.CLOSED and closed_at is None)
-        ):
-            raise forge.ForgeMalformedResponseError(self.MALFORMED_BOARD_BLOCKER)
-        parsed_closed_at = None
-        if closed_at is not None:
-            try:
-                parsed_closed_at = datetime.fromisoformat(closed_at)
-            except ValueError as error:
-                raise forge.ForgeMalformedResponseError(self.MALFORMED_BOARD_BLOCKER) from error
-            # No naive-datetime guard here: TIMESTAMP_PATTERN (checked above)
-            # requires a literal trailing "Z", which `fromisoformat` (3.11+)
-            # always parses as UTC -- never a naive result to guard against.
-            parsed_closed_at = parsed_closed_at.astimezone(UTC)
-        return board.BlockerReference(
-            number,
-            blocker_state,
-            is_pull_request,
-            parsed_closed_at,
-        )
-
-    def list_board_blockers(self, numbers: frozenset[int]) -> tuple[board.BlockerReference, ...]:
-        if not numbers:
-            return ()
-        with ThreadPoolExecutor(max_workers=min(len(numbers), PARALLEL_FETCH_CONCURRENCY)) as pool:
-            return tuple(pool.map(self._board_blocker, sorted(numbers)))
 
     MALFORMED_BOARD_DEPENDENCY = "GitHub returned a malformed board blocked-by dependency"
 

@@ -6,7 +6,7 @@ import argparse
 import json
 import sys
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -789,10 +789,10 @@ def _validated_dependencies(
 
 def _resolve_toplevel() -> Path:
     """The checkout's toplevel, for every command that resolves the
-    repository's board configuration (#150). Without a working tree the
-    command cannot know the `body_contract` pin -- it would otherwise have to
-    guess a default and could silently read a `block`-pinned repository's
-    bodies with the prose grammar, so it refuses instead (#178)."""
+    repository's board configuration (#150) -- its priority ladder, its idea
+    label, its canonical remote, and the body pin it is still checked
+    against. Without a working tree there is no configuration to read, so
+    the command refuses rather than running on guessed defaults (#178)."""
     try:
         return Path(checkout._git_output(["rev-parse", "--show-toplevel"]))
     except protocol.ClaimError as error:
@@ -804,16 +804,17 @@ def _resolve_toplevel() -> Path:
 
 
 def _load_board_config(client: forge.BoardSource, toplevel: Path) -> board.BoardConfig:
-    """The repository's board configuration, with its `body_contract` pin
-    validated against what `client` can actually do (#150 §3): `block`
-    requires `list_board_dependencies` at read-only or better."""
+    """The repository's board configuration, validated against what `client`
+    can actually do (#150 §3): reading a body's dependencies requires
+    `list_board_dependencies` at read-only or better, and the typed block is
+    the one body grammar, so every repository needs it."""
     config = board.load_config(toplevel / board.CONFIG_PATH)
-    if config.body_contract is board.BodyContractMode.BLOCK and (
+    if (
         client.capability(forge.ForgeOperation.LIST_BOARD_DEPENDENCIES)
         is forge.Capability.UNSUPPORTED
     ):
         raise protocol.ClaimError(
-            "board body_contract 'block' requires forge operation list_board_dependencies"
+            "reading work-item bodies requires forge operation list_board_dependencies"
         )
     return config
 
@@ -841,35 +842,25 @@ def _board(
         for issue in issues
         if issue.kind is board.ItemKind.CONTAINER and issue.children_total
     )
-    prose = config.body_contract is board.BodyContractMode.PROSE
-    # Open and recently-merged pull requests, the prose blocker lookup, and
-    # each container's children are independent reads once `since` is known,
-    # so fetching them on separate threads instead of one after another
-    # overlaps their `gh` subprocess wait time. Children get their own
-    # executor (`_fetch_children`) so their concurrency stays capped at
-    # `BOARD_CHILD_FETCH_CONCURRENCY` even once these three base reads finish
-    # and free their own pool's workers. Block mode never calls
-    # `list_board_blockers`; its dependency wave runs afterward instead (below),
-    # so peak concurrent `gh` subprocesses stays at today's 3+4, then at most 4.
-    with ThreadPoolExecutor(max_workers=3) as pool:
+    # Open and recently-merged pull requests and each container's children
+    # are independent reads once `since` is known, so fetching them on
+    # separate threads instead of one after another overlaps their `gh`
+    # subprocess wait time. Children get their own executor
+    # (`_fetch_children`) so their concurrency stays capped at
+    # `BOARD_CHILD_FETCH_CONCURRENCY` even once these two base reads finish
+    # and free their own pool's workers. The dependency wave runs afterward
+    # instead (below), so peak concurrent `gh` subprocesses stays at 2+4,
+    # then at most 4.
+    with ThreadPoolExecutor(max_workers=2) as pool:
         open_pull_requests = pool.submit(client.list_open_board_pull_requests)
         merged_pull_requests = pool.submit(client.list_recent_merged_board_pull_requests, since)
-        blocker_references = (
-            pool.submit(client.list_board_blockers, board.blocker_references(issues))
-            if prose
-            else None
-        )
         children = _fetch_children(client, container_numbers)
         pull_requests = (open_pull_requests.result(), merged_pull_requests.result())
-    dependencies = (
-        {}
-        if prose
-        else _validated_dependencies(
-            issues,
-            _fetch_dependencies(
-                client, tuple(issue.number for issue in issues if issue.blocked_by_count > 0)
-            ),
-        )
+    dependencies = _validated_dependencies(
+        issues,
+        _fetch_dependencies(
+            client, tuple(issue.number for issue in issues if issue.blocked_by_count > 0)
+        ),
     )
     return board.build_board(
         board.BoardBuildInputs(
@@ -879,7 +870,6 @@ def _board(
             claims=claims,
             config=config,
             repository=client.repository.path,
-            blocker_references=(() if blocker_references is None else blocker_references.result()),
             now=now,
             trunk_landings=checkout.trunk_landing_times(),
             children=children,
@@ -1188,36 +1178,12 @@ def _legacy_or_malformed_checks(item: board.BoardItem) -> tuple[SliceCheck, ...]
     return None
 
 
-def _body_contract_checks(
-    item: board.BoardItem,
-    blocker_references: tuple[board.BlockerReference, ...],
-    mode: board.BodyContractMode,
-) -> tuple[SliceCheck, ...]:
+def _body_contract_checks(item: board.BoardItem) -> tuple[SliceCheck, ...]:
     legacy_or_malformed = _legacy_or_malformed_checks(item)
     if legacy_or_malformed is not None:
         return legacy_or_malformed
     contract = item.contract
     checks = [SliceCheck("error", "body-contract", defect.message) for defect in contract.defects]
-    blocker_by_number = {reference.number: reference for reference in blocker_references}
-    for blocker in contract.blocker_issues:
-        reference = blocker_by_number[blocker]
-        if reference.is_pull_request:
-            continue
-        if reference.state is board.BlockerState.CLOSED:
-            checks.append(
-                SliceCheck(
-                    "error", "closed-blocker", f"blocker #{blocker} is closed", issue=blocker
-                )
-            )
-        elif reference.state is board.BlockerState.MISSING:
-            checks.append(
-                SliceCheck(
-                    "error",
-                    "missing-blocker",
-                    f"blocker #{blocker} does not exist here",
-                    issue=blocker,
-                )
-            )
     # Read the two atomic facts directly rather than `item.actionable_reason`:
     # that reason is the *first* one `_actionable_reason` finds (frozen,
     # claimed, blocked, then incomplete), so an item that is both blocked and
@@ -1226,7 +1192,7 @@ def _body_contract_checks(
     # but defect-free skeleton) is refused here exactly as it is invisible to
     # `next`, regardless of what else may also be true of it.
     if not item.contract_complete and not item.projectionless_idea:
-        missing = ", ".join(board.missing_or_empty_sections(contract, mode))
+        missing = ", ".join(board.missing_or_empty_sections(contract))
         checks.append(
             SliceCheck(
                 "error",
@@ -1275,9 +1241,7 @@ def _slice_rule_checks(
             SliceCheck("error", "missing-issue", f"issue #{issue} does not exist here", issue=issue)
         )
     if item is not None:
-        checks.extend(
-            _body_contract_checks(item, projected.blocker_references, projected.body_contract)
-        )
+        checks.extend(_body_contract_checks(item))
     if title is not None:
         parent_check = _parent_checks(lookup.client, lookup.repository, issue, title)
         if parent_check is not None:
@@ -1346,15 +1310,13 @@ def _no_item_defect(
 @dataclass(frozen=True)
 class _LandingCheckContext:
     """What every landing-classification helper needs beyond the pull
-    request's own detail and the store's live claims: which forge to read,
-    which repository owns the check, and which body-contract mode to parse
-    a parent's body with -- grouped so the cluster of helpers below stays
-    under the five-argument limit as claims moved from a `client`-read
-    ledger walk to a separately threaded store snapshot."""
+    request's own detail and the store's live claims: which forge to read
+    and which repository owns the check -- grouped so the cluster of helpers
+    below stays under the five-argument limit as claims moved from a
+    `client`-read ledger walk to a separately threaded store snapshot."""
 
     client: forge.ForgeReader
     repository: str
-    mode: board.BodyContractMode
 
 
 @dataclass(frozen=True)
@@ -1419,7 +1381,7 @@ def _parent_requirement(
     reference_defect = _parent_reference_defect(parent, context.repository)
     if reference_defect is not None:
         return reference_defect
-    parsed_parent = board.parse_body(parent.body, context.mode)
+    parsed_parent = board.parse_body(parent.body)
     if parsed_parent.read_state is not board.BodyReadState.VALID:
         return board.ClassificationDefect(_parent_body_finding(parent.reference, parsed_parent))
     remaining = tuple(
@@ -1564,10 +1526,9 @@ def _pull_request_check(
     claims: tuple[protocol.ActiveClaim, ...],
     repository: str,
     number: int,
-    mode: board.BodyContractMode,
 ) -> CheckOutcome:
     detail = client.landing(number)
-    context = _LandingCheckContext(client, repository, mode)
+    context = _LandingCheckContext(client, repository)
     checked = _checked_classification(context, claims, detail)
     if isinstance(checked, board.ClassificationDefect):
         return CheckOutcome(
@@ -1599,42 +1560,21 @@ def _refused_issue(number: int, finding: str) -> CheckOutcome:
     return CheckOutcome(CheckKind.ISSUE, number, _issue_line(number, finding), finding)
 
 
-def _open_issue_blockers(
-    client: forge.ForgeReader,
-    repository: str,
-    number: int,
-    contract: board.Contract,
-    mode: board.BodyContractMode,
-) -> tuple[board.IssueReference, ...]:
-    """What still blocks this issue, from whichever source its pin owns:
-    GitHub's own `blocked_by` dependencies under the block pin, the body's
-    own `Blocked by` line under prose -- which needs no second request,
-    since prose states its open blockers itself."""
-    if mode is board.BodyContractMode.BLOCK:
-        return board.open_dependency_blockers(client.list_board_dependencies(number), repository)
-    return tuple(
-        board.IssueReference(repository, blocker) for blocker in sorted(contract.blocker_issues)
-    )
-
-
 def _issue_check(
-    client: forge.ForgeReader,
-    repository: str,
-    body: str,
-    number: int,
-    mode: board.BodyContractMode,
+    client: forge.ForgeReader, repository: str, body: str, number: int
 ) -> CheckOutcome:
     """Whether this issue's body is the contract a builder can start from:
-    readable under the repository's pin, complete, and unblocked."""
-    parsed = board.parse_body(body, mode)
+    readable, complete, and unblocked. Its dependencies come from GitHub's
+    own `blocked_by` relation -- a body never states them itself."""
+    parsed = board.parse_body(body)
     if parsed.read_state is board.BodyReadState.LEGACY:
         return _refused_issue(number, "body legacy")
     if parsed.read_state is board.BodyReadState.MALFORMED:
         return _refused_issue(number, board.body_defect_text(parsed.contract.defects[0]))
-    missing = board.missing_or_empty_sections(parsed.contract, mode)
+    missing = board.missing_or_empty_sections(parsed.contract)
     if missing:
         return _refused_issue(number, f"body incomplete: {', '.join(missing)}")
-    blockers = _open_issue_blockers(client, repository, number, parsed.contract, mode)
+    blockers = board.open_dependency_blockers(client.list_board_dependencies(number), repository)
     if blockers:
         named = ", ".join(board.open_blocker_label(blocker, repository) for blocker in blockers)
         return _refused_issue(number, f"blocked by {named}")
@@ -2027,23 +1967,18 @@ def _cmd_check(parsed: argparse.Namespace, session: _ReadSession) -> int:
     number = int(parsed.number)
     client = session.forge
     repository = client.repository.path
-    config = _load_board_config(client, _resolve_toplevel())
+    # Read for its refusals only: a repository pinned to a grammar this tool
+    # no longer reads, or a forge that cannot answer `blocked_by`, must fail
+    # here rather than hand back a half-read answer.
+    _load_board_config(client, _resolve_toplevel())
     reference = client.item_reference(number)
     if reference.state is forge.ItemState.MISSING:
         outcome = _missing_number(repository, number)
     elif reference.is_landing:
         _worktree, _remote, observed = _store_observation(parsed)
-        outcome = _pull_request_check(
-            client,
-            tuple(observed.claims.values()),
-            repository,
-            number,
-            config.body_contract,
-        )
+        outcome = _pull_request_check(client, tuple(observed.claims.values()), repository, number)
     else:
-        outcome = _issue_check(
-            client, repository, reference.body or "", number, config.body_contract
-        )
+        outcome = _issue_check(client, repository, reference.body or "", number)
     return outcome.report(as_json=parsed.json)
 
 
@@ -2275,117 +2210,11 @@ def _cut_target(client: forge.ForgeWriter, number: int) -> board.Issue:
     return target
 
 
-def _row_index_ranges(indices: Sequence[int]) -> str:
-    """A plain hyphen joins each range, not an en dash: RUF001/RUF002 read
-    the repository's own output text like any other string literal, and
-    this repository takes no inline suppressions."""
-    ranges: list[tuple[int, int]] = []
-    for value in sorted(indices):
-        if ranges and value == ranges[-1][1] + 1:
-            ranges[-1] = (ranges[-1][0], value)
-        else:
-            ranges.append((value, value))
-    return ", ".join(str(start) if start == end else f"{start}-{end}" for start, end in ranges)
-
-
-def _uncuttable_row_refusal(
-    target: board.Issue, row_number: int, findings: board.SliceTableFindings
-) -> protocol.ClaimUnavailableError:
-    """Why `--row {row_number}` names no row `cut` can link, in priority
-    order: the row exists but is already cut; the row exists but is
-    unlinkable (`_cut_row` only reaches this refusal when `--row
-    {row_number}` matched nothing in `findings.cuttable`, and the
-    undispatched marker is always cuttable, so an existing, uncut row here
-    can only be an unlinkable one -- named by the broken item cell it
-    already holds, not folded into the "no such row" sentence below); the
-    whole table has nothing left uncut; some rows are still malformed and
-    named by `#` cell and reason; or -- the remaining case, a request that
-    matches no row at all while other rows stay cuttable -- the requested
-    number alongside those cuttable rows, instead of the unqualified (and
-    then false) claim that none exist."""
-    all_rows = tuple(
-        entry
-        for entry in board.parse_slice_table(target.body)
-        if isinstance(entry, board.SliceTableRow)
-    )
-    cuttable = ", ".join(str(row.index) for row in findings.cuttable) or "none"
-    requested = next((row for row in all_rows if row.index == row_number), None)
-    if requested is not None and requested.item_issue is not None:
-        return protocol.ClaimUnavailableError(
-            f"#{target.number} row {row_number} is already cut (#{requested.item_issue}); "
-            f"cuttable rows: {cuttable}"
-        )
-    if requested is not None:
-        return protocol.ClaimUnavailableError(
-            f"#{target.number} row {row_number} is not cuttable: item cell "
-            f"{requested.item_cell!r} is not a valid #n link"
-        )
-    cut_rows = tuple(row.index for row in all_rows if row.item_issue is not None)
-    if not findings.cuttable and cut_rows:
-        return protocol.ClaimUnavailableError(
-            f"#{target.number} has no uncut row; rows {_row_index_ranges(cut_rows)} are cut"
-        )
-    if findings.malformed:
-        named = "; ".join(board.malformed_row_clause(row) for row in findings.malformed)
-        return protocol.ClaimUnavailableError(
-            f"#{target.number} has no cuttable slice row; {named}"
-        )
-    return protocol.ClaimUnavailableError(
-        f"#{target.number} has no row {row_number}; cuttable rows: {cuttable}"
-    )
-
-
-def _cut_row(target: board.Issue, row_number: int | None) -> board.SliceTableRow | None:
-    """The slice-table row `cut` dispatches (#151): without `--row`, the
-    first still-cuttable row when one exists, else `None` -- `cut` then
-    creates an untied child, table or not, so a command `next` just printed
-    for `target` is never refused for lacking one. `--row N` requires a
-    table containing an uncut row `N` and refuses by name otherwise: no
-    slice table at all, or no row `N` left cuttable in it.
-    """
-    findings = board.slice_table_findings(target.body)
-    if row_number is None:
-        return findings.cuttable[0] if findings.cuttable else None
-    if not findings.has_table:
-        raise protocol.ClaimUnavailableError(
-            f"#{target.number} has no slice table; --row needs one to select a row from"
-        )
-    row = next(
-        (candidate for candidate in findings.cuttable if candidate.index == row_number), None
-    )
-    if row is None:
-        raise _uncuttable_row_refusal(target, row_number, findings)
-    return row
-
-
-@dataclass(frozen=True)
-class _SliceLink:
-    """The slice-table row `cut` links its fresh child into, and the exact
-    item-cell span `board.locate_slice_row` found for it."""
-
-    row: board.SliceTableRow
-    span: tuple[int, int]
-
-
-def _cut_link(target: board.Issue, row_number: int | None) -> _SliceLink | None:
-    """Where `cut` links its fresh child, or `None` when `target` has no
-    slice table to link into -- the child is then created untied to any row."""
-    row = _cut_row(target, row_number)
-    if row is None:
-        return None
-    span = board.locate_slice_row(target.body, row.index)
-    if span is None:
-        raise protocol.ClaimUnavailableError(
-            f"#{target.number}'s row {row.index} could not be located"
-        )
-    return _SliceLink(row, span)
-
-
 def _link_created_child(
     client: forge.ForgeWriter, container: int, new_body: str, child: int, step: str
 ) -> None:
-    """Write `new_body` (`container`'s slice table or `agent-claim` block,
-    the just-created `child` already linked or removed from it) back to
+    """Write `new_body` (`container`'s `agent-claim` block, the
+    just-created `child`'s slice entry already removed from it) back to
     `container`.
 
     Not atomic with `create_child` -- GitHub has no transaction across the
@@ -2393,7 +2222,7 @@ def _link_created_child(
     raises the same `forge.ForgePartialChildCreationError` a failed relation
     write inside `create_child` itself would -- one type, so `_cmd_cut`
     renders one recovery message for either, `step` naming the exact manual
-    repair for whichever mode wrote `new_body`.
+    repair.
     """
     try:
         client.update_item_body(container, new_body)
@@ -2411,37 +2240,6 @@ def _print_cut_result(number: int, row_index: int | None, child: int, *, as_json
     print(f"CUT #{number}{suffix} -> #{child}")
 
 
-def _cmd_cut_prose(
-    client: forge.ForgeWriter, target: board.Issue, parsed: argparse.Namespace
-) -> int:
-    number = target.number
-    link = _cut_link(target, parsed.row)
-    try:
-        child = client.create_child(
-            parent=number, title=parsed.title, body=board.CHILD_SKELETON, kind=board.ItemKind.TASK
-        )
-        if link is not None:
-            new_body = board.link_slice_row(target.body, link.span, child)
-            step = f"link it into #{number}'s slice table row {link.row.index}"
-            _link_created_child(client, number, new_body, child, step)
-    except forge.ForgePartialChildCreationError as error:
-        raise protocol.ClaimUnavailableError(
-            f"created #{error.child} but failed to {error.step}: {error.cause}; "
-            "do not re-run -- finish it by hand"
-        ) from error
-    _print_cut_result(number, None if link is None else link.row.index, child, as_json=parsed.json)
-    return 0
-
-
-@dataclass(frozen=True)
-class _BlockSliceLink:
-    """The `[[slice]]` entry block `cut` links its fresh child into --
-    `cut`'s block-mode counterpart to `_SliceLink`."""
-
-    index: int
-    title: str
-
-
 def _block_slice_entries(data: Mapping[str, object]) -> list[dict[str, object]]:
     value = data.get("slice")
     if not isinstance(value, list):
@@ -2449,22 +2247,21 @@ def _block_slice_entries(data: Mapping[str, object]) -> list[dict[str, object]]:
     return [entry for entry in value if isinstance(entry, dict)]
 
 
-def _block_slice_link(entry: dict[str, object]) -> _BlockSliceLink:
-    return _BlockSliceLink(cast(int, entry["index"]), cast(str, entry["title"]))
+def _slice_row(entry: dict[str, object]) -> board.SliceRow:
+    return board.SliceRow(cast(int, entry["index"]), cast(str, entry["title"]))
 
 
-def _block_cut_link(
+def _cut_link(
     number: int, data: Mapping[str, object], row_number: int | None
-) -> _BlockSliceLink | None:
-    """Where block `cut` links its fresh child (#150 §7): without `--row`,
-    the first slice entry when present; with `--row N`, the entry `N` names
-    -- refusing by the same "no slice table at all" string prose uses, or,
-    for no matching row, the same "no row N; cuttable rows" grammar prose's
-    `_uncuttable_row_refusal` prints (every remaining entry is cuttable here:
-    a linked entry is removed from `data["slice"]` at the moment it is cut)."""
+) -> board.SliceRow | None:
+    """Which `[[slice]]` entry `cut` links its fresh child to (#150 §7):
+    without `--row`, the first entry when the block carries one; with `--row
+    N`, the entry `N` names, refusing by name when the block has no `slice`
+    key at all or no such row left (every remaining entry is cuttable: a
+    linked entry is removed from `data["slice"]` at the moment it is cut)."""
     entries = _block_slice_entries(data)
     if row_number is None:
-        return _block_slice_link(entries[0]) if entries else None
+        return _slice_row(entries[0]) if entries else None
     if "slice" not in data:
         raise protocol.ClaimUnavailableError(
             f"#{number} has no slice table; --row needs one to select a row from"
@@ -2475,10 +2272,10 @@ def _block_cut_link(
         raise protocol.ClaimUnavailableError(
             f"#{number} has no row {row_number}; cuttable rows: {cuttable}"
         )
-    return _block_slice_link(match)
+    return _slice_row(match)
 
 
-def _require_matching_title(number: int, link: _BlockSliceLink, title: str) -> None:
+def _require_matching_title(number: int, link: board.SliceRow, title: str) -> None:
     if title != link.title:
         raise protocol.ClaimUnavailableError(
             f"#{number}'s slice {link.index} is titled {link.title!r}; "
@@ -2486,8 +2283,8 @@ def _require_matching_title(number: int, link: _BlockSliceLink, title: str) -> N
         )
 
 
-def _block_cut_target(number: int, target: board.Issue) -> board.LocatedBlock:
-    parsed = board.parse_body(target.body, board.BodyContractMode.BLOCK)
+def _cut_target_block(number: int, target: board.Issue) -> board.LocatedBlock:
+    parsed = board.parse_body(target.body)
     if parsed.read_state is board.BodyReadState.LEGACY:
         raise protocol.ClaimUnavailableError(
             f"#{number} body legacy; cut needs a valid agent-claim block"
@@ -2500,12 +2297,10 @@ def _block_cut_target(number: int, target: board.Issue) -> board.LocatedBlock:
     return board.locate_agent_claim_block(target.body)
 
 
-def _cmd_cut_block(
-    client: forge.ForgeWriter, target: board.Issue, parsed: argparse.Namespace
-) -> int:
+def _cut_slice(client: forge.ForgeWriter, target: board.Issue, parsed: argparse.Namespace) -> int:
     number = target.number
-    located = _block_cut_target(number, target)
-    link = _block_cut_link(number, located.data, parsed.row)
+    located = _cut_target_block(number, target)
+    link = _cut_link(number, located.data, parsed.row)
     if link is not None:
         _require_matching_title(number, link, parsed.title)
     try:
@@ -2542,11 +2337,8 @@ def _cmd_cut(parsed: argparse.Namespace, session: _WriteSession) -> int:
             raise protocol.ClaimUnavailableError(
                 f"this forge cannot {operation.value}; cut the slice by hand"
             )
-    config = _load_board_config(client, _resolve_toplevel())
-    target = _cut_target(client, number)
-    if config.body_contract is board.BodyContractMode.BLOCK:
-        return _cmd_cut_block(client, target, parsed)
-    return _cmd_cut_prose(client, target, parsed)
+    _load_board_config(client, _resolve_toplevel())
+    return _cut_slice(client, _cut_target(client, number), parsed)
 
 
 _READ_HANDLERS: dict[str, Callable[[argparse.Namespace, _ReadSession], int | None]] = {

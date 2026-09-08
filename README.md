@@ -148,9 +148,8 @@ answers whether the number is a pull request, an issue, or in neither number
 space, and each answer asks a different question. `--json` prints it as
 `{"ok": …, "kind": "pull_request"|"issue"|"missing", "number": n}`, with a
 `refused` reason added when `ok` is false. The command needs a working tree of the
-repository (a shallow checkout is enough) to read the repository's
-`body_contract` pin from `.agent-claim/board.toml`, and refuses outright
-without one.
+repository (a shallow checkout is enough) to read `.agent-claim/board.toml`,
+and refuses outright without one.
 
 For a **pull request** it answers: which item does this landing close? It
 prints `PR #<n> by <author> declares <classification>` and exits 0, or prints
@@ -160,12 +159,11 @@ check on every pull request that targets the default branch.
 For an **issue** it answers: can a builder start from this body? It prints one
 `ISSUE #<n> ...` line — `body ok` and exit 0, or one of `body legacy`,
 `body malformed: <reason>`, `body incomplete: <sections>`, or
-`blocked by #<a>, #<b>` and exit 1. Under the prose pin the blockers are the
-body's own `Blocked by` line; under the block pin they are GitHub's
-`blocked_by` dependencies, so a foreign one renders as `owner/repo#n`. A block
-body has no `Blocked by` section at all, so a body-incomplete line never asks
-for one. The issue mode reads nothing else: it repeats none of `claim`'s
-working-tree, identity, or ordering checks.
+`blocked by #<a>, #<b>` and exit 1. The blockers are GitHub's own `blocked_by`
+dependencies, so a foreign one renders as `owner/repo#n`. A body carries no
+dependency key at all, so a body-incomplete line never asks for one. The issue
+mode reads nothing else: it repeats none of `claim`'s working-tree, identity,
+or ordering checks.
 
 A number that is in **neither** number space prints `REFUSED: #<n> does not
 exist in <owner>/<repo>` and exits 1. It names no kind: GitHub gives issues
@@ -220,17 +218,14 @@ The table exposes which exact contract headings were found, an
 `EXPECT` cell (`-`, `OPEN/TOTAL`, or `ruled N` / `ruled N old`), a concise `Next`, and a CLAIM
 cell with `-` or the agent, role, claim age, and `old` when the claim comment
 is older than one hour; JSON includes the complete derived contract state and
-the same open/total expectation progress. An `Erwartung`, `Erwartungen`, or
-`Erwartungsliste` heading makes the following block an expectation list: a line
-with `*(Default: yes|no|later)*` is proposed. A block is ruled only when every
-expectation line carries a `*(geregelt: ja)*` or `*(geregelt: NEIN ...)*`
-marker; absent or malformed markers remain proposed. A ruled block also shows
-how many default-branch first-parent landings (`git log --first-parent`
-committer times) happened after its heading date (`DD.MM.YYYY`, preferring
-`GEREGELT: Operator …`); ten or more mark it `old`. Missing or proposed
-expectations have neither fresh nor old. If a ruled block has no readable date
-or git cannot name the default branch, that is an error, never silently fresh.
-It never writes GitHub.
+the same open/total expectation progress. Expectations are the block's own
+`[[expectation]]` entries (below): an item is proposed while any entry still
+carries a `default`, and ruled once every entry carries a `ruling` with its
+`ruled_on` date. A ruled item also shows how many default-branch first-parent
+landings (`git log --first-parent` committer times) happened after the oldest
+of those dates; ten or more mark it `old`. Missing or proposed expectations
+have neither fresh nor old. If git cannot name the default branch, that is an
+error, never silently fresh. It never writes GitHub.
 The target defaults to the repository of the current checkout;
 for another GitHub repository run `aco --repo overnightworks/atelier-2 board`.
 The current checkout may set `priority_labels` as an ordered non-empty list in
@@ -243,20 +238,20 @@ first, then a blocker, then a container's completing last child, then the
 remaining configured labels, then unlabelled; the label index only ever
 tie-breaks inside the critical category, so every other category still
 degenerates to plain number order at equal score. The same file may set one
-`idea_label`; an item carrying that label with no Now/Next/Blocked by/Done when
+`idea_label`; an item carrying that label with no Now/Next/Done when
 projection ranks normally, and `next` tells the head `Problem neu prüfen und
 Item verfeinern`. Once it has a complete contract, its own Next takes over;
 without the configured label, a projectionless item remains
 `body incomplete: <missing sections>` — the same rendering `claim` and
 `check` use, detailed below.
-The same file's `body_contract` key pins how a work-item body itself is read
-(prose, the default, or the typed block below); `priority_labels` and
-`idea_label` mean the same thing in either mode. The file defines exactly
-`priority_labels`, `idea_label`, `body_contract` and `canonical_remote`; any
-other key is refused by name (`board configuration <path> has unknown
-top-level key body_contarct`) rather than read past, since a typo would
-otherwise leave the pin at its default and read every body with the wrong
-grammar.
+The file defines exactly `priority_labels`, `idea_label`, `body_contract` and
+`canonical_remote`; any other key is refused by name (`board configuration
+<path> has unknown top-level key priorty_labels`) rather than read past, since
+a typo would otherwise leave the setting at its default with nothing saying
+so. `body_contract` survives as a known key with a single legal value,
+`"block"` (below): an absent key means the same thing, and `"prose"` is
+refused by name — `board configuration <path> pins body_contract 'prose':
+prose bodies are no longer supported`.
 The board table's `FREED` column shows `YYYY-MM-DD (N d)` when every listed
 issue blocker has closed, using the latest such UTC closing date and whole days
 since then; it otherwise shows `-`. Every item in `board --json` carries the
@@ -276,19 +271,12 @@ A container is never itself actionable — its `board`/`next` reason reads
 sibling has closed) ranks above ordinary work, though never above a critical
 item or a real blocker.
 
-`board` also shows an `UNCUT` section naming, per item, the slice-table
-rows (`#79`'s grammar) that are not yet linked to a dispatched child — an
-undispatched (`—`) row, or one whose item cell is neither the marker nor a
-well-formed `#n` link — by row index, as `#<item>: rows N, N, … uncut`; a row
-linking any issue (open or closed) is landed, never uncut. A malformed row
-(the wrong column count, or a non-integer `#` cell) is named by its `#` cell
-and reason instead, e.g. `row "B": index must be a positive integer`,
-appended to the same line. **`board --json`'s `uncut` contract changed**: the
-top-level `uncut` list still carries `item`, but `rows` is now a list of
-`{"index", "title"}` objects (was a list of bare name strings) and a new
-`malformed` list carries each malformed row's `line`, `id_cell`, and
-`reason`. This is a finding, never a status column: a landed row simply
-leaves the list.
+`board` also shows an `UNCUT` section naming, per item, the `[[slice]]`
+entries still waiting to be dispatched, by index, as `#<item>: rows N, N, …
+uncut`. In `board --json` the top-level `uncut` list carries `item` and `rows`,
+a list of `{"index", "title"}` objects. This is a finding, never a status
+column: `cut` removes an entry the moment it dispatches it, so a dispatched
+slice simply leaves the list.
 
 `board` prints a `RECOVERY (close or re-project)` section after `STALE`,
 followed by the `CONTAINERS` and `UNCUT` sections above; `next` names recovery
@@ -311,7 +299,7 @@ Use `aco next` (or `aco next --json`) to name the board's
 top-ranked qualifying row — the same `board_rank` order `board` shows.
 `next --json` always carries an `action` field, naming one of three shapes
 or `null` when nothing qualifies. `work_item`: the row is open, free,
-unblocked, not frozen, and has a complete Now/Next/Blocked by/Done when
+unblocked, not frozen, and has a complete Now/Next/Done when
 contract, or is a configured projectionless idea; its text form also prints
 `Run: aco claim <n> --scope <paths>` (the literal placeholder
 `<paths>`, since the scope cannot be derived) and a line pointing at the
@@ -338,62 +326,33 @@ nothing qualifies, but still prints at least `No actionable item.` (plus any
 `SKIPPED`/`RECOVERY` sections) in text, and `--json` still emits an object —
 `{"action": null, "recovery": [...], "skipped": [...]}` — never nothing.
 `claim` refuses work out of order when a higher-priority actionable item — the
-same order `board` and `next` use — is free. It also refuses a blocked item,
-one sentence per repository pin, then the same shared override in either mode:
+same order `board` and `next` use — is free. It also refuses an item that has
+at least one open GitHub blocked-by dependency, including a foreign
+`owner/repo#n`; a closed same-repository dependency does not count. The
+message is `#5 is blocked by #3 (open); pass --out-of-order REASON to claim it
+anyway` (a foreign entry renders as `owner/repo#n`), naming every open
+blocker. Pass `--out-of-order REASON` to proceed deliberately; it remains
+visible as a warning and preserves the reason in the claim comment.
 
-- Prose: `claim` refuses an item whose `Blocked by` still names at least one
-  open issue (a pull request, or a closed or missing issue, does not count —
-  those stay their own refusals below).
-- Block (`body_contract = "block"`, below): `claim` refuses an item that has
-  at least one open GitHub blocked-by dependency, including a foreign
-  `owner/repo#n`; a pull request or a closed same-repository dependency does
-  not count.
-- Shared: the message is `#5 is blocked by #3 (open); pass --out-of-order
-  REASON to claim it anyway` (a foreign entry renders as `owner/repo#n`),
-  naming every open blocker. Pass `--out-of-order REASON` to proceed
-  deliberately in either case; it remains visible as a warning and preserves
-  the reason in the claim comment.
-
-Before it writes a claim, `claim` also reads the pulled issue's live contract:
-`Now`, `Next`, `Blocked by`, and `Done when` each appear at most once outside
-fenced code examples. `Blocked by` is exactly `nichts` or a comma-separated
-`#N` list such as `#62, #75`; every listed issue must be open. `claim` also
-refuses with `#<n> body incomplete: <missing sections>` (body order, e.g.
-`#150 body incomplete: Now, Done when`) when any of the four sections is
-empty, unless the issue is a configured projectionless idea (above) — the
-same rule and the same rendering `board`'s `actionable` and `next`'s
-`SKIPPED` reason use, so a freshly `cut` child (its `board.CHILD_SKELETON`
-body has `Now`/`Next`/`Done when` empty and `Blocked by: nichts`) is named
+Before it writes a claim, `claim` also reads the pulled issue's live contract
+from its block. It refuses with `#<n> body incomplete: <missing sections>`
+(block order, e.g. `#150 body incomplete: Now, Done when`) when any of the
+three projection keys is empty, unless the issue is a configured
+projectionless idea (above) — the same rule and the same rendering `board`'s
+`actionable` and `next`'s `SKIPPED` reason use, so a freshly `cut` child (its
+`board.BLOCK_CHILD_SKELETON` body has `now`/`next`/`done_when` empty) is named
 `body incomplete: Now, Next, Done when` everywhere until the head fills it
-in. The check does not limit body size or inspect
-references in `Next`, and `release` stays available even when the body's
-contract has since become invalid.
+in. The check does not limit body size or inspect references in `next`, and
+`release` stays available even when the body's contract has since become
+invalid.
 
-A body line `Eingefroren bis: <trigger in one sentence> (Operator, DD.MM.YYYY)`
-freezes an issue: it drops out of `next` and the higher-priority refusal check
-even though its score keeps showing on `board`, and deleting the line thaws it
-again. The tool only checks the line's form, never who wrote it — that
-authority is the coordination contract's. It reads the body the way GitHub
-renders it: a marker inside a fenced code block (` ``` ` or `~~~`, including
-one left unclosed to the end of the body) is documentation, never a live
-marker — examples belong in a fence. A blockquoted `> Eingefroren bis: …`
-still freezes; this repo already quotes operator rulings, so a quoted freeze
-line reads as the freeze itself.
+## The work-item body contract
 
-## Typed body contract (`body_contract`)
-
-Everything above describes the default, `body_contract = "prose"`: the four
-regex-read `## Now`/`## Next`/`## Blocked by`/`## Done when` sections. A
-repository may instead set, in `.agent-claim/board.toml`:
-
-```toml
-body_contract = "block"
-```
-
-Under that pin, `board`, `next`, issue-mode `claim`, `cut`, `rulings`, and the
-parent-body part of `check` read a work item's `Now`/`Next`/`Done when`,
-freeze, expectations, and undispatched slices from one typed `agent-claim`
-fenced TOML block instead — no regex, no German markers, no slice table.
+`board`, `next`, issue-mode `claim`, `cut`, `rulings`, and the parent-body
+part of `check` read a work item's `Now`/`Next`/`Done when`, freeze,
+expectations, and undispatched slices from one typed `agent-claim` fenced TOML
+block. That block is the whole grammar: the human prose around it — including
+another tool's own section headings in the same body — is never parsed.
 
 A fresh, unfilled item looks like this — the same four lines `cut` writes
 automatically for a dispatched child, and what a human pastes by hand into a
@@ -445,12 +404,13 @@ and dependencies stay in the human prose beside the block; only a slice's
 `index` and `title` are typed. Schema and version tokens, and an expectation's
 `default`/`ruling` values, are protocol — always this exact English spelling;
 every other value (`now`/`next`/`done_when`, `frozen_until.trigger`,
-expectation `text`, slice `title`) is the operator's prose and is never
-parsed, exactly like prose mode. `next`'s own retained non-parsed vocabulary
+expectation `text`, slice `title`) is the operator's own prose and is never
+parsed. `next`'s own non-parsed vocabulary
 (`keiner | keine | nichts | none | -` for "no further work", plus `tbd | todo
 | unknown` for "not yet concrete") still applies to a block's `next` value.
 
-An item with no recognized `agent-claim` fence at all is **body legacy**; one
+An item with no recognized `agent-claim` fence at all is **body legacy** —
+"no block was found", never "some other grammar was found instead"; one
 with a recognized fence that is unclosed, duplicated, invalid TOML, or a
 schema violation is **body malformed: `<path>: <reason>`** (e.g. `body
 malformed: version: version must be exactly 1`). Both fail loud, by name, on
@@ -458,85 +418,60 @@ malformed: version: version must be exactly 1`). Both fail loud, by name, on
 checks) — never a guess through the missing or broken block, and a container
 in either state is never proposed as `cut_slice` or `close_container`.
 
-**Blockers** come from GitHub's own issue-dependency relations, not a body
+**Blockers** come from GitHub's own issue-dependency relations, never a body
 line — `Blocked by:` prose beside the block is documentation only and changes
-nothing. An open same-repository dependency blocks exactly like a local
-`Blocked by` blocker; a foreign `owner/repo#n` blocks the same way and is
-named the same way (`blocked by owner/repo#n`, or `#3, owner/repo#n` mixed
-with a local one). A same-repository *closed* dependency does not block and
-lets `board`'s `FREED` column and `claim` proceed; a closed *foreign*
-dependency does not free an item on its own (foreign relations can only
-block, never free). Unlike prose, a same-repository pull-request dependency
-blocks or frees exactly like any other dependency — `blocker-is-a-PR` is a
-prose-only check. **Parentage stays on sub-issues** in both modes; it never
-passes through the body.
+nothing. A foreign `owner/repo#n` blocks exactly like a same-repository
+dependency and is named the same way (`blocked by owner/repo#n`, or `#3,
+owner/repo#n` mixed with a local one). A same-repository *closed* dependency
+does not block and lets `board`'s `FREED` column and `claim` proceed; a closed
+*foreign* dependency does not free an item on its own (foreign relations can
+only block, never free). A pull-request dependency blocks and frees exactly
+like any other dependency. **Parentage stays on sub-issues**; it never passes
+through the body.
 
-**`cut`** writes and reads the block the same way it writes and reads the
-prose slice table: without `--row` it links the first `[[slice]]` entry when
-one exists and otherwise creates an untied child (table or not); `--row N`
-selects entry `N` and requires `--title` to equal that entry's own `title`
-exactly, refusing before any write on a mismatch. `cut` removes only the
-selected entry (`slice = []` after removing the last one) and preserves every
-other byte of the body, including CRLF line endings, exactly. The "no slice
-table at all" refusal string is shared with prose/#151: `#N has no slice
-table; --row needs one to select a row from`. A `--row N` that names no
-entry refuses `#N has no row <N>; cuttable rows: <list-or-none>`: block mode
-has no malformed or unlinkable state of its own — a linked entry is removed
+**`cut`** reads and rewrites the block: without `--row` it links the first
+`[[slice]]` entry when one exists and otherwise creates an untied child;
+`--row N` selects entry `N` and requires `--title` to equal that entry's own
+`title` exactly, refusing before any write on a mismatch. `cut` removes only
+the selected entry (`slice = []` after removing the last one) and preserves
+every other byte of the body, including CRLF line endings, exactly. A `--row`
+against a block with no `slice` key at all refuses `#N has no slice table;
+--row needs one to select a row from`; a `--row N` that names no entry refuses
+`#N has no row <N>; cuttable rows: <list-or-none>` — a linked entry is removed
 from the block the moment it is cut, so every entry still in `[[slice]]` is
 cuttable, and the refusal lists them all.
 
-**Migration is a hand edit, not a command.** There is no migration command,
-module, or receipt: one reviewed AI session per repository transcribes each
-open item's current prose into a block (refusing, by name, anything it
-cannot derive rather than inventing it) and keeps the existing prose in place
-— GitHub's own edit history is the undo. Forge dependencies are added to
-reproduce existing `Blocked by` relations before the pin lands; parentage
-needs no migration since it already lives on sub-issues. **Upgrade every
-active `agent-coordination` installation to a release containing this contract
-before a repository sets `body_contract = "block"`** — an older client either
-does not know the key (and keeps reading prose blindly) or, once every open
-item carries a block, would otherwise see a repository it cannot coordinate
-on correctly. From the pin onward, every hand-created issue (`gh issue
-create`, an operator-opened item) must carry a valid block — the four-line
-skeleton above — or it is `body legacy`; only `cut` writes that skeleton
-automatically.
+Every hand-created issue (`gh issue create`, an operator-opened item) must
+carry a valid block — the four-line skeleton above — or it is `body legacy`;
+only `cut` writes that skeleton automatically.
 
 ## Cutting a container's next slice
 
 `aco cut <container> --title "…"` dispatches a container's next slice
 as a fresh child issue in one step: it creates the issue (native type `Task`),
-records it as the container's sub-issue, and, when there is a slice-table row
-to link, rewrites the container's slice table so that row now links
-`#<child>` instead of the undispatched `—` marker. The fresh child's body is
-`board.CHILD_SKELETON` — every contract section present, `Now`/`Next`/`Done
-when` empty and `Blocked by: nichts` — so it is named
-`body incomplete: Now, Next, Done when` (invisible to `next`, refused by
-`claim`) until the head fills it in.
+records it as the container's sub-issue, and, when there is a `[[slice]]`
+entry to link, removes that entry from the container's block. The fresh
+child's body is `board.BLOCK_CHILD_SKELETON` — every projection key present
+and empty — so it is named `body incomplete: Now, Next, Done when` (invisible
+to `next`, refused by `claim`) until the head fills it in.
 
-`cut` without `--row` links into the first still-cuttable row when one exists
-and otherwise creates an untied child, table or not (#151): a container with
-no slice table at all — only a numbered `Next` line, as #122 carried on
-06.09.2026 — and one whose table is fully linked but whose own `Next` line
-still names further work both cut this way, the container's body left exactly
-as it was. `next` never prints `--row`, so a command it prints for a
-container is always one `cut` accepts. `--row N` requires a table containing
-an uncut row `N` and refuses by name otherwise: no slice table at all, `N`
-already linked (`#122 row 4 is already cut (#150); cuttable rows: 5, 6, 7`),
-no row left uncut anywhere in the table (`#122 has no uncut row; rows 4-7
-are cut`), row `N` exists but cannot be linked (`#79 row 1 is not cuttable:
-item cell 'not a link' is not a valid #n link`), row `N` is not in the table
-at all while other rows remain cuttable (`#79 has no row 9; cuttable rows: 1,
-2`), or any malformed rows are named by their `#` cell and reason instead of
-only counted (`#79 has no cuttable slice row; row "B": index must be a
-positive integer`).
+`cut` without `--row` links the first `[[slice]]` entry when one exists and
+otherwise creates an untied child (#151): a container with no `slice` key at
+all — only a numbered `Next` line, as #122 carried on 06.09.2026 — and one
+whose list has been emptied but whose own `Next` line still names further work
+both cut this way, the container's body left exactly as it was. `next` never
+prints `--row`, so a command it prints for a container is always one `cut`
+accepts. `--row N` requires a block carrying entry `N` and refuses by name
+otherwise: no `slice` key at all (`#122 has no slice table; --row needs one to
+select a row from`), or no such entry left (`#79 has no row 9; cuttable rows:
+1, 2`).
 
 Every refusal precedes every write. `cut` refuses when the forge cannot
 create a child issue or update an item body (`capability()` answers anything
 but `read_write` for either); when the target is not an open container, or is
-itself a child of another issue (nested containers are not supported); and,
-for `--row N`, when the table it names does not exist, or has no row `N` left
-cuttable — a row already linked to any issue, or one whose item cell is
-malformed, is never a target. None of the three writes are atomic with each
+itself a child of another issue (nested containers are not supported); when
+the target's own body is legacy or malformed; and, for `--row N`, when the
+block names no such entry. None of the three writes are atomic with each
 other — nor is the child issue's creation atomic with its own sub-issue
 relation write inside `create_child` — so a failure at any point after the
 child issue exists names the created child and the step that failed, and
@@ -621,6 +556,23 @@ and this collection point never runs for it. **Deliberate boundary**: an
 argparse failure (a missing issue number, an unknown flag) happens before any
 command -- and therefore any `--json` -- is known, and still only prints
 argparse's usage text to stderr with nothing on stdout.
+
+Read the exit status first and parse second: this object shares stdout with
+whatever ordinary payload the command would otherwise have printed, so a
+reader that parses stdout without looking at the status reads a refusal as a
+successful answer. The rule that holds even for a case this paragraph forgets:
+**on a non-zero status, expect an object whose shape belongs to the command
+that produced it**, and read the sentence out of `error` only when this
+collection point is what produced it. Every other refusal object has its own
+keys — `claim --json` refuses with `{"refused": true, "issue": …, "checks":
+[…]}`, `check --json` with `{"ok": false, "kind": …, "number": …, "refused":
+…}`, `protect` denies with `{"decision": "deny", "reason": …}`, and `status`
+reports a claim conflict with its ordinary payload. A non-zero status need not
+mean a refusal at all: `next` exits 3 with its ordinary `{"action": null, …}`
+payload when nothing is actionable. The codes: 0 succeeded; 1 is `check`'s own
+refusal; 2 is this collection point, plus `claim`'s refusal, `protect`'s deny,
+`status`'s conflict, and argparse's usage failure (which writes nothing to
+stdout at all); 3 means only that `next` had nothing to name.
 
 ## Scope and boundaries
 

@@ -61,12 +61,11 @@ region parsed by `tomllib`. **Keys are protocol and are always English; values a
 operator's prose and are never parsed.** This retires the German markers, the slice table,
 and both malformed-input defect classes. Issue #150 (step 4) draws that line concretely:
 human projection (`now`/`next`/`done_when`), freeze, expectation `text`, and slice `title`
-are prose; `version` and an expectation's `default`/`ruling` values are protocol tokens. A
-prose ruled marker's optional justification tail (`*(geregelt: ja — …)*`) is folded into that
-expectation's `text` at hand-migration transcription — no separate provenance key. `next`
-keeps its retained non-parsed vocabulary (`keiner | keine | nichts | none | -`, owned by
-`has_further_work`, plus `tbd | todo | unknown` concreteness) as the explicit exception to
-"values are never parsed", in both prose and block bodies.
+are the operator's own words; `version` and an expectation's `default`/`ruling` values are
+protocol tokens. `next` keeps its non-parsed vocabulary (`keiner | keine | nichts | none |
+-`, owned by `has_further_work`, plus `tbd | todo | unknown` concreteness) as the explicit
+exception to "values are never parsed". Issue #204 completed the replacement on 08.09.2026:
+the regex reader is deleted, so the block is not one grammar among two but the only one.
 
 **Blockers and parentage live on the forge's structured relations where the pinned storage
 configuration says so.** Capabilities *validate* the pin; they never *choose* the owner. The
@@ -135,11 +134,12 @@ plan review must satisfy. The direction in §2 is ruled; these are not.
 8. **Migration that loses nothing and fences old clients.** Resolved for the item body by
    issue #150 as hand migration, not a command: one reviewed AI session per repository
    transcribes body values and structured relations, refuses anything not derivable rather
-   than inventing it, and retains the existing prose during rollout — GitHub's own edit
-   history is the undo, so no migration command, module, or receipt is added. The prose
-   ruled-marker justification tail is derivable as `text` (item 1 above), not refused. The
-   slice-table parser survives until every supported repository is pinned and validated (D5).
-   The old-client tombstone remains open for step 5: v0.9.0 silently ignores unknown
+   than inventing it, and leaves the operator's own words in the body — GitHub's own edit
+   history is the undo, so no migration command, module, or receipt is added. Every
+   supported repository was migrated and validated by 08.09.2026, and issue #204 then
+   deleted the regex reader; the `body_contract` key stays known and accepts only `"block"`,
+   so a repository still carrying the old value is refused by name rather than read with a
+   reader that no longer exists. The old-client tombstone remains open for step 5: v0.9.0 silently ignores unknown
    `board.toml` keys, so a pinned config alone does not fence it; the state cut needs a
    tombstone the *old* client reads and refuses on.
 9. **A complete `Landing` candidate.** The proposed

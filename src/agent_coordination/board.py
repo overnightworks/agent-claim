@@ -17,35 +17,8 @@ from . import protocol
 DEFAULT_PRIORITY_LABELS = ("security", "data", "ci", "product", "ux", "cleanup")
 CONFIG_PATH = Path(".agent-claim/board.toml")
 IDEA_REFINEMENT_STEP = "Problem neu prüfen und Item verfeinern"
-BLOCKED_BY = "Blocked by"
-CONTRACT_HEADING_PATTERN = re.compile(
-    rf"(?m)^#{{1,6}}[ \t]+(?P<name>Now|Next|{BLOCKED_BY}|Done when)[ \t]*$"
-)
-CONTRACT_FIELD_PATTERN = re.compile(
-    rf"(?m)^(?:\*\*(?P<bold_name>Now|Next|{BLOCKED_BY}|Done when):\*\*|"
-    rf"(?P<plain_name>Now|Next|{BLOCKED_BY}|Done when):)[ \t]*(?P<value>[^\r\n]*)$"
-)
-BLOCKER_LIST_PATTERN = re.compile(r"#([1-9]\d*)(?:[ \t]*,[ \t]*#([1-9]\d*))*", re.ASCII)
-NO_BLOCKERS = "nichts"
-MARKDOWN_HEADING_PATTERN = re.compile(r"(?m)^#{1,6} .*$")
-EXPECTATION_HEADING_PATTERN = re.compile(
-    r"(?im)^#{1,6}[ \t]+(?:Erwartung|Erwartungen|Erwartungsliste)\b[^\n]*$"
-)
-DOTTED_DATE_PATTERN = re.compile(r"\b([0-3]?\d)\.([01]?\d)\.(20\d{2})\b")
-OPERATOR_RULING_DATE_PATTERN = re.compile(
-    r"GEREGELT:[ \t]*Operator[ \t]*([0-3]?\d)\.([01]?\d)\.(20\d{2})",
-    re.IGNORECASE,
-)
 RULING_OLD_AFTER_LANDINGS = 10
 STALE_IDLE_DAYS = 7
-FROZEN_LINE_PATTERN = re.compile(
-    r"(?m)^(?:[ \t]{0,3}>)*[ \t]{0,3}(?:\*\*Eingefroren bis:\*\*|Eingefroren bis:)"
-    r"[ \t]*(?P<value>[^\r\n]*)$"
-)
-FROZEN_TRIGGER_PATTERN = re.compile(
-    r"(?P<trigger>\S.*?)[ \t]*\(Operator,[ \t]*"
-    r"(?P<day>[0-3]?\d)\.(?P<month>[01]?\d)\.(?P<year>20\d{2})\)"
-)
 # CommonMark fence delimiters: at most 3 leading spaces, then a run of 3+
 # backticks or 3+ tildes. An OPENING delimiter may carry an info string after
 # the run (` ```python `); a CLOSING delimiter may not — only trailing
@@ -55,24 +28,6 @@ FROZEN_TRIGGER_PATTERN = re.compile(
 # modeled here; see `_live_text` for why that gap is safe.
 FENCE_OPENING_PATTERN = re.compile(r"^ {0,3}(?P<run>`{3,}|~{3,})")
 FENCE_CLOSING_PATTERN = re.compile(r"^ {0,3}(?P<run>`{3,}|~{3,})[ \t]*$")
-PROPOSED_EXPECTATION_PATTERN = re.compile(r"\*\(Default:[ \t]*(?:yes|no|later)\)\*", re.IGNORECASE)
-# `ja` and `NEIN` both may carry trailing justification text before the
-# closing `)*` (`*(geregelt: ja — Owner ist #567)*`, `*(geregelt: NEIN, it
-# stays)*`) — real operator rulings cite an owner or a reservation on a
-# "yes" as often as on a "no", so the two keywords take the same shape. The
-# character right after the keyword must be the closing `)`, whitespace, an
-# em dash `—`, or one of `, ; :` — every real separator seen in #79 and in
-# #62's own tests (`ja — Owner`, `ja mit Schärfung,`, `ja, aber`, `NEIN, it
-# stays`). A hyphen or any other letter-joining character is excluded on
-# purpose: `ja-nein` is a contradiction in the ruling text, not a "yes".
-RULED_EXPECTATION_PATTERN = re.compile(
-    r"\*\(geregelt:[ \t]*(?:ja|NEIN)(?:[ \t,;:\u2014][^\r\n]*)?\)\*", re.IGNORECASE
-)
-# Both RULED_EXPECTATION_PATTERN and PROPOSED_EXPECTATION_PATTERN mark a
-# CommonMark list item (`- ...` or `1. ...`): every expectation line in this
-# contract is written as one. A line with that shape is a candidate
-# expectation, whether or not it happens to carry either marker yet.
-EXPECTATION_LINE_SHAPE_PATTERN = re.compile(r"^(?:[-*+]|\d+[.)])[ \t]+")
 REFERENCE_PATTERN = re.compile(r"(?<!\w)#([1-9]\d*)", re.ASCII)
 # One issue named the way GitHub names it across repositories: `OWNER/REPO#n`,
 # or `#n` for the repository the text itself lives in. Every typed line below
@@ -124,25 +79,12 @@ TOUCHES_WITHOUT_CLOSING_LINE_PATTERN = re.compile(
     r"(?im)^(?:Refs?|References?|Part of|Teil von)\b[:\s].*$"
 )
 CLAIM_OLD_AFTER = timedelta(hours=1)
-# The slice table's header cells, in order, compared case- and
-# whitespace-insensitively (`_table_row_cells` already strips each cell).
-SLICE_TABLE_HEADER_CELLS = ("#", "scheibe", "item", "hängt ab von")
-_SLICE_TABLE_SEPARATOR_CELL_PATTERN = re.compile(r"^:?-+:?$")
-_SLICE_TABLE_INDEX_PATTERN = re.compile(r"^[1-9]\d*$", re.ASCII)
-_SLICE_TABLE_ITEM_LINK_PATTERN = re.compile(r"^#([1-9]\d*)$", re.ASCII)
-UNDISPATCHED_SLICE_CELL = "—"
-# `cut`'s fresh child: every contract section present, `Now`/`Next`/`Done
-# when` empty. `parse_contract` maps an empty section to `None`, so this
-# skeleton is `contract_complete=False` -- invisible to `next`, refused by
-# `claim` -- until the head fills it in. `Blocked by` is prefilled `nichts`
-# (NO_BLOCKERS): a fresh child names no blocker yet, and an empty `Blocked
-# by` value is itself a contract defect (`_validate_blocked_by`), which
-# would read as a malformed body rather than an unfinished one.
-CHILD_SKELETON = f"## Now\n\n## Next\n\n## Blocked by\n{NO_BLOCKERS}\n\n## Done when\n"
-# Empty strings, not omitted keys: `parse_body` must read this as
-# `VALID`/incomplete, matching `CHILD_SKELETON`'s prose behavior. No
-# `source_slice` -- title, sub-issue relation, and GitHub history own
-# provenance instead.
+# `cut`'s fresh child, in the one grammar the tool reads: every projection
+# key present and empty, so `parse_body` reads it as `VALID` but
+# `contract_complete=False` -- invisible to `next`, refused by `claim` --
+# until the head fills it in. Empty strings, not omitted keys, which the
+# block schema would refuse. No `source_slice` -- title, sub-issue relation,
+# and GitHub history own provenance instead.
 BLOCK_CHILD_SKELETON = '```agent-claim\nversion = 1\nnow = ""\nnext = ""\ndone_when = ""\n```\n'
 # The three slice-title forms seen in atelier-2 (`#79`): a parenthetical
 # after the real title (`(#962 Scheibe 4)`, `(#962 slice 4)`) or a leading
@@ -192,20 +134,20 @@ class Issue:
 
 
 class BlockerState(StrEnum):
+    """The state of one `blocked_by` dependency GitHub returns for an item."""
+
     OPEN = "open"
     CLOSED = "closed"
-    MISSING = "missing"
 
 
 class ChildState(StrEnum):
     """The two states a sub-issue can be in.
 
-    Not `BlockerState`: that owns a *referenced* issue, whose third state is
-    MISSING -- a state a sub-issue returned by the relation cannot have, and
-    which `ContainerProgress` must not be able to represent. The adapter
-    fails loud on any other state string, which is exactly what the parent's
-    open-children reading has always required: an unrecognized state must
-    never make a parent look childless.
+    Its own enum, not the dependency relation's `BlockerState`: the two are
+    separate port operations with separate response shapes, and the adapter
+    fails loud on any state string it does not recognize -- which is exactly
+    what the parent's open-children reading has always required, since an
+    unrecognized state must never make a parent look childless.
     """
 
     OPEN = "open"
@@ -217,8 +159,8 @@ class ChildItem:
     """One sub-issue, as the port returns it and as the board shows it.
 
     `blocked_by` is empty at the port boundary -- the adapter cannot know it
-    -- and `build_board` fills it for open children from the board's own
-    contracts, with no extra request.
+    -- and `build_board` fills it for open children from the dependencies it
+    already read for the board, with no extra request.
     """
 
     number: int
@@ -231,14 +173,6 @@ class ContainerProgress:
     closed: int
     total: int
     open_children: tuple[ChildItem, ...]
-
-
-@dataclass(frozen=True)
-class BlockerReference:
-    number: int
-    state: BlockerState
-    is_pull_request: bool
-    closed_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -330,68 +264,19 @@ class ClassificationDefect:
 
 
 @dataclass(frozen=True)
-class SliceTableRow:
-    """One row of a body's slice table (`#79`'s grammar).
-
-    `item_issue` is the parsed `#n` when `item_cell` is a well-formed link;
-    `None` covers both the undispatched marker (`item_cell ==
-    UNDISPATCHED_SLICE_CELL`) and a malformed cell — `item_cell` itself is
-    the one source of truth for telling those two apart, so this row never
-    needs a separate status field to go stale against it.
-    """
+class SliceRow:
+    """One `[[slice]]` entry of a body's `agent-claim` block: a slice its
+    container still has to dispatch. `index` is exactly what `cut --row N`
+    names it by, `title` exactly what `cut --title` must match."""
 
     index: int
-    name: str
-    item_cell: str
-    item_issue: int | None
-
-
-@dataclass(frozen=True)
-class MalformedSliceTable:
-    """A header line that looks like an attempted slice table but isn't one.
-
-    "Looks like" is deliberately loose (starts with `#`, names `Scheibe`
-    somewhere on the line) — the whole point is to catch a header that
-    almost, but not quite, matches `SLICE_TABLE_HEADER_CELLS`, rather than
-    silently treating it as ordinary prose and skipping the checks it was
-    meant to carry.
-    """
-
-    line: str
-
-
-@dataclass(frozen=True)
-class MalformedSliceRow:
-    """A pipe-shaped line inside a recognized slice table that isn't a
-    well-formed row: the wrong column count, or a non-integer `#` cell.
-
-    `id_cell` and `reason` are what a refusal names it by -- `row "B":
-    index must be a positive integer` -- instead of only counting it;
-    `line` keeps the raw row for anything that still wants the full text.
-    """
-
-    line: str
-    id_cell: str
-    reason: str
-
-
-SliceTableEntry = SliceTableRow | MalformedSliceTable | MalformedSliceRow
-
-
-class BodyContractMode(StrEnum):
-    """Whether a work-item body is read as prose (regex sections) or the
-    typed `agent-claim` TOML block. `parse_body` is the one selector;
-    nothing downstream re-derives it."""
-
-    PROSE = "prose"
-    BLOCK = "block"
+    title: str
 
 
 @dataclass(frozen=True)
 class BoardConfig:
     priority_labels: tuple[str, ...] = DEFAULT_PRIORITY_LABELS
     idea_label: str | None = None
-    body_contract: BodyContractMode = BodyContractMode.PROSE
     # The remote `refs/aco/state` lives on (issue #176, §1); every store and
     # import refusal is phrased in its terms. The store's own default is
     # already "origin" (`store.DEFAULT_CANONICAL_REMOTE`) -- this is the one
@@ -399,9 +284,18 @@ class BoardConfig:
     canonical_remote: str = "origin"
 
 
+# The body pin (issue #150) is still a key this file defines, but no longer
+# a setting: the typed `agent-claim` block is the one grammar, so `"block"`
+# is its only legal value and there is nothing left for `BoardConfig` to
+# carry (issue #204). It must stay *known* all the same -- five repositories
+# pin it, and `_refuse_unknown_config_keys` lies on the path of every store
+# command, so forgetting it here would refuse `claim` and `release` there.
+BODY_CONTRACT_KEY = "body_contract"
+BODY_CONTRACT_BLOCK = "block"
+BODY_CONTRACT_PROSE = "prose"
 # Every key `.agent-claim/board.toml` defines; anything else is a typo, and
 # `_refuse_unknown_config_keys` names it rather than reading past it.
-CONFIG_KEYS = frozenset({setting.name for setting in fields(BoardConfig)})
+CONFIG_KEYS = frozenset({setting.name for setting in fields(BoardConfig)}) | {BODY_CONTRACT_KEY}
 
 
 @dataclass(frozen=True)
@@ -420,15 +314,16 @@ def body_defect_text(defect: ContractDefect) -> str:
 
 
 def _contract_fields(contract: Contract) -> tuple[tuple[str, str | None], ...]:
-    """The four body sections in body order, paired with their current
+    """The three projection keys in block order, paired with their current
     value -- the one place that knows both the names and the order, so a
     caller asking which are present (`_contract_summary`) and a caller
     asking which are missing (`missing_or_empty_sections`) never drift
-    apart."""
+    apart. A block body has no dependency key at all: its dependencies live
+    on the forge, never in the body.
+    """
     return (
         ("Now", contract.now),
         ("Next", contract.next),
-        (BLOCKED_BY, contract.blocked_by),
         ("Done when", contract.done_when),
     )
 
@@ -437,26 +332,8 @@ def _contract_fields(contract: Contract) -> tuple[tuple[str, str | None], ...]:
 class Contract:
     now: str | None
     next: str | None
-    blocked_by: str | None
     done_when: str | None
     defects: tuple[ContractDefect, ...] = ()
-
-    @property
-    def complete(self) -> bool:
-        return (
-            self.now is not None
-            and self.next is not None
-            and self.blocked_by is not None
-            and self.done_when is not None
-        )
-
-    @property
-    def projectionless(self) -> bool:
-        return not any((self.now, self.next, self.blocked_by, self.done_when))
-
-    @property
-    def blocker_issues(self) -> frozenset[int]:
-        return _blocker_references(self.blocked_by)
 
 
 class Stage(StrEnum):
@@ -534,9 +411,7 @@ class Board:
     stale: tuple[BoardItem, ...]
     recovery: tuple[BoardItem, ...]
     uncut: tuple[UncutSlices, ...]
-    blocker_references: tuple[BlockerReference, ...]
     repository: str
-    body_contract: BodyContractMode
     requests: int
 
 
@@ -565,13 +440,25 @@ def _validated_idea_label(raw: dict[str, object]) -> str | None:
     return idea_label
 
 
-def _validated_body_contract(raw: dict[str, object], path: Path) -> BodyContractMode:
-    body_contract_raw = raw.get("body_contract")
-    if body_contract_raw is None:
-        return BodyContractMode.PROSE
-    if isinstance(body_contract_raw, str) and body_contract_raw in set(BodyContractMode):
-        return BodyContractMode(body_contract_raw)
-    raise protocol.ClaimError(f"board configuration {path} body_contract must be prose or block")
+def _refuse_unpinned_body_contract(raw: dict[str, object], path: Path) -> None:
+    """Refuse any body pin but the one grammar this tool reads (issue #204).
+
+    An absent key means the block, so an unpinned repository needs no edit.
+    `"prose"` is refused by name rather than as an unknown value: a
+    repository still carrying it is not making a typo, it is asking for a
+    reader that no longer exists.
+    """
+    pinned = raw.get(BODY_CONTRACT_KEY)
+    if pinned is None or pinned == BODY_CONTRACT_BLOCK:
+        return
+    if pinned == BODY_CONTRACT_PROSE:
+        raise protocol.ClaimError(
+            f"board configuration {path} pins {BODY_CONTRACT_KEY} "
+            f"{BODY_CONTRACT_PROSE!r}: prose bodies are no longer supported"
+        )
+    raise protocol.ClaimError(
+        f"board configuration {path} {BODY_CONTRACT_KEY} must be {BODY_CONTRACT_BLOCK!r}"
+    )
 
 
 def _validated_canonical_remote(raw: dict[str, object], path: Path) -> str:
@@ -593,9 +480,9 @@ def _refuse_unknown_config_keys(raw: dict[str, object], path: Path) -> None:
     """Name a key this file does not define, the way the block parser names
     an unknown top-level key.
 
-    Silence here is expensive: `body_contarct = "block"` would leave the pin
-    at its prose default and every body would be read with the wrong grammar,
-    with nothing in any output saying so.
+    Silence here is expensive: `priorty_labels = [...]` would leave the
+    board ordered by the defaults, with nothing in any output saying the
+    repository's own ladder was never read.
     """
     unknown = sorted(set(raw) - CONFIG_KEYS)
     if unknown:
@@ -612,194 +499,12 @@ def load_config(path: Path = CONFIG_PATH) -> BoardConfig:
     except (OSError, tomllib.TOMLDecodeError) as error:
         raise protocol.ClaimError(f"cannot read board configuration {path}: {error}") from error
     _refuse_unknown_config_keys(raw, path)
+    _refuse_unpinned_body_contract(raw, path)
     return BoardConfig(
         priority_labels=_validated_priority_labels(raw),
         idea_label=_validated_idea_label(raw),
-        body_contract=_validated_body_contract(raw, path),
         canonical_remote=_validated_canonical_remote(raw, path),
     )
-
-
-def _contract_field_value(
-    live_body: str, matches: list[re.Match[str]], index: int, match: re.Match[str]
-) -> tuple[str, str]:
-    if match.re is CONTRACT_HEADING_PATTERN:
-        name = match.group("name")
-        next_heading = MARKDOWN_HEADING_PATTERN.search(live_body, match.end())
-        next_field = matches[index + 1] if index + 1 < len(matches) else None
-        end = min(
-            next_heading.start() if next_heading is not None else len(live_body),
-            next_field.start() if next_field is not None else len(live_body),
-        )
-        return name, live_body[match.end() : end].strip()
-    name = match.group("bold_name") or match.group("plain_name")
-    return name, match.group("value").strip()
-
-
-def _collect_contract_sections(
-    live_body: str, matches: list[re.Match[str]]
-) -> tuple[dict[str, str], list[ContractDefect]]:
-    sections: dict[str, str] = {}
-    defects: list[ContractDefect] = []
-    for index, match in enumerate(matches):
-        name, value = _contract_field_value(live_body, matches, index, match)
-        if name in sections:
-            defects.append(ContractDefect(name, f"duplicate {name} projection field"))
-            continue
-        sections[name] = value
-    return sections, defects
-
-
-def _validate_blocked_by(sections: dict[str, str], defects: list[ContractDefect]) -> str | None:
-    blocked_by = sections.get(BLOCKED_BY)
-    if (
-        blocked_by is not None
-        and blocked_by != NO_BLOCKERS
-        and BLOCKER_LIST_PATTERN.fullmatch(blocked_by) is None
-    ):
-        defects.append(
-            ContractDefect(
-                BLOCKED_BY,
-                f"{BLOCKED_BY} must be exactly nichts or a comma-separated #N list",
-            )
-        )
-    return blocked_by
-
-
-def parse_contract(body: str) -> Contract:
-    live_body = _live_text(body)
-    matches = sorted(
-        (
-            *CONTRACT_HEADING_PATTERN.finditer(live_body),
-            *CONTRACT_FIELD_PATTERN.finditer(live_body),
-        ),
-        key=re.Match.start,
-    )
-    sections, defects = _collect_contract_sections(live_body, matches)
-    blocked_by = _validate_blocked_by(sections, defects)
-    return Contract(
-        now=sections.get("Now") or None,
-        next=sections.get("Next") or None,
-        blocked_by=blocked_by,
-        done_when=sections.get("Done when") or None,
-        defects=tuple(defects),
-    )
-
-
-def expectation_heading(body: str) -> re.Match[str] | None:
-    return EXPECTATION_HEADING_PATTERN.search(body)
-
-
-def _expectation_block_text(body: str, heading: re.Match[str]) -> str:
-    next_heading = MARKDOWN_HEADING_PATTERN.search(body, heading.end())
-    return body[heading.end() : next_heading.start() if next_heading is not None else len(body)]
-
-
-def _expectation_lines(body: str, heading: re.Match[str]) -> tuple[str, ...]:
-    return tuple(
-        line.strip()
-        for line in _expectation_block_text(body, heading).splitlines()
-        if EXPECTATION_LINE_SHAPE_PATTERN.match(line.strip())
-    )
-
-
-def _expectation_block_state(body: str, heading: re.Match[str]) -> ExpectationState:
-    """The state of one expectation block.
-
-    The heading itself carries the ruling when it matches the operator's
-    `GEREGELT: Operator DD.MM.YYYY` marker (issue #78): the contract requires
-    example, counterexample and default per line, so a ruled block is
-    necessarily prose, not a machine-parsable pattern on every line. A line
-    that still carries the explicit proposal marker is a contradiction to
-    surface, not to swallow under a ruled heading, so it still forces
-    PROPOSED. A ruled heading only excuses lines that are not themselves
-    shaped like an expectation item (EXPECTATION_LINE_SHAPE_PATTERN): a list
-    item added later, under the same heading, without its own ruled marker
-    is silence wearing the heading's ruling, not a ruling of its own, so it
-    still forces PROPOSED. A heading with no lines beneath it rules nothing
-    and is PROPOSED. Without the heading marker, every non-empty line must
-    carry the ruled-line pattern (issue #62): silence never rules.
-    """
-    lines = tuple(
-        line.strip() for line in _expectation_block_text(body, heading).splitlines() if line.strip()
-    )
-    if any(PROPOSED_EXPECTATION_PATTERN.search(line) for line in lines):
-        return ExpectationState.PROPOSED
-    if not lines:
-        return ExpectationState.PROPOSED
-    if OPERATOR_RULING_DATE_PATTERN.search(heading.group(0)) is not None:
-        unruled_expectation_shaped_lines = (
-            line
-            for line in lines
-            if EXPECTATION_LINE_SHAPE_PATTERN.match(line)
-            and not RULED_EXPECTATION_PATTERN.search(line)
-        )
-        if any(unruled_expectation_shaped_lines):
-            return ExpectationState.PROPOSED
-        return ExpectationState.RULED
-    if all(RULED_EXPECTATION_PATTERN.search(line) for line in lines):
-        return ExpectationState.RULED
-    return ExpectationState.PROPOSED
-
-
-def expectation_state(body: str) -> ExpectationState:
-    headings = tuple(EXPECTATION_HEADING_PATTERN.finditer(body))
-    if not headings:
-        return ExpectationState.NONE
-    block_states = tuple(_expectation_block_state(body, heading) for heading in headings)
-    if any(state is ExpectationState.PROPOSED for state in block_states):
-        return ExpectationState.PROPOSED
-    return ExpectationState.RULED
-
-
-def expectation_progress(body: str) -> ExpectationProgress:
-    lines = tuple(
-        line
-        for heading in EXPECTATION_HEADING_PATTERN.finditer(body)
-        for line in _expectation_lines(body, heading)
-    )
-    return ExpectationProgress(
-        open=sum(not RULED_EXPECTATION_PATTERN.search(line) for line in lines), total=len(lines)
-    )
-
-
-def _parse_dotted_date(day: str, month: str, year: str) -> date:
-    try:
-        return date(int(year), int(month), int(day))
-    except ValueError as error:
-        raise protocol.ClaimError(
-            f"expectation heading has an invalid date {day}.{month}.{year}"
-        ) from error
-
-
-def parse_ruling_date(body: str) -> date:
-    """The date of the ruling shown for freshness (issue #62's "old" hint).
-
-    Reads only the first expectation heading matched by
-    EXPECTATION_HEADING_PATTERN. A body with several dated `## Erwartungen…`
-    blocks (issue #78) therefore has its freshness driven by block order,
-    not by the oldest or most relevant ruling — a known residual, left
-    unfixed here. EXPECTATION_HEADING_PATTERN itself requires the heading to
-    start with "Erwartung"/"Erwartungen"/"Erwartungsliste"; a heading like
-    "Geregelte Erwartungen …" is not matched at all and contributes neither
-    a state nor a date. Both gaps are named, not widened, by issue #78.
-    """
-    heading = expectation_heading(body)
-    if heading is None:
-        raise protocol.ClaimError("ruled expectations have no readable date")
-    line = heading.group(0)
-    operator = OPERATOR_RULING_DATE_PATTERN.search(line)
-    if operator is not None:
-        return _parse_dotted_date(*operator.groups())
-    dates = {
-        _parse_dotted_date(day, month, year)
-        for day, month, year in DOTTED_DATE_PATTERN.findall(line)
-    }
-    if len(dates) == 1:
-        return next(iter(dates))
-    if not dates:
-        raise protocol.ClaimError("ruled expectations have no readable date")
-    raise protocol.ClaimError("ruled expectations have more than one date")
 
 
 def _opening_fence_delimiter(line: str) -> tuple[str, int] | None:
@@ -818,12 +523,10 @@ def _closing_fence_delimiter(line: str) -> tuple[str, int] | None:
     return run[0], len(run)
 
 
-def _live_line_entries(body: str) -> list[tuple[int, str]]:
-    """Every non-fenced line of `body`, paired with its original `splitlines()` index.
-
-    The one fence-walk both `_live_text` (which only needs the joined prose)
-    and `locate_slice_row` (which needs the original index to map a table
-    cell back to `body`'s real character offsets) read.
+def _live_text(body: str) -> str:
+    """The body's non-fenced lines, joined back in order — what GitHub
+    renders as running text, and the only text this module reads a marker
+    (a classification line, a `Refs #n` trailer) out of.
 
     Walks the body once carrying CommonMark fence state: a line opens a fence
     (an info string after the run is allowed, e.g. ` ```python `), and only a
@@ -842,220 +545,32 @@ def _live_line_entries(body: str) -> list[tuple[int, str]]:
     form). A marker written there is read as live — visible on `board`/`next`
     and correctable by fencing it properly, never a silent divergence.
     """
-    entries: list[tuple[int, str]] = []
+    lines: list[str] = []
     fence_char: str | None = None
     fence_length = 0
-    for index, line in enumerate(body.splitlines()):
+    for line in body.splitlines():
         if fence_char is None:
             opening = _opening_fence_delimiter(line)
             if opening is not None:
                 fence_char, fence_length = opening
                 continue
-            entries.append((index, line))
+            lines.append(line)
             continue
         closing = _closing_fence_delimiter(line)
         if closing is not None and closing[0] == fence_char and closing[1] >= fence_length:
             fence_char, fence_length = None, 0
         # Still inside the fence (or just closed it): never scanned for a marker.
-    return entries
-
-
-def _live_text(body: str) -> str:
-    """The body's non-fenced lines, joined back in order — what GitHub renders as prose."""
-    return "\n".join(line for _, line in _live_line_entries(body))
-
-
-def _table_row_cells(line: str) -> tuple[str, ...] | None:
-    """A markdown table row's cells, or None when `line` isn't table-shaped.
-
-    Leading/trailing `|` are optional, matching both the pipe-fenced style
-    every slice table in this repository uses and the bare form CommonMark
-    also allows.
-    """
-    stripped = line.strip()
-    if "|" not in stripped:
-        return None
-    stripped = stripped.removeprefix("|")
-    stripped = stripped.removesuffix("|")
-    cells = tuple(cell.strip() for cell in stripped.split("|"))
-    return cells or None
-
-
-def _row_cell_spans(line: str) -> tuple[tuple[int, int], ...]:
-    """Each pipe-delimited cell's character span in `line`, unstripped.
-
-    `_table_row_cells` returns the same cells stripped of surrounding
-    whitespace; this positions them back in `line` instead, so a caller can
-    replace exactly one cell's text (padding included) and leave every other
-    byte of the row untouched. Mirrors `_table_row_cells`'s optional
-    leading/trailing `|` handling exactly, so the same row yields the same
-    cells either way.
-
-    Callable only on a line `_table_row_cells` has already accepted as
-    "|"-containing and non-blank (`_row_item_cell_span`'s sole call site
-    passes only a raw line a `SliceTableRow` was already built from) -- that
-    guarantee is this function's whole contract, not re-checked here.
-    """
-    start = len(line) - len(line.lstrip())
-    end = len(line.rstrip())
-    if line[start] == "|":
-        start += 1
-    # Never `start > end` here: the leading strip above needs only one
-    # character of room, and the trailing strip only fires when `end > start`
-    # already holds -- the two can cross only on a single-character `stripped`
-    # (a lone "|"), where the trailing strip's own guard already refuses.
-    if end > start and line[end - 1] == "|":
-        end -= 1
-    spans: list[tuple[int, int]] = []
-    cursor = start
-    for part in line[start:end].split("|"):
-        spans.append((cursor, cursor + len(part)))
-        cursor += len(part) + 1
-    return tuple(spans)
-
-
-def _is_slice_table_separator(line: str) -> bool:
-    cells = _table_row_cells(line)
-    return (
-        cells is not None
-        and len(cells) == len(SLICE_TABLE_HEADER_CELLS)
-        and all(_SLICE_TABLE_SEPARATOR_CELL_PATTERN.match(cell) is not None for cell in cells)
-    )
-
-
-def _slice_table_row(index: str, name: str, item_cell: str) -> SliceTableRow:
-    if item_cell == UNDISPATCHED_SLICE_CELL:
-        return SliceTableRow(int(index), name, item_cell, None)
-    link = _SLICE_TABLE_ITEM_LINK_PATTERN.match(item_cell)
-    return SliceTableRow(int(index), name, item_cell, int(link.group(1)) if link else None)
-
-
-_SLICE_TABLE_HEADER_TRIGGER_WORDS = frozenset({"scheibe", "slice", "item"})
-
-
-def _looks_like_slice_table_header(cells: tuple[str, ...]) -> bool:
-    """A loose, deliberately over-eager heuristic: a `#`-first pipe row that
-    also names one of the slice table's real column words — `Scheibe`,
-    `Slice`, `Item`, or a `Hängt ab...` column — is an attempted slice
-    table, whether or not it turns out well-formed. Catching it here —
-    rather than only the exact header shape — is what makes a near-miss
-    header (including the English "Slice" spelling) fail loud instead of
-    reading as ordinary prose. `#` alone never counts: an ordinary table
-    that happens to start with a `#` column stays untouched.
-    """
-    if cells[0].strip() != "#":
-        return False
-    return any(
-        cell.strip().casefold() in _SLICE_TABLE_HEADER_TRIGGER_WORDS
-        or cell.strip().casefold().startswith("hängt ab")
-        for cell in cells[1:]
-    )
-
-
-def _slice_table_header_at(lines: list[str], line_index: int) -> tuple[bool, bool] | None:
-    """Whether the candidate header at `line_index` is well-formed and separated.
-
-    None when the line is not even a `#`-first slice-table attempt.
-    """
-    header_cells = _table_row_cells(lines[line_index])
-    if header_cells is None or not _looks_like_slice_table_header(header_cells):
-        return None
-    well_formed_header = (
-        len(header_cells) == len(SLICE_TABLE_HEADER_CELLS)
-        and tuple(cell.casefold() for cell in header_cells) == SLICE_TABLE_HEADER_CELLS
-    )
-    has_separator = line_index + 1 < len(lines) and _is_slice_table_separator(lines[line_index + 1])
-    return well_formed_header, has_separator
-
-
-def _malformed_row_reason(row_cells: tuple[str, ...]) -> str | None:
-    """Why `row_cells` is not a well-formed slice-table row, or `None` when
-    it is -- the wrong column count is checked first, since a shifted
-    column makes `row_cells[0]` unreliable as the actual `#` cell."""
-    if len(row_cells) != len(SLICE_TABLE_HEADER_CELLS):
-        return f"expected {len(SLICE_TABLE_HEADER_CELLS)} cells, found {len(row_cells)}"
-    if _SLICE_TABLE_INDEX_PATTERN.match(row_cells[0]) is None:
-        return "index must be a positive integer"
-    return None
-
-
-def _slice_table_rows(lines: list[str], start: int) -> tuple[tuple[SliceTableEntry, ...], int]:
-    """The row block following a well-formed header, and the line index after it."""
-    entries: list[SliceTableEntry] = []
-    line_index = start
-    while line_index < len(lines):
-        row_cells = _table_row_cells(lines[line_index])
-        if row_cells is None:
-            break
-        reason = _malformed_row_reason(row_cells)
-        if reason is not None:
-            id_cell = row_cells[0] if row_cells else ""
-            entries.append(MalformedSliceRow(lines[line_index].strip(), id_cell, reason))
-            line_index += 1
-            continue
-        entries.append(_slice_table_row(*row_cells[:3]))
-        line_index += 1
-    return tuple(entries), line_index
-
-
-def parse_slice_table(body: str) -> tuple[SliceTableEntry, ...]:
-    """Every slice table entry in `body` (`#79`'s grammar): a well-formed
-    row, or a `MalformedSliceTable`/`MalformedSliceRow` marking a near-miss.
-
-    A slice table is a markdown table whose header cells are exactly `#`,
-    `Scheibe`, `Item`, `Hängt ab von`, in that order, case- and
-    whitespace-insensitively, followed by a separator row — the shape
-    atelier-2 #962 carries since 02.09. Any `#`-first row naming `Scheibe`
-    that doesn't match that shape exactly (wrong columns, no separator) is
-    `MalformedSliceTable` rather than silently ignored prose. Every table in
-    the body is parsed, not just the first. Reads only `_live_text`, so a
-    fenced example of the grammar never counts.
-    """
-    lines = _live_text(body).splitlines()
-    entries: list[SliceTableEntry] = []
-    line_index = 0
-    while line_index < len(lines):
-        header = _slice_table_header_at(lines, line_index)
-        if header is None:
-            line_index += 1
-            continue
-        well_formed_header, has_separator = header
-        if not well_formed_header or not has_separator:
-            entries.append(MalformedSliceTable(lines[line_index].strip()))
-            line_index += 1
-            continue
-        row_entries, line_index = _slice_table_rows(lines, line_index + 2)
-        entries.extend(row_entries)
-    return tuple(entries)
-
-
-@dataclass(frozen=True)
-class SliceTableFindings:
-    """`parse_slice_table`'s entries, classified by what a builder does next.
-
-    A row whose `item_issue` is set (linking any issue, open or closed) is
-    landed, never a finding: `cut` only ever targets `cuttable`, and `board`
-    only ever reports `cuttable`/`unlinkable`/`malformed` as uncut.
-
-    `has_table` is `True` the moment `parse_slice_table` found any table
-    attempt at all, well-formed or not, `False` for a container that carries
-    no slice table whatsoever (#151). `cut --row N` needs it: a named row can
-    only ever come from a table, so a tableless container refuses by name
-    instead of reporting a row that was never there. `cut` without `--row`
-    never consults it -- it links the first still-cuttable row when one
-    exists and otherwise creates an untied child, table or not.
-    """
-
-    cuttable: tuple[SliceTableRow, ...]
-    unlinkable: tuple[SliceTableRow, ...]
-    malformed: tuple[MalformedSliceRow, ...]
-    has_table: bool
+    return "\n".join(lines)
 
 
 class BodyReadState(StrEnum):
-    """How `parse_body` read one issue's body under its repository's pin --
-    `VALID`/`LEGACY`/`MALFORMED` for a block-mode read; always `VALID` for
-    prose, which has no separate contract to be legacy or malformed against."""
+    """How `parse_body` read one issue's body.
+
+    `LEGACY` means no recognized `agent-claim` block was found at all -- not
+    that some other grammar was recognized instead; there is no other
+    grammar. `MALFORMED` means the block was found and its schema refused
+    it.
+    """
 
     VALID = "valid"
     LEGACY = "legacy"
@@ -1064,9 +579,8 @@ class BodyReadState(StrEnum):
 
 @dataclass(frozen=True)
 class ParsedBody:
-    """The one typed read of a work-item body, whichever grammar its
-    repository is pinned to. Every consumer reads this instead of
-    re-parsing the raw body or branching on the pin itself."""
+    """The one typed read of a work-item body. Every consumer reads this
+    instead of re-parsing the raw body."""
 
     contract: Contract
     contract_complete: bool
@@ -1075,7 +589,7 @@ class ParsedBody:
     expectation_progress: ExpectationProgress
     ruling_date: date | None
     frozen_trigger: str | None
-    slice_findings: SliceTableFindings
+    slices: tuple[SliceRow, ...]
     read_state: BodyReadState
 
 
@@ -1319,27 +833,27 @@ def _block_schema_defects(data: dict[str, object]) -> tuple[ContractDefect, ...]
 
 def _malformed_parsed_body(defects: tuple[ContractDefect, ...]) -> ParsedBody:
     return ParsedBody(
-        contract=Contract(None, None, None, None, defects),
+        contract=Contract(None, None, None, defects),
         contract_complete=False,
         projectionless=False,
         expectation_state=ExpectationState.NONE,
         expectation_progress=ExpectationProgress(0, 0),
         ruling_date=None,
         frozen_trigger=None,
-        slice_findings=SliceTableFindings((), (), (), False),
+        slices=(),
         read_state=BodyReadState.MALFORMED,
     )
 
 
 _LEGACY_PARSED_BODY = ParsedBody(
-    contract=Contract(None, None, None, None, ()),
+    contract=Contract(None, None, None, ()),
     contract_complete=False,
     projectionless=False,
     expectation_state=ExpectationState.NONE,
     expectation_progress=ExpectationProgress(0, 0),
     ruling_date=None,
     frozen_trigger=None,
-    slice_findings=SliceTableFindings((), (), (), False),
+    slices=(),
     read_state=BodyReadState.LEGACY,
 )
 
@@ -1382,17 +896,17 @@ def _block_frozen_trigger(data: dict[str, object]) -> str | None:
     return trigger if isinstance(trigger, str) else None
 
 
-def _block_slice_findings(data: dict[str, object]) -> SliceTableFindings:
-    cuttable = tuple(
-        SliceTableRow(
-            cast(int, entry["index"]), cast(str, entry["title"]), UNDISPATCHED_SLICE_CELL, None
-        )
+def _block_slices(data: dict[str, object]) -> tuple[SliceRow, ...]:
+    """Every still-undispatched `[[slice]]` entry: `cut` removes an entry
+    from the block at the moment it links a child to it, so whatever is left
+    here is exactly what is still uncut."""
+    return tuple(
+        SliceRow(cast(int, entry["index"]), cast(str, entry["title"]))
         for entry in _block_array(data, "slice")
         if isinstance(entry, dict)
         and isinstance(entry.get("index"), int)
         and isinstance(entry.get("title"), str)
     )
-    return SliceTableFindings(cuttable, (), (), "slice" in data)
 
 
 def _valid_block_parsed_body(data: dict[str, object]) -> ParsedBody:
@@ -1404,7 +918,7 @@ def _valid_block_parsed_body(data: dict[str, object]) -> ParsedBody:
     expectations = _block_expectation_dicts(data)
     expectation_state = _block_expectation_state(expectations)
     return ParsedBody(
-        contract=Contract(now, next_value, None, done_when, ()),
+        contract=Contract(now, next_value, done_when, ()),
         contract_complete=bool(now and next_value and done_when),
         projectionless=not (now or next_value or done_when),
         expectation_state=expectation_state,
@@ -1415,12 +929,17 @@ def _valid_block_parsed_body(data: dict[str, object]) -> ParsedBody:
             else None
         ),
         frozen_trigger=_block_frozen_trigger(data),
-        slice_findings=_block_slice_findings(data),
+        slices=_block_slices(data),
         read_state=BodyReadState.VALID,
     )
 
 
-def _parse_block_body(body: str) -> ParsedBody:
+def parse_body(body: str) -> ParsedBody:
+    """The one read of a work-item body (issue #150, narrowed to one grammar
+    by #204): the typed `agent-claim` block. Every consumer reads the
+    returned `ParsedBody` instead of re-parsing the raw body. Human prose
+    around the block is never parsed -- another repository may own its own
+    section headings in the same body."""
     fences = _agent_claim_fence_matches(body)
     if not fences:
         return _LEGACY_PARSED_BODY
@@ -1451,32 +970,6 @@ def _parse_block_body(body: str) -> ParsedBody:
     if defects:
         return _malformed_parsed_body(defects)
     return _valid_block_parsed_body(data)
-
-
-def _parse_prose_body(body: str) -> ParsedBody:
-    contract = parse_contract(body)
-    state = expectation_state(body)
-    return ParsedBody(
-        contract=contract,
-        contract_complete=contract.complete,
-        projectionless=contract.projectionless,
-        expectation_state=state,
-        expectation_progress=expectation_progress(body),
-        ruling_date=parse_ruling_date(body) if state is ExpectationState.RULED else None,
-        frozen_trigger=frozen_trigger(body),
-        slice_findings=slice_table_findings(body),
-        read_state=BodyReadState.VALID,
-    )
-
-
-def parse_body(body: str, mode: BodyContractMode) -> ParsedBody:
-    """The one grammar selector for a work-item body (issue #150): prose's
-    regex sections, or the repository-pinned typed `agent-claim` block.
-    Every consumer reads the returned `ParsedBody` instead of re-parsing the
-    raw body or branching on `mode` itself."""
-    if mode is BodyContractMode.BLOCK:
-        return _parse_block_body(body)
-    return _parse_prose_body(body)
 
 
 @dataclass(frozen=True)
@@ -1597,128 +1090,25 @@ def replace_agent_claim_block(body: str, located: LocatedBlock, data: Mapping[st
     )
 
 
-def missing_or_empty_sections(contract: Contract, mode: BodyContractMode) -> tuple[str, ...]:
-    """Every projection section a body-incomplete refusal names: `None`
-    (prose's unset section) or the empty string (a block's fresh skeleton
-    value, #150) both count, even though both stay legitimate CONTRACT-column
-    *presence* (`_contract_summary` is `None`-only for that column, matching
-    #150 §5's rule that a block skeleton still shows `Now, Next, Done
-    when`).
-
-    A block body has no `Blocked by` section at all -- its dependencies live
-    on the forge -- so naming it as missing would ask for a key the block
-    grammar refuses.
-    """
-    return tuple(
-        name
-        for name, value in _contract_fields(contract)
-        if not value and not (mode is BodyContractMode.BLOCK and name == BLOCKED_BY)
-    )
-
-
-def slice_table_findings(body: str) -> SliceTableFindings:
-    entries = parse_slice_table(body)
-    cuttable: list[SliceTableRow] = []
-    unlinkable: list[SliceTableRow] = []
-    malformed: list[MalformedSliceRow] = []
-    for entry in entries:
-        if isinstance(entry, SliceTableRow):
-            if entry.item_cell == UNDISPATCHED_SLICE_CELL:
-                cuttable.append(entry)
-            elif entry.item_issue is None:
-                unlinkable.append(entry)
-        elif isinstance(entry, MalformedSliceRow):
-            malformed.append(entry)
-    return SliceTableFindings(tuple(cuttable), tuple(unlinkable), tuple(malformed), bool(entries))
-
-
-@dataclass(frozen=True)
-class UncutRow:
-    """One still-open slice-table row `board` names as uncut -- `index` is
-    exactly what `cut --row N` needs to select it."""
-
-    index: int
-    title: str
+def missing_or_empty_sections(contract: Contract) -> tuple[str, ...]:
+    """Every projection key a body-incomplete refusal names: an absent key
+    and a fresh skeleton's empty string both count, even though both stay
+    legitimate CONTRACT-column *presence* (`_contract_summary` is
+    `None`-only for that column, matching #150 §5's rule that a block
+    skeleton still shows `Now, Next, Done when`)."""
+    return tuple(name for name, value in _contract_fields(contract) if not value)
 
 
 @dataclass(frozen=True)
 class UncutSlices:
-    """One item's undispatched slice-table findings, as `board` reports them."""
+    """One item's still-undispatched slices, as `board` reports them."""
 
     item: int
-    rows: tuple[UncutRow, ...]
-    malformed: tuple[MalformedSliceRow, ...] = ()
+    rows: tuple[SliceRow, ...]
 
 
-def _uncut_slices(issue_number: int, findings: SliceTableFindings) -> UncutSlices | None:
-    rows = tuple(
-        UncutRow(row.index, row.name) for row in (*findings.cuttable, *findings.unlinkable)
-    )
-    if not rows and not findings.malformed:
-        return None
-    return UncutSlices(issue_number, rows, findings.malformed)
-
-
-def _row_item_cell_span(
-    entries: list[tuple[int, str]],
-    raw_lines: list[str],
-    row_start: int,
-    offset: int,
-) -> tuple[int, int]:
-    """The item-cell span of the row at `entries[row_start + offset]` --
-    `offset` is the caller's own already-confirmed match, mapped back into
-    `body`'s real character offsets."""
-    original_index, raw_line = entries[row_start + offset]
-    spans = _row_cell_spans(raw_line)
-    preceding = sum(len(raw) + 1 for raw in raw_lines[:original_index])
-    start, end = spans[2]
-    return preceding + start, preceding + end
-
-
-def locate_slice_row(body: str, row_index: int) -> tuple[int, int] | None:
-    """The character span of slice-table row `row_index`'s item cell in
-    `body`, padding included -- so `link_slice_row` can replace exactly that
-    cell and leave every other byte untouched. `None` when no such row
-    exists: already cut, or the index does not name a row.
-
-    Walks the same header/row scan `parse_slice_table` does, over
-    `_live_line_entries` instead of `_live_text` alone, so a fenced example
-    is skipped exactly as it always is, while each live line still carries
-    the original index needed to map back into `body`'s real offsets.
-    """
-    entries = _live_line_entries(body)
-    lines = [line for _, line in entries]
-    raw_lines = body.splitlines()
-    line_index = 0
-    while line_index < len(lines):
-        header = _slice_table_header_at(lines, line_index)
-        if header is None:
-            line_index += 1
-            continue
-        well_formed_header, has_separator = header
-        if not well_formed_header or not has_separator:
-            line_index += 1
-            continue
-        row_start = line_index + 2
-        row_entries, line_index = _slice_table_rows(lines, row_start)
-        offset = next(
-            (
-                offset
-                for offset, entry in enumerate(row_entries)
-                if isinstance(entry, SliceTableRow) and entry.index == row_index
-            ),
-            None,
-        )
-        if offset is not None:
-            return _row_item_cell_span(entries, raw_lines, row_start, offset)
-    return None
-
-
-def link_slice_row(body: str, span: tuple[int, int], child: int) -> str:
-    """Rewrite the slice-table cell at `span` to link `child` -- pure,
-    changing only that cell and nothing else in `body`."""
-    start, end = span
-    return f"{body[:start]} #{child} {body[end:]}"
+def _uncut_slices(issue_number: int, slices: tuple[SliceRow, ...]) -> UncutSlices | None:
+    return UncutSlices(issue_number, slices) if slices else None
 
 
 def _issue_reference(match: re.Match[str], repository: str) -> IssueReference:
@@ -1824,32 +1214,6 @@ def slice_title_match(title: str) -> tuple[int, int] | None:
     return int(match.group("slice")), int(match.group("parent"))
 
 
-def frozen_trigger(body: str) -> str | None:
-    """The operator's frozen-marker trigger sentence, or None when the item is not frozen.
-
-    A line `Eingefroren bis: <trigger> (Operator, DD.MM.YYYY)` — bold or plain,
-    matching the Now/Next/Blocked by/Done when field grammar, optionally
-    prefixed by blockquote `>` markers — freezes the item. The tool checks
-    only this form, never who wrote it: authority over freezing is the
-    coordination contract's, not this parser's. Fenced text is documentation,
-    never a live marker (see `_live_text`); a blockquoted marker is still
-    live — this repo already quotes operator rulings, so a quoted freeze line
-    reads as the freeze itself. A malformed marker outside a fence still
-    fails loud: a real typo must stay visible.
-    """
-    line = FROZEN_LINE_PATTERN.search(_live_text(body))
-    if line is None:
-        return None
-    match = FROZEN_TRIGGER_PATTERN.fullmatch(line.group("value").strip())
-    if match is None:
-        raise protocol.ClaimError(
-            "frozen marker must read "
-            "'Eingefroren bis: <trigger in one sentence> (Operator, DD.MM.YYYY)'"
-        )
-    _parse_dotted_date(match.group("day"), match.group("month"), match.group("year"))
-    return match.group("trigger").strip()
-
-
 def landings_since(trunk_landings: tuple[datetime, ...], ruling: date) -> int:
     start = datetime(ruling.year, ruling.month, ruling.day, tzinfo=UTC) + timedelta(days=1)
     return sum(1 for moment in trunk_landings if moment >= start)
@@ -1871,68 +1235,12 @@ def _references(text: str) -> frozenset[int]:
     return frozenset(int(number) for number in REFERENCE_PATTERN.findall(text))
 
 
-def _blocker_references(text: str | None) -> frozenset[int]:
-    if text is None or text == NO_BLOCKERS or BLOCKER_LIST_PATTERN.fullmatch(text) is None:
-        return frozenset()
-    return _references(text)
-
-
-def blocker_references(issues: tuple[Issue, ...]) -> frozenset[int]:
-    return frozenset(
-        blocker for issue in issues for blocker in parse_contract(issue.body).blocker_issues
-    )
-
-
-def _with_blocker_defects(contract: Contract, blockers: dict[int, BlockerReference]) -> Contract:
-    pull_requests = tuple(
-        blocker for blocker in sorted(contract.blocker_issues) if blockers[blocker].is_pull_request
-    )
-    if not pull_requests:
-        return contract
-    return replace(
-        contract,
-        defects=(
-            *contract.defects,
-            *(
-                ContractDefect(BLOCKED_BY, f"blocker #{blocker} is a pull request")
-                for blocker in pull_requests
-            ),
-        ),
-    )
-
-
-def _open_blockers(
-    contract: Contract, blockers: dict[int, BlockerReference], repository: str
-) -> tuple[IssueReference, ...]:
-    return tuple(
-        IssueReference(repository, blocker)
-        for blocker in sorted(contract.blocker_issues)
-        if (not blockers[blocker].is_pull_request and blockers[blocker].state is BlockerState.OPEN)
-    )
-
-
-def _freed_on(contract: Contract, blockers: dict[int, BlockerReference]) -> datetime | None:
-    issue_blockers = tuple(
-        blockers[blocker]
-        for blocker in contract.blocker_issues
-        if not blockers[blocker].is_pull_request
-    )
-    if not issue_blockers or any(
-        blocker.state is not BlockerState.CLOSED for blocker in issue_blockers
-    ):
-        return None
-    return max(
-        (blocker.closed_at for blocker in issue_blockers if blocker.closed_at is not None),
-        default=None,
-    )
-
-
 def open_dependency_blockers(
     dependencies: tuple[IssueDependency, ...], repository: str
 ) -> tuple[IssueReference, ...]:
-    """Block mode's `open_blockers` (#150 §6): every open dependency, same-
-    or foreign-repository -- unlike prose, a same-repository pull-request
-    dependency blocks like any other (`blocker-is-a-PR` is prose-only)."""
+    """An item's `open_blockers` (#150 §6): every open `blocked_by`
+    dependency GitHub records for it, same- or foreign-repository, issue or
+    pull request alike."""
     references = (
         dependency.reference for dependency in dependencies if dependency.state is BlockerState.OPEN
     )
@@ -1942,7 +1250,7 @@ def open_dependency_blockers(
 def _dependency_freed_on(
     dependencies: tuple[IssueDependency, ...], repository: str
 ) -> datetime | None:
-    """Block mode's `freed_on` (#150 §6): only same-repository dependencies
+    """An item's `freed_on` (#150 §6): only same-repository dependencies
     can free an item -- a foreign dependency, open or closed, is dropped
     here and never blocks freedom on its own repository being unreachable."""
     local = tuple(
@@ -1986,16 +1294,13 @@ def _single_concrete_next(value: str | None) -> bool:
     return len(lines) == 1 and lines[0].casefold() not in {"tbd", "todo", "unknown"}
 
 
-# Beside `NO_BLOCKERS`'s vocabulary for `Blocked by`, a container's `Next`
-# line has its own small set of "nothing left" spellings -- German and
-# English, ASCII only. `check`'s last-child rule and `next`'s
-# cut_slice/close_container split both read a `Next` line the same way.
-# "" joins this vocabulary for #150's block `next`: a block skeleton's
-# `next = ""` (never mapped to `None` the way prose's empty section is, so
-# CONTRACT still shows it, #150 §5) must still mean "no further work",
-# exactly like prose's `None`. Inert for prose, whose `Contract.next` is
-# never the empty string.
-_NO_FURTHER_WORK_VALUES = frozenset({"keiner", "keine", NO_BLOCKERS, "none", "-", ""})
+# A container's `Next` line has its own small set of "nothing left"
+# spellings -- German and English, ASCII only. `check`'s last-child rule and
+# `next`'s cut_slice/close_container split both read a `Next` line the same
+# way. `""` belongs to it because a fresh skeleton writes `next = ""` and
+# that value stays the empty string (never mapped to `None`, so CONTRACT
+# still shows the key, #150 §5).
+_NO_FURTHER_WORK_VALUES = frozenset({"keiner", "keine", "nichts", "none", "-", ""})
 
 
 def has_further_work(next_line: str | None) -> bool:
@@ -2155,45 +1460,6 @@ def board_rank(item: BoardItem) -> tuple[int, int, int, int, int]:
     )
 
 
-def _validated_blocker_by_number(
-    issues: tuple[Issue, ...],
-    open_pull_requests: tuple[PullRequest, ...],
-    contracts: dict[int, Contract],
-    blocker_references: tuple[BlockerReference, ...] | None,
-) -> tuple[dict[int, BlockerReference], tuple[BlockerReference, ...]]:
-    """The by-number blocker map, and the resolved `blocker_references` behind it.
-
-    Raises when GitHub did not return every blocker a contract names, or omitted
-    `closed_at` for one it reports closed.
-    """
-    referenced_blockers = frozenset(
-        blocker for contract in contracts.values() for blocker in contract.blocker_issues
-    )
-    if blocker_references is None:
-        blocker_references = (
-            *(BlockerReference(issue.number, BlockerState.OPEN, False) for issue in issues),
-            *(
-                BlockerReference(pull_request.number, BlockerState.OPEN, True)
-                for pull_request in open_pull_requests
-            ),
-        )
-    blocker_by_number = {reference.number: reference for reference in blocker_references}
-    missing_blockers = referenced_blockers - blocker_by_number.keys()
-    if missing_blockers:
-        missing = min(missing_blockers)
-        raise protocol.ClaimError(f"GitHub did not return blocker #{missing}")
-    invalid_closed_blockers = tuple(
-        reference.number
-        for reference in blocker_by_number.values()
-        if reference.state is BlockerState.CLOSED and reference.closed_at is None
-    )
-    if invalid_closed_blockers:
-        raise protocol.ClaimError(
-            f"GitHub did not return closed_at for blocker #{min(invalid_closed_blockers)}"
-        )
-    return blocker_by_number, blocker_references
-
-
 @dataclass(frozen=True)
 class _BoardBuildContext:
     """Per-run board state that every issue's `BoardItem` is derived against."""
@@ -2303,25 +1569,6 @@ def _completes_container(
     return progress.closed >= 1 and len(progress.open_children) == 1
 
 
-def _malformed_only_uncut(
-    contract: Contract,
-    findings: SliceTableFindings,
-    container_progress: ContainerProgress | None,
-) -> tuple[MalformedSliceRow, ...]:
-    """The malformed slice-table rows blocking an item when it is a
-    container with no open child, no further `Next` work, and no still-open
-    cuttable or unlinkable row left -- exactly the state `next_action` skips
-    instead of proposing to close, and what its skip reason names via the
-    same `malformed_row_clause` `board`'s own `UNCUT` section uses."""
-    if container_progress is None or container_progress.open_children:
-        return ()
-    if has_further_work(contract.next):
-        return ()
-    if findings.cuttable or findings.unlinkable:
-        return ()
-    return findings.malformed
-
-
 def _board_item(
     issue: Issue, context: _BoardBuildContext, config: BoardConfig, observed_at: datetime
 ) -> BoardItem:
@@ -2366,15 +1613,11 @@ def _board_item(
             open_blockers=open_blockers,
             repository=context.repository,
             contract=contract,
-            mode=config.body_contract,
             contract_complete=parsed.contract_complete,
             projectionless_idea=projectionless_idea,
             read_state=parsed.read_state,
             malformed_defect=(
                 contract.defects[0] if parsed.read_state is BodyReadState.MALFORMED else None
-            ),
-            malformed_uncut=_malformed_only_uncut(
-                contract, parsed.slice_findings, container_progress
             ),
         )
     )
@@ -2422,7 +1665,6 @@ class BoardBuildInputs:
     claims: tuple[protocol.ScopedClaim, ...]
     config: BoardConfig
     repository: str
-    blocker_references: tuple[BlockerReference, ...] | None = None
     now: datetime | None = None
     trunk_landings: tuple[datetime, ...] = ()
     children: Mapping[int, tuple[ChildItem, ...]] = field(default_factory=dict)
@@ -2441,21 +1683,11 @@ def build_board(inputs: BoardBuildInputs) -> Board:
     config = inputs.config
     repository = inputs.repository
     observed_at = (inputs.now or datetime.now(UTC)).astimezone(UTC)
-    modes = {issue.number: config.body_contract for issue in issues}
-    parsed_bodies = {issue.number: parse_body(issue.body, modes[issue.number]) for issue in issues}
+    parsed_bodies = {issue.number: parse_body(issue.body) for issue in issues}
     contracts = {number: parsed.contract for number, parsed in parsed_bodies.items()}
-    blocker_by_number, blocker_references = _validated_blocker_by_number(
-        issues, open_pull_requests, contracts, inputs.blocker_references
-    )
-    contracts = {
-        issue.number: _with_blocker_defects(contracts[issue.number], blocker_by_number)
-        for issue in issues
-    }
     blockers: dict[int, tuple[IssueReference, ...]] = {
-        issue.number: (
-            _open_blockers(contracts[issue.number], blocker_by_number, repository)
-            if modes[issue.number] is BodyContractMode.PROSE
-            else open_dependency_blockers(inputs.dependencies.get(issue.number, ()), repository)
+        issue.number: open_dependency_blockers(
+            inputs.dependencies.get(issue.number, ()), repository
         )
         for issue in issues
     }
@@ -2481,10 +1713,8 @@ def build_board(inputs: BoardBuildInputs) -> Board:
         parsed_bodies=parsed_bodies,
         blockers=blockers,
         freed_on={
-            issue.number: (
-                _freed_on(contracts[issue.number], blocker_by_number)
-                if modes[issue.number] is BodyContractMode.PROSE
-                else _dependency_freed_on(inputs.dependencies.get(issue.number, ()), repository)
+            issue.number: _dependency_freed_on(
+                inputs.dependencies.get(issue.number, ()), repository
             )
             for issue in issues
         },
@@ -2508,12 +1738,12 @@ def build_board(inputs: BoardBuildInputs) -> Board:
             key=board_rank,
         )
     )
-    per_issue_findings = (
-        _uncut_slices(issue.number, parsed_bodies[issue.number].slice_findings) for issue in issues
+    per_issue_slices = (
+        _uncut_slices(issue.number, parsed_bodies[issue.number].slices) for issue in issues
     )
     uncut = tuple(
         sorted(
-            (finding for finding in per_issue_findings if finding is not None),
+            (finding for finding in per_issue_slices if finding is not None),
             key=lambda finding: finding.item,
         )
     )
@@ -2527,9 +1757,7 @@ def build_board(inputs: BoardBuildInputs) -> Board:
         ),
         recovery=tuple(item for item in ordered if item.number in landed_work_items),
         uncut=uncut,
-        blocker_references=blocker_references,
         repository=repository,
-        body_contract=config.body_contract,
         requests=inputs.requests,
     )
 
@@ -2588,20 +1816,18 @@ def next_action(board: Board) -> NextAction | None:
     and returns the first row that is either an actionable non-container
     (`WorkItemAction`; a container is never actionable, so this branch never
     fires for one) or a container with no open child (`CutSliceAction` when
-    its own `Next` line still names work or its slice table still carries a
-    cuttable or unlinkable row, else `CloseContainerAction`). `_container_progress`
+    its own `Next` line still names work or its block still carries an
+    undispatched `[[slice]]`, else `CloseContainerAction`). `_container_progress`
     already fails loud on a container whose summary disagrees with its
     open-children list, so "no open child" here reliably means every
     created child has closed. Every other row -- blocked, claimed,
-    incomplete, a container still holding an open child, or a container
-    whose only uncut findings are malformed rows (nothing left to close for
-    and nothing `cut` could link either) -- is skipped, never blocking a
-    lower-ranked qualifying row.
+    incomplete, or a container still holding an open child -- is skipped,
+    never blocking a lower-ranked qualifying row.
 
     Whichever branch fires, the printed command never carries `--row` (#151):
     `cut` without `--row` accepts every container `next` names here, linking
-    its first still-cuttable row when one exists and otherwise creating an
-    untied child -- table or not, uncut row or none left in it.
+    its first undispatched slice when one exists and otherwise creating an
+    untied child.
 
     A `LEGACY` or `MALFORMED` container (#150) is skipped here exactly like
     one still holding an open child: its own finding already surfaces
@@ -2626,13 +1852,13 @@ def _container_next_action(
     item: BoardItem, container: ContainerProgress, uncut_by_container: dict[int, UncutSlices]
 ) -> NextAction | None:
     """The action a childless container qualifies for, or `None` to skip it:
-    a non-`VALID` body, or a slice table whose only findings are malformed
-    rows, name their own finding elsewhere and are never guessed through."""
+    a non-`VALID` body names its own finding elsewhere and is never guessed
+    through."""
     if item.read_state is not BodyReadState.VALID:
         return None
     next_line = item.contract.next
     uncut = uncut_by_container.get(item.number)
-    if uncut is not None and uncut.rows:
+    if uncut is not None:
         cut_title = uncut.rows[0].title
         next_step = (
             next_line if next_line is not None and has_further_work(next_line) else cut_title
@@ -2640,36 +1866,29 @@ def _container_next_action(
         return CutSliceAction(item, container, next_step, cut_title)
     if next_line is not None and has_further_work(next_line):
         return CutSliceAction(item, container, next_line, next_line)
-    if uncut is not None and uncut.malformed:
-        return None
     return CloseContainerAction(item, container)
 
 
-def _project_blocker_references(
-    entry: dict[str, object], key: str, repository: str, *, block_mode: bool
-) -> None:
-    """Rewrite `entry[key]` (a list of `asdict`'d `IssueReference`s) into
-    the pre-#150 local-int list, adding a sibling `foreign_blockers` key
-    only in block mode (A2) -- the one projector `board_json` uses for both
-    `BoardItem.open_blockers` and each open child's `ChildItem.blocked_by`,
-    never a mixed `int | str` list and never re-parsed from a label."""
+def _project_blocker_references(entry: dict[str, object], key: str, repository: str) -> None:
+    """Rewrite `entry[key]` (a list of `asdict`'d `IssueReference`s) into the
+    pre-#150 local-int list plus a sibling `foreign_blockers` key (A2) -- the
+    one projector `board_json` uses for both `BoardItem.open_blockers` and
+    each open child's `ChildItem.blocked_by`, never a mixed `int | str` list
+    and never re-parsed from a label."""
     references = cast(_JsonRows, entry.pop(key))
     entry[key] = [
         reference["number"] for reference in references if reference["repository"] == repository
     ]
-    if block_mode:
-        entry["foreign_blockers"] = [
-            f"{reference['repository']}#{reference['number']}"
-            for reference in references
-            if reference["repository"] != repository
-        ]
+    entry["foreign_blockers"] = [
+        f"{reference['repository']}#{reference['number']}"
+        for reference in references
+        if reference["repository"] != repository
+    ]
 
 
 def board_json(board: Board) -> str:
     payload = asdict(board)
-    payload.pop("blocker_references")
     repository = payload.pop("repository")
-    block_mode = payload.pop("body_contract") is BodyContractMode.BLOCK
     for group in ("items", "ready_now", "stale", "recovery"):
         for item in payload[group]:
             freed_on = item["freed_on"]
@@ -2677,13 +1896,11 @@ def board_json(board: Board) -> str:
                 None if freed_on is None else freed_on.astimezone(UTC).date().isoformat()
             )
             item.pop("read_state")
-            _project_blocker_references(item, "open_blockers", repository, block_mode=block_mode)
+            _project_blocker_references(item, "open_blockers", repository)
             container = item["container"]
             if container is not None:
                 for child in container["open_children"]:
-                    _project_blocker_references(
-                        child, "blocked_by", repository, block_mode=block_mode
-                    )
+                    _project_blocker_references(child, "blocked_by", repository)
     return json.dumps(payload, default=lambda value: value.value)
 
 
@@ -2781,20 +1998,9 @@ def _container_lines(board: Board) -> list[str]:
     ]
 
 
-def malformed_row_clause(row: MalformedSliceRow) -> str:
-    """The one naming unit for a malformed row -- `row "B": index must be a
-    positive integer" -- shared by `board`'s `UNCUT` section and `cut
-    --row`'s refusal so a malformed row reads the same way in both."""
-    return f'row "{row.id_cell}": {row.reason}'
-
-
 def _uncut_line(finding: UncutSlices) -> str:
-    clauses = []
-    if finding.rows:
-        indices = ", ".join(str(row.index) for row in finding.rows)
-        clauses.append(f"rows {indices} uncut")
-    clauses.extend(malformed_row_clause(row) for row in finding.malformed)
-    return f"#{finding.item}: " + "; ".join(clauses)
+    indices = ", ".join(str(row.index) for row in finding.rows)
+    return f"#{finding.item}: rows {indices} uncut"
 
 
 def _contract_summary(contract: Contract) -> str:
@@ -2814,19 +2020,10 @@ class _ActionabilityFacts:
     open_blockers: tuple[IssueReference, ...]
     repository: str
     contract: Contract
-    mode: BodyContractMode
     contract_complete: bool
     projectionless_idea: bool
     read_state: BodyReadState = BodyReadState.VALID
     malformed_defect: ContractDefect | None = None
-    malformed_uncut: tuple[MalformedSliceRow, ...] = ()
-
-
-def _container_actionable_reason(malformed_uncut: tuple[MalformedSliceRow, ...]) -> str:
-    if not malformed_uncut:
-        return "container; claim a child"
-    named = "; ".join(malformed_row_clause(row) for row in malformed_uncut)
-    return f"container; {named}"
 
 
 def _read_state_actionable_reason(facts: _ActionabilityFacts) -> str | None:
@@ -2850,7 +2047,7 @@ def _claim_or_completeness_reason(facts: _ActionabilityFacts) -> str | None:
             open_blocker_label(reference, facts.repository) for reference in facts.open_blockers
         )
     if not facts.contract_complete and not facts.projectionless_idea:
-        missing = ", ".join(missing_or_empty_sections(facts.contract, facts.mode))
+        missing = ", ".join(missing_or_empty_sections(facts.contract))
         return f"body incomplete: {missing}"
     return None
 
@@ -2860,7 +2057,7 @@ def _actionable_reason(facts: _ActionabilityFacts) -> str | None:
     if read_state_reason is not None:
         return read_state_reason
     if facts.kind is ItemKind.CONTAINER:
-        return _container_actionable_reason(facts.malformed_uncut)
+        return "container; claim a child"
     return _claim_or_completeness_reason(facts)
 
 
@@ -2889,9 +2086,8 @@ def _freed_cell(item: BoardItem) -> str:
 
 
 def _brief(value: str | None, *, maximum: int = 48) -> str:
-    # `None` (prose's unset Next) and `""` (a block skeleton's unfilled
-    # `next`, #150 §5) render identically: a fresh child looks the same in
-    # this column whichever mode its repository is pinned to.
+    # An absent value and `""` (a block skeleton's unfilled `next`, #150 §5)
+    # render identically: a fresh child shows nothing in this column.
     if value is None or not value.strip():
         return "-"
     one_line = " ".join(value.split())
