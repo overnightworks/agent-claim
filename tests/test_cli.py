@@ -7359,12 +7359,11 @@ def test_checkout_validation_names_the_isolated_worktree_recipe_for_a_shared_che
 
 
 def test_checkout_validation_return_to_claim_names_no_branch_from_the_trunk() -> None:
-    """`rescope` and `release` share this check with `claim` (issue #211),
-    but their honest repair differs: their claim's worktree already exists,
-    so recommending the `git worktree add` recipe builds a second, foreign
-    one. From the trunk branch no other branch is known here to name, so
-    `RETURN_TO_CLAIM` points back at the claim's own worktree without
-    inventing one."""
+    """`rescope` shares this check with `claim` (issue #211), but its honest
+    repair differs: its claim's worktree already exists, so recommending the
+    `git worktree add` recipe builds a second, foreign one. From the trunk
+    branch no other branch is known here to name, so `RETURN_TO_CLAIM` points
+    back at the claim's own worktree without inventing one."""
     with pytest.raises(ClaimError) as error:
         checkout._validate_worktree_branch("main", repair=checkout.WorktreeRepair.RETURN_TO_CLAIM)
 
@@ -7401,30 +7400,21 @@ def test_checkout_validation_return_to_claim_names_the_known_branch(
     )
 
 
-@pytest.mark.parametrize(
-    ("command", "extra_arguments"),
-    [
-        ("rescope", ("--add", "src/new.py")),
-        ("release", ("--abandoned", "stopped")),
-    ],
-)
-def test_cli_rescope_and_release_from_the_primary_checkout_point_back_at_the_claims_worktree(
+def test_cli_rescope_from_the_primary_checkout_points_back_at_the_claims_worktree(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-    command: str,
-    extra_arguments: tuple[str, ...],
 ) -> None:
     """The reported bug (#211): a held claim's worktree already exists, so
-    running `rescope`/`release` from the primary checkout on `main` must not
-    send an agent to build a second one. No branch is known from `main`, so
-    the refusal names none."""
+    running `rescope` from the primary checkout on `main` must not send an
+    agent to build a second one. No branch is known from `main`, so the
+    refusal names none."""
     client = FakeForge()
     monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
     git_values = _git_checkout(branch="main")
     monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
 
     status = issue_claim.main(
-        ["--repo", "example/agent-claim", command, "72", "--agent", "Ada", *extra_arguments]
+        ["--repo", "example/agent-claim", "rescope", "72", "--agent", "Ada", "--add", "src/new.py"]
     )
 
     assert status == 2
@@ -7465,8 +7455,8 @@ def test_cli_claim_from_the_primary_checkout_still_names_the_create_recipe(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """`claim`'s refusal is unchanged by #211 -- pinned here through the real
-    command, alongside `rescope`'s and `release`'s corrected sentences above,
-    since a fresh claim genuinely has no worktree yet to return to."""
+    command, alongside `rescope`'s corrected sentence above, since a fresh
+    claim genuinely has no worktree yet to return to."""
     client = FakeForge()
     monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
     git_values = _git_checkout(branch="main")
@@ -7678,15 +7668,9 @@ def _patch_release_session(
 
         monkeypatch.setattr(checkout, "_git_output", git)
         return
-    # A linked isolated worktree by default: `release` now validates its own
-    # checkout the same way `rescope` always has, so a bare branch name with
-    # no git-dir/common-dir pair would fail that check, not exercise the
-    # release flow the rest of this fixture sets up.
     git_values = {
         ("branch", "--show-current"): branch or "",
         ("rev-parse", "--show-toplevel"): "/repo",
-        ("rev-parse", "--git-dir"): "/repo/.git/worktrees/lane-72",
-        ("rev-parse", "--git-common-dir"): "/repo/.git",
     }
     monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
 
@@ -8782,8 +8766,6 @@ def test_cli_lane_claim_and_release_round_trip_without_issue_number(
         ("branch", "--show-current"): "docs/lane-cleanup",
         ("rev-parse", "--show-toplevel"): "/repo",
         ("rev-parse", "HEAD"): BASE,
-        ("rev-parse", "--git-dir"): "/repo/.git/worktrees/lane-cleanup",
-        ("rev-parse", "--git-common-dir"): "/repo/.git",
     }
     monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
 
@@ -8846,8 +8828,9 @@ def test_cli_lane_mode_refuses_a_non_conventional_branch(
     _set_agent_identity_env(monkeypatch, {"ACO_AGENT": "Codex Sol"})
     client = FakeForge()
     _patch_status_cli(monkeypatch, client)
-    git_values = _git_checkout(branch="codex/issue-38-issueless-claims")
-    monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
+    monkeypatch.setattr(
+        checkout, "_git_output", lambda arguments: "codex/issue-38-issueless-claims"
+    )
 
     arguments = ["--repo", "example/agent-claim", command]
     if command == "claim":

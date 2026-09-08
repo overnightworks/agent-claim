@@ -2409,9 +2409,6 @@ def _release_branch_for(parsed: argparse.Namespace) -> str | None:
         return None
     release_branch = checkout._git_output(["branch", "--show-current"])
     if release_branch:
-        checkout._validate_worktree_branch(
-            release_branch, repair=checkout.WorktreeRepair.RETURN_TO_CLAIM
-        )
         return release_branch
     if parsed.issue is None:
         raise protocol.ClaimUnavailableError(
