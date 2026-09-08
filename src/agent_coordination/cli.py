@@ -2020,7 +2020,7 @@ def _rescope_command(parsed: argparse.Namespace) -> protocol.RescopeRequest:
             "rescope requires a non-empty current branch; "
             "check out the claim branch, or pass an issue number"
         )
-    checkout._validate_worktree_branch(branch)
+    checkout._validate_worktree_branch(branch, repair=checkout.WorktreeRepair.RETURN_TO_CLAIM)
     identity = _resolved_identity(_optional_issue_number(parsed.issue), branch)
     return protocol.RescopeRequest(
         identity=identity,
