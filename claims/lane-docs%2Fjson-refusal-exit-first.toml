@@ -1,7 +1,0 @@
-claim_id = "199d399a016449218c8215b6f989ce12"
-agent = "Claude Fable 5.1"
-role = "builder"
-base = "09fa215754b6ddb1ab168b96901328db21eebd8b"
-branch = "docs/json-refusal-exit-first"
-scope = ["README.md"]
-opened_commit = "cd6457b5c4d48196eaf53857d4873ad291311cc8"
