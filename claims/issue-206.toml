@@ -1,7 +1,0 @@
-claim_id = "62799f5e3d3b433099d14942861bd7c0"
-agent = "Claude Fable 5.1"
-role = "builder"
-base = "ad3e761b6ce9b189a2ef8a4868333b281d08935e"
-branch = "claude/issue-206-overlap-names-the-path"
-scope = ["src/agent_coordination/cli.py", "tests/test_cli.py"]
-opened_commit = "58e546466e6e60589a5fdf2d3e83cb99d08bd292"
