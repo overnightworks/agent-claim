@@ -9276,6 +9276,7 @@ def test_cli_claim_scope_keeps_a_comma_inside_one_path(
     monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
     monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
     monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+    monkeypatch.setattr(checkout, "versioned_paths", lambda: ("docs/report,v2.md",))
 
     claimed = issue_claim.main(
         [
@@ -9339,6 +9340,7 @@ def test_cli_claim_scope_comma_differs_from_repeated_scope_flags(
     monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
     monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
     monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+    monkeypatch.setattr(checkout, "versioned_paths", lambda: ("docs/PRODUCT.md,src/widget.py",))
 
     joined = issue_claim.main(
         [
@@ -9389,6 +9391,82 @@ def test_cli_claim_scope_comma_differs_from_repeated_scope_flags(
     }
 
 
+def test_cli_claim_refuses_a_comma_scope_that_matches_nothing_in_the_checkout(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`--scope a.py,b.py` passed from the comma-splitting habit that #201
+    removed used to store one path that guards nothing: no such file exists,
+    so the lane's real files stayed unclaimed and no overlap check could ever
+    fire for them (issue #207). The claim is refused before it is written,
+    naming the one-path-per-flag rule."""
+    client = FakeForge()
+    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
+    monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
+    monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+
+    status = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "claim",
+            "72",
+            "--agent",
+            "Ada",
+            "--base",
+            BASE,
+            "--branch",
+            "codex/issue-72",
+            "--scope",
+            "a.py,b.py",
+            "--claim-id",
+            "habit-comma",
+        ]
+    )
+
+    assert status == 2
+    assert capsys.readouterr().err == (
+        "ERROR: 'a.py,b.py' matches nothing in the checkout; one --scope path per flag, "
+        "so its comma is read literally -- repeat --scope for a second path\n"
+    )
+
+
+def test_cli_claim_accepts_a_scope_path_without_a_comma_that_does_not_exist_yet(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A lane routinely claims files it is about to create; only a comma
+    with no match in the checkout trips the new refusal (issue #207), so a
+    comma-free path git has never heard of still claims cleanly."""
+    client = FakeForge()
+    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
+    monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
+    monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+
+    status = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "claim",
+            "72",
+            "--agent",
+            "Ada",
+            "--base",
+            BASE,
+            "--branch",
+            "codex/issue-72",
+            "--scope",
+            "src/not-created-yet.py",
+            "--claim-id",
+            "future-file",
+        ]
+    )
+
+    assert status == 0
+    assert capsys.readouterr().err == ""
+    assert _live_store_claim().scope == ("src/not-created-yet.py",)
+
+
 def test_cli_rescope_adds_a_path_without_matching_head_or_a_clean_tree(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -9436,6 +9514,7 @@ def test_cli_rescope_add_keeps_a_comma_inside_one_path(
     git_values = _git_checkout(head="b" * 40, dirty=" M file")
     monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
     monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+    monkeypatch.setattr(checkout, "versioned_paths", lambda: ("reports/a,b.md",))
     _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Codex Sol"})
 
     status = issue_claim.main(
@@ -9472,6 +9551,7 @@ def test_cli_rescope_drop_matches_a_comma_path_as_one_whole_path(
     git_values = _git_checkout(head="b" * 40, dirty=" M file")
     monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
     monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+    monkeypatch.setattr(checkout, "versioned_paths", lambda: ("reports/a,b.md",))
     _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Codex Sol"})
 
     status = issue_claim.main(
@@ -9488,6 +9568,80 @@ def test_cli_rescope_drop_matches_a_comma_path_as_one_whole_path(
     assert status == 0
     assert capsys.readouterr().out == f"RESCOPED issue #72: {acquired.claim_id}\n"
     assert _live_store_claim().scope == ("reports/a",)
+
+
+def test_cli_rescope_add_refuses_a_comma_scope_that_matches_nothing_in_the_checkout(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`--add` must not be a way around the same refusal `claim` applies
+    (issue #207): a comma-habit value that names no real path is refused
+    before the rescope is written, leaving the live claim untouched."""
+    client = FakeForge()
+    claimed_request = request(issue=72, branch="codex/issue-72", scope=("src/widget.py",))
+    acquired = _store_claim_from_request(claimed_request)
+    _patch_store_write(monkeypatch, acquired)
+    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
+    git_values = _git_checkout(head="b" * 40, dirty=" M file")
+    monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
+    monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+    _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Codex Sol"})
+
+    status = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "rescope",
+            "72",
+            "--add",
+            "a.py,b.py",
+        ]
+    )
+
+    assert status == 2
+    assert capsys.readouterr().err == (
+        "ERROR: 'a.py,b.py' matches nothing in the checkout; one --scope path per flag, "
+        "so its comma is read literally -- repeat --scope for a second path\n"
+    )
+    assert _live_store_claim().scope == ("src/widget.py",)
+
+
+def test_cli_rescope_drop_refuses_a_comma_scope_that_matches_nothing_in_the_checkout(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`--drop` shares the same refusal as `--add` and `claim` (issue #207):
+    a comma-habit value that names no real path is refused before the
+    rescope is written, leaving the live claim untouched."""
+    client = FakeForge()
+    claimed_request = request(
+        issue=72, branch="codex/issue-72", scope=("src/widget.py", "reports/a,b.md")
+    )
+    acquired = _store_claim_from_request(claimed_request)
+    _patch_store_write(monkeypatch, acquired)
+    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
+    git_values = _git_checkout(head="b" * 40, dirty=" M file")
+    monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
+    monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+    _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Codex Sol"})
+
+    status = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "rescope",
+            "72",
+            "--drop",
+            "a.py,b.py",
+        ]
+    )
+
+    assert status == 2
+    assert capsys.readouterr().err == (
+        "ERROR: 'a.py,b.py' matches nothing in the checkout; one --scope path per flag, "
+        "so its comma is read literally -- repeat --scope for a second path\n"
+    )
+    assert _live_store_claim().scope == ("src/widget.py", "reports/a,b.md")
 
 
 def test_cli_rescope_json_prints_updated_scope_and_same_claim_id(
