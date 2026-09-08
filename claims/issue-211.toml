@@ -1,7 +1,0 @@
-claim_id = "a69b6bcde1fc414383d87edc20afb93a"
-agent = "Claude Fable 5.1"
-role = "builder"
-base = "c2a2c64c7d3b87f34ae7c70195efc053e84dbce4"
-branch = "claude/issue-211-worktree-repair-sentence"
-scope = ["src/agent_coordination/checkout.py", "src/agent_coordination/cli.py", "tests/test_cli.py"]
-opened_commit = "497c4b77940df41a273dea8e533b0eab95cd9da8"
