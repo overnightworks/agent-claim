@@ -557,6 +557,17 @@ argparse failure (a missing issue number, an unknown flag) happens before any
 command -- and therefore any `--json` -- is known, and still only prints
 argparse's usage text to stderr with nothing on stdout.
 
+Read the exit status first and parse second: this object shares stdout with
+whatever ordinary payload the command would otherwise have printed, so a
+reader that parses stdout without looking at the status reads a refusal as a
+successful answer. A non-zero status does not always carry it, either — `next`
+exits 3 with its ordinary `{"action": null, …}` payload when nothing is
+actionable, `check` exits 1 with its own `{"ok": false, …, "refused": …}`
+answer, and `status` exits 2 with its ordinary payload when a claim conflicts.
+Plainly: 0 succeeded, 1 is `check`'s own refusal, 2 is where this collection
+point sends every `ClaimError` (and where `status` reports a conflict), and 3
+means only that `next` had nothing to name.
+
 ## Scope and boundaries
 
 GitHub through the `gh` CLI is the one adapter that exists. A second forge
