@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 
 from . import process
@@ -109,7 +110,43 @@ ISOLATED_WORKTREE_RECIPE = (
 )
 
 
-def _validate_worktree_branch(branch: str) -> None:
+class WorktreeRepair(StrEnum):
+    """Which repair a worktree-isolation refusal should name.
+
+    `claim` has no worktree yet, so it needs one built (`CREATE`, the `git
+    worktree add` recipe). `rescope` and `release` act on a claim that was
+    taken from a worktree that therefore already exists, so naming the same
+    create recipe sends an agent to build a second, foreign one -- exactly
+    the worktree the state then sees as an unrelated lane. Their honest
+    repair is `RETURN_TO_CLAIM`: go back to the worktree this claim already
+    has.
+    """
+
+    CREATE = "create"
+    RETURN_TO_CLAIM = "return_to_claim"
+
+
+def _worktree_repair_instruction(repair: WorktreeRepair, *, branch: str | None) -> str:
+    """The actionable clause a worktree-isolation refusal ends with.
+
+    `branch` is the checkout's own already-known branch, never one looked up
+    for the occasion: at the trunk-branch check the checkout is on `main` or
+    `master`, so no other branch is available to name without guessing, and
+    `None` says so; at the shared-checkout check the checkout's branch is
+    already known (it is `branch` below), so `RETURN_TO_CLAIM` names it.
+    """
+    if repair is WorktreeRepair.CREATE:
+        return f"run {ISOLATED_WORKTREE_RECIPE}"
+    if branch is None:
+        return "run this command from this claim's own worktree, not the primary checkout"
+    return (
+        f"run this command from this claim's own worktree on {branch!r}, not the primary checkout"
+    )
+
+
+def _validate_worktree_branch(
+    branch: str, *, repair: WorktreeRepair = WorktreeRepair.CREATE
+) -> None:
     """Require an isolated non-main worktree checked out on `branch`.
 
     Rescope uses this without also binding HEAD to the claim base or requiring
@@ -118,7 +155,7 @@ def _validate_worktree_branch(branch: str) -> None:
     if branch in {"main", "master"}:
         raise ClaimError(
             "build claims require an isolated non-main worktree branch; "
-            f"run {ISOLATED_WORKTREE_RECIPE}"
+            f"{_worktree_repair_instruction(repair, branch=None)}"
         )
     current = _git_output(["branch", "--show-current"])
     git_directory = Path(_git_output(["rev-parse", "--git-dir"])).resolve()
@@ -128,7 +165,7 @@ def _validate_worktree_branch(branch: str) -> None:
     if git_directory == common_directory:
         raise ClaimError(
             "build claims require a linked isolated worktree checkout; "
-            f"run {ISOLATED_WORKTREE_RECIPE}"
+            f"{_worktree_repair_instruction(repair, branch=branch)}"
         )
 
 

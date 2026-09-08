@@ -7358,6 +7358,144 @@ def test_checkout_validation_names_the_isolated_worktree_recipe_for_a_shared_che
     )
 
 
+def test_checkout_validation_return_to_claim_names_no_branch_from_the_trunk() -> None:
+    """`rescope` and `release` share this check with `claim` (issue #211),
+    but their honest repair differs: their claim's worktree already exists,
+    so recommending the `git worktree add` recipe builds a second, foreign
+    one. From the trunk branch no other branch is known here to name, so
+    `RETURN_TO_CLAIM` points back at the claim's own worktree without
+    inventing one."""
+    with pytest.raises(ClaimError) as error:
+        checkout._validate_worktree_branch("main", repair=checkout.WorktreeRepair.RETURN_TO_CLAIM)
+
+    assert str(error.value) == (
+        "build claims require an isolated non-main worktree branch; "
+        "run this command from this claim's own worktree, not the primary checkout"
+    )
+
+
+def test_checkout_validation_return_to_claim_names_the_known_branch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Checked out directly on a real branch inside the shared (non-linked)
+    checkout, that branch is already known -- it is the same branch the
+    caller resolved its identity from -- so `RETURN_TO_CLAIM` names it
+    instead of leaving the sentence branch-less."""
+    values = {
+        ("branch", "--show-current"): "codex/issue-211-worktree-repair-sentence",
+        ("rev-parse", "--git-dir"): "/repo/.git",
+        ("rev-parse", "--git-common-dir"): "/repo/.git",
+    }
+    monkeypatch.setattr(checkout, "_git_output", lambda arguments: values[tuple(arguments)])
+
+    with pytest.raises(ClaimError) as error:
+        checkout._validate_worktree_branch(
+            "codex/issue-211-worktree-repair-sentence",
+            repair=checkout.WorktreeRepair.RETURN_TO_CLAIM,
+        )
+
+    assert str(error.value) == (
+        "build claims require a linked isolated worktree checkout; "
+        "run this command from this claim's own worktree on "
+        "'codex/issue-211-worktree-repair-sentence', not the primary checkout"
+    )
+
+
+@pytest.mark.parametrize(
+    ("command", "extra_arguments"),
+    [
+        ("rescope", ("--add", "src/new.py")),
+        ("release", ("--abandoned", "stopped")),
+    ],
+)
+def test_cli_rescope_and_release_from_the_primary_checkout_point_back_at_the_claims_worktree(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+    extra_arguments: tuple[str, ...],
+) -> None:
+    """The reported bug (#211): a held claim's worktree already exists, so
+    running `rescope`/`release` from the primary checkout on `main` must not
+    send an agent to build a second one. No branch is known from `main`, so
+    the refusal names none."""
+    client = FakeForge()
+    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
+    git_values = _git_checkout(branch="main")
+    monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
+
+    status = issue_claim.main(
+        ["--repo", "example/agent-claim", command, "72", "--agent", "Ada", *extra_arguments]
+    )
+
+    assert status == 2
+    assert capsys.readouterr().err == (
+        "ERROR: build claims require an isolated non-main worktree branch; "
+        "run this command from this claim's own worktree, not the primary checkout\n"
+    )
+
+
+def test_cli_rescope_from_a_shared_checkout_names_the_known_branch(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Checked out directly on the claim's own branch inside the primary
+    checkout, without a linked worktree -- the branch is already known here,
+    so the refusal names it instead of leaving the sentence blank."""
+    client = FakeForge()
+    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
+    git_values = _git_checkout(
+        branch="codex/issue-72", git_directory="/repo/.git", common_directory="/repo/.git"
+    )
+    monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
+
+    status = issue_claim.main(
+        ["--repo", "example/agent-claim", "rescope", "72", "--agent", "Ada", "--add", "src/new.py"]
+    )
+
+    assert status == 2
+    assert capsys.readouterr().err == (
+        "ERROR: build claims require a linked isolated worktree checkout; "
+        "run this command from this claim's own worktree on 'codex/issue-72', "
+        "not the primary checkout\n"
+    )
+
+
+def test_cli_claim_from_the_primary_checkout_still_names_the_create_recipe(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`claim`'s refusal is unchanged by #211 -- pinned here through the real
+    command, alongside `rescope`'s and `release`'s corrected sentences above,
+    since a fresh claim genuinely has no worktree yet to return to."""
+    client = FakeForge()
+    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
+    git_values = _git_checkout(branch="main")
+    monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
+
+    status = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "claim",
+            "72",
+            "--agent",
+            "Ada",
+            "--branch",
+            "main",
+            "--scope",
+            "src",
+            "--claim-id",
+            "cli-claim",
+        ]
+    )
+
+    assert status == 2
+    assert capsys.readouterr().err == (
+        "ERROR: build claims require an isolated non-main worktree branch; "
+        f"run {checkout.ISOLATED_WORKTREE_RECIPE}\n"
+    )
+
+
 def test_checkout_validation_names_the_first_three_dirty_paths_and_the_rest_as_a_count(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -7540,9 +7678,15 @@ def _patch_release_session(
 
         monkeypatch.setattr(checkout, "_git_output", git)
         return
+    # A linked isolated worktree by default: `release` now validates its own
+    # checkout the same way `rescope` always has, so a bare branch name with
+    # no git-dir/common-dir pair would fail that check, not exercise the
+    # release flow the rest of this fixture sets up.
     git_values = {
         ("branch", "--show-current"): branch or "",
         ("rev-parse", "--show-toplevel"): "/repo",
+        ("rev-parse", "--git-dir"): "/repo/.git/worktrees/lane-72",
+        ("rev-parse", "--git-common-dir"): "/repo/.git",
     }
     monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
 
@@ -8638,6 +8782,8 @@ def test_cli_lane_claim_and_release_round_trip_without_issue_number(
         ("branch", "--show-current"): "docs/lane-cleanup",
         ("rev-parse", "--show-toplevel"): "/repo",
         ("rev-parse", "HEAD"): BASE,
+        ("rev-parse", "--git-dir"): "/repo/.git/worktrees/lane-cleanup",
+        ("rev-parse", "--git-common-dir"): "/repo/.git",
     }
     monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
 
@@ -8700,9 +8846,8 @@ def test_cli_lane_mode_refuses_a_non_conventional_branch(
     _set_agent_identity_env(monkeypatch, {"ACO_AGENT": "Codex Sol"})
     client = FakeForge()
     _patch_status_cli(monkeypatch, client)
-    monkeypatch.setattr(
-        checkout, "_git_output", lambda arguments: "codex/issue-38-issueless-claims"
-    )
+    git_values = _git_checkout(branch="codex/issue-38-issueless-claims")
+    monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
 
     arguments = ["--repo", "example/agent-claim", command]
     if command == "claim":
