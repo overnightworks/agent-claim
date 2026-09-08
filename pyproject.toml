@@ -56,6 +56,8 @@ type = "layers"
 containers = ["agent_coordination"]
 layers = [
     "cli",
+    "workspace",
+    "codex | terminal",
     "checkout | store",
     "github",
     "forge",
@@ -78,6 +80,23 @@ allow_indirect_imports = true
 as_packages = false
 
 [[tool.importlinter.contracts]]
+name = "Workspace recovery does not reach repository coordination"
+type = "forbidden"
+source_modules = [
+    "agent_coordination.workspace",
+    "agent_coordination.codex",
+    "agent_coordination.terminal",
+]
+forbidden_modules = [
+    "agent_coordination.store",
+    "agent_coordination.checkout",
+    "agent_coordination.github",
+    "agent_coordination.forge",
+]
+allow_indirect_imports = false
+as_packages = false
+
+[[tool.importlinter.contracts]]
 name = "Only the process boundary imports subprocess"
 type = "forbidden"
 source_modules = ["agent_coordination", "agent_coordination.*"]
@@ -87,7 +106,7 @@ as_packages = false
 ignore_imports = ["agent_coordination.process -> subprocess"]
 
 [[tool.importlinter.contracts]]
-name = "Only the gh and git owners run commands"
+name = "Only the gh, git, and terminal owners run commands"
 type = "forbidden"
 source_modules = ["agent_coordination", "agent_coordination.*"]
 forbidden_modules = ["agent_coordination.process"]
@@ -97,6 +116,7 @@ ignore_imports = [
     "agent_coordination.github -> agent_coordination.process",
     "agent_coordination.checkout -> agent_coordination.process",
     "agent_coordination.store -> agent_coordination.process",
+    "agent_coordination.terminal -> agent_coordination.process",
 ]
 
 [tool.pyright]
