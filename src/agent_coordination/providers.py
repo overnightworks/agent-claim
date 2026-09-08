@@ -33,15 +33,17 @@ def session_identity_environment_names() -> frozenset[str]:
 
 def resume_command(provider: Provider, session_id: str, model: str | None = None) -> list[str]:
     """Build the provider-native command that resumes one registered conversation."""
-    if provider is Provider.CODEX:
-        command = ["codex", "resume"]
-        if model is not None:
-            command.extend(("--model", model))
-        return [*command, session_id]
-    command = ["claude", "--resume", session_id]
-    if model is not None:
-        command.extend(("--model", model))
-    return command
+    match provider:
+        case Provider.CODEX:
+            command = ["codex", "resume"]
+            if model is not None:
+                command.extend(("--model", model))
+            return [*command, session_id]
+        case Provider.CLAUDE:
+            command = ["claude", "--resume", session_id]
+            if model is not None:
+                command.extend(("--model", model))
+            return command
 
 
 def project_environment(environment: Mapping[str, str], agent: str) -> dict[str, str]:

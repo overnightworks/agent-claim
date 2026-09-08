@@ -79,12 +79,6 @@ def default_config_path(environment: Mapping[str, str], home: Path | None = None
     )
 
 
-def registration(
-    key: str, directory: Path, session_id: str, agent: str, model: str | None = None
-) -> WorkspaceRegistration:
-    return WorkspaceRegistration(key, directory, session_id, agent, model)
-
-
 def register_project(handoff: WorkspaceRegistration, config_path: Path) -> bool:
     """Store one explicit stopped-session handoff; return whether it was new."""
     candidate = _project(handoff)
