@@ -1,8 +1,0 @@
-claim_id = "d1e8ee66f7d741e1bf1d6ba6f7c98f9c"
-agent = "Claude Fable 5.1"
-role = "builder"
-base = "09fa215754b6ddb1ab168b96901328db21eebd8b"
-branch = "claude/issue-204-one-body-grammar"
-scope = ["src/agent_coordination", "tests", "README.md", "docs/decisions"]
-opened_commit = "83d92fbdcd92b5c721548ae19a3bfb76c2d3be12"
-whole_reason = "Eine Grammatik verlässt Parser, Skelett, Konfiguration, Ausgabe und ihre Tests in einem Zug; getrennt gelandet wäre jede Zwischenstufe ein Werkzeug, das seine eigenen Bodies nicht liest"
