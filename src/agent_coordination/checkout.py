@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from . import process
-from .protocol import ClaimError, ClaimRequest, _outbound_text
+from .protocol import ClaimError, ClaimRequest, _outbound_text, named_with_overflow_count
 
 ACO_AGENT_ENV = "ACO_AGENT"
 GROK_SESSION_ID_ENV = "GROK_SESSION_ID"
@@ -150,11 +150,7 @@ def _validate_checkout(request: ClaimRequest) -> None:
     _validate_worktree_branch(request.branch)
     dirty = _git_output(["status", "--porcelain"])
     if dirty:
-        paths = _dirty_paths(dirty)
-        named = ", ".join(paths[:3])
-        remainder = len(paths) - 3
-        if remainder > 0:
-            named += f", and {remainder} more"
+        named = named_with_overflow_count(_dirty_paths(dirty))
         raise ClaimError(f"claim must be acquired before the first worktree edit: {named}")
 
 

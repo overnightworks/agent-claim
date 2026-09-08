@@ -10085,24 +10085,137 @@ def test_cli_claim_json_lists_an_overlapping_standing_claim_as_a_touch(
     ]
 
 
+def test_cli_claim_json_touch_key_set_is_unchanged_by_the_human_overlap_line(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A consumer pins `touches`' exact field set (issue #206): naming the
+    colliding path on the human line must add no key here, and the full
+    scope a touch already carries is how a consumer can compute that path
+    itself today."""
+    standing = request(
+        "claim-a", "Ada", issue=1400, scope=("tests/adapters/test_agent_claim_cli.py",)
+    )
+    client = FakeForge()
+    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
+    monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
+    monkeypatch.setattr(
+        checkout, "_scope_directories", lambda paths: tuple(p for p in paths if p == "tests")
+    )
+    _patch_store_write(monkeypatch, _store_claim_from_request(standing))
+
+    status = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "claim",
+            "1401",
+            "--agent",
+            "Grok 4.6",
+            "--base",
+            BASE,
+            "--branch",
+            "codex/issue-1401",
+            "--scope",
+            "tests",
+            "--claim-id",
+            "challenger",
+            "--whole",
+            "the whole test tree",
+            "--json",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert status == 0
+    assert len(payload["touches"]) == 1
+    assert set(payload["touches"][0]) == {"issue", "lane", "claim_id", "agent", "scope"}
+    assert payload["touches"][0] == {
+        "issue": 1400,
+        "lane": None,
+        "claim_id": "claim-a",
+        "agent": "Ada",
+        "scope": ["tests/adapters/test_agent_claim_cli.py"],
+    }
+
+
 def test_claim_cost_lists_an_overlapping_standing_claim_as_a_touch() -> None:
     standing = _store_claim_from_request(request("claim-a", issue=55, scope=("src",)))
     lane = _store_claim_from_request(
         request("claim-b", "Grok 4.6", lane=True, branch="docs/foo", scope=("docs",))
     )
+    narrow_scope = ("src/widget.py",)
     overlapping = protocol.conflicting_claims(
-        (standing, lane), request("challenger", issue=56, scope=("src/widget.py",))
+        (standing, lane), request("challenger", issue=56, scope=narrow_scope)
     )
+    wide_scope = ("src", "docs")
     both = protocol.conflicting_claims(
-        (standing, lane), request("wide", issue=56, scope=("src", "docs"))
+        (standing, lane), request("wide", issue=56, scope=wide_scope)
     )
 
     assert [claim.claim_id for claim in overlapping] == ["claim-a"]
-    assert issue_claim._touch_summary(overlapping) == "overlaps issue #55 (claim-a)"
-    assert issue_claim._touch_summary(both) == (
-        "overlaps issue #55 (claim-a), lane docs/foo (claim-b)"
+    assert issue_claim._touch_summary(narrow_scope, overlapping) == (
+        "overlaps issue #55 on src/widget.py"
     )
-    assert issue_claim._touch_summary(()) == "overlaps no other open claims"
+    assert issue_claim._touch_summary(wide_scope, both) == (
+        "overlaps issue #55 on src, lane docs/foo on docs"
+    )
+    assert issue_claim._touch_summary(wide_scope, ()) == "overlaps no other open claims"
+
+
+def test_claim_cost_names_a_directory_scope_meeting_a_single_file_of_a_standing_claim() -> None:
+    """The case that hurt a consumer twice in one night (issue #206): a
+    directory in the newly granted scope contains a single file a standing
+    claim already holds, so the overlap line must name that file, not just
+    the standing claim's issue."""
+    standing = _store_claim_from_request(
+        request("claim-a", issue=1400, scope=("tests/adapters/test_agent_claim_cli.py",))
+    )
+    own_scope = ("tests",)
+
+    touches = protocol.conflicting_claims(
+        (standing,), request("challenger", issue=1401, scope=own_scope)
+    )
+
+    assert issue_claim._touch_summary(own_scope, touches) == (
+        "overlaps issue #1400 on tests/adapters/test_agent_claim_cli.py"
+    )
+
+
+def test_claim_cost_counts_overflow_when_many_paths_collide_in_one_claim() -> None:
+    standing = _store_claim_from_request(
+        request(
+            "claim-a",
+            issue=55,
+            scope=("src/a.py", "docs/b.md", "tests/c.py", "scripts/d.py"),
+        )
+    )
+    own_scope = ("src", "docs", "tests", "scripts")
+
+    touches = protocol.conflicting_claims(
+        (standing,), request("challenger", issue=56, scope=own_scope)
+    )
+
+    assert issue_claim._touch_summary(own_scope, touches) == (
+        "overlaps issue #55 on docs/b.md, scripts/d.py, src/a.py, and 1 more"
+    )
+
+
+def test_claim_cost_lists_every_overlapping_claim_separately() -> None:
+    first = _store_claim_from_request(request("claim-a", issue=55, scope=("src/a.py",)))
+    second = _store_claim_from_request(request("claim-b", issue=57, scope=("docs/b.md",)))
+    third = _store_claim_from_request(
+        request("claim-c", "Grok 4.6", lane=True, branch="docs/foo", scope=("tests/c.py",))
+    )
+    own_scope = ("src", "docs", "tests")
+
+    touches = protocol.conflicting_claims(
+        (first, second, third), request("challenger", issue=56, scope=own_scope)
+    )
+
+    assert issue_claim._touch_summary(own_scope, touches) == (
+        "overlaps issue #55 on src/a.py, issue #57 on docs/b.md, lane docs/foo on tests/c.py"
+    )
 
 
 def test_claim_age_old_compares_real_age_against_the_threshold() -> None:
@@ -11879,7 +11992,69 @@ def test_cli_two_claims_of_the_same_directory_are_advisory(
     assert first == 0
     assert second == 0
     assert "CONFLICT" not in claimed
-    assert "overlaps issue #72 (dir-a)" in claimed
+    assert "overlaps issue #72 on src" in claimed
+
+
+def test_cli_claim_on_a_directory_names_the_file_a_standing_claim_holds_under_it(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The real `claim` output for the case that hurt a consumer twice in one
+    night (issue #206): a directory in the newly granted scope contains a
+    single file a standing claim already holds."""
+    client = FakeForge()
+    _patch_status_cli(monkeypatch, client)
+    monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
+    monkeypatch.setattr(
+        checkout,
+        "_scope_directories",
+        lambda paths: tuple(path for path in paths if path == "tests"),
+    )
+
+    first = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "claim",
+            "1400",
+            "--agent",
+            "Ada",
+            "--base",
+            BASE,
+            "--branch",
+            "codex/issue-1400",
+            "--scope",
+            "tests/adapters/test_agent_claim_cli.py",
+            "--claim-id",
+            "claim-a",
+        ]
+    )
+    capsys.readouterr()
+    second = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "claim",
+            "1401",
+            "--agent",
+            "Grok 4.6",
+            "--base",
+            BASE,
+            "--branch",
+            "codex/issue-1401",
+            "--scope",
+            "tests",
+            "--claim-id",
+            "claim-b",
+            "--whole",
+            "the whole test tree",
+        ]
+    )
+    claimed = capsys.readouterr().out
+
+    assert first == 0
+    assert second == 0
+    assert "CONFLICT" not in claimed
+    assert "overlaps issue #1400 on tests/adapters/test_agent_claim_cli.py" in claimed
 
 
 def test_cli_status_and_status_path_show_two_directory_claims_as_advisory(
@@ -11961,7 +12136,7 @@ def test_cli_two_claims_of_the_same_file_are_advisory(
     assert first == 0
     assert second == 0
     assert "CONFLICT" not in claimed
-    assert "overlaps issue #72 (file-a)" in claimed
+    assert "overlaps issue #72 on src/widget.py" in claimed
 
 
 def test_cli_status_and_status_path_show_two_file_claims_as_advisory(

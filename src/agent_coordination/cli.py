@@ -148,17 +148,25 @@ def _touch_json(claim: protocol.ScopedClaim) -> dict[str, object]:
     }
 
 
-def _touch_summary(touches: tuple[protocol.ScopedClaim, ...]) -> str:
+def _touch_line(own_scope: tuple[str, ...], claim: protocol.ScopedClaim) -> str:
+    """One overlapping claim, named with the paths where its scope meets
+    `own_scope` -- the fact a claimant needs to know they hold both scopes
+    at once, not only the other item's name (issue #206)."""
+    meeting = protocol.scope_overlap_paths(own_scope, claim.scope)
+    return f"{_claim_subject(claim)} on {protocol.named_with_overflow_count(meeting)}"
+
+
+def _touch_summary(own_scope: tuple[str, ...], touches: tuple[protocol.ScopedClaim, ...]) -> str:
     if not touches:
         return "overlaps no other open claims"
-    return "overlaps " + ", ".join(
-        f"{_claim_subject(claim)} ({claim.claim_id})" for claim in touches
-    )
+    return "overlaps " + ", ".join(_touch_line(own_scope, claim) for claim in touches)
 
 
-def _claim_cost_line(n: int, total: int, touches: tuple[protocol.ScopedClaim, ...]) -> str:
+def _claim_cost_line(
+    n: int, total: int, own_scope: tuple[str, ...], touches: tuple[protocol.ScopedClaim, ...]
+) -> str:
     percent = 0 if total == 0 else round(100 * n / total)
-    return f"{n} of {total} versioned files ({percent}%); {_touch_summary(touches)}"
+    return f"{n} of {total} versioned files ({percent}%); {_touch_summary(own_scope, touches)}"
 
 
 def _request(arguments: argparse.Namespace) -> protocol.ClaimRequest:
@@ -2147,7 +2155,7 @@ def _cmd_claim(parsed: argparse.Namespace, session: _WriteSession) -> int:
             checks=checks,
         )
     print(f"CLAIMED {_claim_subject(claimed)}: {claimed.claim_id}")
-    print(_claim_cost_line(n, total, touches))
+    print(_claim_cost_line(n, total, requested.scope, touches))
     return 0
 
 
