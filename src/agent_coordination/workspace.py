@@ -260,8 +260,11 @@ def _project(
         raise WorkspaceError(f"project {key!r} session_id must be an exact UUID")
     if not agent or not agent.strip():
         raise WorkspaceError(f"project {key!r} agent must not be empty")
+    _validate_launch_identifier(agent, f"project {key!r} agent")
     if model is not None and (not model or not model.strip()):
         raise WorkspaceError(f"project {key!r} model must not be empty")
+    if model is not None:
+        _validate_launch_identifier(model, f"project {key!r} model")
     return WorkspaceProject(key, canonical, session_id, agent, model)
 
 
@@ -297,6 +300,11 @@ def _optional_string(value: object, name: str) -> str | None:
     if value is None:
         return None
     return _string(value, name)
+
+
+def _validate_launch_identifier(value: str, name: str) -> None:
+    if "\0" in value or "\r" in value or "\n" in value:
+        raise WorkspaceError(f"{name} must not contain line breaks or NUL")
 
 
 def _runtime_directory(runtime_directory: Path | None, environment: Mapping[str, str]) -> Path:

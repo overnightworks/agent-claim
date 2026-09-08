@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shlex
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -14,6 +15,9 @@ from . import process
 _PROJECT_OPTION = "@aco_project"
 _SESSION_OPTION = "@aco_session_id"
 _VIEWER_PENDING_OPTION = "@aco_viewer_pending"
+_ENVIRONMENT_NAMES_OPTION = "@aco_environment_names"
+_ASCII_CONTROL_LIMIT = 32
+_ASCII_DELETE = 127
 
 
 class TerminalError(RuntimeError):
@@ -164,9 +168,14 @@ class TmuxTerminal:
     def clear_viewer_pending(self, project: str) -> None:
         self._set_option(target_name(project), _VIEWER_PENDING_OPTION, "")
 
-    def _run(self, *arguments: str) -> process.CapturedResult:
+    def _run(
+        self, *arguments: str, environment: Mapping[str, str] | None = None
+    ) -> process.CapturedResult:
         try:
-            return process.run_captured(["tmux", "-S", str(self._socket_path), *arguments])
+            return process.run_captured(
+                ["tmux", "-S", str(self._socket_path), *arguments],
+                env=None if environment is None else dict(environment),
+            )
         except process.ProcessError as error:
             raise TerminalError(f"tmux is unavailable: {error}") from error
 
@@ -242,14 +251,14 @@ class TmuxTerminal:
         )
 
     def _configure_environment(self, target: str, launch: Launch) -> None:
+        environment_names = frozenset(launch.environment)
         commands = [
-            shlex.join(["set-environment", "-t", target, name, value])
+            _control_command("set-environment", "-t", target, name, value)
             for name, value in launch.environment.items()
         ]
         commands.extend(
-            shlex.join(["set-environment", "-r", "-t", target, name])
-            for name in launch.removed_environment_names
-            if name not in launch.environment
+            _control_command("set-environment", "-r", "-t", target, name)
+            for name in self._environment_names_to_remove(target, launch, environment_names)
         )
         try:
             result = process.run_bounded(
@@ -260,6 +269,26 @@ class TmuxTerminal:
             raise TerminalError("prepare session environment failed") from error
         if result.exit_status != 0 or b"%error" in result.output:
             raise TerminalError("prepare session environment failed")
+        self._set_option(target, _ENVIRONMENT_NAMES_OPTION, json.dumps(sorted(environment_names)))
+
+    def _environment_names_to_remove(
+        self, target: str, launch: Launch, environment_names: frozenset[str]
+    ) -> frozenset[str]:
+        return (
+            self._environment_names(target) | launch.removed_environment_names
+        ) - environment_names
+
+    def _environment_names(self, target: str) -> frozenset[str]:
+        stored = self._option(target, _ENVIRONMENT_NAMES_OPTION)
+        if not stored:
+            return frozenset()
+        try:
+            names = json.loads(stored)
+        except json.JSONDecodeError as error:
+            raise TerminalError("read tmux environment metadata failed") from error
+        if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
+            raise TerminalError("read tmux environment metadata failed")
+        return frozenset(names)
 
     def _start_fresh_window(
         self, target: str, launch: Launch, directory: Path | None = None
@@ -276,16 +305,17 @@ class TmuxTerminal:
         if directory is not None:
             command.extend(("-c", str(directory)))
         command.append(shlex.join(self._provider_command(target, launch)))
-        new_window = self._text(self._successful_result(self._run(*command), "start Codex session"))
+        new_window = self._text(
+            self._successful_result(
+                self._run(*command, environment=launch.environment), "start Codex session"
+            )
+        )
         if not new_window:
             raise TerminalError("start Codex session failed: missing window id")
         self._require_success(self._run("select-window", "-t", new_window), "select Codex session")
         self._require_success(self._run("kill-window", "-t", old_window), "discard setup window")
 
     def _provider_command(self, target: str, launch: Launch) -> list[str]:
-        session_environment = shlex.join(
-            ["tmux", "-S", str(self._socket_path), "show-environment", "-s", "-t", target]
-        )
         provider = shlex.join(self._environment_command(launch))
         preserve_dead_pane = (
             f'tmux -S {shlex.quote(str(self._socket_path))} set-option -w -t "$TMUX_PANE" '
@@ -297,7 +327,6 @@ class TmuxTerminal:
             " && ".join(
                 (
                     preserve_dead_pane,
-                    f'eval "$({session_environment})"',
                     f"exec {provider}",
                 )
             ),
@@ -324,3 +353,28 @@ class TmuxTerminal:
             return
         detail = cls._text(result) or result.stderr.decode(errors="replace").strip()
         raise TerminalError(f"{action} failed: {detail or f'exit {result.exit_status}'}")
+
+
+def _control_command(command: str, *arguments: str) -> str:
+    return " ".join((command, *(_control_argument(argument) for argument in arguments)))
+
+
+def _control_argument(value: str) -> str:
+    if "\0" in value:
+        raise TerminalError("tmux environment cannot contain a NUL")
+    escaped = "".join(_control_character(character) for character in value)
+    return f'"{escaped}"'
+
+
+def _control_character(character: str) -> str:
+    if character == "\\":
+        return "\\\\"
+    if character == '"':
+        return '\\"'
+    if character == "\n":
+        return "\\n"
+    if character == "\r":
+        return "\\015"
+    if ord(character) < _ASCII_CONTROL_LIMIT or ord(character) == _ASCII_DELETE:
+        return f"\\{ord(character):03o}"
+    return character

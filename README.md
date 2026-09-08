@@ -615,6 +615,8 @@ operation. Invocations set `NO_COLOR=1` and `GH_NO_UPDATE_NOTIFIER=1`, strip
 ANSI from output, and parse pretty or compact JSON, so a wrapping `gh` shim is
 not required. The tool does not automatically allocate work, merge code, or
 operate a lease server. Omitted `--agent` follows the documented else-chain; it
-does not invent an identity. It writes no file outside the repository's own git
-directory: no provider configuration, and never `~/.claude`, `~/.codex`, or
-`~/.grok`.
+does not invent an identity. Claim commands write no file outside the repository's
+own git directory: no provider configuration, and never `~/.claude`, `~/.codex`, or
+`~/.grok`. Workspace registration is the one exception: it writes its local
+project-to-session mapping under the XDG configuration path described above;
+it does not change provider configuration.

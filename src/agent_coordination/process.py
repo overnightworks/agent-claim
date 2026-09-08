@@ -1,7 +1,7 @@
 """Bounded subprocess execution: spawning, timing out, and bounding output.
 
-Every process this package runs -- `gh`, `git` -- goes through this module,
-the sole `subprocess` importer, so timeout, output-size and I/O-failure
+Every process this package runs -- `gh`, `git`, tmux, and GNOME Terminal --
+goes through this module, the sole `subprocess` importer, so timeout, output-size and I/O-failure
 handling exist in exactly one place. Failures come back as typed,
 provider-neutral exceptions; only a caller that knows what command it ran and
 why can turn one into a user-facing message.

@@ -80,6 +80,23 @@ allow_indirect_imports = true
 as_packages = false
 
 [[tool.importlinter.contracts]]
+name = "Workspace recovery does not reach repository coordination"
+type = "forbidden"
+source_modules = [
+    "agent_coordination.workspace",
+    "agent_coordination.codex",
+    "agent_coordination.terminal",
+]
+forbidden_modules = [
+    "agent_coordination.store",
+    "agent_coordination.checkout",
+    "agent_coordination.github",
+    "agent_coordination.forge",
+]
+allow_indirect_imports = false
+as_packages = false
+
+[[tool.importlinter.contracts]]
 name = "Only the process boundary imports subprocess"
 type = "forbidden"
 source_modules = ["agent_coordination", "agent_coordination.*"]
