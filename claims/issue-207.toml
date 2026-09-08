@@ -1,7 +1,0 @@
-claim_id = "499fa9bbe9fb446b8a238d0437872cd8"
-agent = "Claude Fable 5.1"
-role = "builder"
-base = "638648b8b2e442b74d1cbb914a053cf6aaa60b84"
-branch = "claude/issue-207-comma-scope-guards-nothing"
-scope = ["src/agent_coordination/cli.py", "tests/test_cli.py"]
-opened_commit = "f3cd7f5f5d5404a66329aabb9c614f68e70d444e"
