@@ -560,13 +560,19 @@ argparse's usage text to stderr with nothing on stdout.
 Read the exit status first and parse second: this object shares stdout with
 whatever ordinary payload the command would otherwise have printed, so a
 reader that parses stdout without looking at the status reads a refusal as a
-successful answer. A non-zero status does not always carry it, either — `next`
-exits 3 with its ordinary `{"action": null, …}` payload when nothing is
-actionable, `check` exits 1 with its own `{"ok": false, …, "refused": …}`
-answer, and `status` exits 2 with its ordinary payload when a claim conflicts.
-Plainly: 0 succeeded, 1 is `check`'s own refusal, 2 is where this collection
-point sends every `ClaimError` (and where `status` reports a conflict), and 3
-means only that `next` had nothing to name.
+successful answer. The rule that holds even for a case this paragraph forgets:
+**on a non-zero status, expect an object whose shape belongs to the command
+that produced it**, and read the sentence out of `error` only when this
+collection point is what produced it. Every other refusal object has its own
+keys — `claim --json` refuses with `{"refused": true, "issue": …, "checks":
+[…]}`, `check --json` with `{"ok": false, "kind": …, "number": …, "refused":
+…}`, `protect` denies with `{"decision": "deny", "reason": …}`, and `status`
+reports a claim conflict with its ordinary payload. A non-zero status need not
+mean a refusal at all: `next` exits 3 with its ordinary `{"action": null, …}`
+payload when nothing is actionable. The codes: 0 succeeded; 1 is `check`'s own
+refusal; 2 is this collection point, plus `claim`'s refusal, `protect`'s deny,
+`status`'s conflict, and argparse's usage failure (which writes nothing to
+stdout at all); 3 means only that `next` had nothing to name.
 
 ## Scope and boundaries
 
