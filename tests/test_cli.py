@@ -3988,7 +3988,14 @@ def test_next_action_names_the_top_actionable_work_item() -> None:
     assert action.item.number == 10
 
 
-def test_next_action_cuts_a_container_with_no_open_child_and_further_next_work() -> None:
+def test_next_action_never_cuts_a_container_whose_slice_table_is_empty() -> None:
+    """Issue #208: an empty `[[slice]]` table is the typed statement that
+    there is nothing here to cut, even when the container's own `Next` line
+    still names real work. `next_action` must not fall back to building a
+    `CutSliceAction` (and an unrunnable `cut --title "<paragraph>"`) out of
+    that prose -- it reports the container and its own sentence through
+    `CloseContainerAction` instead, exactly like a container with nothing
+    left, just with `next_step` carrying the sentence rather than `None`."""
     container = board.Issue(
         130,
         "Container",
@@ -4006,7 +4013,7 @@ def test_next_action_cuts_a_container_with_no_open_child_and_further_next_work()
 
     action = board.next_action(projected)
 
-    assert isinstance(action, board.CutSliceAction)
+    assert isinstance(action, board.CloseContainerAction)
     assert action.container.number == 130
     assert action.next_step == "Cut the next slice."
 
@@ -4032,6 +4039,7 @@ def test_next_action_closes_a_container_with_no_open_child_and_no_further_work()
     assert isinstance(action, board.CloseContainerAction)
     assert action.container.number == 140
     assert action.container_progress == board.ContainerProgress(3, 3, ())
+    assert action.next_step is None
 
 
 def test_next_action_cuts_a_container_with_an_uncut_row_and_no_further_next_work() -> None:
@@ -4208,7 +4216,9 @@ def test_next_names_a_cuttable_container_slice(
         180,
         "Epic",
         (),
-        complete_contract("Scheibe B — Kartenraster"),
+        complete_contract(
+            "Scheibe B — Kartenraster", slice=slice_entries("Scheibe B — Kartenraster")
+        ),
         "2026-08-20T00:00:00Z",
         "2026-08-20T00:00:00Z",
         kind=board.ItemKind.CONTAINER,
@@ -4234,37 +4244,22 @@ _DIFFERING_NEXT_LINE = "Weitere Aufgabe."
 
 @dataclass(frozen=True)
 class _CutRoundTripCase:
-    """One #151 round-trip scenario, over {container's own `Next` line still
-    names work} x {block carries an undispatched `[[slice]]`}: the `cut`
-    command `next` prints for `container_number` must be one `cut` itself
-    accepts. `row_title` is that one entry's title when the container
-    carries one, else `None`. `expected_item_bodies`/`expected_output` take
+    """One #151 round-trip scenario for a container whose block still
+    carries an undispatched `[[slice]]` row: the `cut` command `next` prints
+    for `container_number` must be one `cut` itself accepts. Since issue
+    #208, that row is the only thing that makes `next` print a `cut`
+    command at all -- a container with no uncut row is never one of these
+    cases, whatever its `Next` line says (see
+    `test_next_names_a_container_with_no_slice_row_by_its_own_next_line` for
+    that combination instead). `expected_item_bodies`/`expected_output` take
     the freshly created child's number, since only `cut` fixes that."""
 
     case_id: str
     container_number: int
     body: str
     expected_created_title: str
-    row_title: str | None
     expected_item_bodies: Callable[[int], dict[int, str]]
     expected_output: Callable[[int], str]
-
-
-def _no_uncut_row_case(
-    case_id: str, container_number: int, body: str, next_step: str
-) -> _CutRoundTripCase:
-    """When no undispatched entry exists (no `slice` key, or an empty
-    array), `cut` always creates a child tied to no entry, titled with the
-    container's own `Next` words."""
-    return _CutRoundTripCase(
-        case_id,
-        container_number,
-        body,
-        next_step,
-        None,
-        lambda _child: {},
-        lambda child: f"CUT #{container_number} -> #{child}\n",
-    )
 
 
 def _uncut_row_case(
@@ -4278,34 +4273,27 @@ def _uncut_row_case(
         container_number,
         complete_contract(next_line, slice=slice_entries(row_title)),
         row_title,
-        row_title,
         lambda _child: {container_number: complete_contract(next_line, slice=[])},
         lambda child: f"CUT #{container_number} row 1 -> #{child}\n",
     )
 
 
 _CUT_ROUND_TRIP_CASES = (
-    # next=yes, uncut=no (no `slice` key at all) -- exactly what #122 hit on
-    # 06.09.2026, whose container carried a `Next` line but no slice list.
-    _no_uncut_row_case("next_only_no_slice_key", 183, complete_contract("Scheibe D"), "Scheibe D"),
-    # next=yes, uncut=no (every entry already cut away) -- the remaining #151
-    # gap: an emptied list must not block the `Next` line's own pathway.
-    _no_uncut_row_case(
-        "next_only_emptied_slice_list",
-        185,
-        complete_contract(_DIFFERING_NEXT_LINE, slice=[]),
-        _DIFFERING_NEXT_LINE,
-    ),
-    # next=no, uncut=yes -- the slice-backed twin of the case above (#151).
+    # next=no, uncut=yes -- an uncut row on its own already qualifies (#151).
     _uncut_row_case("uncut_row_only", 184, "", "Scheibe E"),
     # next=yes, uncut=yes, and they disagree -- #177 itself: seven live
     # atelier-2 containers where `next` printed the `Next` line's prose and
     # `cut` refused it, because the row it actually links carries a
     # different title.
     _uncut_row_case("next_and_differing_uncut_row", 186, _DIFFERING_NEXT_LINE, "Scheibe F"),
-    # The remaining combination -- neither a `Next` line nor an uncut row --
-    # closes the container instead of cutting a slice, so it has no `cut`
-    # command to round-trip; `test_next_names_a_closeable_container` proves it.
+    # The remaining combinations -- no uncut row, whether or not the `Next`
+    # line still names work -- close the container instead of cutting a
+    # slice (issue #208: an empty slice table, with or without a `slice` key
+    # at all, is the typed statement that there is nothing here to cut, and
+    # #122 is what happened when a fallback ignored it), so they have no
+    # `cut` command to round-trip; `test_next_names_a_closeable_container`
+    # and `test_next_names_a_container_with_no_slice_row_by_its_own_next_line`
+    # prove those instead.
 )
 
 
@@ -4369,7 +4357,7 @@ def test_next_prints_a_cut_command_that_cut_accepts_for_every_qualifying_contain
         130,
         "Epic ranked first",
         (),
-        complete_contract(_DIFFERING_NEXT_LINE),
+        complete_contract(_DIFFERING_NEXT_LINE, slice=slice_entries("Scheibe I-top")),
         "2026-08-20T00:00:00Z",
         "2026-08-20T00:00:00Z",
         kind=board.ItemKind.CONTAINER,
@@ -4430,7 +4418,7 @@ def test_next_json_names_a_cuttable_container_slice(
         181,
         "Epic",
         (),
-        complete_contract("Scheibe C"),
+        complete_contract("Scheibe C", slice=slice_entries("Scheibe C")),
         "2026-08-20T00:00:00Z",
         "2026-08-20T00:00:00Z",
         kind=board.ItemKind.CONTAINER,
@@ -4497,7 +4485,72 @@ def test_next_json_names_a_closeable_container(
     assert payload["number"] == 183
     assert payload["closed"] == 4
     assert payload["total"] == 4
+    assert payload["next_step"] is None
     assert "command" not in payload
+
+
+def test_next_names_a_container_with_no_slice_row_by_its_own_next_line(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Issue #208, reproduced live at #122: an empty slice table is the
+    typed statement that there is nothing here to cut, even though the
+    container's own `Next` line still names real work. `next` must not
+    fabricate `cut --title "<the whole Next paragraph>"` from that prose --
+    it names the container and its own sentence, the same way
+    `close_container` already declines a command when there is none."""
+    container = board.Issue(
+        187,
+        "Epic",
+        (),
+        complete_contract("Schließen, sobald die letzte Bedingung erfüllt ist."),
+        "2026-08-20T00:00:00Z",
+        "2026-08-20T00:00:00Z",
+        kind=board.ItemKind.CONTAINER,
+        children_closed=2,
+        children_total=2,
+    )
+    _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
+
+    exit_code = issue_claim.main(["--repo", "example/agent-claim", "next"])
+
+    assert exit_code == 0
+    assert capsys.readouterr().out == (
+        "close_container #187: Schließen, sobald die letzte Bedingung erfüllt ist.\n"
+    )
+
+
+def test_next_json_names_a_container_with_no_slice_row_by_its_own_next_line(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """The JSON form of the same #208 case: `action` stays `close_container`
+    (there is still nothing to cut) but `next_step` carries the container's
+    own sentence instead of `null`, and no `command` or `cut_title` is
+    invented from it -- text and JSON agree on there being no command to
+    run."""
+    container = board.Issue(
+        188,
+        "Epic",
+        (),
+        complete_contract("Schließen, sobald die letzte Bedingung erfüllt ist."),
+        "2026-08-20T00:00:00Z",
+        "2026-08-20T00:00:00Z",
+        kind=board.ItemKind.CONTAINER,
+        children_closed=2,
+        children_total=2,
+    )
+    _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
+
+    exit_code = issue_claim.main(["--repo", "example/agent-claim", "next", "--json"])
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["action"] == "close_container"
+    assert payload["number"] == 188
+    assert payload["closed"] == 2
+    assert payload["total"] == 2
+    assert payload["next_step"] == "Schließen, sobald die letzte Bedingung erfüllt ist."
+    assert "command" not in payload
+    assert "cut_title" not in payload
 
 
 def test_next_names_the_boards_top_row_even_when_it_is_not_the_highest_score() -> None:
