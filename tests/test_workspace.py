@@ -31,13 +31,12 @@ def test_register_refuses_an_identity_replacement(tmp_path: Path) -> None:
         workspace.registration("alpha", project_path, SESSION_ID, "old head"), config_path
     )
 
+    replacement = workspace.registration(
+        "alpha", project_path, "123e4567-e89b-12d3-a456-426614174001", "old head"
+    )
+
     with pytest.raises(workspace.WorkspaceError, match="already registered"):
-        workspace.register_project(
-            workspace.registration(
-                "alpha", project_path, "123e4567-e89b-12d3-a456-426614174001", "old head"
-            ),
-            config_path,
-        )
+        workspace.register_project(replacement, config_path)
 
 
 @pytest.mark.parametrize(
@@ -63,10 +62,10 @@ def test_register_refuses_a_directory_or_session_used_by_another_project(
         SESSION_ID if replacement == "same-session" else "123e4567-e89b-12d3-a456-426614174001"
     )
 
+    replacement_handoff = workspace.registration("beta", directory, session_id, "beta head")
+
     with pytest.raises(workspace.WorkspaceError, match=message):
-        workspace.register_project(
-            workspace.registration("beta", directory, session_id, "beta head"), config_path
-        )
+        workspace.register_project(replacement_handoff, config_path)
 
 
 @pytest.mark.parametrize(
@@ -85,10 +84,10 @@ def test_register_refuses_launch_identifiers_that_cannot_be_safely_relaunched(
     project_path = tmp_path / "project"
     project_path.mkdir()
 
+    invalid_handoff = workspace.registration("alpha", project_path, SESSION_ID, agent, model)
+
     with pytest.raises(workspace.WorkspaceError, match="line breaks or NUL"):
-        workspace.register_project(
-            workspace.registration("alpha", project_path, SESSION_ID, agent, model), config_path
-        )
+        workspace.register_project(invalid_handoff, config_path)
 
     assert config_path.exists() is False
 
@@ -251,11 +250,11 @@ def test_register_refuses_each_invalid_mapping_field(
     elif directory_kind == "file":
         directory.write_text("not a directory")
 
+    invalid_handoff = workspace.registration(key, directory, session_id, agent, model)
+    config_path = tmp_path / "config" / "workspace.toml"
+
     with pytest.raises(workspace.WorkspaceError, match=message):
-        workspace.register_project(
-            workspace.registration(key, directory, session_id, agent, model),
-            tmp_path / "config" / "workspace.toml",
-        )
+        workspace.register_project(invalid_handoff, config_path)
 
 
 def test_register_leaves_no_configuration_behind_when_atomic_replace_fails(
@@ -270,10 +269,10 @@ def test_register_leaves_no_configuration_behind_when_atomic_replace_fails(
 
     monkeypatch.setattr(workspace.os, "replace", fail_replace)
 
+    handoff = workspace.registration("alpha", project_path, SESSION_ID, "restored head")
+
     with pytest.raises(workspace.WorkspaceError, match="cannot write"):
-        workspace.register_project(
-            workspace.registration("alpha", project_path, SESSION_ID, "restored head"), config_path
-        )
+        workspace.register_project(handoff, config_path)
 
     assert [
         path for path in config_path.parent.glob("workspace.*") if path.name != "workspace.lock"

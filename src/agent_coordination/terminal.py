@@ -297,7 +297,7 @@ class TmuxTerminal:
         command = ["new-window", "-d", "-P", "-F", "#{window_id}", "-t", target]
         if directory is not None:
             command.extend(("-c", str(directory)))
-        command.append(shlex.join(self._provider_command(target, launch)))
+        command.append(shlex.join(self._provider_command(launch)))
         new_window = self._text(
             self._successful_result(
                 self._run(*command, environment=launch.environment), "start Codex session"
@@ -308,7 +308,7 @@ class TmuxTerminal:
         self._require_success(self._run("select-window", "-t", new_window), "select Codex session")
         self._require_success(self._run("kill-window", "-t", old_window), "discard setup window")
 
-    def _provider_command(self, target: str, launch: Launch) -> list[str]:
+    def _provider_command(self, launch: Launch) -> list[str]:
         provider = shlex.join(self._environment_command(launch))
         preserve_dead_pane = (
             f'tmux -S {shlex.quote(str(self._socket_path))} set-option -w -t "$TMUX_PANE" '

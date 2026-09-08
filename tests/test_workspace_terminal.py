@@ -84,18 +84,14 @@ def test_launch_keeps_a_synthetic_secret_out_of_tmux_argv_and_errors(monkeypatch
     monkeypatch.setattr(process, "run_captured", run)
     monkeypatch.setattr(process, "run_bounded", fail)
     adapter = terminal.TmuxTerminal(tmp_path / "tmux.sock")
+    launch = terminal.Launch(
+        ["codex", "resume", "session-a"],
+        {"ACO_AGENT": "head", "ACO_PROOF_SECRET": synthetic_secret},
+        frozenset({"ACO_AGENT"}),
+    )
 
     with pytest.raises(terminal.TerminalError) as raised:
-        adapter.create(
-            "alpha",
-            "session-a",
-            tmp_path,
-            terminal.Launch(
-                ["codex", "resume", "session-a"],
-                {"ACO_AGENT": "head", "ACO_PROOF_SECRET": synthetic_secret},
-                frozenset({"ACO_AGENT"}),
-            ),
-        )
+        adapter.create("alpha", "session-a", tmp_path, launch)
 
     assert private_inputs == [
         b'set-environment "-t" "aco-alpha" "ACO_AGENT" "head"\n'
@@ -162,14 +158,10 @@ def test_tmux_refuses_a_launch_environment_containing_nul(monkeypatch, tmp_path)
 
     monkeypatch.setattr(process, "run_captured", run)
     adapter = terminal.TmuxTerminal(tmp_path / "tmux.sock")
+    launch = terminal.Launch(["codex", "resume", "session-a"], {"ACO_AGENT": "head\0"}, frozenset())
 
     with pytest.raises(terminal.TerminalError, match="cannot contain a NUL"):
-        adapter.create(
-            "alpha",
-            "session-a",
-            tmp_path,
-            terminal.Launch(["codex", "resume", "session-a"], {"ACO_AGENT": "head\0"}, frozenset()),
-        )
+        adapter.create("alpha", "session-a", tmp_path, launch)
 
 
 def test_tmux_reports_when_the_dedicated_socket_cannot_start(monkeypatch, tmp_path) -> None:
@@ -177,9 +169,10 @@ def test_tmux_reports_when_the_dedicated_socket_cannot_start(monkeypatch, tmp_pa
         raise process.ExecutableMissingError("tmux")
 
     monkeypatch.setattr(process, "run_captured", unavailable)
+    adapter = terminal.TmuxTerminal(tmp_path / "tmux.sock")
 
     with pytest.raises(terminal.TerminalError, match="tmux is unavailable: tmux"):
-        terminal.TmuxTerminal(tmp_path / "tmux.sock").inspect("alpha")
+        adapter.inspect("alpha")
 
 
 def test_tmux_hides_private_environment_transport_start_failures(monkeypatch, tmp_path) -> None:
@@ -193,18 +186,15 @@ def test_tmux_hides_private_environment_transport_start_failures(monkeypatch, tm
 
     monkeypatch.setattr(process, "run_captured", run)
     monkeypatch.setattr(process, "run_bounded", fail)
+    adapter = terminal.TmuxTerminal(tmp_path / "tmux.sock")
+    launch = terminal.Launch(
+        ["codex", "resume", "session-a"],
+        {"ACO_AGENT": "head", "ACO_PROOF_SECRET": synthetic_secret},
+        frozenset(),
+    )
 
     with pytest.raises(terminal.TerminalError) as raised:
-        terminal.TmuxTerminal(tmp_path / "tmux.sock").create(
-            "alpha",
-            "session-a",
-            tmp_path,
-            terminal.Launch(
-                ["codex", "resume", "session-a"],
-                {"ACO_AGENT": "head", "ACO_PROOF_SECRET": synthetic_secret},
-                frozenset(),
-            ),
-        )
+        adapter.create("alpha", "session-a", tmp_path, launch)
 
     assert str(raised.value) == "prepare session environment failed"
     assert synthetic_secret not in str(raised.value)
@@ -220,14 +210,11 @@ def test_tmux_hides_native_environment_query_failures(monkeypatch, tmp_path) -> 
     monkeypatch.setattr(
         process, "run_bounded", lambda *_arguments, **_kwargs: process.BoundedResult(0, b"")
     )
+    adapter = terminal.TmuxTerminal(tmp_path / "tmux.sock")
+    launch = terminal.Launch(["codex", "resume", "session-a"], {"ACO_AGENT": "head"}, frozenset())
 
     with pytest.raises(terminal.TerminalError) as raised:
-        terminal.TmuxTerminal(tmp_path / "tmux.sock").create(
-            "alpha",
-            "session-a",
-            tmp_path,
-            terminal.Launch(["codex", "resume", "session-a"], {"ACO_AGENT": "head"}, frozenset()),
-        )
+        adapter.create("alpha", "session-a", tmp_path, launch)
 
     assert str(raised.value) == "read tmux environment failed"
     assert "synthetic-secret-marker" not in str(raised.value)
@@ -257,14 +244,11 @@ def test_tmux_refuses_to_start_when_it_cannot_identify_a_window(
     monkeypatch.setattr(
         process, "run_bounded", lambda *_arguments, **_kwargs: process.BoundedResult(0, b"")
     )
+    adapter = terminal.TmuxTerminal(tmp_path / "tmux.sock")
+    launch = terminal.Launch(["codex", "resume", "session-a"], {"ACO_AGENT": "head"}, frozenset())
 
     with pytest.raises(terminal.TerminalError, match=message):
-        terminal.TmuxTerminal(tmp_path / "tmux.sock").create(
-            "alpha",
-            "session-a",
-            tmp_path,
-            terminal.Launch(["codex", "resume", "session-a"], {"ACO_AGENT": "head"}, frozenset()),
-        )
+        adapter.create("alpha", "session-a", tmp_path, launch)
 
 
 @pytest.mark.parametrize(
@@ -282,14 +266,11 @@ def test_tmux_surfaces_command_output_when_target_creation_fails(
         "run_captured",
         lambda *_arguments, **_kwargs: process.CapturedResult(1, stdout, stderr),
     )
+    adapter = terminal.TmuxTerminal(tmp_path / "tmux.sock")
+    launch = terminal.Launch(["codex", "resume", "session-a"], {"ACO_AGENT": "head"}, frozenset())
 
     with pytest.raises(terminal.TerminalError, match=message):
-        terminal.TmuxTerminal(tmp_path / "tmux.sock").create(
-            "alpha",
-            "session-a",
-            tmp_path,
-            terminal.Launch(["codex", "resume", "session-a"], {"ACO_AGENT": "head"}, frozenset()),
-        )
+        adapter.create("alpha", "session-a", tmp_path, launch)
 
 
 @pytest.mark.parametrize(
@@ -359,9 +340,10 @@ def test_open_viewer_surfaces_a_terminal_start_failure(
 
     monkeypatch.setattr(process, "run_captured", run)
     monkeypatch.setattr(process.subprocess, "Popen", fail)
+    adapter = terminal.TmuxTerminal(tmp_path / "tmux.sock")
 
     with pytest.raises(terminal.TerminalError, match="open project console"):
-        terminal.TmuxTerminal(tmp_path / "tmux.sock").open_viewer("alpha")
+        adapter.open_viewer("alpha")
 
     assert [command[-1] for command in commands] == ["1", ""]
 
