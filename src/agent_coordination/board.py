@@ -1784,13 +1784,18 @@ class WorkItemAction:
 
 @dataclass(frozen=True)
 class CutSliceAction:
-    """`container` has no open child and still names work: `next_step` is
-    the container's own words (its `Next` line, or the first uncut slice
-    title when it has none) for the human-readable action line; `cut_title`
-    is the exact string `cut` itself accepts for the printed `cut` command --
-    the first uncut `[[slice]]` row's title when one exists (that is the
-    entry `cut` without `--row` links), else `next_step`. The two agree only
-    when no uncut row exists."""
+    """`container` has no open child and a still-undispatched `[[slice]]`
+    row: that row is the typed statement that there is something to cut, and
+    is the only thing this action ever fires on (issue #208). `next_step` is
+    the container's own words (its `Next` line when it still names work,
+    else the row's own title) for the human-readable action line;
+    `cut_title` is the exact string `cut` itself accepts for the printed
+    `cut` command -- always the first uncut row's title, the entry `cut`
+    without `--row` links. The two agree only when the `Next` line names no
+    work of its own. A container with no uncut row is never a
+    `CutSliceAction`, however much prose its `Next` line still carries: that
+    prose is not a slice title, and printing it as one built an unrunnable
+    `cut --title "<paragraph>"` from a container's whole sentence."""
 
     container: BoardItem
     container_progress: ContainerProgress
@@ -1800,10 +1805,16 @@ class CutSliceAction:
 
 @dataclass(frozen=True)
 class CloseContainerAction:
-    """`container` has no open child and no further `Next` work: close it."""
+    """`container` has no open child and no uncut slice row: there is
+    nothing to cut, so this action never proposes a `cut` command (issue
+    #208). `next_step` carries the container's own `Next` sentence when that
+    line still names real work -- not a cut, since no slice row offers one --
+    or `None` when it names none, the original "every child closed, nothing
+    left" case that gives the class its name."""
 
     container: BoardItem
     container_progress: ContainerProgress
+    next_step: str | None
 
 
 NextAction = WorkItemAction | CutSliceAction | CloseContainerAction
@@ -1816,18 +1827,21 @@ def next_action(board: Board) -> NextAction | None:
     and returns the first row that is either an actionable non-container
     (`WorkItemAction`; a container is never actionable, so this branch never
     fires for one) or a container with no open child (`CutSliceAction` when
-    its own `Next` line still names work or its block still carries an
-    undispatched `[[slice]]`, else `CloseContainerAction`). `_container_progress`
-    already fails loud on a container whose summary disagrees with its
-    open-children list, so "no open child" here reliably means every
-    created child has closed. Every other row -- blocked, claimed,
-    incomplete, or a container still holding an open child -- is skipped,
-    never blocking a lower-ranked qualifying row.
+    its block still carries an undispatched `[[slice]]` row, else
+    `CloseContainerAction` -- whether or not its own `Next` line still names
+    work; an empty slice table is the typed statement that there is nothing
+    to cut, and #208 is what happened when a fallback ignored it).
+    `_container_progress` already fails loud on a container whose summary
+    disagrees with its open-children list, so "no open child" here reliably
+    means every created child has closed. Every other row -- blocked,
+    claimed, incomplete, or a container still holding an open child -- is
+    skipped, never blocking a lower-ranked qualifying row.
 
-    Whichever branch fires, the printed command never carries `--row` (#151):
-    `cut` without `--row` accepts every container `next` names here, linking
-    its first undispatched slice when one exists and otherwise creating an
-    untied child.
+    Whichever branch prints a command, it never carries `--row` (#151): `cut`
+    without `--row` accepts every container a `CutSliceAction` names here,
+    linking its first undispatched slice. `CloseContainerAction` never
+    prints a command at all, whether or not its `Next` line still names
+    work -- inventing one from prose that is not a slice title is #208.
 
     A `LEGACY` or `MALFORMED` container (#150) is skipped here exactly like
     one still holding an open child: its own finding already surfaces
@@ -1853,7 +1867,14 @@ def _container_next_action(
 ) -> NextAction | None:
     """The action a childless container qualifies for, or `None` to skip it:
     a non-`VALID` body names its own finding elsewhere and is never guessed
-    through."""
+    through.
+
+    An uncut `[[slice]]` row is the only thing that makes this a
+    `CutSliceAction` (#208): a container's `Next` line naming further work is
+    not, by itself, a slice to cut, so an empty slice table -- the typed
+    statement that there is nothing here to cut -- always lands in
+    `CloseContainerAction`, carrying that `Next` sentence as `next_step`
+    instead of a fabricated `cut` title."""
     if item.read_state is not BodyReadState.VALID:
         return None
     next_line = item.contract.next
@@ -1864,9 +1885,8 @@ def _container_next_action(
             next_line if next_line is not None and has_further_work(next_line) else cut_title
         )
         return CutSliceAction(item, container, next_step, cut_title)
-    if next_line is not None and has_further_work(next_line):
-        return CutSliceAction(item, container, next_line, next_line)
-    return CloseContainerAction(item, container)
+    further_work = next_line if next_line is not None and has_further_work(next_line) else None
+    return CloseContainerAction(item, container, further_work)
 
 
 def _project_blocker_references(entry: dict[str, object], key: str, repository: str) -> None:
