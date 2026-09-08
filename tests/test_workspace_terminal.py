@@ -292,15 +292,20 @@ def test_tmux_surfaces_command_output_when_target_creation_fails(
         )
 
 
-@pytest.mark.parametrize("attached", [False, True])
+@pytest.mark.parametrize(
+    ("attached", "viewer_option_absent"),
+    [(False, False), (True, False), (False, True)],
+)
 def test_tmux_inspect_reports_each_live_attachment_state(
-    monkeypatch, tmp_path, attached: bool
+    monkeypatch, tmp_path, attached: bool, viewer_option_absent: bool
 ) -> None:
     def run(command: list[str], **_kwargs: object) -> process.CapturedResult:
         action = command[3]
         if action == "has-session":
             return process.CapturedResult(0, b"", b"")
         if action == "show-options":
+            if command[-1] == "@aco_viewer_pending" and viewer_option_absent:
+                return process.CapturedResult(1, b"", b"")
             values = {"@aco_project": b"alpha\n", "@aco_session_id": b"session-a\n"}
             return process.CapturedResult(0, values.get(command[-1], b""), b"")
         if action == "list-panes":
