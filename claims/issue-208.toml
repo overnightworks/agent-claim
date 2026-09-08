@@ -1,7 +1,0 @@
-claim_id = "ee4590e2503243b78113c8eb26701773"
-agent = "Claude Fable 5.1"
-role = "builder"
-base = "ad17315a2bf8a9f4d60725e3285f3938bd73869f"
-branch = "claude/issue-208-next-proposes-a-cut"
-scope = ["src/agent_coordination/board.py", "src/agent_coordination/cli.py", "tests/test_cli.py"]
-opened_commit = "a289481377a84eb4fbacd099a636edf92b03c2f5"
