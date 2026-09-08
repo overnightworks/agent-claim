@@ -32,6 +32,10 @@ WIDE_SCOPE_PATH_LIMIT = 3
 WIDE_SCOPE_SHARE_LIMIT = 0.25
 # A tiny repository must not trip the share condition.
 WIDE_SCOPE_SHARE_FLOOR = 12
+# How many paths a truncated listing names in full before counting the rest --
+# the dirty-tree refusal's and the claim overlap notice's shared shape for a
+# list too long to print whole.
+NAMED_PATH_OVERFLOW_LIMIT = 3
 # The first printable ASCII code point (space) and DEL bound the control
 # characters a claim marker field, scope path, or outbound text may never
 # contain -- each is meant to read as a single printable line.
@@ -307,21 +311,54 @@ def wide_scope_trip(
     return None
 
 
-def _scope_prefixes(paths: tuple[str, ...]) -> set[tuple[str, ...]]:
-    prefixes: set[tuple[str, ...]] = set()
-    for path in paths:
-        parts = PurePosixPath(path).parts
-        prefixes.update(parts[:length] for length in range(1, len(parts) + 1))
-    return prefixes
+def scope_overlap_paths(left: tuple[str, ...], right: tuple[str, ...]) -> tuple[str, ...]:
+    """The concrete paths where two scopes meet, sorted and deduplicated.
+
+    A scope path stands for itself and everything under it, so two paths meet
+    when one is an ancestor (or equal) of the other; the meeting point named
+    is always the deeper (more specific) of the two, since that is the real
+    file or directory the overlap touches -- not the ancestor that merely
+    covers it. A directory in `left` meeting a single file under it in
+    `right` therefore names that file, and an identical path in both names
+    that path once.
+    """
+    meeting: set[str] = set()
+    for left_path in left:
+        left_parts = PurePosixPath(left_path).parts
+        for right_path in right:
+            right_parts = PurePosixPath(right_path).parts
+            if len(left_parts) <= len(right_parts):
+                ancestor_parts, descendant_path, descendant_parts = (
+                    left_parts,
+                    right_path,
+                    right_parts,
+                )
+            else:
+                ancestor_parts, descendant_path, descendant_parts = (
+                    right_parts,
+                    left_path,
+                    left_parts,
+                )
+            if descendant_parts[: len(ancestor_parts)] == ancestor_parts:
+                meeting.add(descendant_path)
+    return tuple(sorted(meeting))
 
 
 def _scopes_overlap(left: tuple[str, ...], right: tuple[str, ...]) -> bool:
-    left_paths = {PurePosixPath(path).parts for path in left}
-    right_paths = {PurePosixPath(path).parts for path in right}
-    return bool(
-        left_paths.intersection(_scope_prefixes(right))
-        or right_paths.intersection(_scope_prefixes(left))
-    )
+    return bool(scope_overlap_paths(left, right))
+
+
+def named_with_overflow_count(
+    paths: tuple[str, ...], *, limit: int = NAMED_PATH_OVERFLOW_LIMIT
+) -> str:
+    """Render `paths` as a comma-separated list, naming only the first `limit`
+    and counting the rest -- too many to list is still a fact worth stating,
+    just not one worth printing in full."""
+    named = ", ".join(paths[:limit])
+    remainder = len(paths) - limit
+    if remainder > 0:
+        named += f", and {remainder} more"
+    return named
 
 
 class ScopedClaim(Protocol):
