@@ -1013,6 +1013,7 @@ def _next_action_payload(action: board.NextAction) -> dict[str, object]:
         "number": action.container.number,
         "closed": action.container_progress.closed,
         "total": action.container_progress.total,
+        "next_step": action.next_step,
     }
 
 
@@ -1061,6 +1062,8 @@ def _next_action_lines(action: board.NextAction) -> list[str]:
             f"cut_slice #{action.container.number}: {action.next_step}",
             f"Next: {_next_action_command(action)}",
         ]
+    if action.next_step is not None:
+        return [f"close_container #{action.container.number}: {action.next_step}"]
     progress = action.container_progress
     return [
         f"close_container #{action.container.number}: "

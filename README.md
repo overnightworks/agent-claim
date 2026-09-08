@@ -313,14 +313,19 @@ contract, or is a configured projectionless idea; its text form also prints
 `<paths>`, since the scope cannot be derived) and a line pointing at the
 item body for the real paths — the `--json` form is unchanged beyond the
 always-present `action` field. `cut_slice`: a container with no open child
-still names work in its own `Next` line (`{"action": "cut_slice", "number",
-"title", "slice", "cut_title"}`); `slice` is the container's own human step,
-`cut_title` is the exact title `cut` accepts (#177: the first uncut
-`[[slice]]` entry's title when one exists, else `slice`) — the head cuts
-that slice (`aco cut <number> --title "<cut_title>"`) and dispatches
-it. `close_container`: a container with no
-open child and no further `Next` work (`{"action": "close_container",
-"number", "closed", "total"}`); the head closes it. A container is never
+still carries an undispatched `[[slice]]` row (`{"action": "cut_slice",
+"number", "title", "slice", "cut_title"}`); `slice` is the container's own
+human step — its `Next` line when that still names work, else the row's own
+title — `cut_title` is always the first uncut row's title, the exact title
+`cut` accepts (#177) — the head cuts that slice
+(`aco cut <number> --title "<cut_title>"`) and dispatches it. `close_container`:
+a container with no open child and no uncut slice row, so there is nothing
+to cut (`{"action": "close_container", "number", "closed", "total",
+"next_step"}`); `next_step` is the container's own `Next` sentence when it
+still names real work that is not a slice, or `null` when it names none —
+either way no command is proposed, because a container's prose is not a
+slice title (#208). The head closes the container only when `next_step` is
+`null`; otherwise it reads that sentence. A container is never
 itself the `work_item` target. Pulling is not dispatching, so unruled
 expectations never withhold a `work_item`; the pulled item carries
 `Erwartungen ungeregelt, beim Ziehen zuerst refinen` instead, and an item
