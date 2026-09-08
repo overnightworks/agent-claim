@@ -104,7 +104,7 @@ def test_default_config_path_prefers_xdg_configuration(tmp_path: Path) -> None:
     )
 
 
-def test_invalid_configuration_refuses_every_project_before_runtime_work(tmp_path: Path) -> None:
+def test_load_config_refuses_a_relative_project_directory(tmp_path: Path) -> None:
     config_path = tmp_path / "workspace.toml"
     config_path.write_text(
         'version = 1\n[projects.alpha]\npath = "missing"\nsession_id = "'
@@ -112,7 +112,10 @@ def test_invalid_configuration_refuses_every_project_before_runtime_work(tmp_pat
         + '"\nagent = "head"\n'
     )
 
-    with pytest.raises(workspace.WorkspaceError, match="directory"):
+    with pytest.raises(
+        workspace.WorkspaceError,
+        match="workspace project path must be an absolute canonical directory",
+    ):
         workspace.load_config(config_path)
 
 
@@ -140,6 +143,119 @@ def test_load_config_refuses_malformed_or_non_strict_records(
 
     with pytest.raises(workspace.WorkspaceError, match=message):
         workspace.load_config(config_path)
+
+
+def test_load_config_reports_missing_or_unreadable_configuration(tmp_path: Path) -> None:
+    with pytest.raises(workspace.WorkspaceError, match="workspace configuration does not exist"):
+        workspace.load_config(tmp_path / "missing.toml")
+
+    with pytest.raises(workspace.WorkspaceError, match="cannot read workspace configuration"):
+        workspace.load_config(tmp_path)
+
+
+def test_load_config_refuses_a_non_table_project_record(tmp_path: Path) -> None:
+    config_path = tmp_path / "workspace.toml"
+    config_path.write_text('version = 1\nprojects = { alpha = "not-a-table" }\n')
+
+    with pytest.raises(
+        workspace.WorkspaceError, match="workspace projects must use project keys and table records"
+    ):
+        workspace.load_config(config_path)
+
+
+def test_load_config_refuses_missing_or_noncanonical_project_directories(tmp_path: Path) -> None:
+    config_path = tmp_path / "workspace.toml"
+    missing = tmp_path / "missing"
+    config_path.write_text(
+        f'version = 1\n[projects.alpha]\npath = "{missing}"\n'
+        f'session_id = "{SESSION_ID}"\nagent = "head"\n'
+    )
+
+    with pytest.raises(
+        workspace.WorkspaceError, match="workspace project directory does not exist"
+    ):
+        workspace.load_config(config_path)
+
+    directory = tmp_path / "project"
+    directory.mkdir()
+    link = tmp_path / "project-link"
+    link.symlink_to(directory)
+    config_path.write_text(
+        f'version = 1\n[projects.alpha]\npath = "{link}"\n'
+        f'session_id = "{SESSION_ID}"\nagent = "head"\n'
+    )
+
+    with pytest.raises(
+        workspace.WorkspaceError, match="workspace project path must be a canonical directory"
+    ):
+        workspace.load_config(config_path)
+
+
+@pytest.mark.parametrize(
+    ("beta_path", "beta_session", "message"),
+    [
+        ("alpha", "123e4567-e89b-12d3-a456-426614174001", "duplicate canonical paths"),
+        ("beta", SESSION_ID, "duplicate native Codex UUIDs"),
+    ],
+)
+def test_load_config_refuses_duplicate_project_identity(
+    tmp_path: Path, beta_path: str, beta_session: str, message: str
+) -> None:
+    config_path = tmp_path / "workspace.toml"
+    alpha = tmp_path / "alpha"
+    beta = tmp_path / "beta"
+    alpha.mkdir()
+    beta.mkdir()
+    directory = alpha if beta_path == "alpha" else beta
+    config_path.write_text(
+        f'version = 1\n[projects.alpha]\npath = "{alpha}"\n'
+        f'session_id = "{SESSION_ID}"\nagent = "head"\n'
+        f'\n[projects.beta]\npath = "{directory}"\nsession_id = "{beta_session}"\nagent = "head"\n'
+    )
+
+    with pytest.raises(workspace.WorkspaceError, match=message):
+        workspace.load_config(config_path)
+
+
+@pytest.mark.parametrize(
+    ("key", "directory_kind", "session_id", "agent", "model", "message"),
+    [
+        ("bad key", "directory", SESSION_ID, "head", None, "project key must use letters"),
+        ("alpha", "missing", SESSION_ID, "head", None, "directory does not exist"),
+        ("alpha", "file", SESSION_ID, "head", None, "directory is not a directory"),
+        ("alpha", "directory", "not-a-uuid", "head", None, "session_id must be an exact UUID"),
+        (
+            "alpha",
+            "directory",
+            SESSION_ID.upper(),
+            "head",
+            None,
+            "session_id must be an exact UUID",
+        ),
+        ("alpha", "directory", SESSION_ID, " ", None, "agent must not be empty"),
+        ("alpha", "directory", SESSION_ID, "head", " ", "model must not be empty"),
+    ],
+)
+def test_register_refuses_each_invalid_mapping_field(
+    tmp_path: Path,
+    key: str,
+    directory_kind: str,
+    session_id: str,
+    agent: str,
+    model: str | None,
+    message: str,
+) -> None:
+    directory = tmp_path / directory_kind
+    if directory_kind == "directory":
+        directory.mkdir()
+    elif directory_kind == "file":
+        directory.write_text("not a directory")
+
+    with pytest.raises(workspace.WorkspaceError, match=message):
+        workspace.register_project(
+            workspace.registration(key, directory, session_id, agent, model),
+            tmp_path / "config" / "workspace.toml",
+        )
 
 
 def test_register_leaves_no_configuration_behind_when_atomic_replace_fails(
@@ -211,6 +327,20 @@ def test_run_refuses_an_unknown_selected_project(tmp_path: Path) -> None:
         workspace.run_projects(config_path, "beta", runtime_directory=tmp_path)
 
 
+def test_run_validates_the_complete_configuration_before_runtime(tmp_path: Path) -> None:
+    config_path = tmp_path / "workspace.toml"
+    config_path.write_text(
+        'version = 1\n[projects.alpha]\npath = "relative"\n'
+        f'session_id = "{SESSION_ID}"\nagent = "head"\n'
+    )
+
+    with pytest.raises(
+        workspace.WorkspaceError,
+        match="workspace project path must be an absolute canonical directory",
+    ):
+        workspace.run_projects(config_path, runtime_directory=Path("relative"))
+
+
 def test_register_persists_an_optional_model(tmp_path: Path) -> None:
     config_path = tmp_path / "config" / "workspace.toml"
     project_path = tmp_path / "project"
@@ -232,11 +362,13 @@ class FakeTerminal:
         *,
         attach_viewer: bool = True,
         pending_after_create: bool = False,
+        attach_after_launch: bool = False,
     ):
         self.target = target
         self.failed_project = failed_project
         self.attach_viewer = attach_viewer
         self.pending_after_create = pending_after_create
+        self.attach_after_launch = attach_after_launch
         self.created: list[tuple[str, str, Path, terminal.Launch]] = []
         self.retried: list[tuple[str, terminal.Launch]] = []
         self.opened: list[str] = []
@@ -256,12 +388,23 @@ class FakeTerminal:
     ) -> None:
         self.created.append((project, session_id, directory, launch))
         self.target = terminal.Target(
-            terminal.TargetState.DETACHED, project, session_id, self.pending_after_create
+            terminal.TargetState.ATTACHED
+            if self.attach_after_launch
+            else terminal.TargetState.DETACHED,
+            project,
+            session_id,
+            self.pending_after_create,
         )
 
     def retry(self, project: str, launch: terminal.Launch) -> None:
         self.retried.append((project, launch))
-        self.target = terminal.Target(terminal.TargetState.DETACHED, project, SESSION_ID)
+        self.target = terminal.Target(
+            terminal.TargetState.ATTACHED
+            if self.attach_after_launch
+            else terminal.TargetState.DETACHED,
+            project,
+            SESSION_ID,
+        )
 
     def open_viewer(self, project: str) -> None:
         self.opened.append(project)
@@ -450,6 +593,39 @@ def test_run_retries_an_exited_matching_pane_only_when_explicitly_invoked(tmp_pa
 
     assert outcomes == (workspace.RunOutcome("alpha", workspace.RunState.RETRIED),)
     assert fake.retried[0][1].command == ["codex", "resume", SESSION_ID]
+
+
+@pytest.mark.parametrize(
+    ("target", "expected_state"),
+    [
+        (terminal.Target(terminal.TargetState.ABSENT), workspace.RunState.STARTED),
+        (
+            terminal.Target(terminal.TargetState.EXITED, "alpha", SESSION_ID),
+            workspace.RunState.RETRIED,
+        ),
+    ],
+)
+def test_run_reports_a_console_that_attached_during_launch_without_opening_another(
+    tmp_path: Path, target: terminal.Target, expected_state: workspace.RunState
+) -> None:
+    config_path = tmp_path / "config" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    workspace.register_project(
+        workspace.registration("alpha", project_path, SESSION_ID, "restored head"), config_path
+    )
+    fake = FakeTerminal(target, attach_after_launch=True)
+
+    outcomes = workspace.run_projects(
+        config_path,
+        environment={"XDG_RUNTIME_DIR": str(tmp_path)},
+        runtime_directory=tmp_path,
+        terminal_factory=lambda _socket: fake,
+    )
+
+    assert outcomes == (workspace.RunOutcome("alpha", expected_state),)
+    assert fake.opened == []
+    assert fake.cleared == ["alpha"]
 
 
 def test_runtime_failure_for_one_project_does_not_hide_the_later_project(tmp_path: Path) -> None:

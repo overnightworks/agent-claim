@@ -172,6 +172,126 @@ def test_tmux_refuses_a_launch_environment_containing_nul(monkeypatch, tmp_path)
         )
 
 
+def test_tmux_reports_when_the_dedicated_socket_cannot_start(monkeypatch, tmp_path) -> None:
+    def unavailable(*_arguments: object, **_kwargs: object) -> process.CapturedResult:
+        raise process.ExecutableMissingError("tmux")
+
+    monkeypatch.setattr(process, "run_captured", unavailable)
+
+    with pytest.raises(terminal.TerminalError, match="tmux is unavailable: tmux"):
+        terminal.TmuxTerminal(tmp_path / "tmux.sock").inspect("alpha")
+
+
+def test_tmux_hides_private_environment_transport_start_failures(monkeypatch, tmp_path) -> None:
+    synthetic_secret = "synthetic-secret-marker"
+
+    def run(_command: list[str], **_kwargs: object) -> process.CapturedResult:
+        return process.CapturedResult(0, b"", b"")
+
+    def fail(*_arguments: object, **_kwargs: object) -> process.BoundedResult:
+        raise process.ProcessStartFailedError(synthetic_secret)
+
+    monkeypatch.setattr(process, "run_captured", run)
+    monkeypatch.setattr(process, "run_bounded", fail)
+
+    with pytest.raises(terminal.TerminalError) as raised:
+        terminal.TmuxTerminal(tmp_path / "tmux.sock").create(
+            "alpha",
+            "session-a",
+            tmp_path,
+            terminal.Launch(
+                ["codex", "resume", "session-a"],
+                {"ACO_AGENT": "head", "ACO_PROOF_SECRET": synthetic_secret},
+                frozenset(),
+            ),
+        )
+
+    assert str(raised.value) == "prepare session environment failed"
+    assert synthetic_secret not in str(raised.value)
+
+
+def test_tmux_hides_native_environment_query_failures(monkeypatch, tmp_path) -> None:
+    def run(command: list[str], **_kwargs: object) -> process.CapturedResult:
+        if command[3] == "show-environment":
+            return process.CapturedResult(1, b"synthetic-secret-marker", b"")
+        return process.CapturedResult(0, b"", b"")
+
+    monkeypatch.setattr(process, "run_captured", run)
+    monkeypatch.setattr(
+        process, "run_bounded", lambda *_arguments, **_kwargs: process.BoundedResult(0, b"")
+    )
+
+    with pytest.raises(terminal.TerminalError) as raised:
+        terminal.TmuxTerminal(tmp_path / "tmux.sock").create(
+            "alpha",
+            "session-a",
+            tmp_path,
+            terminal.Launch(["codex", "resume", "session-a"], {"ACO_AGENT": "head"}, frozenset()),
+        )
+
+    assert str(raised.value) == "read tmux environment failed"
+    assert "synthetic-secret-marker" not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("missing", "message"),
+    [
+        ("old", "inspect tmux window failed: missing window id"),
+        ("new", "start Codex session failed: missing window id"),
+    ],
+)
+def test_tmux_refuses_to_start_when_it_cannot_identify_a_window(
+    monkeypatch, tmp_path, missing: str, message: str
+) -> None:
+    def run(command: list[str], **_kwargs: object) -> process.CapturedResult:
+        action = command[3]
+        if action == "show-environment":
+            return process.CapturedResult(0, b"", b"")
+        if action == "display-message":
+            return process.CapturedResult(0, b"" if missing == "old" else b"@0\n", b"")
+        if action == "new-window":
+            return process.CapturedResult(0, b"" if missing == "new" else b"@1\n", b"")
+        return process.CapturedResult(0, b"", b"")
+
+    monkeypatch.setattr(process, "run_captured", run)
+    monkeypatch.setattr(
+        process, "run_bounded", lambda *_arguments, **_kwargs: process.BoundedResult(0, b"")
+    )
+
+    with pytest.raises(terminal.TerminalError, match=message):
+        terminal.TmuxTerminal(tmp_path / "tmux.sock").create(
+            "alpha",
+            "session-a",
+            tmp_path,
+            terminal.Launch(["codex", "resume", "session-a"], {"ACO_AGENT": "head"}, frozenset()),
+        )
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stderr", "message"),
+    [
+        (b"tmux startup failed\n", b"", "create tmux target failed: tmux startup failed"),
+        (b"", b"permission denied\n", "create tmux target failed: permission denied"),
+    ],
+)
+def test_tmux_surfaces_command_output_when_target_creation_fails(
+    monkeypatch, tmp_path, stdout: bytes, stderr: bytes, message: str
+) -> None:
+    monkeypatch.setattr(
+        process,
+        "run_captured",
+        lambda *_arguments, **_kwargs: process.CapturedResult(1, stdout, stderr),
+    )
+
+    with pytest.raises(terminal.TerminalError, match=message):
+        terminal.TmuxTerminal(tmp_path / "tmux.sock").create(
+            "alpha",
+            "session-a",
+            tmp_path,
+            terminal.Launch(["codex", "resume", "session-a"], {"ACO_AGENT": "head"}, frozenset()),
+        )
+
+
 @pytest.mark.parametrize("attached", [False, True])
 def test_tmux_inspect_reports_each_live_attachment_state(
     monkeypatch, tmp_path, attached: bool
@@ -269,6 +389,10 @@ def _environment(output_path: Path) -> dict[str, str]:
 def test_initial_and_retried_codex_children_receive_the_sanitized_environment(
     monkeypatch, tmp_path
 ) -> None:
+    path = os.environ["PATH"]
+    for name in tuple(os.environ):
+        monkeypatch.delenv(name)
+    monkeypatch.setenv("PATH", path)
     socket_path = tmp_path / "tmux.sock"
     output_path = tmp_path / "environment.txt"
     executable_directory = tmp_path / "bin"
@@ -280,8 +404,12 @@ def test_initial_and_retried_codex_children_receive_the_sanitized_environment(
         'tmux -S "$ACO_PROOF_SOCKET" wait-for -S aco-env-proof\n'
     )
     fake_codex.chmod(0o700)
-    synthetic_secret = 'first\nnew-session -d -s aco-injected\nsecond\r"\\$'
+    synthetic_secret = (
+        "~/.codex/pre$PATH/${ACO_PROOF_VARIABLE}/first\n"
+        'new-session -d -s aco-injected\nsecond\r"\\$\t'
+    )
     synthetic_authentication = "initial-authentication-marker"
+    stale_global_marker = "stale-global-marker"
     removed_names = frozenset(
         {
             "ACO_AGENT",
@@ -297,10 +425,11 @@ def test_initial_and_retried_codex_children_receive_the_sanitized_environment(
     )
     for name in removed_names:
         monkeypatch.setenv(name, "caller-session")
+    monkeypatch.setenv("ACO_PROOF_STALE_GLOBAL", stale_global_marker)
     launch = terminal.Launch(
         ["codex", "resume", "session-a"],
         {
-            "PATH": f"{executable_directory}:{os.environ['PATH']}",
+            "PATH": f"{executable_directory}:{path}",
             "ACO_AGENT": "aco-proof-head",
             "ACO_PROOF_OUTPUT": str(output_path),
             "ACO_PROOF_SOCKET": str(socket_path),
@@ -332,6 +461,7 @@ def test_initial_and_retried_codex_children_receive_the_sanitized_environment(
                 ]
             ).stdout.decode()
 
+            monkeypatch.delenv("ACO_PROOF_STALE_GLOBAL")
             retry_launch = replace(
                 launch,
                 environment={
@@ -373,6 +503,9 @@ def test_initial_and_retried_codex_children_receive_the_sanitized_environment(
     assert first_environment["ACO_PROOF_AUTH"] == synthetic_authentication
     assert "ACO_PROOF_AUTH" not in retried_environment
     assert "ACO_PROOF_AUTH" not in second_project_environment
+    assert "ACO_PROOF_STALE_GLOBAL" not in first_environment
+    assert "ACO_PROOF_STALE_GLOBAL" not in retried_environment
+    assert "ACO_PROOF_STALE_GLOBAL" not in second_project_environment
     assert injected_target.exit_status == 1
     assert synthetic_secret not in pane_command
     assert synthetic_secret not in retried_pane_command

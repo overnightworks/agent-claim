@@ -55,6 +55,36 @@ def test_register_writes_an_explicit_stopped_handover_through_the_cli(
     assert workspace.load_config(config_path).projects["alpha"].agent == "restored head"
 
 
+def test_register_uses_the_xdg_workspace_configuration_path(
+    capsys, monkeypatch, tmp_path: Path
+) -> None:
+    configuration = tmp_path / "config"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(configuration))
+
+    assert (
+        cli.main(
+            [
+                "register",
+                "alpha",
+                "--path",
+                str(project_path),
+                "--session-id",
+                "123e4567-e89b-12d3-a456-426614174000",
+                "--agent",
+                "restored head",
+                "--stopped",
+            ]
+        )
+        == 0
+    )
+
+    config_path = configuration / "aco" / "workspace.toml"
+    assert capsys.readouterr().out == "alpha: registered\n"
+    assert workspace.load_config(config_path).projects["alpha"].directory == project_path
+
+
 @pytest.mark.parametrize(
     ("outcomes", "expected_status", "expected_output"),
     [
