@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import uuid
 from collections.abc import Callable, Mapping
@@ -14,7 +15,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import cast
 
-from . import __version__, board, checkout, forge, github, protocol, store
+from . import __version__, board, checkout, forge, github, protocol, store, workspace
 
 ACO_AGENT_ENV = checkout.ACO_AGENT_ENV
 CLAUDE_SESSION_ID_ENV = checkout.CLAUDE_SESSION_ID_ENV
@@ -443,6 +444,32 @@ def _add_protect_parser(commands: argparse._SubParsersAction) -> None:
     commands.add_parser("protect", help="deny PreToolUse writes without this session's live claim")
 
 
+def _add_register_parser(commands: argparse._SubParsersAction) -> None:
+    register = commands.add_parser(
+        "register", help="record one stopped Codex session for later workspace recovery"
+    )
+    register.add_argument("project", metavar="PROJECT", help="a stable local project key")
+    register.add_argument(
+        "--path", required=True, type=Path, help="the project's canonical directory"
+    )
+    register.add_argument(
+        "--session-id", required=True, help="the exact stopped Codex session UUID"
+    )
+    register.add_argument("--agent", required=True, help="the inherited logical claim identity")
+    register.add_argument("--model", help="optional Codex model override")
+    register.add_argument(
+        "--stopped",
+        action="store_true",
+        required=True,
+        help="acknowledge that the existing Codex session was checkpointed and stopped",
+    )
+
+
+def _add_run_parser(commands: argparse._SubParsersAction) -> None:
+    run = commands.add_parser("run", help="open the registered Codex workspace consoles")
+    run.add_argument("project", metavar="PROJECT", nargs="?", help="one registered project")
+
+
 _SUBPARSER_BUILDERS: tuple[Callable[[argparse._SubParsersAction], None], ...] = (
     _add_bootstrap_parser,
     _add_status_parser,
@@ -455,6 +482,8 @@ _SUBPARSER_BUILDERS: tuple[Callable[[argparse._SubParsersAction], None], ...] = 
     _add_cut_parser,
     _add_check_parser,
     _add_protect_parser,
+    _add_register_parser,
+    _add_run_parser,
 )
 
 
@@ -2446,8 +2475,46 @@ def _dispatch(parsed: argparse.Namespace) -> int:
     return 0 if result is None else result
 
 
+def _workspace_config_path() -> Path:
+    return workspace.default_config_path(os.environ)
+
+
+def _register_workspace(parsed: argparse.Namespace) -> int:
+    handoff = workspace.registration(
+        parsed.project,
+        parsed.path,
+        parsed.session_id,
+        parsed.agent,
+        parsed.model,
+    )
+    created = workspace.register_project(handoff, _workspace_config_path())
+    status = "registered" if created else "already registered"
+    print(f"{parsed.project}: {status}")
+    return 0
+
+
+def _run_workspace(parsed: argparse.Namespace) -> int:
+    outcomes = workspace.run_projects(_workspace_config_path(), parsed.project)
+    for outcome in outcomes:
+        suffix = f": {outcome.detail}" if outcome.detail else ""
+        print(f"{outcome.project}: {outcome.state}{suffix}")
+    return 1 if any(outcome.state is workspace.RunState.FAILED for outcome in outcomes) else 0
+
+
 def main(arguments: list[str] | None = None) -> int:
     parsed = _parser().parse_args(arguments)
+    if parsed.command in {"register", "run"}:
+        try:
+            if parsed.repo is not None:
+                raise protocol.ClaimError("--repo is meaningless for workspace operations")
+            return (
+                _register_workspace(parsed)
+                if parsed.command == "register"
+                else _run_workspace(parsed)
+            )
+        except protocol.ClaimError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 2
     if parsed.command == "protect":
         return _protect(parsed.repo)
     try:

@@ -57,6 +57,30 @@ aco claim 42 --agent "Ada" --scope src/widget.py
 aco release 42 --merged 57
 ```
 
+## Recovering a stopped Codex workspace
+
+`aco register` is a deliberate, local handoff for a Codex conversation the
+operator has already checkpointed and stopped. It records the mapping at
+`${XDG_CONFIG_HOME:-~/.config}/aco/workspace.toml`; it does not alter the
+conversation, repository files, or its live claim. The acknowledgement is
+required because `aco` cannot prove whether an arbitrary unmanaged Codex
+process is still running.
+
+```bash
+aco register my-project --path /work/my-project \
+  --session-id 123e4567-e89b-12d3-a456-426614174000 \
+  --agent "Codex workspace head" --stopped
+aco run my-project
+```
+
+`aco run` works outside a Git checkout and never accepts `--repo`. It resumes
+the registered UUID in a dedicated local tmux socket and opens one GNOME
+Terminal console for the project. Repeating it reuses an attached managed
+head, reattaches a detached one, and retries a preserved exited pane only on
+that explicit command. The managed process receives the registered `ACO_AGENT`
+identity while retaining the existing Codex authentication and configuration
+channels; it does not copy credentials or alter Codex permissions.
+
 Omitted `--base`/`--branch` bind the current checkout; explicit values must match it.
 Omitted `--agent` on `claim` and `release` is filled from non-empty
 `ACO_AGENT`, else non-empty `GROK_SESSION_ID` as `Grok {session}`, else
@@ -596,6 +620,8 @@ operation. Invocations set `NO_COLOR=1` and `GH_NO_UPDATE_NOTIFIER=1`, strip
 ANSI from output, and parse pretty or compact JSON, so a wrapping `gh` shim is
 not required. The tool does not automatically allocate work, merge code, or
 operate a lease server. Omitted `--agent` follows the documented else-chain; it
-does not invent an identity. It writes no file outside the repository's own git
-directory: no provider configuration, and never `~/.claude`, `~/.codex`, or
-`~/.grok`.
+does not invent an identity. Claim commands write no file outside the repository's
+own git directory: no provider configuration, and never `~/.claude`, `~/.codex`, or
+`~/.grok`. Workspace registration is the one exception: it writes its local
+project-to-session mapping under the XDG configuration path described above;
+it does not change provider configuration.
