@@ -15,7 +15,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import cast
 
-from . import __version__, board, checkout, forge, github, protocol, store, workspace
+from . import __version__, board, checkout, forge, github, protocol, providers, store, workspace
 
 ACO_AGENT_ENV = checkout.ACO_AGENT_ENV
 CLAUDE_SESSION_ID_ENV = checkout.CLAUDE_SESSION_ID_ENV
@@ -446,27 +446,33 @@ def _add_protect_parser(commands: argparse._SubParsersAction) -> None:
 
 def _add_register_parser(commands: argparse._SubParsersAction) -> None:
     register = commands.add_parser(
-        "register", help="record one stopped Codex session for later workspace recovery"
+        "register", help="record one stopped provider session for later workspace recovery"
     )
     register.add_argument("project", metavar="PROJECT", help="a stable local project key")
     register.add_argument(
         "--path", required=True, type=Path, help="the project's canonical directory"
     )
     register.add_argument(
-        "--session-id", required=True, help="the exact stopped Codex session UUID"
+        "--session-id", required=True, help="the exact stopped provider session UUID"
     )
     register.add_argument("--agent", required=True, help="the inherited logical claim identity")
-    register.add_argument("--model", help="optional Codex model override")
+    register.add_argument(
+        "--provider",
+        choices=tuple(provider.value for provider in providers.Provider),
+        default=providers.Provider.CODEX.value,
+        help="the stopped conversation provider (default: codex)",
+    )
+    register.add_argument("--model", help="optional provider model override")
     register.add_argument(
         "--stopped",
         action="store_true",
         required=True,
-        help="acknowledge that the existing Codex session was checkpointed and stopped",
+        help="acknowledge that the existing provider session was checkpointed and stopped",
     )
 
 
 def _add_run_parser(commands: argparse._SubParsersAction) -> None:
-    run = commands.add_parser("run", help="open the registered Codex workspace consoles")
+    run = commands.add_parser("run", help="open the registered provider workspace consoles")
     run.add_argument("project", metavar="PROJECT", nargs="?", help="one registered project")
 
 
@@ -2480,12 +2486,13 @@ def _workspace_config_path() -> Path:
 
 
 def _register_workspace(parsed: argparse.Namespace) -> int:
-    handoff = workspace.registration(
+    handoff = workspace.WorkspaceRegistration(
         parsed.project,
         parsed.path,
         parsed.session_id,
         parsed.agent,
         parsed.model,
+        provider=providers.Provider(parsed.provider),
     )
     created = workspace.register_project(handoff, _workspace_config_path())
     status = "registered" if created else "already registered"

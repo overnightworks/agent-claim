@@ -57,13 +57,13 @@ aco claim 42 --agent "Ada" --scope src/widget.py
 aco release 42 --merged 57
 ```
 
-## Recovering a stopped Codex workspace
+## Recovering a stopped provider workspace
 
-`aco register` is a deliberate, local handoff for a Codex conversation the
-operator has already checkpointed and stopped. It records the mapping at
+`aco register` is a deliberate, local handoff for a Codex or Claude conversation
+the operator has already checkpointed and stopped. It records the mapping at
 `${XDG_CONFIG_HOME:-~/.config}/aco/workspace.toml`; it does not alter the
 conversation, repository files, or its live claim. The acknowledgement is
-required because `aco` cannot prove whether an arbitrary unmanaged Codex
+required because `aco` cannot prove whether an arbitrary unmanaged provider
 process is still running.
 
 ```bash
@@ -73,13 +73,26 @@ aco register my-project --path /work/my-project \
 aco run my-project
 ```
 
+Use `--provider claude` to register a stopped Claude UUID; omitted `--provider`
+keeps the existing Codex default. The local mapping upgrades additively to version
+2 when a new registration succeeds, preserving every existing project field with
+an explicit provider. An older Codex-only installation refuses version 2 rather
+than silently dropping provider identity; native `codex resume` and `claude
+--resume UUID` remain available independently.
+
 `aco run` works outside a Git checkout and never accepts `--repo`. It resumes
 the registered UUID in a dedicated local tmux socket and opens one GNOME
 Terminal console for the project. Repeating it reuses an attached managed
 head, reattaches a detached one, and retries a preserved exited pane only on
 that explicit command. The managed process receives the registered `ACO_AGENT`
-identity while retaining the existing Codex authentication and configuration
-channels; it does not copy credentials or alter Codex permissions.
+identity while retaining the current provider authentication and configuration
+channels; it does not copy credentials or alter provider permissions. Claude
+uses the caller's existing `CLAUDE_CONFIG_DIR` when set and its normal home when
+unset; `aco` does not select an account or search provider homes.
+
+Claude's existing `claude-revive` SessionStart hook remains a separate recovery
+owner. Do not use both recovery paths for the same conversation; its replacement,
+enrollment, and retirement remain with #213.
 
 Omitted `--base`/`--branch` bind the current checkout; explicit values must match it.
 Omitted `--agent` on `claim` and `release` is filled from non-empty

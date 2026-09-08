@@ -1,8 +1,15 @@
-"""Codex-specific resume arguments and inherited environment handling."""
+"""Native workspace resume commands and inherited environment handling."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
+from enum import StrEnum
+
+
+class Provider(StrEnum):
+    CODEX = "codex"
+    CLAUDE = "claude"
+
 
 _SESSION_IDENTITY_ENVIRONMENTS = frozenset(
     {
@@ -24,12 +31,16 @@ def session_identity_environment_names() -> frozenset[str]:
     return _SESSION_IDENTITY_ENVIRONMENTS
 
 
-def resume_command(session_id: str, model: str | None = None) -> list[str]:
-    """Build the native command that resumes one explicitly registered session."""
-    command = ["codex", "resume"]
+def resume_command(provider: Provider, session_id: str, model: str | None = None) -> list[str]:
+    """Build the provider-native command that resumes one registered conversation."""
+    if provider is Provider.CODEX:
+        command = ["codex", "resume"]
+        if model is not None:
+            command.extend(("--model", model))
+        return [*command, session_id]
+    command = ["claude", "--resume", session_id]
     if model is not None:
         command.extend(("--model", model))
-    command.append(session_id)
     return command
 
 

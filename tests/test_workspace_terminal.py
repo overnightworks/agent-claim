@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_coordination import process, terminal
+from agent_coordination import process, providers, terminal
 
 
 def test_tmux_target_name_is_stable_and_safe() -> None:
@@ -23,9 +23,33 @@ def test_terminal_title_identifies_the_project() -> None:
 def test_target_metadata_conflict_is_not_adopted() -> None:
     assert (
         terminal.target_matches(
-            {"@aco_project": "alpha", "@aco_session_id": "session-a"}, "alpha", "session-b"
+            {"@aco_project": "alpha", "@aco_session_id": "session-a"},
+            "alpha",
+            providers.Provider.CODEX,
+            "session-b",
         )
         is False
+    )
+
+
+def test_legacy_target_metadata_matches_only_codex() -> None:
+    metadata = {"@aco_project": "alpha", "@aco_session_id": "session-a"}
+
+    assert terminal.target_matches(metadata, "alpha", providers.Provider.CODEX, "session-a") is True
+    assert (
+        terminal.target_matches(metadata, "alpha", providers.Provider.CLAUDE, "session-a") is False
+    )
+
+
+def test_explicit_target_provider_mismatch_is_not_adopted() -> None:
+    metadata = {
+        "@aco_project": "alpha",
+        "@aco_provider": "codex",
+        "@aco_session_id": "session-a",
+    }
+
+    assert (
+        terminal.target_matches(metadata, "alpha", providers.Provider.CLAUDE, "session-a") is False
     )
 
 
@@ -60,6 +84,7 @@ def test_tmux_sets_dead_pane_preservation_and_metadata_before_starting_codex(
     assert command.index("remain-on-exit") < command.index("wait-for")
     assert "@aco_project alpha" in command
     assert "@aco_session_id session-a" in command
+    assert "@aco_provider codex" in command
     provider = next(command for command in commands if command[3] == "new-window")[-1]
     assert provider.endswith("exec env ACO_AGENT=head codex resume session-a'")
 
@@ -224,7 +249,7 @@ def test_tmux_hides_native_environment_query_failures(monkeypatch, tmp_path) -> 
     ("missing", "message"),
     [
         ("old", "inspect tmux window failed: missing window id"),
-        ("new", "start Codex session failed: missing window id"),
+        ("new", "start provider session failed: missing window id"),
     ],
 )
 def test_tmux_refuses_to_start_when_it_cannot_identify_a_window(
@@ -274,11 +299,11 @@ def test_tmux_surfaces_command_output_when_target_creation_fails(
 
 
 @pytest.mark.parametrize(
-    ("attached", "viewer_option_absent"),
-    [(False, False), (True, False), (False, True)],
+    ("attached", "viewer_option_absent", "provider"),
+    [(False, False, ""), (True, False, "claude"), (False, True, "")],
 )
 def test_tmux_inspect_reports_each_live_attachment_state(
-    monkeypatch, tmp_path, attached: bool, viewer_option_absent: bool
+    monkeypatch, tmp_path, attached: bool, viewer_option_absent: bool, provider: str
 ) -> None:
     def run(command: list[str], **_kwargs: object) -> process.CapturedResult:
         action = command[3]
@@ -287,7 +312,11 @@ def test_tmux_inspect_reports_each_live_attachment_state(
         if action == "show-options":
             if command[-1] == "@aco_viewer_pending" and viewer_option_absent:
                 return process.CapturedResult(1, b"", b"")
-            values = {"@aco_project": b"alpha\n", "@aco_session_id": b"session-a\n"}
+            values = {
+                "@aco_project": b"alpha\n",
+                "@aco_provider": provider.encode(),
+                "@aco_session_id": b"session-a\n",
+            }
             return process.CapturedResult(0, values.get(command[-1], b""), b"")
         if action == "list-panes":
             return process.CapturedResult(0, b"0\n", b"")
@@ -303,6 +332,7 @@ def test_tmux_inspect_reports_each_live_attachment_state(
         terminal.TargetState.ATTACHED if attached else terminal.TargetState.DETACHED,
         "alpha",
         "session-a",
+        provider=providers.Provider(provider) if provider else None,
     )
 
 
