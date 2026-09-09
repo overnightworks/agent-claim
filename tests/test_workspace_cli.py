@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import io
 from pathlib import Path
 
 import pytest
@@ -28,6 +29,52 @@ def test_register_requires_the_explicit_stopped_handover() -> None:
 def test_run_refuses_a_repository_target(capsys) -> None:
     assert cli.main(["--repo", "example/repository", "run"]) == 2
     assert "--repo" in capsys.readouterr().err
+
+
+def test_start_requires_a_path_and_logical_agent() -> None:
+    with pytest.raises(SystemExit, match="2"):
+        cli.main(["start", "alpha"])
+
+
+def test_start_uses_its_own_isolated_python_callback(capsys, monkeypatch, tmp_path: Path) -> None:
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    observed: dict[str, object] = {}
+    monkeypatch.setattr(cli.sys, "executable", "/candidate/bin/python")
+    monkeypatch.setattr(cli, "_workspace_config_path", lambda: tmp_path / "workspace.toml")
+
+    def start(
+        request: workspace.StartRequest, context: workspace.StartContext
+    ) -> workspace.RunOutcome:
+        observed["request"] = request
+        observed["context"] = context
+        return workspace.RunOutcome("alpha", workspace.RunState.ENROLLMENT_PENDING)
+
+    monkeypatch.setattr(workspace, "start_project", start)
+
+    assert cli.main(["start", "alpha", "--path", str(project_path), "--agent", "new head"]) == 0
+
+    assert observed["request"] == workspace.StartRequest("alpha", project_path, "new head")
+    assert isinstance(observed["context"], workspace.StartContext)
+    assert observed["context"].callback == (
+        "/candidate/bin/python -I -m agent_coordination.cli _capture-codex-start"
+    )
+    assert capsys.readouterr().out == "alpha: enrollment pending\n"
+
+
+def test_capture_callback_emits_no_model_context_on_success(capsys, monkeypatch) -> None:
+    received: dict[str, object] = {}
+    monkeypatch.setattr(cli.sys, "stdin", io.StringIO('{"hook_event_name": "SessionStart"}'))
+    monkeypatch.setattr(
+        workspace,
+        "capture_codex_start",
+        lambda payload, environment: received.update(payload=payload, environment=environment),
+    )
+
+    assert cli.main(["_capture-codex-start"]) == 0
+
+    assert received["payload"] == {"hook_event_name": "SessionStart"}
+    assert capsys.readouterr().out == ""
 
 
 def test_register_writes_an_explicit_stopped_handover_through_the_cli(

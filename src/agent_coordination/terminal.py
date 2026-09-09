@@ -15,6 +15,12 @@ _PROJECT_OPTION = "@aco_project"
 _SESSION_OPTION = "@aco_session_id"
 _PROVIDER_OPTION = "@aco_provider"
 _VIEWER_PENDING_OPTION = "@aco_viewer_pending"
+_ENROLLMENT_STATE_OPTION = "@aco_enrollment_state"
+_ENROLLMENT_ATTEMPT_OPTION = "@aco_enrollment_attempt"
+_ENROLLMENT_DIRECTORY_OPTION = "@aco_enrollment_directory"
+_ENROLLMENT_AGENT_OPTION = "@aco_enrollment_agent"
+_ENROLLMENT_MODEL_OPTION = "@aco_enrollment_model"
+_ENROLLMENT_SESSION_OPTION = "@aco_enrollment_session_id"
 _ASCII_CONTROL_LIMIT = 32
 _ASCII_DELETE = 127
 
@@ -38,6 +44,12 @@ class TargetState(StrEnum):
     EXITED = "exited"
 
 
+class EnrollmentState(StrEnum):
+    INITIALIZING = "initializing"
+    PENDING = "pending"
+    FINAL = "final"
+
+
 @dataclass(frozen=True)
 class Target:
     state: TargetState
@@ -45,6 +57,17 @@ class Target:
     session_id: str | None = None
     viewer_pending: bool = False
     provider: providers.Provider | None = None
+    enrollment: Enrollment | None = None
+
+
+@dataclass(frozen=True)
+class Enrollment:
+    directory: Path
+    agent: str
+    model: str | None
+    attempt: str
+    state: EnrollmentState
+    session_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -53,15 +76,18 @@ class Launch:
     environment: Mapping[str, str]
     removed_environment_names: frozenset[str]
     provider: providers.Provider = providers.Provider.CODEX
+    enrollment: Enrollment | None = None
 
 
 class TerminalController(Protocol):
     def inspect(self, project: str) -> Target: ...
 
+    def inspect_all(self) -> tuple[Target, ...]: ...
+
     def create(
         self,
         project: str,
-        session_id: str,
+        session_id: str | None,
         directory: Path,
         launch: Launch,
     ) -> None: ...
@@ -75,6 +101,12 @@ class TerminalController(Protocol):
     def open_viewer(self, project: str) -> None: ...
 
     def clear_viewer_pending(self, project: str) -> None: ...
+
+    def finalize_enrollment(self, project: str) -> None: ...
+
+    def stage_enrollment(self, project: str, session_id: str) -> None: ...
+
+    def retry_enrollment(self, project: str, launch: Launch) -> None: ...
 
 
 def target_name(project: str) -> str:
@@ -128,6 +160,12 @@ class TmuxTerminal:
                 _SESSION_OPTION,
                 _PROVIDER_OPTION,
                 _VIEWER_PENDING_OPTION,
+                _ENROLLMENT_STATE_OPTION,
+                _ENROLLMENT_ATTEMPT_OPTION,
+                _ENROLLMENT_DIRECTORY_OPTION,
+                _ENROLLMENT_AGENT_OPTION,
+                _ENROLLMENT_MODEL_OPTION,
+                _ENROLLMENT_SESSION_OPTION,
             )
         }
         dead = self._run("list-panes", "-t", name, "-F", "#{pane_dead}")
@@ -138,18 +176,70 @@ class TmuxTerminal:
             attached = self._run("display-message", "-p", "-t", name, "#{session_attached}")
             self._require_success(attached, "inspect tmux attachment")
             state = TargetState.ATTACHED if self._text(attached) != "0" else TargetState.DETACHED
+        enrollment = None
+        enrollment_options = (
+            _ENROLLMENT_STATE_OPTION,
+            _ENROLLMENT_ATTEMPT_OPTION,
+            _ENROLLMENT_DIRECTORY_OPTION,
+            _ENROLLMENT_AGENT_OPTION,
+            _ENROLLMENT_MODEL_OPTION,
+            _ENROLLMENT_SESSION_OPTION,
+        )
+        if metadata[_ENROLLMENT_STATE_OPTION]:
+            attempt = metadata[_ENROLLMENT_ATTEMPT_OPTION]
+            directory = metadata[_ENROLLMENT_DIRECTORY_OPTION]
+            agent = metadata[_ENROLLMENT_AGENT_OPTION]
+            if not attempt or not directory or not agent:
+                raise TerminalError("tmux target has incomplete enrollment metadata")
+            try:
+                enrollment_state = EnrollmentState(metadata[_ENROLLMENT_STATE_OPTION])
+            except ValueError as error:
+                raise TerminalError("tmux target has invalid enrollment metadata") from error
+            enrollment = Enrollment(
+                Path(directory),
+                agent,
+                metadata[_ENROLLMENT_MODEL_OPTION] or None,
+                attempt,
+                enrollment_state,
+                metadata[_ENROLLMENT_SESSION_OPTION] or None,
+            )
+            if enrollment.state is EnrollmentState.FINAL and enrollment.session_id is None:
+                raise TerminalError("tmux target has incomplete final enrollment metadata")
+            if (
+                enrollment.session_id is not None
+                and metadata[_SESSION_OPTION] != enrollment.session_id
+            ):
+                raise TerminalError("tmux target has mismatched enrollment UUID metadata")
+        elif any(metadata[option] for option in enrollment_options[1:]):
+            raise TerminalError("tmux target has incomplete enrollment metadata")
         return Target(
             state,
             metadata[_PROJECT_OPTION] or None,
             metadata[_SESSION_OPTION] or None,
             metadata[_VIEWER_PENDING_OPTION] == "1",
             _target_provider(metadata[_PROVIDER_OPTION]),
+            enrollment,
         )
+
+    def inspect_all(self) -> tuple[Target, ...]:
+        result = self._run("list-sessions", "-F", "#{session_name}")
+        if result.exit_status == 1:
+            return ()
+        self._require_success(result, "inspect tmux targets")
+        targets: list[Target] = []
+        for name in self._lines(result):
+            if not name.startswith("aco-") or len(name) == len("aco-"):
+                raise TerminalError("tmux target has foreign metadata")
+            target = self.inspect(name.removeprefix("aco-"))
+            if target.project != name.removeprefix("aco-"):
+                raise TerminalError("tmux target has incomplete project metadata")
+            targets.append(target)
+        return tuple(targets)
 
     def create(
         self,
         project: str,
-        session_id: str,
+        session_id: str | None,
         directory: Path,
         launch: Launch,
     ) -> None:
@@ -162,12 +252,18 @@ class TmuxTerminal:
                 name,
                 "-c",
                 str(directory),
-                shlex.join(self._initial_command(name, project, launch.provider, session_id)),
+                shlex.join(self._initial_command(name, project, launch, session_id)),
             ),
             "create tmux target",
         )
         self._wait_for_setup(name)
-        self._configure_environment(name, launch)
+        try:
+            self._configure_environment(name, launch)
+            if launch.enrollment is not None:
+                self._set_option(name, _ENROLLMENT_STATE_OPTION, EnrollmentState.PENDING.value)
+        except TerminalError:
+            self._run("kill-session", "-t", name)
+            raise
         self._start_fresh_window(name, launch, directory)
 
     def retry(
@@ -177,6 +273,19 @@ class TmuxTerminal:
     ) -> None:
         name = target_name(project)
         self._configure_environment(name, launch)
+        self._start_fresh_window(name, launch)
+
+    def retry_enrollment(self, project: str, launch: Launch) -> None:
+        if launch.enrollment is None:
+            raise TerminalError("fresh enrollment launch is missing metadata")
+        name = target_name(project)
+        self._set_enrollment_metadata(name, launch.enrollment, EnrollmentState.INITIALIZING)
+        self._set_option(name, _SESSION_OPTION, "")
+        try:
+            self._configure_environment(name, launch)
+            self._set_option(name, _ENROLLMENT_STATE_OPTION, EnrollmentState.PENDING.value)
+        except TerminalError:
+            raise
         self._start_fresh_window(name, launch)
 
     def open_viewer(self, project: str) -> None:
@@ -202,6 +311,16 @@ class TmuxTerminal:
 
     def clear_viewer_pending(self, project: str) -> None:
         self._set_option(target_name(project), _VIEWER_PENDING_OPTION, "")
+
+    def finalize_enrollment(self, project: str) -> None:
+        self._set_option(
+            target_name(project), _ENROLLMENT_STATE_OPTION, EnrollmentState.FINAL.value
+        )
+
+    def stage_enrollment(self, project: str, session_id: str) -> None:
+        target = target_name(project)
+        self._set_option(target, _SESSION_OPTION, session_id)
+        self._set_option(target, _ENROLLMENT_SESSION_OPTION, session_id)
 
     def _run(
         self, *arguments: str, environment: Mapping[str, str] | None = None
@@ -235,7 +354,7 @@ class TmuxTerminal:
         return [*command, *launch.command]
 
     def _initial_command(
-        self, target: str, project: str, provider: providers.Provider, session_id: str
+        self, target: str, project: str, launch: Launch, session_id: str | None
     ) -> list[str]:
         metadata_commands = (
             [
@@ -266,7 +385,7 @@ class TmuxTerminal:
                 "-t",
                 target,
                 _SESSION_OPTION,
-                session_id,
+                session_id or "",
             ],
             [
                 "tmux",
@@ -276,9 +395,73 @@ class TmuxTerminal:
                 "-t",
                 target,
                 _PROVIDER_OPTION,
-                provider.value,
+                launch.provider.value,
             ],
         )
+        if launch.enrollment is not None:
+            enrollment = launch.enrollment
+            metadata_commands += (
+                [
+                    "tmux",
+                    "-S",
+                    str(self._socket_path),
+                    "set-option",
+                    "-t",
+                    target,
+                    _ENROLLMENT_STATE_OPTION,
+                    EnrollmentState.INITIALIZING.value,
+                ],
+                [
+                    "tmux",
+                    "-S",
+                    str(self._socket_path),
+                    "set-option",
+                    "-t",
+                    target,
+                    _ENROLLMENT_ATTEMPT_OPTION,
+                    enrollment.attempt,
+                ],
+                [
+                    "tmux",
+                    "-S",
+                    str(self._socket_path),
+                    "set-option",
+                    "-t",
+                    target,
+                    _ENROLLMENT_DIRECTORY_OPTION,
+                    str(enrollment.directory),
+                ],
+                [
+                    "tmux",
+                    "-S",
+                    str(self._socket_path),
+                    "set-option",
+                    "-t",
+                    target,
+                    _ENROLLMENT_AGENT_OPTION,
+                    enrollment.agent,
+                ],
+                [
+                    "tmux",
+                    "-S",
+                    str(self._socket_path),
+                    "set-option",
+                    "-t",
+                    target,
+                    _ENROLLMENT_MODEL_OPTION,
+                    enrollment.model or "",
+                ],
+                [
+                    "tmux",
+                    "-S",
+                    str(self._socket_path),
+                    "set-option",
+                    "-t",
+                    target,
+                    _ENROLLMENT_SESSION_OPTION,
+                    enrollment.session_id or "",
+                ],
+            )
         setup = " && ".join(shlex.join(command) for command in metadata_commands)
         ready_signal = shlex.join(
             ["tmux", "-S", str(self._socket_path), "wait-for", "-S", f"aco-ready-{target}"]
@@ -288,6 +471,20 @@ class TmuxTerminal:
             "-c",
             f"{setup} && {ready_signal}",
         ]
+
+    def _set_enrollment_metadata(
+        self, target: str, enrollment: Enrollment, state: EnrollmentState
+    ) -> None:
+        values = (
+            (_ENROLLMENT_STATE_OPTION, state.value),
+            (_ENROLLMENT_ATTEMPT_OPTION, enrollment.attempt),
+            (_ENROLLMENT_DIRECTORY_OPTION, str(enrollment.directory)),
+            (_ENROLLMENT_AGENT_OPTION, enrollment.agent),
+            (_ENROLLMENT_MODEL_OPTION, enrollment.model or ""),
+            (_ENROLLMENT_SESSION_OPTION, enrollment.session_id or ""),
+        )
+        for option, value in values:
+            self._set_option(target, option, value)
 
     def _wait_for_setup(self, target: str) -> None:
         self._require_success(

@@ -115,6 +115,46 @@ def test_tmux_sets_dead_pane_preservation_and_metadata_before_starting_codex(
     assert provider.endswith("exec env ACO_AGENT=head codex resume session-a'")
 
 
+def test_tmux_makes_fresh_enrollment_pending_before_starting_codex(monkeypatch, tmp_path) -> None:
+    commands: list[list[str]] = []
+
+    def run(command: list[str], **_kwargs: object) -> process.CapturedResult:
+        commands.append(command)
+        if command[3] == "display-message":
+            return process.CapturedResult(0, b"@0\n", b"")
+        if command[3] == "new-window":
+            return process.CapturedResult(0, b"@1\n", b"")
+        return process.CapturedResult(0, b"", b"")
+
+    monkeypatch.setattr(process, "run_captured", run)
+    monkeypatch.setattr(
+        process, "run_bounded", lambda *_arguments, **_kwargs: process.BoundedResult(0, b"")
+    )
+    adapter = terminal.TmuxTerminal(tmp_path / "tmux.sock")
+    launch = terminal.Launch(
+        ["codex", "-C", str(tmp_path)],
+        {"ACO_AGENT": "new head", "ACO_CAPTURE_ATTEMPT": "attempt"},
+        frozenset(),
+        enrollment=terminal.Enrollment(
+            tmp_path, "new head", None, "attempt", terminal.EnrollmentState.INITIALIZING
+        ),
+    )
+
+    adapter.create("alpha", None, tmp_path, launch)
+
+    setup = commands[0][-1]
+    pending = next(
+        index
+        for index, command in enumerate(commands)
+        if command[3:5] == ["set-option", "-t"]
+        and command[-2:] == ["@aco_enrollment_state", "pending"]
+    )
+    provider = next(index for index, command in enumerate(commands) if command[3] == "new-window")
+    assert "@aco_enrollment_state initializing" in setup
+    assert "@aco_enrollment_attempt attempt" in setup
+    assert pending < provider
+
+
 def test_launch_keeps_a_synthetic_secret_out_of_tmux_argv_and_errors(monkeypatch, tmp_path) -> None:
     commands: list[list[str]] = []
     bounded_commands: list[list[str]] = []

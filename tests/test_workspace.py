@@ -1219,7 +1219,7 @@ class FakeTerminal:
         self.attach_viewer = attach_viewer
         self.pending_after_create = pending_after_create
         self.attach_after_launch = attach_after_launch
-        self.created: list[tuple[str, str, Path, terminal.Launch]] = []
+        self.created: list[tuple[str, str | None, Path, terminal.Launch]] = []
         self.retried: list[tuple[str, terminal.Launch]] = []
         self.opened: list[str] = []
         self.cleared: list[str] = []
@@ -1229,14 +1229,28 @@ class FakeTerminal:
             raise terminal.TerminalError("tmux is unavailable")
         return self.target
 
+    def inspect_all(self) -> tuple[terminal.Target, ...]:
+        if self.target.state is terminal.TargetState.ABSENT:
+            return ()
+        return (self.target,)
+
     def create(
         self,
         project: str,
-        session_id: str,
+        session_id: str | None,
         directory: Path,
         launch: terminal.Launch,
     ) -> None:
         self.created.append((project, session_id, directory, launch))
+        enrollment = launch.enrollment
+        if enrollment is not None:
+            enrollment = terminal.Enrollment(
+                enrollment.directory,
+                enrollment.agent,
+                enrollment.model,
+                enrollment.attempt,
+                terminal.EnrollmentState.PENDING,
+            )
         self.target = terminal.Target(
             terminal.TargetState.ATTACHED
             if self.attach_after_launch
@@ -1244,6 +1258,8 @@ class FakeTerminal:
             project,
             session_id,
             self.pending_after_create,
+            launch.provider,
+            enrollment=enrollment,
         )
 
     def retry(self, project: str, launch: terminal.Launch) -> None:
@@ -1256,15 +1272,513 @@ class FakeTerminal:
             SESSION_ID,
         )
 
+    def retry_enrollment(self, project: str, launch: terminal.Launch) -> None:
+        self.retried.append((project, launch))
+        assert launch.enrollment is not None
+        self.target = terminal.Target(
+            terminal.TargetState.DETACHED,
+            project,
+            provider=providers.Provider.CODEX,
+            enrollment=terminal.Enrollment(
+                launch.enrollment.directory,
+                launch.enrollment.agent,
+                launch.enrollment.model,
+                launch.enrollment.attempt,
+                terminal.EnrollmentState.PENDING,
+            ),
+        )
+
     def open_viewer(self, project: str) -> None:
         self.opened.append(project)
         if self.attach_viewer:
             self.target = terminal.Target(
-                terminal.TargetState.ATTACHED, project, self.target.session_id
+                terminal.TargetState.ATTACHED,
+                project,
+                self.target.session_id,
+                provider=self.target.provider,
+                enrollment=self.target.enrollment,
             )
 
     def clear_viewer_pending(self, project: str) -> None:
         self.cleared.append(project)
+
+    def finalize_enrollment(self, project: str) -> None:
+        assert self.target.enrollment is not None
+        assert self.target.session_id is not None
+        enrollment = self.target.enrollment
+        self.target = terminal.Target(
+            self.target.state,
+            project,
+            self.target.session_id,
+            self.target.viewer_pending,
+            self.target.provider,
+            terminal.Enrollment(
+                enrollment.directory,
+                enrollment.agent,
+                enrollment.model,
+                enrollment.attempt,
+                terminal.EnrollmentState.FINAL,
+                self.target.session_id,
+            ),
+        )
+
+    def stage_enrollment(self, project: str, session_id: str) -> None:
+        assert self.target.enrollment is not None
+        enrollment = self.target.enrollment
+        self.target = terminal.Target(
+            self.target.state,
+            project,
+            session_id,
+            self.target.viewer_pending,
+            self.target.provider,
+            terminal.Enrollment(
+                enrollment.directory,
+                enrollment.agent,
+                enrollment.model,
+                enrollment.attempt,
+                enrollment.state,
+                session_id,
+            ),
+        )
+
+
+def _pending_enrollment(
+    directory: Path, attempt: str = "123e4567-e89b-12d3-a456-426614174002"
+) -> terminal.Enrollment:
+    return terminal.Enrollment(
+        directory,
+        "new head",
+        None,
+        attempt,
+        terminal.EnrollmentState.PENDING,
+    )
+
+
+def _start_context(config_path: Path, runtime: Path, fake: FakeTerminal) -> workspace.StartContext:
+    return workspace.StartContext(
+        config_path,
+        "/venv/bin/python -I -m agent_coordination.cli _capture-codex-start",
+        {"XDG_RUNTIME_DIR": str(runtime)},
+        runtime,
+        lambda _socket: fake,
+    )
+
+
+def test_start_opens_a_promptless_pending_codex_console(tmp_path: Path) -> None:
+    config_path = tmp_path / "config" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    fake = FakeTerminal(terminal.Target(terminal.TargetState.ABSENT), attach_viewer=False)
+
+    outcome = workspace.start_project(
+        workspace.StartRequest("alpha", project_path, "new head"),
+        workspace.StartContext(
+            config_path,
+            "/venv/bin/python -I -m agent_coordination.cli _capture-codex-start",
+            {"XDG_RUNTIME_DIR": str(tmp_path), "ACO_CAPTURE_ATTEMPT": "stale"},
+            tmp_path,
+            lambda _socket: fake,
+        ),
+    )
+
+    assert outcome.state is workspace.RunState.ENROLLMENT_PENDING
+    assert config_path.exists() is False
+    launch = fake.created[0][3]
+    assert launch.command[:3] == ["codex", "-C", str(project_path.resolve())]
+    assert launch.enrollment is not None
+    assert {
+        "ACO_CAPTURE_PROJECT",
+        "ACO_CAPTURE_DIRECTORY",
+        "ACO_CAPTURE_CONFIG",
+        "ACO_CAPTURE_RUNTIME",
+        "ACO_CAPTURE_AGENT",
+        "ACO_CAPTURE_ATTEMPT",
+    } <= set(launch.environment)
+    assert launch.environment["ACO_CAPTURE_PROJECT"] == "alpha"
+    assert launch.environment["ACO_CAPTURE_DIRECTORY"] == str(project_path.resolve())
+    assert launch.environment["ACO_CAPTURE_ATTEMPT"] == launch.enrollment.attempt
+    assert "stale" not in launch.environment.values()
+
+
+def test_capture_commits_the_matching_pending_native_uuid(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "config" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    runtime = tmp_path / "runtime"
+    runtime.mkdir(mode=0o700)
+    fake = FakeTerminal(terminal.Target(terminal.TargetState.ABSENT))
+    request = workspace.StartRequest("alpha", project_path, "new head")
+    workspace.start_project(
+        request,
+        workspace.StartContext(
+            config_path,
+            "callback",
+            {"XDG_RUNTIME_DIR": str(runtime)},
+            runtime,
+            lambda _socket: fake,
+        ),
+    )
+    monkeypatch.setattr(terminal, "TmuxTerminal", lambda _socket: fake)
+    launch = fake.created[0][3]
+    workspace.capture_codex_start(
+        {
+            "hook_event_name": "SessionStart",
+            "source": "startup",
+            "session_id": SESSION_ID,
+            "cwd": str(project_path.resolve()),
+        },
+        launch.environment,
+    )
+
+    assert workspace.load_config(config_path).projects["alpha"].session_id == SESSION_ID
+    assert fake.target.enrollment is not None
+    assert fake.target.enrollment.state is terminal.EnrollmentState.FINAL
+
+
+def test_start_refuses_a_second_pending_project_for_the_same_canonical_path(
+    monkeypatch, tmp_path: Path
+) -> None:
+    config_path = tmp_path / "config" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    fake = FakeTerminal(terminal.Target(terminal.TargetState.ABSENT))
+    pending = terminal.Target(
+        terminal.TargetState.DETACHED,
+        "beta",
+        provider=providers.Provider.CODEX,
+        enrollment=_pending_enrollment(project_path),
+    )
+    monkeypatch.setattr(fake, "inspect_all", lambda: (pending,))
+
+    with pytest.raises(workspace.WorkspaceError, match="pending Codex start"):
+        workspace.start_project(
+            workspace.StartRequest("alpha", project_path, "new head"),
+            _start_context(config_path, tmp_path, fake),
+        )
+
+    assert fake.created == []
+
+
+def test_start_refuses_an_ordinary_target_whose_path_is_not_terminal_owned(tmp_path: Path) -> None:
+    config_path = tmp_path / "config" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    fake = FakeTerminal(
+        terminal.Target(
+            terminal.TargetState.DETACHED,
+            "old",
+            SESSION_ID,
+            provider=providers.Provider.CODEX,
+        )
+    )
+
+    with pytest.raises(workspace.WorkspaceError, match="unknown ownership or path"):
+        workspace.start_project(
+            workspace.StartRequest("alpha", project_path, "new head"),
+            _start_context(config_path, tmp_path, fake),
+        )
+
+    assert fake.created == []
+
+
+def test_run_refuses_a_registered_path_held_by_another_pending_start(
+    monkeypatch, tmp_path: Path
+) -> None:
+    config_path = tmp_path / "config" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    workspace.register_project(
+        workspace.WorkspaceRegistration("alpha", project_path, SESSION_ID, "restored head"),
+        config_path,
+    )
+    fake = FakeTerminal(terminal.Target(terminal.TargetState.ABSENT))
+    pending = terminal.Target(
+        terminal.TargetState.DETACHED,
+        "beta",
+        provider=providers.Provider.CODEX,
+        enrollment=_pending_enrollment(project_path),
+    )
+    monkeypatch.setattr(fake, "inspect_all", lambda: (pending,))
+
+    outcomes = workspace.run_projects(
+        config_path,
+        "alpha",
+        environment={"XDG_RUNTIME_DIR": str(tmp_path)},
+        runtime_directory=tmp_path,
+        terminal_factory=lambda _socket: fake,
+    )
+
+    assert outcomes[0].state is workspace.RunState.FAILED
+    assert "pending Codex start" in outcomes[0].detail
+    assert fake.created == []
+
+
+def test_start_replaces_only_an_exited_uncaptured_attempt(tmp_path: Path) -> None:
+    config_path = tmp_path / "config" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    fake = FakeTerminal(
+        terminal.Target(
+            terminal.TargetState.EXITED,
+            "alpha",
+            provider=providers.Provider.CODEX,
+            enrollment=_pending_enrollment(project_path),
+        ),
+        attach_viewer=False,
+    )
+
+    outcome = workspace.start_project(
+        workspace.StartRequest("alpha", project_path, "new head"),
+        _start_context(config_path, tmp_path, fake),
+    )
+
+    assert outcome.state is workspace.RunState.ENROLLMENT_PENDING
+    assert config_path.exists() is False
+    assert fake.retried[0][1].enrollment is not None
+    assert fake.retried[0][1].enrollment.attempt != "123e4567-e89b-12d3-a456-426614174002"
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ({"hook_event_name": "SessionStart", "source": "resume"}, "startup SessionStart"),
+        (
+            {"hook_event_name": "SessionStart", "source": "startup", "session_id": "not-a-uuid"},
+            "UUID",
+        ),
+        (
+            {"hook_event_name": "SessionStart", "source": "startup", "cwd": "/tmp"},
+            "cwd does not match",
+        ),
+    ],
+)
+def test_capture_rejects_invalid_native_events_without_writing_configuration(
+    monkeypatch, tmp_path: Path, payload: dict[str, str], message: str
+) -> None:
+    config_path = tmp_path / "config" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    fake = FakeTerminal(terminal.Target(terminal.TargetState.ABSENT))
+    workspace.start_project(
+        workspace.StartRequest("alpha", project_path, "new head"),
+        _start_context(config_path, tmp_path, fake),
+    )
+    monkeypatch.setattr(terminal, "TmuxTerminal", lambda _socket: fake)
+    event = {
+        "hook_event_name": "SessionStart",
+        "source": "startup",
+        "session_id": SESSION_ID,
+        "cwd": str(project_path),
+    }
+    event.update(payload)
+    launch = fake.created[0][3]
+
+    with pytest.raises(workspace.WorkspaceError, match=message):
+        workspace.capture_codex_start(event, launch.environment)
+
+    assert config_path.exists() is False
+    assert fake.target.enrollment is not None
+    assert fake.target.enrollment.session_id is None
+
+
+def test_capture_stages_the_native_uuid_before_an_atomic_config_failure(
+    monkeypatch, tmp_path: Path
+) -> None:
+    config_path = tmp_path / "config" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    fake = FakeTerminal(terminal.Target(terminal.TargetState.ABSENT))
+    workspace.start_project(
+        workspace.StartRequest("alpha", project_path, "new head"),
+        _start_context(config_path, tmp_path, fake),
+    )
+    monkeypatch.setattr(terminal, "TmuxTerminal", lambda _socket: fake)
+    monkeypatch.setattr(
+        workspace, "_write_config", lambda *_arguments: (_ for _ in ()).throw(OSError())
+    )
+    launch = fake.created[0][3]
+
+    with pytest.raises(OSError):
+        workspace.capture_codex_start(
+            {
+                "hook_event_name": "SessionStart",
+                "source": "startup",
+                "session_id": SESSION_ID,
+                "cwd": str(project_path),
+            },
+            launch.environment,
+        )
+
+    assert config_path.exists() is False
+    assert fake.target.enrollment is not None
+    assert fake.target.enrollment.session_id == SESSION_ID
+    assert fake.target.enrollment.state is terminal.EnrollmentState.PENDING
+
+
+def test_start_repairs_final_metadata_after_configuration_commits(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config_path = tmp_path / "config" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    fake = FakeTerminal(terminal.Target(terminal.TargetState.ABSENT), attach_viewer=False)
+    context = _start_context(config_path, tmp_path, fake)
+    workspace.start_project(workspace.StartRequest("alpha", project_path, "new head"), context)
+    monkeypatch.setattr(terminal, "TmuxTerminal", lambda _socket: fake)
+    original_finalize = fake.finalize_enrollment
+    monkeypatch.setattr(
+        fake,
+        "finalize_enrollment",
+        lambda *_arguments: (_ for _ in ()).throw(terminal.TerminalError("tmux failed")),
+    )
+    launch = fake.created[0][3]
+
+    with pytest.raises(terminal.TerminalError, match="tmux failed"):
+        workspace.capture_codex_start(
+            {
+                "hook_event_name": "SessionStart",
+                "source": "startup",
+                "session_id": SESSION_ID,
+                "cwd": str(project_path),
+            },
+            launch.environment,
+        )
+
+    monkeypatch.setattr(fake, "finalize_enrollment", original_finalize)
+    outcome = workspace.start_project(
+        workspace.StartRequest("alpha", project_path, "new head"), context
+    )
+
+    assert workspace.load_config(config_path).projects["alpha"].session_id == SESSION_ID
+    assert fake.target.enrollment is not None
+    assert fake.target.enrollment.state is terminal.EnrollmentState.FINAL
+    assert fake.retried == []
+    assert outcome.state in {
+        workspace.RunState.ENROLLMENT_PENDING,
+        workspace.RunState.REATTACHED,
+        workspace.RunState.PENDING,
+    }
+
+
+def test_exact_repeated_capture_is_a_noop_after_finalization(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "config" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    fake = FakeTerminal(terminal.Target(terminal.TargetState.ABSENT))
+    workspace.start_project(
+        workspace.StartRequest("alpha", project_path, "new head"),
+        _start_context(config_path, tmp_path, fake),
+    )
+    monkeypatch.setattr(terminal, "TmuxTerminal", lambda _socket: fake)
+    launch = fake.created[0][3]
+    event = {
+        "hook_event_name": "SessionStart",
+        "source": "startup",
+        "session_id": SESSION_ID,
+        "cwd": str(project_path),
+    }
+
+    workspace.capture_codex_start(event, launch.environment)
+    workspace.capture_codex_start(event, launch.environment)
+
+    assert workspace.load_config(config_path).projects == {
+        "alpha": workspace.WorkspaceProject("alpha", project_path, SESSION_ID, "new head")
+    }
+
+
+def test_final_target_without_its_workspace_mapping_is_not_adopted(tmp_path: Path) -> None:
+    config_path = tmp_path / "config" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    fake = FakeTerminal(
+        terminal.Target(
+            terminal.TargetState.DETACHED,
+            "alpha",
+            SESSION_ID,
+            provider=providers.Provider.CODEX,
+            enrollment=terminal.Enrollment(
+                project_path,
+                "new head",
+                None,
+                "123e4567-e89b-12d3-a456-426614174002",
+                terminal.EnrollmentState.FINAL,
+                SESSION_ID,
+            ),
+        )
+    )
+
+    with pytest.raises(workspace.WorkspaceError, match="final without a workspace mapping"):
+        workspace.start_project(
+            workspace.StartRequest("alpha", project_path, "new head"),
+            _start_context(config_path, tmp_path, fake),
+        )
+
+    assert config_path.exists() is False
+
+
+def test_capture_refuses_a_stale_attempt_after_a_new_attempt_is_pending(
+    monkeypatch, tmp_path: Path
+) -> None:
+    config_path = tmp_path / "config" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    fake = FakeTerminal(terminal.Target(terminal.TargetState.ABSENT))
+    workspace.start_project(
+        workspace.StartRequest("alpha", project_path, "new head"),
+        _start_context(config_path, tmp_path, fake),
+    )
+    monkeypatch.setattr(terminal, "TmuxTerminal", lambda _socket: fake)
+    launch = fake.created[0][3]
+    stale_environment = {
+        **launch.environment,
+        "ACO_CAPTURE_ATTEMPT": "123e4567-e89b-12d3-a456-426614174003",
+    }
+
+    with pytest.raises(workspace.WorkspaceError, match="pending attempt"):
+        workspace.capture_codex_start(
+            {
+                "hook_event_name": "SessionStart",
+                "source": "startup",
+                "session_id": SESSION_ID,
+                "cwd": str(project_path),
+            },
+            stale_environment,
+        )
+
+    assert config_path.exists() is False
+
+
+def test_capture_does_not_adopt_a_registration_that_raced_the_pending_attempt(
+    monkeypatch, tmp_path: Path
+) -> None:
+    config_path = tmp_path / "config" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    fake = FakeTerminal(terminal.Target(terminal.TargetState.ABSENT))
+    workspace.start_project(
+        workspace.StartRequest("alpha", project_path, "new head"),
+        _start_context(config_path, tmp_path, fake),
+    )
+    registered_uuid = "123e4567-e89b-12d3-a456-426614174004"
+    workspace.register_project(
+        workspace.WorkspaceRegistration("alpha", project_path, registered_uuid, "new head"),
+        config_path,
+    )
+    monkeypatch.setattr(terminal, "TmuxTerminal", lambda _socket: fake)
+    launch = fake.created[0][3]
+
+    with pytest.raises(workspace.WorkspaceError, match="conflicts with the pending"):
+        workspace.capture_codex_start(
+            {
+                "hook_event_name": "SessionStart",
+                "source": "startup",
+                "session_id": SESSION_ID,
+                "cwd": str(project_path),
+            },
+            launch.environment,
+        )
+
+    assert workspace.load_config(config_path).projects["alpha"].session_id == registered_uuid
 
 
 def test_run_starts_the_exact_registered_session_with_its_logical_identity(tmp_path: Path) -> None:
