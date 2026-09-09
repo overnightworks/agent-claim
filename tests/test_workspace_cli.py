@@ -294,7 +294,11 @@ def test_hidden_login_runner_reports_workspace_failure_without_private_detail(
     attempt = workspace.load_login_attempt(workspace.login_attempt_path(os.environ))
     assert attempt.failure == "workspace failure"
     assert notifications == ["Workspace recovery failed."]
-    assert "missing.toml" not in capsys.readouterr().out
+    assert cli.main(["login", "status"]) == 0
+
+    output = capsys.readouterr().out
+    assert "workspace: workspace failure\n" in output
+    assert "missing.toml" not in output
 
 
 def test_login_status_reports_a_malformed_attempt_without_echoing_its_contents(
