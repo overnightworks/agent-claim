@@ -1,8 +1,0 @@
-claim_id = "532eb376b0aa4471810bd2b18df3dd8f"
-agent = "Codex workspace head"
-role = "coordinator"
-base = "2f01be86b27a711fae53681c25469ee179b53e38"
-branch = "codex/issue-219-resume-grok"
-scope = ["src/agent_coordination/providers.py", "src/agent_coordination/workspace.py", "README.md", "tests/test_workspace_providers.py", "tests/test_workspace_codex.py", "tests/test_workspace_cli.py", "tests/test_workspace.py", "tests/test_workspace_terminal.py"]
-opened_commit = "2fdb653a6f3494e52ea216e3a82c93deb23ac739"
-whole_reason = "One Grok command case changes its sole caller and the existing provider fixtures; these eight small paths prove the same recovery contract."
