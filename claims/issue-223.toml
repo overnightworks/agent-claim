@@ -1,0 +1,8 @@
+claim_id = "4ac4e11dd16c46098249ef7ff56f6e0c"
+agent = "Codex workspace head"
+role = "coordinator"
+base = "9ef15aa8cbfd9fb3f6fbcc058abf596a504d1a89"
+branch = "codex/issue-223-login-recovery"
+scope = ["README.md", "src/agent_coordination/cli.py", "src/agent_coordination/workspace.py", "src/agent_coordination/terminal.py", "tests/test_workspace.py", "tests/test_workspace_cli.py", "tests/test_workspace_terminal.py"]
+opened_commit = "f09dc7c071d72996aabb8d3f9fbf6c1dea30d99a"
+whole_reason = "One reviewed login-recovery slice across the existing CLI, workspace and process owners and their focused tests; separate behavioral regions preserve the frozen upstream Codex candidate."
