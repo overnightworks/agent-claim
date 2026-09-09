@@ -112,6 +112,10 @@ claims, and surviving tmux heads intact. `aco login status` reports launcher and
 mapping state separately, plus the most recent login attempt, without starting a
 provider or writing a file.
 
+The installed Python path must not contain `%`. ACO refuses that path before it
+creates or replaces a launcher; move the installation to a percent-free path and
+enable login again.
+
 Login recovery is desired-workspace mode: every configured project is resumed in
 configuration order at each desktop login, including one that was previously
 exited. It restores the existing native UUID through the normal promptless

@@ -680,6 +680,7 @@ def _login_executable(executable: Path) -> Path:
     lexical = Path(os.path.abspath(executable))
     if (
         "=" in str(lexical)
+        or "%" in str(lexical)
         or _unsafe_desktop_text(str(lexical))
         or re.fullmatch(r"python(?:[0-9]+(?:\.[0-9]+)*)?", lexical.name) is None
     ):
@@ -702,16 +703,13 @@ def _desktop_entry(executable: Path) -> str:
 
 
 def _desktop_argument(argument: str) -> str:
-    if _unsafe_desktop_text(argument):
-        raise WorkspaceError("login launcher text contains a control character")
-    field_safe = argument.replace("%", "%%")
-    if not field_safe or any(character in _DESKTOP_RESERVED_CHARACTERS for character in field_safe):
+    if not argument or any(character in _DESKTOP_RESERVED_CHARACTERS for character in argument):
         quoted = "".join(
             f"\\{character}" if character in {"\\", '"', "`", "$"} else character
-            for character in field_safe
+            for character in argument
         )
         return '"' + quoted.replace("\\", "\\\\") + '"'
-    return field_safe
+    return argument
 
 
 def _unsafe_desktop_text(value: str) -> bool:
@@ -790,7 +788,7 @@ def _desktop_exec_arguments(value: str) -> tuple[str, ...]:
                     raise WorkspaceError("login launcher is malformed")
                 index += 1
             argument = unescaped[start:index]
-        arguments.append(_desktop_percent_unescape(argument))
+        arguments.append(argument)
         if index < len(unescaped):
             index += 1
     return tuple(arguments)
@@ -810,21 +808,6 @@ def _desktop_string_unescape(value: str) -> str:
             raise WorkspaceError("login launcher is malformed")
         characters.append("\\")
         index += 1
-    return "".join(characters)
-
-
-def _desktop_percent_unescape(value: str) -> str:
-    characters: list[str] = []
-    index = 0
-    while index < len(value):
-        if value[index] != "%":
-            characters.append(value[index])
-            index += 1
-            continue
-        if index + 1 == len(value) or value[index + 1] != "%":
-            raise WorkspaceError("login launcher is malformed")
-        characters.append("%")
-        index += 2
     return "".join(characters)
 
 

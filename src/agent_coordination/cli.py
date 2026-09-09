@@ -2595,32 +2595,27 @@ def _login_operation(parsed: argparse.Namespace) -> int:
     return _login_status()
 
 
-def _workspace_operation(parsed: argparse.Namespace) -> int:
-    if parsed.repo is not None:
-        raise protocol.ClaimError("--repo is meaningless for workspace operations")
-    if parsed.command == "register":
-        return _register_workspace(parsed)
-    return _run_workspace(parsed)
-
-
-def _local_operation(parsed: argparse.Namespace) -> int | None:
+def _local_operation(parsed: argparse.Namespace) -> int:
     if parsed.command == "_run-at-login":
         return _run_at_login()
     if parsed.command == "login":
         return _login_operation(parsed)
-    if parsed.command in {"register", "run"}:
-        return _workspace_operation(parsed)
-    return None
+    if parsed.repo is not None:
+        raise protocol.ClaimError("--repo is meaningless for workspace operations")
+    return _register_workspace(parsed) if parsed.command == "register" else _run_workspace(parsed)
 
 
 def main(arguments: list[str] | None = None) -> int:
     parsed = _parser().parse_args(arguments)
+    if parsed.command in {"_run-at-login", "register", "run", "login"}:
+        try:
+            return _local_operation(parsed)
+        except protocol.ClaimError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 2
+    if parsed.command == "protect":
+        return _protect(parsed.repo)
     try:
-        local_result = _local_operation(parsed)
-        if local_result is not None:
-            return local_result
-        if parsed.command == "protect":
-            return _protect(parsed.repo)
         if parsed.command == "status":
             return _cmd_status(parsed)
         return _dispatch(parsed)
