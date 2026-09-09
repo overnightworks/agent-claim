@@ -2610,16 +2610,6 @@ def _login_operation(parsed: argparse.Namespace) -> int:
     return _login_status()
 
 
-def _local_operation(parsed: argparse.Namespace) -> int:
-    if parsed.command == "_run-at-login":
-        return _run_at_login()
-    if parsed.command == "login":
-        return _login_operation(parsed)
-    if parsed.repo is not None:
-        raise protocol.ClaimError("--repo is meaningless for workspace operations")
-    return _register_workspace(parsed) if parsed.command == "register" else _run_workspace(parsed)
-
-
 def _start_workspace(parsed: argparse.Namespace) -> int:
     callback = shlex.join(
         [sys.executable, "-I", "-m", "agent_coordination.cli", "_capture-codex-start"]
@@ -2658,8 +2648,10 @@ def _workspace_operation(parsed: argparse.Namespace) -> int:
 def _workspace_command(parsed: argparse.Namespace) -> int:
     if parsed.command == "_capture-codex-start":
         return _capture_start()
-    if parsed.command in {"_run-at-login", "login"}:
-        return _local_operation(parsed)
+    if parsed.command == "_run-at-login":
+        return _run_at_login()
+    if parsed.command == "login":
+        return _login_operation(parsed)
     return _workspace_operation(parsed)
 
 
