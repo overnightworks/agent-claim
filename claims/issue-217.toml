@@ -1,8 +1,0 @@
-claim_id = "a81c9fd6967c4059827fe4e4c3b2abe4"
-agent = "Codex workspace head"
-role = "coordinator"
-base = "23f5c24edf3fbdc981744d5c8e07285777f7f01a"
-branch = "codex/issue-217-resume-claude"
-scope = ["src/agent_coordination/workspace.py", "src/agent_coordination/codex.py", "src/agent_coordination/providers.py", "src/agent_coordination/terminal.py", "src/agent_coordination/cli.py", "pyproject.toml", "README.md", "tests/test_workspace.py", "tests/test_workspace_cli.py", "tests/test_workspace_codex.py", "tests/test_workspace_providers.py", "tests/test_workspace_terminal.py"]
-opened_commit = "7924a86b3b2ca719bbc725b0131db587ed2ad080"
-whole_reason = "Provider-aware configuration and live target identity must ship with the exact Claude command so the new recovery cannot reuse the wrong provider head; the remaining paths are their focused proofs and boundary documentation."
