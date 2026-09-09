@@ -2673,7 +2673,7 @@ def main(arguments: list[str] | None = None) -> int:
         if parsed.command == "status":
             return _cmd_status(parsed)
         return _dispatch(parsed)
-    except protocol.ClaimError as error:
+    except (protocol.ClaimError, terminal.TerminalError) as error:
         print(f"ERROR: {error}", file=sys.stderr)
         if getattr(parsed, "json", False):
             print(json.dumps({"ok": False, "error": str(error)}))

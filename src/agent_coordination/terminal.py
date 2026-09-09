@@ -205,6 +205,8 @@ class TmuxTerminal:
             )
             if enrollment.state is EnrollmentState.FINAL and enrollment.session_id is None:
                 raise TerminalError("tmux target has incomplete final enrollment metadata")
+            if metadata[_SESSION_OPTION] and enrollment.session_id is None:
+                raise TerminalError("tmux target has interrupted enrollment UUID metadata")
             if (
                 enrollment.session_id is not None
                 and metadata[_SESSION_OPTION] != enrollment.session_id
@@ -501,9 +503,18 @@ class TmuxTerminal:
             _control_command("set-environment", "-r", "-t", target, name)
             for name in self._environment_names_to_remove(target, launch, environment_names)
         )
+        commands.append(_control_command("detach-client"))
         try:
             result = process.run_bounded(
-                ["tmux", "-C", "-S", str(self._socket_path)],
+                [
+                    "tmux",
+                    "-C",
+                    "-S",
+                    str(self._socket_path),
+                    "attach-session",
+                    "-t",
+                    target,
+                ],
                 input_data=("\n".join(commands) + "\n").encode(),
             )
         except process.ProcessError as error:

@@ -187,6 +187,7 @@ def test_launch_keeps_a_synthetic_secret_out_of_tmux_argv_and_errors(monkeypatch
     assert private_inputs == [
         b'set-environment "-t" "aco-alpha" "ACO_AGENT" "head"\n'
         b'set-environment "-t" "aco-alpha" "ACO_PROOF_SECRET" "synthetic-secret-marker"\n'
+        b"detach-client\n"
     ]
     assert all(synthetic_secret not in argument for command in commands for argument in command)
     assert all(
@@ -427,6 +428,221 @@ def test_tmux_inspect_refuses_unknown_provider_metadata(monkeypatch, tmp_path) -
         adapter.inspect("alpha")
 
 
+@pytest.mark.parametrize(
+    ("metadata", "message"),
+    [
+        (
+            {"@aco_enrollment_state": "pending"},
+            "incomplete enrollment",
+        ),
+        (
+            {
+                "@aco_enrollment_state": "unknown",
+                "@aco_enrollment_attempt": "attempt",
+                "@aco_enrollment_directory": "/workspace",
+                "@aco_enrollment_agent": "head",
+            },
+            "invalid enrollment",
+        ),
+        (
+            {
+                "@aco_enrollment_state": "final",
+                "@aco_enrollment_attempt": "attempt",
+                "@aco_enrollment_directory": "/workspace",
+                "@aco_enrollment_agent": "head",
+            },
+            "incomplete final",
+        ),
+        (
+            {
+                "@aco_enrollment_state": "pending",
+                "@aco_enrollment_attempt": "attempt",
+                "@aco_enrollment_directory": "/workspace",
+                "@aco_enrollment_agent": "head",
+                "@aco_session_id": "123e4567-e89b-12d3-a456-426614174000",
+            },
+            "interrupted enrollment UUID",
+        ),
+        (
+            {
+                "@aco_enrollment_state": "pending",
+                "@aco_enrollment_attempt": "attempt",
+                "@aco_enrollment_directory": "/workspace",
+                "@aco_enrollment_agent": "head",
+                "@aco_session_id": "session-a",
+                "@aco_enrollment_session_id": "session-b",
+            },
+            "mismatched enrollment UUID",
+        ),
+    ],
+)
+def test_tmux_inspect_refuses_incomplete_enrollment_metadata(
+    monkeypatch, tmp_path, metadata: dict[str, str], message: str
+) -> None:
+    def run(command: list[str], **_kwargs: object) -> process.CapturedResult:
+        action = command[3]
+        if action == "has-session":
+            return process.CapturedResult(0, b"", b"")
+        if action == "show-options":
+            value = metadata.get(command[-1], "")
+            return process.CapturedResult(0, value.encode(), b"")
+        if action == "list-panes":
+            return process.CapturedResult(0, b"0\n", b"")
+        if action == "display-message":
+            return process.CapturedResult(0, b"0\n", b"")
+        raise AssertionError(command)
+
+    monkeypatch.setattr(process, "run_captured", run)
+
+    with pytest.raises(terminal.TerminalError, match=message):
+        terminal.TmuxTerminal(tmp_path / "tmux.sock").inspect("alpha")
+
+
+def test_tmux_inspect_all_refuses_a_foreign_session(monkeypatch, tmp_path) -> None:
+    def run(command: list[str], **_kwargs: object) -> process.CapturedResult:
+        assert command[3:] == ["list-sessions", "-F", "#{session_name}"]
+        return process.CapturedResult(0, b"1\naco-alpha\n", b"")
+
+    adapter = terminal.TmuxTerminal(tmp_path / "tmux.sock")
+    monkeypatch.setattr(process, "run_captured", run)
+
+    with pytest.raises(terminal.TerminalError, match="foreign metadata"):
+        adapter.inspect_all()
+
+
+def test_tmux_inspect_all_reports_no_targets_when_the_socket_has_no_server(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(
+        process,
+        "run_captured",
+        lambda *_arguments, **_kwargs: process.CapturedResult(1, b"", b""),
+    )
+
+    assert terminal.TmuxTerminal(tmp_path / "tmux.sock").inspect_all() == ()
+
+
+def test_tmux_inspect_reports_a_complete_pending_enrollment(monkeypatch, tmp_path) -> None:
+    metadata = {
+        "@aco_project": "alpha",
+        "@aco_provider": "codex",
+        "@aco_session_id": "session-a",
+        "@aco_enrollment_state": "pending",
+        "@aco_enrollment_attempt": "attempt",
+        "@aco_enrollment_directory": str(tmp_path),
+        "@aco_enrollment_agent": "new head",
+        "@aco_enrollment_model": "gpt-5",
+        "@aco_enrollment_session_id": "session-a",
+    }
+
+    def run(command: list[str], **_kwargs: object) -> process.CapturedResult:
+        action = command[3]
+        if action == "has-session":
+            return process.CapturedResult(0, b"", b"")
+        if action == "show-options":
+            return process.CapturedResult(0, metadata.get(command[-1], "").encode(), b"")
+        if action == "list-panes":
+            return process.CapturedResult(0, b"0\n", b"")
+        if action == "display-message":
+            return process.CapturedResult(0, b"0\n", b"")
+        raise AssertionError(command)
+
+    monkeypatch.setattr(process, "run_captured", run)
+
+    assert terminal.TmuxTerminal(tmp_path / "tmux.sock").inspect("alpha") == terminal.Target(
+        terminal.TargetState.DETACHED,
+        "alpha",
+        "session-a",
+        provider=providers.Provider.CODEX,
+        enrollment=terminal.Enrollment(
+            tmp_path,
+            "new head",
+            "gpt-5",
+            "attempt",
+            terminal.EnrollmentState.PENDING,
+            "session-a",
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "enrollment",
+    [
+        None,
+        terminal.Enrollment(
+            Path("/workspace"), "new head", None, "attempt", terminal.EnrollmentState.INITIALIZING
+        ),
+    ],
+)
+def test_tmux_retries_existing_targets_with_current_launch_environment(
+    monkeypatch, tmp_path, enrollment: terminal.Enrollment | None
+) -> None:
+    commands: list[list[str]] = []
+    bounded: list[list[str]] = []
+
+    def run(command: list[str], **_kwargs: object) -> process.CapturedResult:
+        commands.append(command)
+        action = command[3]
+        if action == "show-environment":
+            return process.CapturedResult(0, b"", b"")
+        if action == "display-message":
+            return process.CapturedResult(0, b"@0\n", b"")
+        if action == "new-window":
+            return process.CapturedResult(0, b"@1\n", b"")
+        return process.CapturedResult(0, b"", b"")
+
+    def configure(command: list[str], **_kwargs: object) -> process.BoundedResult:
+        bounded.append(command)
+        return process.BoundedResult(0, b"")
+
+    monkeypatch.setattr(process, "run_captured", run)
+    monkeypatch.setattr(process, "run_bounded", configure)
+    adapter = terminal.TmuxTerminal(tmp_path / "tmux.sock")
+    launch = terminal.Launch(
+        ["codex", "-C", "/workspace"],
+        {"ACO_AGENT": "new head"},
+        frozenset(),
+        enrollment=enrollment,
+    )
+
+    if enrollment is None:
+        adapter.retry("alpha", launch)
+    else:
+        adapter.retry_enrollment("alpha", launch)
+
+    assert bounded == [
+        ["tmux", "-C", "-S", str(tmp_path / "tmux.sock"), "attach-session", "-t", "aco-alpha"]
+    ]
+    assert any(command[3] == "new-window" for command in commands)
+    if enrollment is not None:
+        assert [command[-2:] for command in commands if command[3] == "set-option"][:2] == [
+            ["@aco_enrollment_state", "initializing"],
+            ["@aco_enrollment_attempt", "attempt"],
+        ]
+
+
+def test_tmux_updates_enrollment_metadata_for_a_captured_session(monkeypatch, tmp_path) -> None:
+    commands: list[list[str]] = []
+
+    def run(command: list[str], **_kwargs: object) -> process.CapturedResult:
+        commands.append(command)
+        return process.CapturedResult(0, b"", b"")
+
+    monkeypatch.setattr(process, "run_captured", run)
+    adapter = terminal.TmuxTerminal(tmp_path / "tmux.sock")
+
+    adapter.stage_enrollment("alpha", "session-a")
+    adapter.finalize_enrollment("alpha")
+    adapter.clear_viewer_pending("alpha")
+
+    assert [command[-2:] for command in commands] == [
+        ["@aco_session_id", "session-a"],
+        ["@aco_enrollment_session_id", "session-a"],
+        ["@aco_enrollment_state", "final"],
+        ["@aco_viewer_pending", ""],
+    ]
+
+
 def test_tmux_inspect_reports_an_absent_or_exited_target(monkeypatch, tmp_path) -> None:
     def absent(command: list[str], **_kwargs: object) -> process.CapturedResult:
         return process.CapturedResult(1, b"", b"")
@@ -551,6 +767,9 @@ def test_initial_and_retried_codex_children_receive_the_sanitized_environment(
     with _probe_lock():
         try:
             adapter.create("alpha", "session-a", tmp_path, launch)
+            assert process.run_captured(
+                ["tmux", "-S", str(socket_path), "list-sessions", "-F", "#{session_name}"]
+            ).stdout.decode().splitlines() == ["aco-alpha"]
             _wait_for_probe(socket_path)
             first_environment = _environment(output_path)
             injected_target = process.run_captured(

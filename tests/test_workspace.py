@@ -1364,14 +1364,15 @@ def _start_context(config_path: Path, runtime: Path, fake: FakeTerminal) -> work
     )
 
 
-def test_start_opens_a_promptless_pending_codex_console(tmp_path: Path) -> None:
+@pytest.mark.parametrize("model", [None, "gpt-5.3-codex"])
+def test_start_opens_a_promptless_pending_codex_console(tmp_path: Path, model: str | None) -> None:
     config_path = tmp_path / "config" / "workspace.toml"
     project_path = tmp_path / "project"
     project_path.mkdir()
     fake = FakeTerminal(terminal.Target(terminal.TargetState.ABSENT), attach_viewer=False)
 
     outcome = workspace.start_project(
-        workspace.StartRequest("alpha", project_path, "new head"),
+        workspace.StartRequest("alpha", project_path, "new head", model),
         workspace.StartContext(
             config_path,
             "/venv/bin/python -I -m agent_coordination.cli _capture-codex-start",
@@ -1397,6 +1398,7 @@ def test_start_opens_a_promptless_pending_codex_console(tmp_path: Path) -> None:
     assert launch.environment["ACO_CAPTURE_PROJECT"] == "alpha"
     assert launch.environment["ACO_CAPTURE_DIRECTORY"] == str(project_path.resolve())
     assert launch.environment["ACO_CAPTURE_ATTEMPT"] == launch.enrollment.attempt
+    assert launch.environment.get("ACO_CAPTURE_MODEL") == model
     assert "stale" not in launch.environment.values()
 
 
@@ -1457,6 +1459,98 @@ def test_start_refuses_a_second_pending_project_for_the_same_canonical_path(
         )
 
     assert fake.created == []
+
+
+@pytest.mark.parametrize(
+    ("registered_key", "request_agent", "message"),
+    [
+        ("alpha", "other head", "different definition"),
+        ("beta", "new head", "directory .* already registered"),
+    ],
+)
+def test_start_refuses_a_definition_already_owned_by_configuration(
+    tmp_path: Path, registered_key: str, request_agent: str, message: str
+) -> None:
+    config_path = tmp_path / "config" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    workspace.register_project(
+        workspace.WorkspaceRegistration(registered_key, project_path, SESSION_ID, "new head"),
+        config_path,
+    )
+    fake = FakeTerminal(terminal.Target(terminal.TargetState.ABSENT))
+
+    with pytest.raises(workspace.WorkspaceError, match=message):
+        workspace.start_project(
+            workspace.StartRequest("alpha", project_path, request_agent),
+            _start_context(config_path, tmp_path, fake),
+        )
+
+    assert fake.created == []
+
+
+def test_start_refuses_an_initializing_target_until_its_setup_is_complete(tmp_path: Path) -> None:
+    config_path = tmp_path / "config" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    fake = FakeTerminal(
+        terminal.Target(
+            terminal.TargetState.DETACHED,
+            "alpha",
+            provider=providers.Provider.CODEX,
+            enrollment=terminal.Enrollment(
+                project_path,
+                "new head",
+                None,
+                "123e4567-e89b-12d3-a456-426614174002",
+                terminal.EnrollmentState.INITIALIZING,
+            ),
+        )
+    )
+
+    with pytest.raises(workspace.WorkspaceError, match="setup is incomplete"):
+        workspace.start_project(
+            workspace.StartRequest("alpha", project_path, "new head"),
+            _start_context(config_path, tmp_path, fake),
+        )
+
+    assert fake.created == []
+
+
+def test_start_recovers_a_staged_native_uuid_before_starting_another_console(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    enrollment = terminal.Enrollment(
+        project_path,
+        "new head",
+        None,
+        "123e4567-e89b-12d3-a456-426614174002",
+        terminal.EnrollmentState.PENDING,
+        SESSION_ID,
+    )
+    fake = FakeTerminal(
+        terminal.Target(
+            terminal.TargetState.DETACHED,
+            "alpha",
+            SESSION_ID,
+            provider=providers.Provider.CODEX,
+            enrollment=enrollment,
+        )
+    )
+
+    outcome = workspace.start_project(
+        workspace.StartRequest("alpha", project_path, "new head"),
+        _start_context(config_path, tmp_path, fake),
+    )
+
+    assert workspace.load_config(config_path).projects["alpha"].session_id == SESSION_ID
+    assert fake.target.enrollment is not None
+    assert fake.target.enrollment.state is terminal.EnrollmentState.FINAL
+    assert fake.created == []
+    assert outcome.state is workspace.RunState.REATTACHED
 
 
 def test_start_refuses_an_ordinary_target_whose_path_is_not_terminal_owned(tmp_path: Path) -> None:
@@ -1581,6 +1675,35 @@ def test_capture_rejects_invalid_native_events_without_writing_configuration(
     assert fake.target.enrollment.session_id is None
 
 
+def test_capture_refuses_a_missing_fresh_identity_without_writing_configuration(
+    monkeypatch, tmp_path: Path
+) -> None:
+    config_path = tmp_path / "config" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    fake = FakeTerminal(terminal.Target(terminal.TargetState.ABSENT))
+    workspace.start_project(
+        workspace.StartRequest("alpha", project_path, "new head"),
+        _start_context(config_path, tmp_path, fake),
+    )
+    monkeypatch.setattr(terminal, "TmuxTerminal", lambda _socket: fake)
+    environment = dict(fake.created[0][3].environment)
+    del environment["ACO_CAPTURE_ATTEMPT"]
+
+    with pytest.raises(workspace.WorkspaceError, match="capture identity is incomplete"):
+        workspace.capture_codex_start(
+            {
+                "hook_event_name": "SessionStart",
+                "source": "startup",
+                "session_id": SESSION_ID,
+                "cwd": str(project_path),
+            },
+            environment,
+        )
+
+    assert config_path.exists() is False
+
+
 def test_capture_stages_the_native_uuid_before_an_atomic_config_failure(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -1684,6 +1807,32 @@ def test_exact_repeated_capture_is_a_noop_after_finalization(tmp_path: Path, mon
     assert workspace.load_config(config_path).projects == {
         "alpha": workspace.WorkspaceProject("alpha", project_path, SESSION_ID, "new head")
     }
+
+
+def test_capture_refuses_a_different_uuid_after_finalization(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "config" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    fake = FakeTerminal(terminal.Target(terminal.TargetState.ABSENT))
+    workspace.start_project(
+        workspace.StartRequest("alpha", project_path, "new head"),
+        _start_context(config_path, tmp_path, fake),
+    )
+    monkeypatch.setattr(terminal, "TmuxTerminal", lambda _socket: fake)
+    launch = fake.created[0][3]
+    event = {
+        "hook_event_name": "SessionStart",
+        "source": "startup",
+        "session_id": SESSION_ID,
+        "cwd": str(project_path),
+    }
+    workspace.capture_codex_start(event, launch.environment)
+    event["session_id"] = "123e4567-e89b-12d3-a456-426614174005"
+
+    with pytest.raises(workspace.WorkspaceError, match="final attempt"):
+        workspace.capture_codex_start(event, launch.environment)
+
+    assert workspace.load_config(config_path).projects["alpha"].session_id == SESSION_ID
 
 
 def test_final_target_without_its_workspace_mapping_is_not_adopted(tmp_path: Path) -> None:

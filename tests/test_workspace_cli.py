@@ -62,6 +62,34 @@ def test_start_uses_its_own_isolated_python_callback(capsys, monkeypatch, tmp_pa
     assert capsys.readouterr().out == "alpha: enrollment pending\n"
 
 
+def test_start_reports_a_terminal_refusal_without_a_traceback(
+    capsys, monkeypatch, tmp_path: Path
+) -> None:
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+
+    def refuse(*_arguments: object) -> workspace.RunOutcome:
+        raise terminal.TerminalError("foreign metadata")
+
+    monkeypatch.setattr(
+        workspace,
+        "start_project",
+        refuse,
+    )
+
+    assert cli.main(["start", "alpha", "--path", str(project_path), "--agent", "new head"]) == 2
+
+    assert capsys.readouterr().err == "ERROR: foreign metadata\n"
+
+
+def test_capture_callback_reports_an_invalid_payload(capsys, monkeypatch) -> None:
+    monkeypatch.setattr(cli.sys, "stdin", io.StringIO("[]"))
+
+    assert cli.main(["_capture-codex-start"]) == 2
+
+    assert capsys.readouterr().err == "ERROR: native startup hook payload must be an object\n"
+
+
 def test_capture_callback_emits_no_model_context_on_success(capsys, monkeypatch) -> None:
     received: dict[str, object] = {}
     monkeypatch.setattr(cli.sys, "stdin", io.StringIO('{"hook_event_name": "SessionStart"}'))
