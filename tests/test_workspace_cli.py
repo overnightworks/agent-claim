@@ -57,7 +57,21 @@ def test_register_writes_an_explicit_stopped_handover_through_the_cli(
     assert project.provider is providers.Provider.CODEX
 
 
-def test_register_accepts_an_explicit_claude_provider(capsys, monkeypatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("provider", "agent", "expected_provider"),
+    [
+        ("claude", "Claude workspace head", providers.Provider.CLAUDE),
+        ("grok", "Grok workspace head", providers.Provider.GROK),
+    ],
+)
+def test_register_accepts_an_explicit_provider(
+    capsys,
+    monkeypatch,
+    tmp_path: Path,
+    provider: str,
+    agent: str,
+    expected_provider: providers.Provider,
+) -> None:
     config_path = tmp_path / "config" / "workspace.toml"
     project_path = tmp_path / "project"
     project_path.mkdir()
@@ -69,13 +83,13 @@ def test_register_accepts_an_explicit_claude_provider(capsys, monkeypatch, tmp_p
                 "register",
                 "alpha",
                 "--provider",
-                "claude",
+                provider,
                 "--path",
                 str(project_path),
                 "--session-id",
                 "123e4567-e89b-12d3-a456-426614174000",
                 "--agent",
-                "Claude workspace head",
+                agent,
                 "--stopped",
             ]
         )
@@ -83,9 +97,7 @@ def test_register_accepts_an_explicit_claude_provider(capsys, monkeypatch, tmp_p
     )
 
     assert capsys.readouterr().out == "alpha: registered\n"
-    assert (
-        workspace.load_config(config_path).projects["alpha"].provider is providers.Provider.CLAUDE
-    )
+    assert workspace.load_config(config_path).projects["alpha"].provider is expected_provider
 
 
 def test_register_uses_the_xdg_workspace_configuration_path(

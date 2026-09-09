@@ -190,7 +190,7 @@ def test_registering_a_provider_adds_explicit_identity_to_a_legacy_mapping(tmp_p
     [
         (1, 'provider = "codex"\n', "unsupported or missing"),
         (2, "", "unsupported or missing"),
-        (2, 'provider = "grok"\n', "provider must be one of codex, claude"),
+        (2, 'provider = "gemini"\n', "provider must be one of codex, claude, grok"),
     ],
 )
 def test_load_config_refuses_mixed_or_unknown_provider_records(
@@ -265,7 +265,7 @@ def test_load_config_refuses_a_relative_project_directory(tmp_path: Path) -> Non
         ),
         (
             'version = 2\n[projects.alpha]\npath = "/tmp"\nsession_id = 3\n'
-            'agent = "head"\nprovider = "grok"\n',
+            'agent = "head"\nprovider = "gemini"\n',
             "session_id must be a string",
         ),
         (
@@ -823,7 +823,7 @@ def test_runtime_failure_for_one_project_does_not_hide_the_later_project(tmp_pat
             beta,
             "123e4567-e89b-12d3-a456-426614174001",
             "beta head",
-            provider=providers.Provider.CLAUDE,
+            provider=providers.Provider.GROK,
         ),
         config_path,
     )
@@ -841,9 +841,11 @@ def test_runtime_failure_for_one_project_does_not_hide_the_later_project(tmp_pat
         workspace.RunState.STARTED,
     ]
     assert fake.created[0][3].command == [
-        "claude",
+        "grok",
         "--resume",
         "123e4567-e89b-12d3-a456-426614174001",
+        "--cwd",
+        str(beta.resolve()),
     ]
 
 
