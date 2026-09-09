@@ -1,12 +1,690 @@
 from __future__ import annotations
 
+import json
+import os
+import uuid
+from datetime import UTC, datetime
 from pathlib import Path
+from threading import Event, Thread
 
 import pytest
 
 from agent_coordination import providers, terminal, workspace
 
 SESSION_ID = "123e4567-e89b-12d3-a456-426614174000"
+
+
+def _completed_login_record() -> dict[str, object]:
+    return {
+        "version": 1,
+        "attempt_id": "123e4567-e89b-42d3-a456-426614174000",
+        "started_at": "2026-09-09T00:00:00+00:00",
+        "state": "completed",
+        "outcomes": [{"project": "alpha", "outcome": "started"}],
+        "completed_at": "2026-09-09T00:00:01+00:00",
+    }
+
+
+def _owned_login_entry(
+    command: str = "/candidate/python -I -m agent_coordination.cli _run-at-login",
+) -> str:
+    return (
+        "[Desktop Entry]\n"
+        "Type=Application\n"
+        "Name=ACO workspace recovery\n"
+        f"Exec={command}\n"
+        "X-Aco-Owner=agent-coordination/login-v1\n"
+    )
+
+
+def test_login_enable_writes_only_a_validated_owned_desktop_entry(tmp_path: Path) -> None:
+    config_path = tmp_path / "config" / "aco" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    workspace.register_project(
+        workspace.WorkspaceRegistration("alpha", project_path, SESSION_ID, "workspace head"),
+        config_path,
+    )
+    environment = {"XDG_CONFIG_HOME": str(tmp_path / "config")}
+
+    changed = workspace.enable_login(config_path, environment, Path("/opt/aco python/bin/python"))
+
+    desktop_entry = tmp_path / "config" / "autostart" / "aco-workspace.desktop"
+    assert changed is True
+    assert desktop_entry.read_text() == (
+        "[Desktop Entry]\n"
+        "Type=Application\n"
+        "Name=ACO workspace recovery\n"
+        'Exec="/opt/aco python/bin/python" -I -m agent_coordination.cli _run-at-login\n'
+        "X-Aco-Owner=agent-coordination/login-v1\n"
+    )
+    assert (
+        workspace.enable_login(config_path, environment, Path("/opt/aco python/bin/python"))
+        is False
+    )
+
+
+def test_login_attempt_is_running_before_recovery_and_records_ordered_safe_outcomes(
+    monkeypatch, tmp_path: Path
+) -> None:
+    config_path = tmp_path / "workspace.toml"
+    state_path = tmp_path / "state" / "aco" / "login-attempt.json"
+    observed: list[workspace.LoginAttempt] = []
+
+    def recover(*_arguments: object, **_kwargs: object) -> tuple[workspace.RunOutcome, ...]:
+        observed.append(workspace.load_login_attempt(state_path))
+        return (
+            workspace.RunOutcome("alpha", workspace.RunState.REATTACHED, "private detail"),
+            workspace.RunOutcome("beta", workspace.RunState.FAILED, "private detail"),
+        )
+
+    monkeypatch.setattr(workspace, "run_projects", recover)
+
+    result = workspace.run_login_recovery(
+        config_path,
+        state_path,
+        now=lambda: datetime(2026, 9, 9, tzinfo=UTC),
+        new_attempt_id=lambda: "123e4567-e89b-42d3-a456-426614174000",
+    )
+
+    assert observed == [
+        workspace.LoginAttempt(
+            "123e4567-e89b-42d3-a456-426614174000", "2026-09-09T00:00:00+00:00", "running"
+        )
+    ]
+    assert result.exit_status == 1
+    assert workspace.load_login_attempt(state_path) == workspace.LoginAttempt(
+        "123e4567-e89b-42d3-a456-426614174000",
+        "2026-09-09T00:00:00+00:00",
+        "completed",
+        (("alpha", workspace.RunState.REATTACHED), ("beta", workspace.RunState.FAILED)),
+        None,
+        "2026-09-09T00:00:00+00:00",
+    )
+
+
+@pytest.mark.parametrize(
+    ("executable_text", "expected_exec"),
+    [
+        ("/opt/aco $bin/python", 'Exec="/opt/aco \\\\$bin/python"'),
+        (r"/opt/aco\bin/python", 'Exec="/opt/aco\\\\\\\\bin/python"'),
+        ('/opt/aco"bin/python', 'Exec="/opt/aco\\\\"bin/python"'),
+        ("/opt/aco`bin/python", 'Exec="/opt/aco\\\\`bin/python"'),
+    ],
+)
+def test_login_enable_serializes_reserved_executable_characters_exactly(
+    tmp_path: Path, executable_text: str, expected_exec: str
+) -> None:
+    config_path = tmp_path / "config" / "aco" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    workspace.register_project(
+        workspace.WorkspaceRegistration("alpha", project_path, SESSION_ID, "workspace head"),
+        config_path,
+    )
+    environment = {"XDG_CONFIG_HOME": str(tmp_path / "config")}
+
+    executable = Path(executable_text)
+    workspace.enable_login(config_path, environment, executable)
+
+    assert workspace.login_desktop_path(environment).read_text() == (
+        "[Desktop Entry]\n"
+        "Type=Application\n"
+        "Name=ACO workspace recovery\n"
+        f"{expected_exec} -I -m agent_coordination.cli _run-at-login\n"
+        "X-Aco-Owner=agent-coordination/login-v1\n"
+    )
+    assert (
+        workspace.login_launcher_state(environment, executable)
+        is workspace.LoginLauncherState.ENABLED
+    )
+
+
+def test_login_enable_refuses_a_percent_executable_path(tmp_path: Path) -> None:
+    config_path = tmp_path / "config" / "aco" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    workspace.register_project(
+        workspace.WorkspaceRegistration("alpha", project_path, SESSION_ID, "workspace head"),
+        config_path,
+    )
+
+    with pytest.raises(workspace.WorkspaceError, match="absolute safe path"):
+        workspace.enable_login(
+            config_path,
+            {"XDG_CONFIG_HOME": str(tmp_path / "config")},
+            Path("/opt/aco%bin/python"),
+        )
+
+
+def test_login_preserves_the_lexical_venv_python_path(tmp_path: Path) -> None:
+    config_path = tmp_path / "config" / "aco" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    workspace.register_project(
+        workspace.WorkspaceRegistration("alpha", project_path, SESSION_ID, "workspace head"),
+        config_path,
+    )
+    executable = tmp_path / "venv" / "bin" / "python"
+    executable.parent.mkdir(parents=True)
+    os.symlink("/usr/bin/python3", executable)
+    environment = {"XDG_CONFIG_HOME": str(tmp_path / "config")}
+
+    workspace.enable_login(config_path, environment, executable)
+
+    assert (
+        f"Exec={executable} -I -m agent_coordination.cli _run-at-login"
+        in workspace.login_desktop_path(environment).read_text()
+    )
+
+
+def test_login_recovery_generates_a_canonical_attempt_uuid(monkeypatch, tmp_path: Path) -> None:
+    state_path = tmp_path / "state" / "login-attempt.json"
+    monkeypatch.setattr(
+        workspace,
+        "run_projects",
+        lambda *_arguments, **_kwargs: (workspace.RunOutcome("alpha", workspace.RunState.STARTED),),
+    )
+
+    workspace.run_login_recovery(tmp_path / "workspace.toml", state_path)
+
+    identifier = uuid.UUID(workspace.load_login_attempt(state_path).attempt_id)
+    assert identifier.version == 4
+
+
+def test_login_disable_refuses_a_foreign_launcher_without_changing_it(tmp_path: Path) -> None:
+    environment = {"XDG_CONFIG_HOME": str(tmp_path / "config")}
+    desktop_path = workspace.login_desktop_path(environment)
+    desktop_path.parent.mkdir(parents=True)
+    desktop_path.parent.chmod(0o700)
+    desktop_path.write_text("[Desktop Entry]\nType=Application\nExec=other\n")
+    original = desktop_path.read_bytes()
+
+    with pytest.raises(workspace.WorkspaceError, match="unowned"):
+        workspace.disable_login(environment)
+
+    assert desktop_path.read_bytes() == original
+
+
+def test_login_refuses_a_non_python_launcher_without_changing_it(tmp_path: Path) -> None:
+    config_path = tmp_path / "config" / "aco" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    workspace.register_project(
+        workspace.WorkspaceRegistration("alpha", project_path, SESSION_ID, "workspace head"),
+        config_path,
+    )
+    environment = {"XDG_CONFIG_HOME": str(tmp_path / "config")}
+    desktop_path = workspace.login_desktop_path(environment)
+    desktop_path.parent.mkdir(parents=True)
+    desktop_path.parent.chmod(0o700)
+    desktop_path.write_text(
+        "[Desktop Entry]\nType=Application\nName=ACO workspace recovery\n"
+        "Exec=/bin/sh -I -m agent_coordination.cli _run-at-login\n"
+        "X-Aco-Owner=agent-coordination/login-v1\n"
+    )
+    original = desktop_path.read_bytes()
+
+    with pytest.raises(workspace.WorkspaceError, match="unowned"):
+        workspace.enable_login(config_path, environment, Path("/candidate/python"))
+    with pytest.raises(workspace.WorkspaceError, match="unowned"):
+        workspace.disable_login(environment)
+
+    assert (
+        workspace.login_launcher_state(environment, Path("/candidate/python"))
+        is workspace.LoginLauncherState.CONFLICT
+    )
+    assert desktop_path.read_bytes() == original
+
+
+def test_login_refuses_a_relative_python_launcher_without_changing_it(tmp_path: Path) -> None:
+    config_path = tmp_path / "config" / "aco" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    workspace.register_project(
+        workspace.WorkspaceRegistration("alpha", project_path, SESSION_ID, "workspace head"),
+        config_path,
+    )
+    environment = {"XDG_CONFIG_HOME": str(tmp_path / "config")}
+    desktop_path = workspace.login_desktop_path(environment)
+    desktop_path.parent.mkdir(parents=True)
+    desktop_path.parent.chmod(0o700)
+    desktop_path.write_text(
+        "[Desktop Entry]\nType=Application\nName=ACO workspace recovery\n"
+        "Exec=python -I -m agent_coordination.cli _run-at-login\n"
+        "X-Aco-Owner=agent-coordination/login-v1\n"
+    )
+    original = desktop_path.read_bytes()
+
+    with pytest.raises(workspace.WorkspaceError, match="absolute safe path"):
+        workspace.enable_login(config_path, environment, Path("python"))
+    with pytest.raises(workspace.WorkspaceError, match="unowned"):
+        workspace.enable_login(config_path, environment, Path("/candidate/python"))
+    with pytest.raises(workspace.WorkspaceError, match="unowned"):
+        workspace.disable_login(environment)
+
+    assert (
+        workspace.login_launcher_state(environment, Path("/candidate/python"))
+        is workspace.LoginLauncherState.CONFLICT
+    )
+    assert desktop_path.read_bytes() == original
+
+
+@pytest.mark.parametrize("kind", ["directory", "symlink"])
+def test_login_preserves_non_regular_launcher_conflicts(tmp_path: Path, kind: str) -> None:
+    environment = {"XDG_CONFIG_HOME": str(tmp_path / "config")}
+    config_path = tmp_path / "config" / "aco" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    workspace.register_project(
+        workspace.WorkspaceRegistration("alpha", project_path, SESSION_ID, "workspace head"),
+        config_path,
+    )
+    desktop_path = workspace.login_desktop_path(environment)
+    desktop_path.parent.mkdir(parents=True)
+    desktop_path.parent.chmod(0o700)
+    if kind == "directory":
+        desktop_path.mkdir()
+    else:
+        os.symlink(tmp_path / "other.desktop", desktop_path)
+
+    with pytest.raises(workspace.WorkspaceError, match="unowned"):
+        workspace.enable_login(config_path, environment, Path("/candidate/python"))
+    with pytest.raises(workspace.WorkspaceError, match="unowned"):
+        workspace.disable_login(environment)
+
+    assert (
+        workspace.login_launcher_state(environment, Path("/candidate/python"))
+        is workspace.LoginLauncherState.CONFLICT
+    )
+    assert desktop_path.is_dir() if kind == "directory" else desktop_path.is_symlink()
+
+
+def test_login_reports_an_owned_launcher_for_an_old_distribution_as_stale(tmp_path: Path) -> None:
+    config_path = tmp_path / "config" / "aco" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    workspace.register_project(
+        workspace.WorkspaceRegistration("alpha", project_path, SESSION_ID, "workspace head"),
+        config_path,
+    )
+    environment = {"XDG_CONFIG_HOME": str(tmp_path / "config")}
+    workspace.enable_login(config_path, environment, Path("/old/python"))
+
+    assert (
+        workspace.login_launcher_state(environment, Path("/new/python"))
+        is workspace.LoginLauncherState.STALE
+    )
+
+
+def test_login_recovery_keeps_unknown_outcomes_after_interruption(
+    monkeypatch, tmp_path: Path
+) -> None:
+    state_path = tmp_path / "state" / "login-attempt.json"
+    monkeypatch.setattr(
+        workspace,
+        "run_projects",
+        lambda *_arguments, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        workspace.run_login_recovery(tmp_path / "workspace.toml", state_path)
+
+    attempt = workspace.load_login_attempt(state_path)
+    assert attempt.state == "running"
+    assert attempt.outcomes == ()
+
+
+def test_login_recovery_serializes_attempts_and_keeps_the_later_result(
+    monkeypatch, tmp_path: Path
+) -> None:
+    state_path = tmp_path / "state" / "login-attempt.json"
+    first_started = Event()
+    release_first = Event()
+    second_attempted = Event()
+    calls: list[str] = []
+
+    def recover(*_arguments: object, **_kwargs: object) -> tuple[workspace.RunOutcome, ...]:
+        call = "first" if not calls else "second"
+        calls.append(call)
+        if call == "first":
+            first_started.set()
+            assert release_first.wait(timeout=1)
+        return (workspace.RunOutcome(call, workspace.RunState.STARTED),)
+
+    monkeypatch.setattr(workspace, "run_projects", recover)
+    first = Thread(
+        target=workspace.run_login_recovery,
+        args=(tmp_path / "workspace.toml", state_path),
+        kwargs={"new_attempt_id": lambda: "123e4567-e89b-42d3-a456-426614174000"},
+    )
+    second = Thread(
+        target=lambda: (
+            second_attempted.set(),
+            workspace.run_login_recovery(
+                tmp_path / "workspace.toml",
+                state_path,
+                new_attempt_id=lambda: "123e4567-e89b-42d3-a456-426614174001",
+            ),
+        ),
+    )
+    first.start()
+    assert first_started.wait(timeout=1)
+    second.start()
+    assert second_attempted.wait(timeout=1)
+    release_first.set()
+    first.join(timeout=1)
+    second.join(timeout=1)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert calls == ["first", "second"]
+    assert (
+        workspace.load_login_attempt(state_path).attempt_id
+        == "123e4567-e89b-42d3-a456-426614174001"
+    )
+
+
+def test_login_recovery_does_not_launch_if_the_initial_record_cannot_be_written(
+    monkeypatch, tmp_path: Path
+) -> None:
+    launched = False
+
+    def fail_write(*_arguments: object) -> None:
+        raise workspace.WorkspaceError("recording failed")
+
+    def recover(*_arguments: object, **_kwargs: object) -> tuple[workspace.RunOutcome, ...]:
+        nonlocal launched
+        launched = True
+        return ()
+
+    monkeypatch.setattr(workspace, "_write_login_attempt", fail_write)
+    monkeypatch.setattr(workspace, "run_projects", recover)
+
+    with pytest.raises(workspace.WorkspaceError, match="recording failed"):
+        workspace.run_login_recovery(tmp_path / "workspace.toml", tmp_path / "state.json")
+
+    assert launched is False
+
+
+def test_login_recovery_preserves_its_running_record_when_completion_cannot_be_written(
+    monkeypatch, tmp_path: Path
+) -> None:
+    state_path = tmp_path / "state" / "login-attempt.json"
+    writes = 0
+    write_attempt = workspace._write_login_attempt
+
+    def fail_completion(path: Path, attempt: workspace.LoginAttempt) -> None:
+        nonlocal writes
+        writes += 1
+        if writes == 2:
+            raise workspace.WorkspaceError("recording failed")
+        write_attempt(path, attempt)
+
+    monkeypatch.setattr(workspace, "_write_login_attempt", fail_completion)
+    monkeypatch.setattr(
+        workspace,
+        "run_projects",
+        lambda *_arguments, **_kwargs: (workspace.RunOutcome("alpha", workspace.RunState.STARTED),),
+    )
+
+    with pytest.raises(workspace.WorkspaceError, match="recording failed"):
+        workspace.run_login_recovery(tmp_path / "workspace.toml", state_path)
+
+    assert workspace.load_login_attempt(state_path).state == "running"
+
+
+def test_login_configuration_state_distinguishes_missing_malformed_empty_and_valid(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config" / "aco" / "workspace.toml"
+
+    assert (
+        workspace.login_configuration_state(config_path)
+        is workspace.LoginConfigurationState.MISSING
+    )
+
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text("version = 99\n")
+    assert (
+        workspace.login_configuration_state(config_path)
+        is workspace.LoginConfigurationState.MALFORMED
+    )
+
+    config_path.write_text("version = 2\nprojects = {}\n")
+    assert (
+        workspace.login_configuration_state(config_path) is workspace.LoginConfigurationState.EMPTY
+    )
+
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    workspace.register_project(
+        workspace.WorkspaceRegistration("alpha", project_path, SESSION_ID, "workspace head"),
+        config_path,
+    )
+    assert (
+        workspace.login_configuration_state(config_path) is workspace.LoginConfigurationState.VALID
+    )
+
+
+def test_login_enable_requires_a_registered_workspace(tmp_path: Path) -> None:
+    config_path = tmp_path / "config" / "aco" / "workspace.toml"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text("version = 2\nprojects = {}\n")
+
+    with pytest.raises(workspace.WorkspaceError, match="no registered projects"):
+        workspace.enable_login(
+            config_path,
+            {"XDG_CONFIG_HOME": str(tmp_path / "config")},
+            Path("/candidate/python"),
+        )
+
+
+def test_login_disable_reports_an_absent_launcher_without_creating_directories(
+    tmp_path: Path,
+) -> None:
+    environment = {"XDG_CONFIG_HOME": str(tmp_path / "config")}
+
+    assert workspace.disable_login(environment) is False
+    assert not workspace.login_desktop_path(environment).parent.exists()
+
+
+def test_login_uses_the_configured_home_when_xdg_roots_are_not_set(tmp_path: Path) -> None:
+    environment = {"HOME": str(tmp_path / "home")}
+
+    assert (
+        workspace.login_desktop_path(environment)
+        == tmp_path / "home" / ".config/autostart/aco-workspace.desktop"
+    )
+    assert (
+        workspace.login_attempt_path(environment)
+        == tmp_path / "home" / ".local/state/aco/login-attempt.json"
+    )
+
+
+def test_login_uses_the_process_home_when_xdg_roots_and_home_are_not_set(
+    monkeypatch, tmp_path: Path
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setattr(workspace.Path, "home", lambda: home)
+
+    assert workspace.login_desktop_path({}) == home / ".config/autostart/aco-workspace.desktop"
+    assert workspace.login_attempt_path({}) == home / ".local/state/aco/login-attempt.json"
+
+
+@pytest.mark.parametrize("kind", ["blocked", "insecure"])
+def test_login_enable_refuses_an_unusable_private_launcher_directory(
+    tmp_path: Path, kind: str
+) -> None:
+    config_path = tmp_path / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    workspace.register_project(
+        workspace.WorkspaceRegistration("alpha", project_path, SESSION_ID, "workspace head"),
+        config_path,
+    )
+    root = tmp_path / "config"
+    if kind == "blocked":
+        root.write_text("not a directory")
+    else:
+        (root / "autostart").mkdir(parents=True)
+        (root / "autostart").chmod(0o755)
+
+    with pytest.raises(
+        workspace.WorkspaceError, match=r"private login directory|private and owned"
+    ):
+        workspace.enable_login(
+            config_path, {"XDG_CONFIG_HOME": str(root)}, Path("/candidate/python")
+        )
+
+
+def test_login_disable_keeps_an_owned_launcher_when_removal_fails(
+    monkeypatch, tmp_path: Path
+) -> None:
+    config_path = tmp_path / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    workspace.register_project(
+        workspace.WorkspaceRegistration("alpha", project_path, SESSION_ID, "workspace head"),
+        config_path,
+    )
+    environment = {"XDG_CONFIG_HOME": str(tmp_path / "config")}
+    workspace.enable_login(config_path, environment, Path("/candidate/python"))
+    desktop_path = workspace.login_desktop_path(environment)
+    original = desktop_path.read_bytes()
+    unlink = Path.unlink
+
+    def refuse_unlink(path: Path, missing_ok: bool = False) -> None:
+        if path == desktop_path:
+            raise OSError("read-only")
+        unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", refuse_unlink)
+
+    with pytest.raises(workspace.WorkspaceError, match="cannot remove login launcher"):
+        workspace.disable_login(environment)
+
+    assert desktop_path.read_bytes() == original
+
+
+def test_login_recovery_reports_an_unreplaceable_state_record(tmp_path: Path, monkeypatch) -> None:
+    state_path = tmp_path / "state" / "login-attempt.json"
+    state_path.parent.mkdir(mode=0o700)
+    state_path.mkdir()
+    monkeypatch.setattr(
+        workspace,
+        "run_projects",
+        lambda *_arguments, **_kwargs: (workspace.RunOutcome("alpha", workspace.RunState.STARTED),),
+    )
+
+    with pytest.raises(workspace.WorkspaceError, match="cannot write login recovery state"):
+        workspace.run_login_recovery(tmp_path / "workspace.toml", state_path)
+
+    assert state_path.is_dir()
+    assert list(state_path.parent.glob(".login-attempt.json.*")) == []
+
+
+def test_login_recovery_records_an_empty_workspace_result_as_a_failure(
+    monkeypatch, tmp_path: Path
+) -> None:
+    state_path = tmp_path / "state" / "login-attempt.json"
+    monkeypatch.setattr(workspace, "run_projects", lambda *_arguments: ())
+
+    result = workspace.run_login_recovery(tmp_path / "workspace.toml", state_path)
+
+    assert result.exit_status == 1
+    assert workspace.load_login_attempt(state_path).failure == "workspace failure"
+
+
+@pytest.mark.parametrize("contents", ["{", "[not a record]"])
+def test_login_rejects_unreadable_or_non_json_attempt_records(
+    tmp_path: Path, contents: str
+) -> None:
+    state_path = tmp_path / "state" / "login-attempt.json"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(contents)
+
+    with pytest.raises(workspace.WorkspaceError, match="login attempt record is malformed"):
+        workspace.load_login_attempt(state_path)
+
+
+def test_login_rejects_a_directory_as_an_attempt_record(tmp_path: Path) -> None:
+    state_path = tmp_path / "state" / "login-attempt.json"
+    state_path.mkdir(parents=True)
+
+    with pytest.raises(workspace.WorkspaceError, match="login attempt record is malformed"):
+        workspace.load_login_attempt(state_path)
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        [],
+        {"version": 1},
+        {**_completed_login_record(), "unexpected": True},
+        {**_completed_login_record(), "version": 2},
+        {**_completed_login_record(), "attempt_id": 7},
+        {**_completed_login_record(), "attempt_id": "123e4567-e89b-12d3-a456-426614174000"},
+        {**_completed_login_record(), "started_at": "not-a-time"},
+        {**_completed_login_record(), "started_at": "invalidTtime"},
+        {**_completed_login_record(), "started_at": "2026-09-09T00:00:00"},
+        {**_completed_login_record(), "state": "unknown"},
+        {**_completed_login_record(), "outcomes": {}},
+        {**_completed_login_record(), "outcomes": [{}]},
+        {**_completed_login_record(), "outcomes": [{"project": "?", "outcome": "started"}]},
+        {**_completed_login_record(), "outcomes": [{"project": "alpha", "outcome": "unknown"}]},
+        {**_completed_login_record(), "state": "running", "outcomes": []},
+        {key: value for key, value in _completed_login_record().items() if key != "completed_at"},
+        {**_completed_login_record(), "completed_at": "2026-09-08T00:00:00+00:00"},
+        {**_completed_login_record(), "failure": "workspace failure"},
+        {**_completed_login_record(), "outcomes": []},
+        {**_completed_login_record(), "outcomes": [], "failure": "private detail"},
+        {**_completed_login_record(), "outcomes": [], "completed_at": 7},
+    ],
+)
+def test_login_rejects_malformed_persisted_attempt_records(tmp_path: Path, record: object) -> None:
+    state_path = tmp_path / "state" / "login-attempt.json"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(json.dumps(record))
+
+    with pytest.raises(workspace.WorkspaceError, match="login attempt record is malformed"):
+        workspace.load_login_attempt(state_path)
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        _owned_login_entry().rstrip("\n"),
+        _owned_login_entry().replace("[Desktop Entry]", "[Foreign Entry]"),
+        _owned_login_entry().replace("Type=Application", "Type"),
+        _owned_login_entry().replace("Name=ACO workspace recovery", "Other=value"),
+        _owned_login_entry().replace("Type=Application\n", "Type=Application\nType=Application\n"),
+        _owned_login_entry().replace("Name=ACO workspace recovery", "Name=Foreign recovery"),
+        _owned_login_entry().replace("_run-at-login", "_run-at-login extra"),
+        _owned_login_entry().replace("Exec=/", "Exec= /"),
+        _owned_login_entry('"/candidate\\\\q" -I -m agent_coordination.cli _run-at-login'),
+        _owned_login_entry('"/candidate/python -I -m agent_coordination.cli _run-at-login'),
+        _owned_login_entry('"/candidate/python"x -I -m agent_coordination.cli _run-at-login'),
+        _owned_login_entry("/candidate/$python -I -m agent_coordination.cli _run-at-login"),
+        _owned_login_entry("/candidate\\python -I -m agent_coordination.cli _run-at-login"),
+        _owned_login_entry("/candidate/python% -I -m agent_coordination.cli _run-at-login"),
+    ],
+)
+def test_login_status_preserves_malformed_desktop_templates_as_conflicts(
+    tmp_path: Path, entry: str
+) -> None:
+    environment = {"XDG_CONFIG_HOME": str(tmp_path / "config")}
+    desktop_path = workspace.login_desktop_path(environment)
+    desktop_path.parent.mkdir(parents=True)
+    desktop_path.parent.chmod(0o700)
+    desktop_path.write_text(entry)
+    original = desktop_path.read_bytes()
+
+    assert (
+        workspace.login_launcher_state(environment, Path("/candidate/python"))
+        is workspace.LoginLauncherState.CONFLICT
+    )
+    assert desktop_path.read_bytes() == original
 
 
 def test_register_is_idempotent_for_the_same_stopped_mapping(tmp_path: Path) -> None:

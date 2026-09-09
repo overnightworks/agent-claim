@@ -12,6 +12,32 @@ import pytest
 from agent_coordination import process, providers, terminal
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [
+        process.ExecutableMissingError("notify-send"),
+        PermissionError("notify-send"),
+        IsADirectoryError("notify-send"),
+    ],
+)
+def test_login_notification_is_best_effort_and_uses_only_its_bounded_summary(
+    monkeypatch, failure: process.ProcessError | OSError
+) -> None:
+    commands: list[list[str]] = []
+
+    def unavailable(command: list[str], **_kwargs: object) -> process.CapturedResult:
+        commands.append(command)
+        raise failure
+
+    monkeypatch.setattr(process, "run_captured", unavailable)
+
+    terminal.notify_login_recovery("Workspace recovery completed for 2 project(s).")
+
+    assert commands == [
+        ["notify-send", "ACO workspace recovery", "Workspace recovery completed for 2 project(s)."]
+    ]
+
+
 def test_tmux_target_name_is_stable_and_safe() -> None:
     assert terminal.target_name("alpha_project") == "aco-alpha_project"
 
