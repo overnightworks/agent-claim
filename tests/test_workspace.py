@@ -264,6 +264,11 @@ def test_load_config_refuses_a_relative_project_directory(tmp_path: Path) -> Non
             "path must be a string",
         ),
         (
+            'version = 2\n[projects.alpha]\npath = "/tmp"\nsession_id = 3\n'
+            'agent = "head"\nprovider = "grok"\n',
+            "session_id must be a string",
+        ),
+        (
             'version = 1\n[projects.alpha]\npath = "/tmp"\nsession_id = "x"\n',
             "unsupported or missing",
         ),

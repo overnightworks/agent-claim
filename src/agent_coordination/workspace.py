@@ -137,29 +137,8 @@ def load_config(config_path: Path) -> WorkspaceConfig:
         raise WorkspaceError("workspace configuration projects must be a mapping")
     projects: dict[str, WorkspaceProject] = {}
     for key, record in raw_projects.items():
-        if not isinstance(key, str) or not isinstance(record, dict):
-            raise WorkspaceError("workspace projects must use project keys and table records")
-        fields = _PROJECT_FIELDS if version == _LEGACY_CONFIG_VERSION else _PROVIDER_PROJECT_FIELDS
-        required = {"path", "session_id", "agent"}
-        if version == _CONFIG_VERSION:
-            required.add("provider")
-        if set(record) - fields or not required <= set(record):
-            raise WorkspaceError(f"project {key!r} has unsupported or missing fields")
-        directory = _canonical_config_directory(_string(record["path"], f"project {key!r} path"))
-        projects[key] = _project(
-            WorkspaceRegistration(
-                key,
-                directory,
-                _string(record["session_id"], f"project {key!r} session_id"),
-                _string(record["agent"], f"project {key!r} agent"),
-                _optional_string(record.get("model"), f"project {key!r} model"),
-                provider=(
-                    providers.Provider.CODEX
-                    if version == _LEGACY_CONFIG_VERSION
-                    else _provider(record["provider"], f"project {key!r} provider")
-                ),
-            )
-        )
+        project = _project_from_config_record(key, record, version)
+        projects[project.key] = project
     _validate_unique_projects(projects)
     return WorkspaceConfig(projects)
 
@@ -292,6 +271,36 @@ def _project(handoff: WorkspaceRegistration) -> WorkspaceProject:
     if model is not None:
         _validate_launch_identifier(model, f"project {key!r} model")
     return WorkspaceProject(key, canonical, session_id, agent, model, provider)
+
+
+def _project_from_config_record(key: object, record: object, version: int) -> WorkspaceProject:
+    if not isinstance(key, str) or not isinstance(record, dict):
+        raise WorkspaceError("workspace projects must use project keys and table records")
+    fields = _PROJECT_FIELDS if version == _LEGACY_CONFIG_VERSION else _PROVIDER_PROJECT_FIELDS
+    required = {"path", "session_id", "agent"}
+    if version == _CONFIG_VERSION:
+        required.add("provider")
+    if set(record) - fields or not required <= set(record):
+        raise WorkspaceError(f"project {key!r} has unsupported or missing fields")
+    directory = _canonical_config_directory(_string(record["path"], f"project {key!r} path"))
+    session_id = _string(record["session_id"], f"project {key!r} session_id")
+    agent = _string(record["agent"], f"project {key!r} agent")
+    model = _optional_string(record.get("model"), f"project {key!r} model")
+    provider = (
+        providers.Provider.CODEX
+        if version == _LEGACY_CONFIG_VERSION
+        else _provider(record["provider"], f"project {key!r} provider")
+    )
+    return _project(
+        WorkspaceRegistration(
+            key,
+            directory,
+            session_id,
+            agent,
+            model,
+            provider=provider,
+        )
+    )
 
 
 def _validate_unique_projects(projects: Mapping[str, WorkspaceProject]) -> None:
