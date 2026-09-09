@@ -65,6 +65,11 @@ def test_provider_choices_are_codex_claude_and_grok() -> None:
         (providers.Provider.CODEX, b"codex\0resume\0" + SESSION_ID.encode() + b"\0", "match"),
         (providers.Provider.CLAUDE, b"claude\0--resume\0" + SESSION_ID.encode() + b"\0", "match"),
         (
+            providers.Provider.CLAUDE,
+            b"claude\0--resume\0" + SESSION_ID.encode() + b"\0continue this work\0",
+            "match",
+        ),
+        (
             providers.Provider.CODEX,
             b"node\0codex.js\0resume\0" + SESSION_ID.encode() + b"\0",
             "ambiguous",

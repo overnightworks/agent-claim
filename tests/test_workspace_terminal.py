@@ -105,6 +105,26 @@ def test_live_registration_returns_a_receipt_after_stable_native_observations(
     assert receipt == terminal.ExternalProcessReceipt("boot", 41, 10)
 
 
+def test_live_registration_discards_a_claude_resume_prompt_from_its_receipt(
+    monkeypatch, tmp_path
+) -> None:
+    native = process.NativeProcess(
+        41,
+        process.NativeProcessState.LIVE,
+        process.current_user_id(),
+        "boot",
+        10,
+        "claude",
+        tmp_path,
+        b"claude\0--resume\0session-a\0continue this work\0",
+    )
+    monkeypatch.setattr(process, "inspect_native_process", lambda _pid: native)
+
+    receipt = terminal.register_live_process(providers.Provider.CLAUDE, "session-a", tmp_path, 41)
+
+    assert receipt == terminal.ExternalProcessReceipt("boot", 41, 10)
+
+
 def test_live_registration_refuses_a_codex_javascript_wrapper(monkeypatch, tmp_path) -> None:
     wrapper = process.NativeProcess(
         41,

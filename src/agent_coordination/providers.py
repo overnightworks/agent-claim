@@ -33,6 +33,7 @@ _SESSION_IDENTITY_ENVIRONMENTS = frozenset(
     }
 )
 _RESUME_ARGUMENT_COUNT = 3
+_PROMPTED_RESUME_ARGUMENT_COUNT = 4
 _MODELED_RESUME_ARGUMENT_COUNT = 5
 
 
@@ -109,6 +110,12 @@ def _classify_codex_resume(arguments: tuple[str, ...], session_id: str) -> Nativ
 
 def _classify_claude_resume(arguments: tuple[str, ...], session_id: str) -> NativeCommandState:
     if len(arguments) == _RESUME_ARGUMENT_COUNT and arguments[1:] == ("--resume", session_id):
+        return NativeCommandState.MATCH
+    if (
+        len(arguments) == _PROMPTED_RESUME_ARGUMENT_COUNT
+        and arguments[1:3] == ("--resume", session_id)
+        and not arguments[3].startswith("-")
+    ):
         return NativeCommandState.MATCH
     if (
         len(arguments) == _MODELED_RESUME_ARGUMENT_COUNT
