@@ -9,10 +9,11 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Protocol
 
-from . import process
+from . import process, providers
 
 _PROJECT_OPTION = "@aco_project"
 _SESSION_OPTION = "@aco_session_id"
+_PROVIDER_OPTION = "@aco_provider"
 _VIEWER_PENDING_OPTION = "@aco_viewer_pending"
 _ASCII_CONTROL_LIMIT = 32
 _ASCII_DELETE = 127
@@ -35,6 +36,7 @@ class Target:
     project: str | None = None
     session_id: str | None = None
     viewer_pending: bool = False
+    provider: providers.Provider | None = None
 
 
 @dataclass(frozen=True)
@@ -42,6 +44,7 @@ class Launch:
     command: list[str]
     environment: Mapping[str, str]
     removed_environment_names: frozenset[str]
+    provider: providers.Provider = providers.Provider.CODEX
 
 
 class TerminalController(Protocol):
@@ -74,8 +77,28 @@ def console_title(project: str) -> str:
     return f"ACO: {project}"
 
 
-def target_matches(metadata: dict[str, str], project: str, session_id: str) -> bool:
-    return metadata.get(_PROJECT_OPTION) == project and metadata.get(_SESSION_OPTION) == session_id
+def target_matches(
+    metadata: Mapping[str, str], project: str, provider: providers.Provider, session_id: str
+) -> bool:
+    target_provider = metadata.get(_PROVIDER_OPTION)
+    return (
+        metadata.get(_PROJECT_OPTION) == project
+        and metadata.get(_SESSION_OPTION) == session_id
+        and (
+            target_provider == provider.value
+            if target_provider
+            else provider is providers.Provider.CODEX
+        )
+    )
+
+
+def _target_provider(value: str) -> providers.Provider | None:
+    if not value:
+        return None
+    try:
+        return providers.Provider(value)
+    except ValueError as error:
+        raise TerminalError("tmux target has unsupported provider metadata") from error
 
 
 class TmuxTerminal:
@@ -92,7 +115,12 @@ class TmuxTerminal:
         self._require_success(result, "inspect tmux target")
         metadata = {
             option: self._option(name, option)
-            for option in (_PROJECT_OPTION, _SESSION_OPTION, _VIEWER_PENDING_OPTION)
+            for option in (
+                _PROJECT_OPTION,
+                _SESSION_OPTION,
+                _PROVIDER_OPTION,
+                _VIEWER_PENDING_OPTION,
+            )
         }
         dead = self._run("list-panes", "-t", name, "-F", "#{pane_dead}")
         self._require_success(dead, "inspect tmux pane")
@@ -107,6 +135,7 @@ class TmuxTerminal:
             metadata[_PROJECT_OPTION] or None,
             metadata[_SESSION_OPTION] or None,
             metadata[_VIEWER_PENDING_OPTION] == "1",
+            _target_provider(metadata[_PROVIDER_OPTION]),
         )
 
     def create(
@@ -125,7 +154,7 @@ class TmuxTerminal:
                 name,
                 "-c",
                 str(directory),
-                shlex.join(self._initial_command(name, project, session_id)),
+                shlex.join(self._initial_command(name, project, launch.provider, session_id)),
             ),
             "create tmux target",
         )
@@ -197,7 +226,9 @@ class TmuxTerminal:
         command.append(f"ACO_AGENT={launch.environment['ACO_AGENT']}")
         return [*command, *launch.command]
 
-    def _initial_command(self, target: str, project: str, session_id: str) -> list[str]:
+    def _initial_command(
+        self, target: str, project: str, provider: providers.Provider, session_id: str
+    ) -> list[str]:
         metadata_commands = (
             [
                 "tmux",
@@ -228,6 +259,16 @@ class TmuxTerminal:
                 target,
                 _SESSION_OPTION,
                 session_id,
+            ],
+            [
+                "tmux",
+                "-S",
+                str(self._socket_path),
+                "set-option",
+                "-t",
+                target,
+                _PROVIDER_OPTION,
+                provider.value,
             ],
         )
         setup = " && ".join(shlex.join(command) for command in metadata_commands)
@@ -300,12 +341,14 @@ class TmuxTerminal:
         command.append(shlex.join(self._provider_command(launch)))
         new_window = self._text(
             self._successful_result(
-                self._run(*command, environment=launch.environment), "start Codex session"
+                self._run(*command, environment=launch.environment), "start provider session"
             )
         )
         if not new_window:
-            raise TerminalError("start Codex session failed: missing window id")
-        self._require_success(self._run("select-window", "-t", new_window), "select Codex session")
+            raise TerminalError("start provider session failed: missing window id")
+        self._require_success(
+            self._run("select-window", "-t", new_window), "select provider session"
+        )
         self._require_success(self._run("kill-window", "-t", old_window), "discard setup window")
 
     def _provider_command(self, launch: Launch) -> list[str]:

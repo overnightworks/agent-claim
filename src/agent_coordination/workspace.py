@@ -1,4 +1,4 @@
-"""Strict local workspace registration and one-head Codex recovery lifecycle."""
+"""Strict local workspace registration and one-head provider recovery lifecycle."""
 
 from __future__ import annotations
 
@@ -16,11 +16,13 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
-from . import codex, protocol, terminal
+from . import protocol, providers, terminal
 
-_CONFIG_VERSION = 1
+_CONFIG_VERSION = 2
+_LEGACY_CONFIG_VERSION = 1
 _PROJECT_KEY_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 _PROJECT_FIELDS = frozenset({"path", "session_id", "agent", "model"})
+_PROVIDER_PROJECT_FIELDS = _PROJECT_FIELDS | {"provider"}
 
 
 class WorkspaceError(protocol.ClaimError):
@@ -43,6 +45,7 @@ class WorkspaceProject:
     session_id: str
     agent: str
     model: str | None = None
+    provider: providers.Provider = providers.Provider.CODEX
 
 
 @dataclass(frozen=True)
@@ -52,6 +55,7 @@ class WorkspaceRegistration:
     session_id: str
     agent: str
     model: str | None = None
+    provider: providers.Provider = providers.Provider.CODEX
 
 
 @dataclass(frozen=True)
@@ -75,21 +79,9 @@ def default_config_path(environment: Mapping[str, str], home: Path | None = None
     )
 
 
-def registration(
-    key: str, directory: Path, session_id: str, agent: str, model: str | None = None
-) -> WorkspaceRegistration:
-    return WorkspaceRegistration(key, directory, session_id, agent, model)
-
-
 def register_project(handoff: WorkspaceRegistration, config_path: Path) -> bool:
     """Store one explicit stopped-session handoff; return whether it was new."""
-    candidate = _project(
-        handoff.key,
-        handoff.directory,
-        handoff.session_id,
-        handoff.agent,
-        handoff.model,
-    )
+    candidate = _project(handoff)
     config_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     with _locked(config_path.with_suffix(".lock")):
         projects = {} if not config_path.exists() else dict(load_config(config_path).projects)
@@ -104,8 +96,13 @@ def register_project(handoff: WorkspaceRegistration, config_path: Path) -> bool:
             )
         if any(project.directory == candidate.directory for project in projects.values()):
             raise WorkspaceError(f"directory {candidate.directory} is already registered")
-        if any(project.session_id == candidate.session_id for project in projects.values()):
-            raise WorkspaceError(f"Codex session {candidate.session_id} is already registered")
+        if any(
+            (project.provider, project.session_id) == (candidate.provider, candidate.session_id)
+            for project in projects.values()
+        ):
+            raise WorkspaceError(
+                f"{candidate.provider.value} session {candidate.session_id} is already registered"
+            )
         projects[candidate.key] = candidate
         _write_config(config_path, projects)
     return True
@@ -125,25 +122,23 @@ def load_config(config_path: Path) -> WorkspaceConfig:
         raw = tomllib.loads(contents.decode())
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
         raise WorkspaceError(f"invalid workspace configuration {config_path}: {error}") from error
-    if set(raw) != {"version", "projects"} or raw.get("version") != _CONFIG_VERSION:
-        raise WorkspaceError("workspace configuration must contain only version = 1 and projects")
+    version = raw.get("version")
+    supported_versions = {_LEGACY_CONFIG_VERSION, _CONFIG_VERSION}
+    if (
+        set(raw) != {"version", "projects"}
+        or type(version) is not int
+        or version not in supported_versions
+    ):
+        raise WorkspaceError(
+            "workspace configuration must contain only version = 1 or version = 2 and projects"
+        )
     raw_projects = raw["projects"]
     if not isinstance(raw_projects, dict):
         raise WorkspaceError("workspace configuration projects must be a mapping")
     projects: dict[str, WorkspaceProject] = {}
     for key, record in raw_projects.items():
-        if not isinstance(key, str) or not isinstance(record, dict):
-            raise WorkspaceError("workspace projects must use project keys and table records")
-        if set(record) - _PROJECT_FIELDS or not {"path", "session_id", "agent"} <= set(record):
-            raise WorkspaceError(f"project {key!r} has unsupported or missing fields")
-        directory = _canonical_config_directory(_string(record["path"], f"project {key!r} path"))
-        projects[key] = _project(
-            key,
-            directory,
-            _string(record["session_id"], f"project {key!r} session_id"),
-            _string(record["agent"], f"project {key!r} agent"),
-            _optional_string(record.get("model"), f"project {key!r} model"),
-        )
+        project = _project_from_config_record(key, record, version)
+        projects[project.key] = project
     _validate_unique_projects(projects)
     return WorkspaceConfig(projects)
 
@@ -185,9 +180,10 @@ def _run_project(
 ) -> RunOutcome:
     target = controller.inspect(project.key)
     launch = terminal.Launch(
-        codex.resume_command(project.session_id, project.model),
-        codex.project_environment(environment, project.agent),
-        codex.session_identity_environment_names(),
+        providers.resume_command(project.provider, project.session_id, project.model),
+        providers.project_environment(environment, project.agent),
+        providers.session_identity_environment_names(),
+        project.provider,
     )
     if target.state is terminal.TargetState.ABSENT:
         controller.create(
@@ -198,8 +194,13 @@ def _run_project(
         )
         return _attach_or_pending(controller, project, RunState.STARTED)
     if not terminal.target_matches(
-        {"@aco_project": target.project or "", "@aco_session_id": target.session_id or ""},
+        {
+            "@aco_project": target.project or "",
+            "@aco_provider": target.provider.value if target.provider is not None else "",
+            "@aco_session_id": target.session_id or "",
+        },
         project.key,
+        project.provider,
         project.session_id,
     ):
         raise terminal.TerminalError(
@@ -240,9 +241,13 @@ def _attach_or_pending(
     return RunOutcome(project.key, RunState.PENDING, "console launch is pending")
 
 
-def _project(
-    key: str, directory: Path | str, session_id: str, agent: str, model: str | None
-) -> WorkspaceProject:
+def _project(handoff: WorkspaceRegistration) -> WorkspaceProject:
+    key = handoff.key
+    directory = handoff.directory
+    session_id = handoff.session_id
+    agent = handoff.agent
+    model = handoff.model
+    provider = _provider(handoff.provider)
     if _PROJECT_KEY_PATTERN.fullmatch(key) is None:
         raise WorkspaceError("project key must use letters, numbers, underscores, or hyphens")
     path = Path(directory).expanduser()
@@ -265,16 +270,54 @@ def _project(
         raise WorkspaceError(f"project {key!r} model must not be empty")
     if model is not None:
         _validate_launch_identifier(model, f"project {key!r} model")
-    return WorkspaceProject(key, canonical, session_id, agent, model)
+    return WorkspaceProject(key, canonical, session_id, agent, model, provider)
+
+
+def _project_from_config_record(key: object, record: object, version: int) -> WorkspaceProject:
+    if not isinstance(key, str) or not isinstance(record, dict):
+        raise WorkspaceError("workspace projects must use project keys and table records")
+    fields = _PROJECT_FIELDS if version == _LEGACY_CONFIG_VERSION else _PROVIDER_PROJECT_FIELDS
+    required = {"path", "session_id", "agent"}
+    if version == _CONFIG_VERSION:
+        required.add("provider")
+    if set(record) - fields or not required <= set(record):
+        raise WorkspaceError(f"project {key!r} has unsupported or missing fields")
+    directory = _canonical_config_directory(_string(record["path"], f"project {key!r} path"))
+    session_id = _string(record["session_id"], f"project {key!r} session_id")
+    agent = _string(record["agent"], f"project {key!r} agent")
+    model = _optional_string(record.get("model"), f"project {key!r} model")
+    provider = (
+        providers.Provider.CODEX
+        if version == _LEGACY_CONFIG_VERSION
+        else _provider(record["provider"], f"project {key!r} provider")
+    )
+    return _project(
+        WorkspaceRegistration(
+            key,
+            directory,
+            session_id,
+            agent,
+            model,
+            provider=provider,
+        )
+    )
 
 
 def _validate_unique_projects(projects: Mapping[str, WorkspaceProject]) -> None:
     directories = [project.directory for project in projects.values()]
-    sessions = [project.session_id for project in projects.values()]
+    sessions = [(project.provider, project.session_id) for project in projects.values()]
     if len(directories) != len(set(directories)):
         raise WorkspaceError("workspace configuration contains duplicate canonical paths")
     if len(sessions) != len(set(sessions)):
-        raise WorkspaceError("workspace configuration contains duplicate native Codex UUIDs")
+        raise WorkspaceError("workspace configuration contains duplicate native provider UUIDs")
+
+
+def _provider(value: providers.Provider | str, name: str = "provider") -> providers.Provider:
+    try:
+        return providers.Provider(value)
+    except (TypeError, ValueError) as error:
+        choices = ", ".join(provider.value for provider in providers.Provider)
+        raise WorkspaceError(f"{name} must be one of {choices}") from error
 
 
 def _canonical_config_directory(value: str) -> Path:
@@ -342,7 +385,7 @@ def _locked(path: Path) -> Iterator[None]:
 
 
 def _write_config(config_path: Path, projects: Mapping[str, WorkspaceProject]) -> None:
-    records = ["version = 1", ""]
+    records = ["version = 2", ""]
     for key, project in projects.items():
         records.extend(
             (
@@ -350,6 +393,7 @@ def _write_config(config_path: Path, projects: Mapping[str, WorkspaceProject]) -
                 f"path = {json.dumps(str(project.directory))}",
                 f"session_id = {json.dumps(project.session_id)}",
                 f"agent = {json.dumps(project.agent)}",
+                f"provider = {json.dumps(project.provider.value)}",
             )
         )
         if project.model is not None:

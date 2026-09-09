@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_coordination import cli, workspace
+from agent_coordination import cli, providers, workspace
 
 
 def test_register_requires_the_explicit_stopped_handover() -> None:
@@ -52,7 +52,40 @@ def test_register_writes_an_explicit_stopped_handover_through_the_cli(
 
     assert result == 0
     assert capsys.readouterr().out == "alpha: registered\n"
-    assert workspace.load_config(config_path).projects["alpha"].agent == "restored head"
+    project = workspace.load_config(config_path).projects["alpha"]
+    assert project.agent == "restored head"
+    assert project.provider is providers.Provider.CODEX
+
+
+def test_register_accepts_an_explicit_claude_provider(capsys, monkeypatch, tmp_path: Path) -> None:
+    config_path = tmp_path / "config" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    monkeypatch.setattr(cli, "_workspace_config_path", lambda: config_path)
+
+    assert (
+        cli.main(
+            [
+                "register",
+                "alpha",
+                "--provider",
+                "claude",
+                "--path",
+                str(project_path),
+                "--session-id",
+                "123e4567-e89b-12d3-a456-426614174000",
+                "--agent",
+                "Claude workspace head",
+                "--stopped",
+            ]
+        )
+        == 0
+    )
+
+    assert capsys.readouterr().out == "alpha: registered\n"
+    assert (
+        workspace.load_config(config_path).projects["alpha"].provider is providers.Provider.CLAUDE
+    )
 
 
 def test_register_uses_the_xdg_workspace_configuration_path(

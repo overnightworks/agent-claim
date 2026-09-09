@@ -1,31 +1,31 @@
 from __future__ import annotations
 
-from agent_coordination import codex
+from agent_coordination import providers
+
+SESSION_ID = "123e4567-e89b-12d3-a456-426614174000"
 
 
-def test_resume_uses_the_registered_uuid_without_a_prompt() -> None:
-    assert codex.resume_command("123e4567-e89b-12d3-a456-426614174000") == [
+def test_codex_resume_keeps_the_registered_uuid_and_optional_model() -> None:
+    assert providers.resume_command(providers.Provider.CODEX, SESSION_ID) == [
         "codex",
         "resume",
-        "123e4567-e89b-12d3-a456-426614174000",
+        SESSION_ID,
     ]
-
-
-def test_resume_keeps_an_explicit_model_before_the_registered_uuid() -> None:
-    assert codex.resume_command("123e4567-e89b-12d3-a456-426614174000", "gpt-5.3-codex") == [
+    assert providers.resume_command(providers.Provider.CODEX, SESSION_ID, "gpt-5.3-codex") == [
         "codex",
         "resume",
         "--model",
         "gpt-5.3-codex",
-        "123e4567-e89b-12d3-a456-426614174000",
+        SESSION_ID,
     ]
 
 
-def test_project_environment_keeps_authentication_but_replaces_session_identity() -> None:
-    environment = codex.project_environment(
+def test_project_environment_keeps_configuration_but_replaces_session_identity() -> None:
+    environment = providers.project_environment(
         {
             "ACO_AGENT": "launching head",
             "CODEX_HOME": "/safe/home",
+            "CLAUDE_CONFIG_DIR": "/safe/claude",
             "CODEX_THREAD_ID": "old",
             "CLAUDE_CODE_SESSION_ID": "nested",
             "GROK_SESSION_ID": "another nested session",
@@ -33,4 +33,8 @@ def test_project_environment_keeps_authentication_but_replaces_session_identity(
         "restored head",
     )
 
-    assert environment == {"ACO_AGENT": "restored head", "CODEX_HOME": "/safe/home"}
+    assert environment == {
+        "ACO_AGENT": "restored head",
+        "CODEX_HOME": "/safe/home",
+        "CLAUDE_CONFIG_DIR": "/safe/claude",
+    }

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_coordination import terminal, workspace
+from agent_coordination import providers, terminal, workspace
 
 SESSION_ID = "123e4567-e89b-12d3-a456-426614174000"
 
@@ -14,7 +14,7 @@ def test_register_is_idempotent_for_the_same_stopped_mapping(tmp_path: Path) -> 
     project_path = tmp_path / "project"
     project_path.mkdir()
 
-    handoff = workspace.registration("alpha", project_path, SESSION_ID, "old head")
+    handoff = workspace.WorkspaceRegistration("alpha", project_path, SESSION_ID, "old head")
     first = workspace.register_project(handoff, config_path)
     second = workspace.register_project(handoff, config_path)
 
@@ -28,11 +28,27 @@ def test_register_refuses_an_identity_replacement(tmp_path: Path) -> None:
     project_path = tmp_path / "project"
     project_path.mkdir()
     workspace.register_project(
-        workspace.registration("alpha", project_path, SESSION_ID, "old head"), config_path
+        workspace.WorkspaceRegistration("alpha", project_path, SESSION_ID, "old head"), config_path
     )
 
-    replacement = workspace.registration(
+    replacement = workspace.WorkspaceRegistration(
         "alpha", project_path, "123e4567-e89b-12d3-a456-426614174001", "old head"
+    )
+
+    with pytest.raises(workspace.WorkspaceError, match="already registered"):
+        workspace.register_project(replacement, config_path)
+
+
+def test_register_refuses_a_provider_replacement(tmp_path: Path) -> None:
+    config_path = tmp_path / "aco" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    workspace.register_project(
+        workspace.WorkspaceRegistration("alpha", project_path, SESSION_ID, "old head"), config_path
+    )
+
+    replacement = workspace.WorkspaceRegistration(
+        "alpha", project_path, SESSION_ID, "old head", provider=providers.Provider.CLAUDE
     )
 
     with pytest.raises(workspace.WorkspaceError, match="already registered"):
@@ -43,7 +59,7 @@ def test_register_refuses_an_identity_replacement(tmp_path: Path) -> None:
     ("replacement", "message"),
     [
         ("same-directory", "directory"),
-        ("same-session", "Codex session"),
+        ("same-session", "codex session"),
     ],
 )
 def test_register_refuses_a_directory_or_session_used_by_another_project(
@@ -55,14 +71,16 @@ def test_register_refuses_a_directory_or_session_used_by_another_project(
     alpha.mkdir()
     beta.mkdir()
     workspace.register_project(
-        workspace.registration("alpha", alpha, SESSION_ID, "alpha head"), config_path
+        workspace.WorkspaceRegistration("alpha", alpha, SESSION_ID, "alpha head"), config_path
     )
     directory = alpha if replacement == "same-directory" else beta
     session_id = (
         SESSION_ID if replacement == "same-session" else "123e4567-e89b-12d3-a456-426614174001"
     )
 
-    replacement_handoff = workspace.registration("beta", directory, session_id, "beta head")
+    replacement_handoff = workspace.WorkspaceRegistration(
+        "beta", directory, session_id, "beta head"
+    )
 
     with pytest.raises(workspace.WorkspaceError, match=message):
         workspace.register_project(replacement_handoff, config_path)
@@ -84,7 +102,9 @@ def test_register_refuses_launch_identifiers_that_cannot_be_safely_relaunched(
     project_path = tmp_path / "project"
     project_path.mkdir()
 
-    invalid_handoff = workspace.registration("alpha", project_path, SESSION_ID, agent, model)
+    invalid_handoff = workspace.WorkspaceRegistration(
+        "alpha", project_path, SESSION_ID, agent, model
+    )
 
     with pytest.raises(workspace.WorkspaceError, match="line breaks or NUL"):
         workspace.register_project(invalid_handoff, config_path)
@@ -101,6 +121,117 @@ def test_default_config_path_prefers_xdg_configuration(tmp_path: Path) -> None:
         workspace.default_config_path({}, tmp_path)
         == tmp_path / ".config" / "aco" / "workspace.toml"
     )
+
+
+def test_loading_a_legacy_mapping_defaults_its_provider_without_rewriting(tmp_path: Path) -> None:
+    config_path = tmp_path / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    contents = (
+        f'version = 1\n[projects.alpha]\npath = "{project_path}"\n'
+        f'session_id = "{SESSION_ID}"\nagent = "restored head"\n'
+    )
+    config_path.write_text(contents)
+
+    project = workspace.load_config(config_path).projects["alpha"]
+    idempotent = workspace.register_project(
+        workspace.WorkspaceRegistration("alpha", project_path, SESSION_ID, "restored head"),
+        config_path,
+    )
+    fake = FakeTerminal(terminal.Target(terminal.TargetState.ABSENT))
+    outcomes = workspace.run_projects(
+        config_path,
+        environment={"XDG_RUNTIME_DIR": str(tmp_path)},
+        runtime_directory=tmp_path,
+        terminal_factory=lambda _socket: fake,
+    )
+
+    assert project.provider is providers.Provider.CODEX
+    assert idempotent is False
+    assert outcomes == (workspace.RunOutcome("alpha", workspace.RunState.STARTED),)
+    assert fake.created[0][3].command == ["codex", "resume", SESSION_ID]
+    assert config_path.read_text() == contents
+
+
+def test_registering_a_provider_adds_explicit_identity_to_a_legacy_mapping(tmp_path: Path) -> None:
+    config_path = tmp_path / "workspace.toml"
+    codex_path = tmp_path / "codex"
+    claude_path = tmp_path / "claude"
+    codex_path.mkdir()
+    claude_path.mkdir()
+    config_path.write_text(
+        f'version = 1\n[projects.codex]\npath = "{codex_path}"\n'
+        f'session_id = "{SESSION_ID}"\nagent = "Codex head"\nmodel = "gpt-5.3-codex"\n'
+    )
+
+    created = workspace.register_project(
+        workspace.WorkspaceRegistration(
+            "claude",
+            claude_path,
+            "123e4567-e89b-12d3-a456-426614174001",
+            "Claude head",
+            "sonnet",
+            provider=providers.Provider.CLAUDE,
+        ),
+        config_path,
+    )
+    projects = workspace.load_config(config_path).projects
+
+    assert created is True
+    assert config_path.read_text().startswith("version = 2\n")
+    assert projects["codex"].provider is providers.Provider.CODEX
+    assert projects["codex"].model == "gpt-5.3-codex"
+    assert projects["claude"].provider is providers.Provider.CLAUDE
+    assert projects["claude"].model == "sonnet"
+
+
+@pytest.mark.parametrize(
+    ("version", "provider", "message"),
+    [
+        (1, 'provider = "codex"\n', "unsupported or missing"),
+        (2, "", "unsupported or missing"),
+        (2, 'provider = "grok"\n', "provider must be one of codex, claude"),
+    ],
+)
+def test_load_config_refuses_mixed_or_unknown_provider_records(
+    tmp_path: Path, version: int, provider: str, message: str
+) -> None:
+    config_path = tmp_path / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    config_path.write_text(
+        f'version = {version}\n[projects.alpha]\npath = "{project_path}"\n'
+        f'session_id = "{SESSION_ID}"\nagent = "head"\n{provider}'
+    )
+
+    with pytest.raises(workspace.WorkspaceError, match=message):
+        workspace.load_config(config_path)
+
+
+def test_provider_scopes_native_uuid_uniqueness_but_not_directory_ownership(tmp_path: Path) -> None:
+    config_path = tmp_path / "workspace.toml"
+    codex_path = tmp_path / "codex"
+    claude_path = tmp_path / "claude"
+    duplicate_path = tmp_path / "duplicate"
+    codex_path.mkdir()
+    claude_path.mkdir()
+    duplicate_path.mkdir()
+    workspace.register_project(
+        workspace.WorkspaceRegistration("codex", codex_path, SESSION_ID, "Codex head"), config_path
+    )
+
+    assert workspace.register_project(
+        workspace.WorkspaceRegistration(
+            "claude", claude_path, SESSION_ID, "Claude head", provider=providers.Provider.CLAUDE
+        ),
+        config_path,
+    )
+
+    duplicate = workspace.WorkspaceRegistration(
+        "claude-copy", duplicate_path, SESSION_ID, "Claude head", provider=providers.Provider.CLAUDE
+    )
+    with pytest.raises(workspace.WorkspaceError, match="claude session"):
+        workspace.register_project(duplicate, config_path)
 
 
 def test_load_config_refuses_a_relative_project_directory(tmp_path: Path) -> None:
@@ -122,11 +253,20 @@ def test_load_config_refuses_a_relative_project_directory(tmp_path: Path) -> Non
     ("contents", "message"),
     [
         ("version = [", "invalid workspace configuration"),
-        ("version = 2\nprojects = {}\n", "version = 1"),
+        ("version = 3\nprojects = {}\n", "version = 1 or version = 2"),
+        ("version = true\nprojects = {}\n", "version = 1 or version = 2"),
+        ("version = false\nprojects = {}\n", "version = 1 or version = 2"),
+        ("version = 1.0\nprojects = {}\n", "version = 1 or version = 2"),
+        ("version = 2.0\nprojects = {}\n", "version = 1 or version = 2"),
         ("version = 1\nprojects = []\n", "projects must be a mapping"),
         (
             'version = 1\n[projects.alpha]\npath = 3\nsession_id = "x"\nagent = "head"\n',
             "path must be a string",
+        ),
+        (
+            'version = 2\n[projects.alpha]\npath = "/tmp"\nsession_id = 3\n'
+            'agent = "head"\nprovider = "grok"\n',
+            "session_id must be a string",
         ),
         (
             'version = 1\n[projects.alpha]\npath = "/tmp"\nsession_id = "x"\n',
@@ -194,7 +334,7 @@ def test_load_config_refuses_missing_or_noncanonical_project_directories(tmp_pat
     ("beta_path", "beta_session", "message"),
     [
         ("alpha", "123e4567-e89b-12d3-a456-426614174001", "duplicate canonical paths"),
-        ("beta", SESSION_ID, "duplicate native Codex UUIDs"),
+        ("beta", SESSION_ID, "duplicate native provider UUIDs"),
     ],
 )
 def test_load_config_refuses_duplicate_project_identity(
@@ -250,7 +390,7 @@ def test_register_refuses_each_invalid_mapping_field(
     elif directory_kind == "file":
         directory.write_text("not a directory")
 
-    invalid_handoff = workspace.registration(key, directory, session_id, agent, model)
+    invalid_handoff = workspace.WorkspaceRegistration(key, directory, session_id, agent, model)
     config_path = tmp_path / "config" / "workspace.toml"
 
     with pytest.raises(workspace.WorkspaceError, match=message):
@@ -269,7 +409,7 @@ def test_register_leaves_no_configuration_behind_when_atomic_replace_fails(
 
     monkeypatch.setattr(workspace.os, "replace", fail_replace)
 
-    handoff = workspace.registration("alpha", project_path, SESSION_ID, "restored head")
+    handoff = workspace.WorkspaceRegistration("alpha", project_path, SESSION_ID, "restored head")
 
     with pytest.raises(workspace.WorkspaceError, match="cannot write"):
         workspace.register_project(handoff, config_path)
@@ -277,6 +417,36 @@ def test_register_leaves_no_configuration_behind_when_atomic_replace_fails(
     assert [
         path for path in config_path.parent.glob("workspace.*") if path.name != "workspace.lock"
     ] == []
+
+
+def test_failed_provider_migration_preserves_legacy_mapping(monkeypatch, tmp_path: Path) -> None:
+    config_path = tmp_path / "workspace.toml"
+    codex_path = tmp_path / "codex"
+    claude_path = tmp_path / "claude"
+    codex_path.mkdir()
+    claude_path.mkdir()
+    original = (
+        f'version = 1\n[projects.codex]\npath = "{codex_path}"\n'
+        f'session_id = "{SESSION_ID}"\nagent = "Codex head"\n'
+    )
+    config_path.write_text(original)
+
+    def fail_replace(*_arguments: object) -> None:
+        raise OSError("disk failure")
+
+    monkeypatch.setattr(workspace.os, "replace", fail_replace)
+    handoff = workspace.WorkspaceRegistration(
+        "claude",
+        claude_path,
+        "123e4567-e89b-12d3-a456-426614174001",
+        "Claude head",
+        provider=providers.Provider.CLAUDE,
+    )
+
+    with pytest.raises(workspace.WorkspaceError, match="cannot write"):
+        workspace.register_project(handoff, config_path)
+
+    assert config_path.read_text() == original
 
 
 @pytest.mark.parametrize(
@@ -319,7 +489,8 @@ def test_run_refuses_an_unknown_selected_project(tmp_path: Path) -> None:
     project_path = tmp_path / "project"
     project_path.mkdir()
     workspace.register_project(
-        workspace.registration("alpha", project_path, SESSION_ID, "restored head"), config_path
+        workspace.WorkspaceRegistration("alpha", project_path, SESSION_ID, "restored head"),
+        config_path,
     )
 
     with pytest.raises(workspace.WorkspaceError, match="not registered"):
@@ -346,7 +517,9 @@ def test_register_persists_an_optional_model(tmp_path: Path) -> None:
     project_path.mkdir()
 
     workspace.register_project(
-        workspace.registration("alpha", project_path, SESSION_ID, "restored head", "gpt-5.3-codex"),
+        workspace.WorkspaceRegistration(
+            "alpha", project_path, SESSION_ID, "restored head", "gpt-5.3-codex"
+        ),
         config_path,
     )
 
@@ -421,7 +594,8 @@ def test_run_starts_the_exact_registered_session_with_its_logical_identity(tmp_p
     project_path = tmp_path / "project"
     project_path.mkdir()
     workspace.register_project(
-        workspace.registration("alpha", project_path, SESSION_ID, "restored head"), config_path
+        workspace.WorkspaceRegistration("alpha", project_path, SESSION_ID, "restored head"),
+        config_path,
     )
     fake = FakeTerminal(terminal.Target(terminal.TargetState.ABSENT))
 
@@ -445,7 +619,8 @@ def test_run_does_not_create_a_second_viewer_while_an_attachment_is_pending(tmp_
     project_path = tmp_path / "project"
     project_path.mkdir()
     workspace.register_project(
-        workspace.registration("alpha", project_path, SESSION_ID, "restored head"), config_path
+        workspace.WorkspaceRegistration("alpha", project_path, SESSION_ID, "restored head"),
+        config_path,
     )
     fake = FakeTerminal(
         terminal.Target(terminal.TargetState.DETACHED, "alpha", SESSION_ID, viewer_pending=True)
@@ -467,7 +642,8 @@ def test_run_reattaches_a_matching_detached_head(tmp_path: Path) -> None:
     project_path = tmp_path / "project"
     project_path.mkdir()
     workspace.register_project(
-        workspace.registration("alpha", project_path, SESSION_ID, "restored head"), config_path
+        workspace.WorkspaceRegistration("alpha", project_path, SESSION_ID, "restored head"),
+        config_path,
     )
     fake = FakeTerminal(terminal.Target(terminal.TargetState.DETACHED, "alpha", SESSION_ID))
 
@@ -505,7 +681,8 @@ def test_run_reuses_an_attached_head_or_reports_an_existing_viewer_pending(
     project_path = tmp_path / "project"
     project_path.mkdir()
     workspace.register_project(
-        workspace.registration("alpha", project_path, SESSION_ID, "restored head"), config_path
+        workspace.WorkspaceRegistration("alpha", project_path, SESSION_ID, "restored head"),
+        config_path,
     )
     fake = FakeTerminal(target)
 
@@ -535,7 +712,8 @@ def test_run_reports_pending_when_a_new_viewer_has_not_attached(
     project_path = tmp_path / "project"
     project_path.mkdir()
     workspace.register_project(
-        workspace.registration("alpha", project_path, SESSION_ID, "restored head"), config_path
+        workspace.WorkspaceRegistration("alpha", project_path, SESSION_ID, "restored head"),
+        config_path,
     )
     fake = FakeTerminal(
         terminal.Target(terminal.TargetState.ABSENT),
@@ -558,7 +736,8 @@ def test_run_reports_foreign_tmux_metadata_without_adopting_it(tmp_path: Path) -
     project_path = tmp_path / "project"
     project_path.mkdir()
     workspace.register_project(
-        workspace.registration("alpha", project_path, SESSION_ID, "restored head"), config_path
+        workspace.WorkspaceRegistration("alpha", project_path, SESSION_ID, "restored head"),
+        config_path,
     )
     fake = FakeTerminal(terminal.Target(terminal.TargetState.DETACHED, "foreign", SESSION_ID))
 
@@ -579,7 +758,8 @@ def test_run_retries_an_exited_matching_pane_only_when_explicitly_invoked(tmp_pa
     project_path = tmp_path / "project"
     project_path.mkdir()
     workspace.register_project(
-        workspace.registration("alpha", project_path, SESSION_ID, "restored head"), config_path
+        workspace.WorkspaceRegistration("alpha", project_path, SESSION_ID, "restored head"),
+        config_path,
     )
     fake = FakeTerminal(terminal.Target(terminal.TargetState.EXITED, "alpha", SESSION_ID))
 
@@ -611,7 +791,8 @@ def test_run_reports_a_console_that_attached_during_launch_without_opening_anoth
     project_path = tmp_path / "project"
     project_path.mkdir()
     workspace.register_project(
-        workspace.registration("alpha", project_path, SESSION_ID, "restored head"), config_path
+        workspace.WorkspaceRegistration("alpha", project_path, SESSION_ID, "restored head"),
+        config_path,
     )
     fake = FakeTerminal(target, attach_after_launch=True)
 
@@ -634,10 +815,16 @@ def test_runtime_failure_for_one_project_does_not_hide_the_later_project(tmp_pat
     alpha.mkdir()
     beta.mkdir()
     workspace.register_project(
-        workspace.registration("alpha", alpha, SESSION_ID, "alpha head"), config_path
+        workspace.WorkspaceRegistration("alpha", alpha, SESSION_ID, "alpha head"), config_path
     )
     workspace.register_project(
-        workspace.registration("beta", beta, "123e4567-e89b-12d3-a456-426614174001", "beta head"),
+        workspace.WorkspaceRegistration(
+            "beta",
+            beta,
+            "123e4567-e89b-12d3-a456-426614174001",
+            "beta head",
+            provider=providers.Provider.CLAUDE,
+        ),
         config_path,
     )
     fake = FakeTerminal(terminal.Target(terminal.TargetState.ABSENT), failed_project="alpha")
@@ -653,3 +840,44 @@ def test_runtime_failure_for_one_project_does_not_hide_the_later_project(tmp_pat
         workspace.RunState.FAILED,
         workspace.RunState.STARTED,
     ]
+    assert fake.created[0][3].command == [
+        "claude",
+        "--resume",
+        "123e4567-e89b-12d3-a456-426614174001",
+    ]
+
+
+@pytest.mark.parametrize("target_provider", [None, providers.Provider.CODEX])
+@pytest.mark.parametrize(
+    "target_state",
+    [terminal.TargetState.ATTACHED, terminal.TargetState.DETACHED, terminal.TargetState.EXITED],
+)
+def test_run_refuses_a_legacy_or_mismatched_target_for_claude_before_opening_a_viewer(
+    tmp_path: Path,
+    target_provider: providers.Provider | None,
+    target_state: terminal.TargetState,
+) -> None:
+    config_path = tmp_path / "config" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    workspace.register_project(
+        workspace.WorkspaceRegistration(
+            "alpha", project_path, SESSION_ID, "Claude head", provider=providers.Provider.CLAUDE
+        ),
+        config_path,
+    )
+    fake = FakeTerminal(
+        terminal.Target(target_state, "alpha", SESSION_ID, provider=target_provider)
+    )
+
+    outcomes = workspace.run_projects(
+        config_path,
+        environment={"XDG_RUNTIME_DIR": str(tmp_path)},
+        runtime_directory=tmp_path,
+        terminal_factory=lambda _socket: fake,
+    )
+
+    assert outcomes[0].state is workspace.RunState.FAILED
+    assert fake.created == []
+    assert fake.retried == []
+    assert fake.opened == []

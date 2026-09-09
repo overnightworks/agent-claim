@@ -57,7 +57,8 @@ containers = ["agent_coordination"]
 layers = [
     "cli",
     "workspace",
-    "codex | terminal",
+    "terminal",
+    "providers",
     "checkout | store",
     "github",
     "forge",
@@ -84,8 +85,8 @@ name = "Workspace recovery does not reach repository coordination"
 type = "forbidden"
 source_modules = [
     "agent_coordination.workspace",
-    "agent_coordination.codex",
     "agent_coordination.terminal",
+    "agent_coordination.providers",
 ]
 forbidden_modules = [
     "agent_coordination.store",
@@ -93,6 +94,14 @@ forbidden_modules = [
     "agent_coordination.github",
     "agent_coordination.forge",
 ]
+allow_indirect_imports = false
+as_packages = false
+
+[[tool.importlinter.contracts]]
+name = "Provider definitions do not drive workspace orchestration"
+type = "forbidden"
+source_modules = ["agent_coordination.providers"]
+forbidden_modules = ["agent_coordination.workspace", "agent_coordination.terminal"]
 allow_indirect_imports = false
 as_packages = false
 
