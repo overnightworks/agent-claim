@@ -79,6 +79,391 @@ def test_explicit_target_provider_mismatch_is_not_adopted() -> None:
     )
 
 
+def test_live_registration_requires_the_same_native_birth_before_and_after_observation(
+    monkeypatch, tmp_path
+) -> None:
+    snapshots = iter(
+        (
+            _native_snapshot(41, tmp_path, start_time=10),
+            _native_snapshot(41, tmp_path, start_time=11),
+        )
+    )
+    monkeypatch.setattr(process, "inspect_native_process", lambda _pid: next(snapshots))
+
+    with pytest.raises(terminal.TerminalError, match="changed"):
+        terminal.register_live_process(providers.Provider.CODEX, "session-a", tmp_path, 41)
+
+
+def test_live_registration_returns_a_receipt_after_stable_native_observations(
+    monkeypatch, tmp_path
+) -> None:
+    native = _native_snapshot(41, tmp_path)
+    monkeypatch.setattr(process, "inspect_native_process", lambda _pid: native)
+
+    receipt = terminal.register_live_process(providers.Provider.CODEX, "session-a", tmp_path, 41)
+
+    assert receipt == terminal.ExternalProcessReceipt("boot", 41, 10)
+
+
+def test_live_registration_discards_a_claude_resume_prompt_from_its_receipt(
+    monkeypatch, tmp_path
+) -> None:
+    native = process.NativeProcess(
+        41,
+        process.NativeProcessState.LIVE,
+        process.current_user_id(),
+        "boot",
+        10,
+        "claude",
+        tmp_path,
+        b"claude\0--resume\0session-a\0continue this work\0",
+    )
+    monkeypatch.setattr(process, "inspect_native_process", lambda _pid: native)
+
+    receipt = terminal.register_live_process(providers.Provider.CLAUDE, "session-a", tmp_path, 41)
+
+    assert receipt == terminal.ExternalProcessReceipt("boot", 41, 10)
+
+
+def test_live_registration_refuses_a_codex_javascript_wrapper(monkeypatch, tmp_path) -> None:
+    wrapper = process.NativeProcess(
+        41,
+        process.NativeProcessState.LIVE,
+        process.current_user_id(),
+        "boot",
+        10,
+        "node",
+        tmp_path,
+        b"node\0codex.js\0resume\0session-a\0",
+    )
+    monkeypatch.setattr(process, "inspect_native_process", lambda _pid: wrapper)
+
+    with pytest.raises(terminal.TerminalError, match="exact resumed native conversation"):
+        terminal.register_live_process(providers.Provider.CODEX, "session-a", tmp_path, 41)
+
+
+def test_live_registration_refuses_grok_until_it_has_a_native_owner_shape(tmp_path) -> None:
+    with pytest.raises(terminal.TerminalError, match="does not support live registration"):
+        terminal.register_live_process(providers.Provider.GROK, "session-a", tmp_path, 41)
+
+
+def test_external_manual_resume_blocks_retry_of_an_exited_managed_pane(
+    monkeypatch, tmp_path
+) -> None:
+    replacement = _native_snapshot(52, tmp_path)
+    monkeypatch.setattr(
+        process,
+        "inspect_native_process",
+        lambda _pid: process.NativeProcess(41, process.NativeProcessState.ABSENT),
+    )
+    monkeypatch.setattr(
+        process,
+        "scan_native_processes",
+        lambda _executable: process.NativeProcessScan((replacement,), True),
+    )
+
+    ownership = terminal.external_ownership(
+        providers.Provider.CODEX,
+        "session-a",
+        tmp_path,
+        terminal.ExternalProcessReceipt("boot", 41, 10),
+    )
+
+    assert ownership.state is terminal.ExternalOwnershipState.LIVE
+
+
+def test_external_ownership_reuses_a_recorded_live_process_without_a_scan(
+    monkeypatch, tmp_path
+) -> None:
+    original = _native_snapshot(41, tmp_path)
+    monkeypatch.setattr(process, "inspect_native_process", lambda _pid: original)
+    monkeypatch.setattr(
+        process, "scan_native_processes", lambda _executable: pytest.fail("scanned")
+    )
+
+    ownership = terminal.external_ownership(
+        providers.Provider.CODEX,
+        "session-a",
+        tmp_path,
+        terminal.ExternalProcessReceipt("boot", 41, 10),
+    )
+
+    assert ownership.state is terminal.ExternalOwnershipState.LIVE
+
+
+@pytest.mark.parametrize(
+    ("boot_id", "start_time", "alternate_pid", "expected"),
+    [
+        ("new-boot", 10, None, terminal.ExternalOwnershipState.ABSENT),
+        ("boot", 11, None, terminal.ExternalOwnershipState.ABSENT),
+        ("new-boot", 10, 52, terminal.ExternalOwnershipState.LIVE),
+    ],
+)
+def test_external_ownership_rechecks_an_invalidated_receipt(
+    monkeypatch, tmp_path, boot_id, start_time, alternate_pid, expected
+) -> None:
+    original = _native_snapshot(41, tmp_path, boot_id=boot_id, start_time=start_time)
+    alternates = () if alternate_pid is None else (_native_snapshot(alternate_pid, tmp_path),)
+    monkeypatch.setattr(process, "inspect_native_process", lambda _pid: original)
+    monkeypatch.setattr(
+        process,
+        "scan_native_processes",
+        lambda _executable: process.NativeProcessScan(alternates, True),
+    )
+
+    ownership = terminal.external_ownership(
+        providers.Provider.CODEX,
+        "session-a",
+        tmp_path,
+        terminal.ExternalProcessReceipt("boot", 41, 10),
+    )
+
+    assert ownership.state is expected
+
+
+@pytest.mark.parametrize("uncertainty", ["incomplete", "wrong-cwd", "ambiguous"])
+def test_external_ownership_refuses_uncertainty_alongside_an_exact_owner(
+    monkeypatch, tmp_path, uncertainty
+) -> None:
+    processes = [_native_snapshot(42, tmp_path)]
+    complete = True
+    if uncertainty == "incomplete":
+        complete = False
+    elif uncertainty == "wrong-cwd":
+        processes.append(_native_snapshot(43, Path("/other")))
+    else:
+        processes.append(
+            process.NativeProcess(
+                43,
+                process.NativeProcessState.LIVE,
+                process.current_user_id(),
+                "boot",
+                10,
+                "codex",
+                tmp_path,
+                b"codex\0resume\0--unexpected\0session-a\0",
+            )
+        )
+    monkeypatch.setattr(
+        process,
+        "inspect_native_process",
+        lambda _pid: process.NativeProcess(41, process.NativeProcessState.ABSENT),
+    )
+    monkeypatch.setattr(
+        process,
+        "scan_native_processes",
+        lambda _executable: process.NativeProcessScan(tuple(processes), complete),
+    )
+
+    ownership = terminal.external_ownership(providers.Provider.CODEX, "session-a", tmp_path, None)
+
+    assert ownership.state is terminal.ExternalOwnershipState.UNKNOWN
+
+
+def test_external_ownership_refuses_a_live_recorded_process_with_changed_binding(
+    monkeypatch, tmp_path
+) -> None:
+    changed = process.NativeProcess(
+        41,
+        process.NativeProcessState.LIVE,
+        process.current_user_id(),
+        "boot",
+        10,
+        "codex",
+        tmp_path,
+        b"codex\0resume\0different\0",
+    )
+    monkeypatch.setattr(process, "inspect_native_process", lambda _pid: changed)
+
+    ownership = terminal.external_ownership(
+        providers.Provider.CODEX,
+        "session-a",
+        tmp_path,
+        terminal.ExternalProcessReceipt("boot", 41, 10),
+    )
+
+    assert ownership.state is terminal.ExternalOwnershipState.UNKNOWN
+
+
+@pytest.mark.parametrize(
+    "scan",
+    [
+        process.NativeProcessScan(
+            (
+                process.NativeProcess(
+                    42,
+                    process.NativeProcessState.LIVE,
+                    process.current_user_id(),
+                    "boot",
+                    10,
+                    "codex",
+                    Path("/other"),
+                    b"codex\0resume\0session-a\0",
+                ),
+            ),
+            True,
+        ),
+        process.NativeProcessScan(
+            (
+                process.NativeProcess(
+                    42,
+                    process.NativeProcessState.LIVE,
+                    process.current_user_id(),
+                    "boot",
+                    10,
+                    "codex",
+                    Path("/other"),
+                    b"codex\0resume\0session-a\0",
+                ),
+            ),
+            False,
+        ),
+        process.NativeProcessScan(
+            (
+                process.NativeProcess(
+                    42,
+                    process.NativeProcessState.LIVE,
+                    process.current_user_id(),
+                    "boot",
+                    10,
+                    "codex",
+                    Path("/other"),
+                    b"codex\0resume\0session-a\0",
+                ),
+                process.NativeProcess(
+                    43,
+                    process.NativeProcessState.LIVE,
+                    process.current_user_id(),
+                    "boot",
+                    10,
+                    "codex",
+                    Path("/other"),
+                    b"codex\0resume\0session-a\0",
+                ),
+            ),
+            True,
+        ),
+        process.NativeProcessScan(
+            (
+                process.NativeProcess(
+                    42,
+                    process.NativeProcessState.LIVE,
+                    process.current_user_id(),
+                    "boot",
+                    10,
+                    "codex",
+                    Path("/other"),
+                ),
+            ),
+            True,
+        ),
+    ],
+)
+def test_external_ownership_refuses_incomplete_or_ambiguous_scans(
+    monkeypatch, tmp_path, scan
+) -> None:
+    monkeypatch.setattr(
+        process,
+        "inspect_native_process",
+        lambda _pid: process.NativeProcess(41, process.NativeProcessState.ABSENT),
+    )
+    monkeypatch.setattr(process, "scan_native_processes", lambda _executable: scan)
+
+    ownership = terminal.external_ownership(providers.Provider.CODEX, "session-a", tmp_path, None)
+
+    assert ownership.state is terminal.ExternalOwnershipState.UNKNOWN
+
+
+@pytest.mark.parametrize(
+    "snapshot",
+    [
+        process.NativeProcess(41, process.NativeProcessState.LIVE, 999, "boot", 10),
+        process.NativeProcess(41, process.NativeProcessState.ZOMBIE, process.current_user_id()),
+        process.NativeProcess(41, process.NativeProcessState.UNKNOWN, process.current_user_id()),
+    ],
+)
+def test_live_registration_refuses_an_unowned_or_unobservable_process(
+    monkeypatch, tmp_path, snapshot
+) -> None:
+    monkeypatch.setattr(process, "inspect_native_process", lambda _pid: snapshot)
+
+    with pytest.raises(terminal.TerminalError):
+        terminal.register_live_process(providers.Provider.CODEX, "session-a", tmp_path, 41)
+
+
+def test_external_ownership_does_not_scan_unsupported_live_grok(tmp_path) -> None:
+    assert (
+        terminal.external_ownership(providers.Provider.GROK, "session-a", tmp_path, None).state
+        is terminal.ExternalOwnershipState.ABSENT
+    )
+
+
+def test_external_ownership_recovers_when_a_matching_native_process_is_a_zombie(
+    monkeypatch, tmp_path
+) -> None:
+    proc_root = tmp_path / "proc"
+    zombie = proc_root / "41"
+    zombie.mkdir(parents=True)
+    fields = ["Z", *("0" for _ in range(19)), "31"]
+    (zombie / "stat").write_text("41 (codex) " + " ".join(fields))
+    (zombie / "status").write_text(f"Uid:\t{process.current_user_id()}\t0\t0\t0\n")
+    real_scan = process.scan_native_processes
+    monkeypatch.setattr(
+        process,
+        "inspect_native_process",
+        lambda _pid: process.NativeProcess(41, process.NativeProcessState.ABSENT),
+    )
+    monkeypatch.setattr(
+        process,
+        "scan_native_processes",
+        lambda executable: real_scan(executable, proc_root),
+    )
+
+    ownership = terminal.external_ownership(providers.Provider.CODEX, "session-a", tmp_path, None)
+
+    assert ownership.state is terminal.ExternalOwnershipState.ABSENT
+
+
+def test_external_ownership_refuses_a_relevant_process_that_loses_its_cwd(
+    monkeypatch, tmp_path
+) -> None:
+    proc_root = tmp_path / "proc"
+    candidate = proc_root / "41"
+    candidate.mkdir(parents=True)
+    (candidate / "stat").write_text("41 (codex) " + " ".join(["S", *("0" for _ in range(19))]))
+    (candidate / "status").write_text(f"Uid:\t{process.current_user_id()}\t0\t0\t0\n")
+    real_scan = process.scan_native_processes
+    monkeypatch.setattr(
+        process,
+        "inspect_native_process",
+        lambda _pid: process.NativeProcess(41, process.NativeProcessState.ABSENT),
+    )
+    monkeypatch.setattr(
+        process,
+        "scan_native_processes",
+        lambda executable: real_scan(executable, proc_root),
+    )
+
+    ownership = terminal.external_ownership(providers.Provider.CODEX, "session-a", tmp_path, None)
+
+    assert ownership.state is terminal.ExternalOwnershipState.UNKNOWN
+
+
+def _native_snapshot(
+    pid: int, directory, *, boot_id: str = "boot", start_time: int = 10
+) -> process.NativeProcess:
+    return process.NativeProcess(
+        pid,
+        process.NativeProcessState.LIVE,
+        process.current_user_id(),
+        boot_id,
+        start_time,
+        "codex",
+        directory,
+        b"codex\0resume\0session-a\0",
+    )
+
+
 def test_tmux_sets_dead_pane_preservation_and_metadata_before_starting_codex(
     monkeypatch, tmp_path
 ) -> None:
@@ -468,6 +853,7 @@ def test_initial_and_retried_codex_children_receive_the_sanitized_environment(
     fake_codex = executable_directory / "codex"
     fake_codex.write_text(
         "#!/bin/sh\n"
+        'export ACO_PROOF_CWD="$(pwd)"\n'
         'env -0 > "$ACO_PROOF_OUTPUT"\n'
         'tmux -S "$ACO_PROOF_SOCKET" wait-for -S aco-env-proof\n'
     )
@@ -538,7 +924,7 @@ def test_initial_and_retried_codex_children_receive_the_sanitized_environment(
                     if name != "ACO_PROOF_AUTH"
                 },
             )
-            adapter.retry("alpha", retry_launch)
+            adapter.retry("alpha", tmp_path, retry_launch)
             _wait_for_probe(socket_path)
             retried_environment = _environment(output_path)
             retried_pane_command = process.run_captured(
@@ -574,6 +960,7 @@ def test_initial_and_retried_codex_children_receive_the_sanitized_environment(
     assert "ACO_PROOF_STALE_GLOBAL" not in first_environment
     assert "ACO_PROOF_STALE_GLOBAL" not in retried_environment
     assert "ACO_PROOF_STALE_GLOBAL" not in second_project_environment
+    assert retried_environment["ACO_PROOF_CWD"] == str(tmp_path)
     assert injected_target.exit_status == 1
     assert synthetic_secret not in pane_command
     assert synthetic_secret not in retried_pane_command

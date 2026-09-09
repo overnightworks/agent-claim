@@ -14,13 +14,45 @@ import selectors
 import subprocess
 import time
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
+from pathlib import Path
 
 DEFAULT_TIMEOUT_SECONDS = 60
 MAX_COMMAND_OUTPUT_BYTES = 8 * 1024 * 1024
 _OUTPUT_CHUNK_BYTES = 64 * 1024
 _PROCESS_EXIT_POLL_SECONDS = 1
+_MAX_PROC_COMMAND_LINE_BYTES = 16 * 1024
+_MAX_NATIVE_PROCESS_SCAN = 1024
+_STAT_START_TIME_INDEX = 19
+
+
+class NativeProcessState(StrEnum):
+    LIVE = "live"
+    ZOMBIE = "zombie"
+    ABSENT = "absent"
+    UNKNOWN = "unknown"
+    BOUNDED = "bounded"
+
+
+@dataclass(frozen=True)
+class NativeProcess:
+    """A transient bounded `/proc` observation; command bytes never leave the caller."""
+
+    pid: int
+    state: NativeProcessState
+    uid: int | None = None
+    boot_id: str | None = None
+    start_time: int | None = None
+    comm: str | None = None
+    directory: Path | None = None
+    command_line: bytes | None = None
+
+
+@dataclass(frozen=True)
+class NativeProcessScan:
+    processes: tuple[NativeProcess, ...]
+    complete: bool
 
 
 class IoStage(StrEnum):
@@ -308,3 +340,161 @@ def start_detached(command: list[str], *, env: dict[str, str] | None = None) -> 
         raise ExecutableMissingError(command[0]) from error
     except OSError as error:
         raise ProcessStartFailedError(str(error)) from error
+
+
+def inspect_native_process(pid: int, proc_root: Path = Path("/proc")) -> NativeProcess:
+    """Read one Linux process twice-safe identity snapshot without shelling out.
+
+    The result intentionally carries raw command bytes only long enough for the
+    terminal boundary to classify them.  Callers persist a receipt, never argv.
+    """
+    identity = _process_identity(pid, proc_root)
+    if identity.state is not NativeProcessState.LIVE:
+        return identity
+    return _live_process_snapshot(identity, proc_root / str(pid), proc_root)
+
+
+def _process_identity(pid: int, proc_root: Path) -> NativeProcess:
+    identity = _stat_identity(pid, proc_root)
+    if identity.state not in {NativeProcessState.LIVE, NativeProcessState.ZOMBIE}:
+        return identity
+    try:
+        uid = _proc_uid(proc_root / str(pid) / "status")
+    except FileNotFoundError:
+        return NativeProcess(pid, NativeProcessState.ABSENT)
+    except (OSError, ValueError):
+        return replace(identity, state=NativeProcessState.UNKNOWN)
+    return replace(identity, uid=uid)
+
+
+def _stat_identity(pid: int, proc_root: Path) -> NativeProcess:
+    absent = NativeProcess(pid, NativeProcessState.ABSENT)
+    if pid <= 0:
+        return absent
+    try:
+        state, comm, start_time = _proc_stat(proc_root / str(pid) / "stat")
+    except FileNotFoundError:
+        return absent
+    except (OSError, ValueError):
+        return NativeProcess(pid, NativeProcessState.UNKNOWN)
+    if state == "Z":
+        return NativeProcess(pid, NativeProcessState.ZOMBIE, comm=comm, start_time=start_time)
+    return NativeProcess(pid, NativeProcessState.LIVE, start_time=start_time, comm=comm)
+
+
+def _live_process_snapshot(
+    identity: NativeProcess,
+    directory: Path,
+    proc_root: Path,
+) -> NativeProcess:
+    boot_id: str | None = None
+    try:
+        boot_id = (proc_root / "sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+        cwd = (directory / "cwd").resolve(strict=True)
+        command_line = _bounded_proc_read(directory / "cmdline")
+    except _ProcReadBoundedError:
+        return NativeProcess(
+            identity.pid,
+            NativeProcessState.BOUNDED,
+            identity.uid,
+            boot_id,
+            identity.start_time,
+            identity.comm,
+        )
+    except FileNotFoundError:
+        return replace(identity, state=NativeProcessState.UNKNOWN)
+    except (OSError, UnicodeDecodeError):
+        return NativeProcess(
+            identity.pid,
+            NativeProcessState.UNKNOWN,
+            identity.uid,
+            boot_id,
+            identity.start_time,
+            identity.comm,
+        )
+    return NativeProcess(
+        identity.pid,
+        NativeProcessState.LIVE,
+        identity.uid,
+        boot_id,
+        identity.start_time,
+        identity.comm,
+        cwd,
+        command_line,
+    )
+
+
+def current_user_id() -> int:
+    """Expose the process boundary's user identity to its callers."""
+    return os.getuid()
+
+
+def scan_native_processes(executable: str, proc_root: Path = Path("/proc")) -> NativeProcessScan:
+    """Boundedly inspect same-user processes whose kernel comm names one native CLI."""
+    observed: list[NativeProcess] = []
+    complete = True
+    inspected = 0
+    try:
+        for entry in proc_root.iterdir():
+            if not entry.name.isdecimal():
+                continue
+            inspected += 1
+            if inspected > _MAX_NATIVE_PROCESS_SCAN:
+                complete = False
+                break
+            snapshot = _scan_native_process_candidate(entry, executable, proc_root)
+            if snapshot is None or snapshot.state is NativeProcessState.ABSENT:
+                continue
+            if snapshot.state is not NativeProcessState.LIVE:
+                complete = False
+                continue
+            observed.append(snapshot)
+    except OSError:
+        complete = False
+    return NativeProcessScan(tuple(observed), complete)
+
+
+def _scan_native_process_candidate(
+    entry: Path, executable: str, proc_root: Path
+) -> NativeProcess | None:
+    identity = _process_identity(int(entry.name), proc_root)
+    if identity.state is NativeProcessState.ABSENT or identity.comm != executable:
+        return None
+    if identity.uid is not None and identity.uid != os.getuid():
+        return None
+    if identity.state is NativeProcessState.ZOMBIE:
+        return None
+    if identity.state is not NativeProcessState.LIVE:
+        return identity
+    return _live_process_snapshot(identity, entry, proc_root)
+
+
+class _ProcReadBoundedError(Exception):
+    pass
+
+
+def _bounded_proc_read(path: Path) -> bytes:
+    with path.open("rb") as source:
+        contents = source.read(_MAX_PROC_COMMAND_LINE_BYTES + 1)
+    if len(contents) > _MAX_PROC_COMMAND_LINE_BYTES:
+        raise _ProcReadBoundedError
+    return contents
+
+
+def _proc_stat(path: Path) -> tuple[str, str, int]:
+    contents = path.read_text(encoding="utf-8")
+    opened = contents.find("(")
+    closed = contents.rfind(")")
+    if opened <= 0 or closed <= opened:
+        raise ValueError("malformed proc stat")
+    fields = contents[closed + 2 :].split()
+    if len(fields) <= _STAT_START_TIME_INDEX:
+        raise ValueError("malformed proc stat")
+    return fields[0], contents[opened + 1 : closed], int(fields[_STAT_START_TIME_INDEX])
+
+
+def _proc_uid(path: Path) -> int:
+    for line in path.read_text(encoding="ascii").splitlines():
+        if line.startswith("Uid:"):
+            return int(line.split()[1])
+    raise ValueError("missing process uid")

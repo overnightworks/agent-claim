@@ -701,6 +701,48 @@ def test_register_is_idempotent_for_the_same_stopped_mapping(tmp_path: Path) -> 
     assert workspace.load_config(config_path).projects["alpha"].directory == project_path.resolve()
 
 
+def test_live_registration_persists_only_a_validated_process_receipt(
+    monkeypatch, tmp_path: Path
+) -> None:
+    config_path = tmp_path / "aco" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    receipt = terminal.ExternalProcessReceipt("boot", 41, 31)
+    monkeypatch.setattr(terminal, "register_live_process", lambda *_arguments: receipt)
+
+    workspace.register_project(
+        workspace.WorkspaceRegistration("alpha", project_path, SESSION_ID, "old head", live_pid=41),
+        config_path,
+    )
+
+    project = workspace.load_config(config_path).projects["alpha"]
+    assert project.external_process == workspace.ExternalProcessReceipt("boot", 41, 31)
+    assert "codex\\0" not in config_path.read_text()
+
+
+@pytest.mark.parametrize(
+    "receipt",
+    [
+        'external_process = { boot_id = "boot", pid = 0, start_time = 31 }\n',
+        'external_process = { boot_id = "boot", pid = 41 }\n',
+        'external_process = { boot_id = "boot", pid = 41, start_time = 31, argv = "secret" }\n',
+    ],
+)
+def test_v3_rejects_partial_or_unknown_external_process_receipts(
+    tmp_path: Path, receipt: str
+) -> None:
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    config_path = tmp_path / "workspace.toml"
+    config_path.write_text(
+        f'version = 3\n[projects.alpha]\npath = "{project_path}"\n'
+        f'session_id = "{SESSION_ID}"\nagent = "head"\nprovider = "codex"\n{receipt}'
+    )
+
+    with pytest.raises(workspace.WorkspaceError, match="external process receipt"):
+        workspace.load_config(config_path)
+
+
 def test_register_refuses_an_identity_replacement(tmp_path: Path) -> None:
     config_path = tmp_path / "aco" / "workspace.toml"
     project_path = tmp_path / "project"
@@ -856,7 +898,7 @@ def test_registering_a_provider_adds_explicit_identity_to_a_legacy_mapping(tmp_p
     projects = workspace.load_config(config_path).projects
 
     assert created is True
-    assert config_path.read_text().startswith("version = 2\n")
+    assert config_path.read_text().startswith("version = 3\n")
     assert projects["codex"].provider is providers.Provider.CODEX
     assert projects["codex"].model == "gpt-5.3-codex"
     assert projects["claude"].provider is providers.Provider.CLAUDE
@@ -931,11 +973,11 @@ def test_load_config_refuses_a_relative_project_directory(tmp_path: Path) -> Non
     ("contents", "message"),
     [
         ("version = [", "invalid workspace configuration"),
-        ("version = 3\nprojects = {}\n", "version = 1 or version = 2"),
-        ("version = true\nprojects = {}\n", "version = 1 or version = 2"),
-        ("version = false\nprojects = {}\n", "version = 1 or version = 2"),
-        ("version = 1.0\nprojects = {}\n", "version = 1 or version = 2"),
-        ("version = 2.0\nprojects = {}\n", "version = 1 or version = 2"),
+        ("version = 4\nprojects = {}\n", "version = 1, version = 2, or version = 3"),
+        ("version = true\nprojects = {}\n", "version = 1, version = 2, or version = 3"),
+        ("version = false\nprojects = {}\n", "version = 1, version = 2, or version = 3"),
+        ("version = 1.0\nprojects = {}\n", "version = 1, version = 2, or version = 3"),
+        ("version = 2.0\nprojects = {}\n", "version = 1, version = 2, or version = 3"),
         ("version = 1\nprojects = []\n", "projects must be a mapping"),
         (
             'version = 1\n[projects.alpha]\npath = 3\nsession_id = "x"\nagent = "head"\n',
@@ -1246,7 +1288,7 @@ class FakeTerminal:
             self.pending_after_create,
         )
 
-    def retry(self, project: str, launch: terminal.Launch) -> None:
+    def retry(self, project: str, directory: Path, launch: terminal.Launch) -> None:
         self.retried.append((project, launch))
         self.target = terminal.Target(
             terminal.TargetState.ATTACHED
@@ -1450,6 +1492,150 @@ def test_run_retries_an_exited_matching_pane_only_when_explicitly_invoked(tmp_pa
 
     assert outcomes == (workspace.RunOutcome("alpha", workspace.RunState.RETRIED),)
     assert fake.retried[0][1].command == ["codex", "resume", SESSION_ID]
+
+
+def test_stopped_mapping_does_not_scan_for_external_ownership(monkeypatch, tmp_path: Path) -> None:
+    config_path = tmp_path / "config" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    workspace.register_project(
+        workspace.WorkspaceRegistration("alpha", project_path, SESSION_ID, "restored head"),
+        config_path,
+    )
+    fake = FakeTerminal(terminal.Target(terminal.TargetState.EXITED, "alpha", SESSION_ID))
+    monkeypatch.setattr(
+        terminal,
+        "external_ownership",
+        lambda *_arguments: pytest.fail("stopped mapping scanned for external ownership"),
+    )
+
+    outcomes = workspace.run_projects(
+        config_path,
+        environment={"XDG_RUNTIME_DIR": str(tmp_path)},
+        runtime_directory=tmp_path,
+        terminal_factory=lambda _socket: fake,
+    )
+
+    assert outcomes == (workspace.RunOutcome("alpha", workspace.RunState.RETRIED),)
+
+
+def test_run_leaves_a_manual_native_replacement_alive_when_its_managed_pane_exited(
+    monkeypatch, tmp_path: Path
+) -> None:
+    config_path = tmp_path / "config" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    monkeypatch.setattr(
+        terminal,
+        "register_live_process",
+        lambda *_arguments: terminal.ExternalProcessReceipt("boot", 41, 10),
+    )
+    workspace.register_project(
+        workspace.WorkspaceRegistration(
+            "alpha", project_path, SESSION_ID, "restored head", live_pid=41
+        ),
+        config_path,
+    )
+    fake = FakeTerminal(terminal.Target(terminal.TargetState.EXITED, "alpha", SESSION_ID))
+    monkeypatch.setattr(
+        terminal,
+        "external_ownership",
+        lambda *_arguments: terminal.ExternalOwnership(terminal.ExternalOwnershipState.LIVE),
+    )
+
+    outcomes = workspace.run_projects(
+        config_path,
+        environment={"XDG_RUNTIME_DIR": str(tmp_path)},
+        runtime_directory=tmp_path,
+        terminal_factory=lambda _socket: fake,
+    )
+
+    assert outcomes == (workspace.RunOutcome("alpha", workspace.RunState.EXTERNAL),)
+    assert fake.retried == []
+
+
+def test_run_reports_unknown_external_ownership_without_retrying(
+    monkeypatch, tmp_path: Path
+) -> None:
+    config_path = tmp_path / "config" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    monkeypatch.setattr(
+        terminal,
+        "register_live_process",
+        lambda *_arguments: terminal.ExternalProcessReceipt("boot", 41, 10),
+    )
+    workspace.register_project(
+        workspace.WorkspaceRegistration(
+            "alpha", project_path, SESSION_ID, "restored head", live_pid=41
+        ),
+        config_path,
+    )
+    fake = FakeTerminal(terminal.Target(terminal.TargetState.EXITED, "alpha", SESSION_ID))
+    monkeypatch.setattr(
+        terminal,
+        "external_ownership",
+        lambda *_arguments: terminal.ExternalOwnership(terminal.ExternalOwnershipState.UNKNOWN),
+    )
+
+    outcomes = workspace.run_projects(
+        config_path,
+        environment={"XDG_RUNTIME_DIR": str(tmp_path)},
+        runtime_directory=tmp_path,
+        terminal_factory=lambda _socket: fake,
+    )
+
+    assert outcomes == (workspace.RunOutcome("alpha", workspace.RunState.UNKNOWN),)
+    assert fake.retried == []
+
+
+def test_live_receipt_allows_retry_after_observation_proves_no_external_owner(
+    monkeypatch, tmp_path: Path
+) -> None:
+    config_path = tmp_path / "config" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    monkeypatch.setattr(
+        terminal,
+        "register_live_process",
+        lambda *_arguments: terminal.ExternalProcessReceipt("boot", 41, 10),
+    )
+    workspace.register_project(
+        workspace.WorkspaceRegistration(
+            "alpha", project_path, SESSION_ID, "restored head", live_pid=41
+        ),
+        config_path,
+    )
+    fake = FakeTerminal(terminal.Target(terminal.TargetState.EXITED, "alpha", SESSION_ID))
+    monkeypatch.setattr(
+        terminal,
+        "external_ownership",
+        lambda *_arguments: terminal.ExternalOwnership(terminal.ExternalOwnershipState.ABSENT),
+    )
+
+    outcomes = workspace.run_projects(
+        config_path,
+        environment={"XDG_RUNTIME_DIR": str(tmp_path)},
+        runtime_directory=tmp_path,
+        terminal_factory=lambda _socket: fake,
+    )
+
+    assert outcomes == (workspace.RunOutcome("alpha", workspace.RunState.RETRIED),)
+    assert len(fake.retried) == 1
+
+
+def test_live_registration_refuses_a_nonpositive_pid_before_observation(tmp_path: Path) -> None:
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    registration = workspace.WorkspaceRegistration(
+        "alpha", project_path, SESSION_ID, "head", live_pid=0
+    )
+
+    with pytest.raises(workspace.WorkspaceError, match="live_pid"):
+        workspace.register_project(
+            registration,
+            tmp_path / "workspace.toml",
+        )
 
 
 @pytest.mark.parametrize(

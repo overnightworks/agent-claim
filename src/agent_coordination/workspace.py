@@ -12,18 +12,20 @@ import tomllib
 import uuid
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 
 from . import protocol, providers, terminal
 
-_CONFIG_VERSION = 2
+_CONFIG_VERSION = 3
+_PROVIDER_CONFIG_VERSION = 2
 _LEGACY_CONFIG_VERSION = 1
 _PROJECT_KEY_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 _PROJECT_FIELDS = frozenset({"path", "session_id", "agent", "model"})
 _PROVIDER_PROJECT_FIELDS = _PROJECT_FIELDS | {"provider"}
+_LIVE_PROJECT_FIELDS = _PROVIDER_PROJECT_FIELDS | {"external_process"}
 _LOGIN_OWNER = "agent-coordination/login-v1"
 _LOGIN_DESKTOP_NAME = "aco-workspace.desktop"
 _LOGIN_ATTEMPT_NAME = "login-attempt.json"
@@ -48,6 +50,8 @@ class RunState(StrEnum):
     REATTACHED = "reattached"
     PENDING = "viewer pending"
     RETRIED = "retried"
+    EXTERNAL = "external live"
+    UNKNOWN = "ownership unknown"
     FAILED = "failed"
 
 
@@ -73,6 +77,7 @@ class WorkspaceProject:
     agent: str
     model: str | None = None
     provider: providers.Provider = providers.Provider.CODEX
+    external_process: ExternalProcessReceipt | None = None
 
 
 @dataclass(frozen=True)
@@ -83,6 +88,14 @@ class WorkspaceRegistration:
     agent: str
     model: str | None = None
     provider: providers.Provider = providers.Provider.CODEX
+    live_pid: int | None = None
+
+
+@dataclass(frozen=True)
+class ExternalProcessReceipt:
+    boot_id: str
+    pid: int
+    start_time: int
 
 
 @dataclass(frozen=True)
@@ -242,7 +255,10 @@ def run_login_recovery(
         )
         _write_login_attempt(state_path, completed)
     return LoginRunResult(
-        completed, 1 if any(state is RunState.FAILED for _, state in completed.outcomes) else 0
+        completed,
+        1
+        if any(state in {RunState.FAILED, RunState.UNKNOWN} for _, state in completed.outcomes)
+        else 0,
     )
 
 
@@ -355,8 +371,18 @@ def _login_timestamp(value: object) -> datetime:
 
 
 def register_project(handoff: WorkspaceRegistration, config_path: Path) -> bool:
-    """Store one explicit stopped-session handoff; return whether it was new."""
+    """Store an explicit stopped or process-validated live handoff."""
     candidate = _project(handoff)
+    if handoff.live_pid is not None:
+        receipt = terminal.register_live_process(
+            candidate.provider, candidate.session_id, candidate.directory, handoff.live_pid
+        )
+        candidate = replace(
+            candidate,
+            external_process=ExternalProcessReceipt(
+                receipt.boot_id, receipt.pid, receipt.start_time
+            ),
+        )
     config_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     with _locked(config_path.with_suffix(".lock")):
         projects = {} if not config_path.exists() else dict(load_config(config_path).projects)
@@ -398,14 +424,15 @@ def load_config(config_path: Path) -> WorkspaceConfig:
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
         raise WorkspaceError(f"invalid workspace configuration {config_path}: {error}") from error
     version = raw.get("version")
-    supported_versions = {_LEGACY_CONFIG_VERSION, _CONFIG_VERSION}
+    supported_versions = {_LEGACY_CONFIG_VERSION, _PROVIDER_CONFIG_VERSION, _CONFIG_VERSION}
     if (
         set(raw) != {"version", "projects"}
         or type(version) is not int
         or version not in supported_versions
     ):
         raise WorkspaceError(
-            "workspace configuration must contain only version = 1 or version = 2 and projects"
+            "workspace configuration must contain only version = 1, version = 2, "
+            "or version = 3 and projects"
         )
     raw_projects = raw["projects"]
     if not isinstance(raw_projects, dict):
@@ -463,13 +490,7 @@ def _run_project(
         project.provider,
     )
     if target.state is terminal.TargetState.ABSENT:
-        controller.create(
-            project.key,
-            project.session_id,
-            project.directory,
-            launch,
-        )
-        return _attach_or_pending(controller, project, RunState.STARTED)
+        return _launch_if_unowned(controller, project, launch, RunState.STARTED)
     if not terminal.target_matches(
         {
             "@aco_project": target.project or "",
@@ -484,11 +505,7 @@ def _run_project(
             f"tmux target {terminal.target_name(project.key)!r} has foreign metadata"
         )
     if target.state is terminal.TargetState.EXITED:
-        controller.retry(
-            project.key,
-            launch,
-        )
-        return _attach_or_pending(controller, project, RunState.RETRIED)
+        return _launch_if_unowned(controller, project, launch, RunState.RETRIED)
     if target.state is terminal.TargetState.ATTACHED:
         controller.clear_viewer_pending(project.key)
         return RunOutcome(project.key, RunState.REUSED)
@@ -497,6 +514,44 @@ def _run_project(
             project.key, RunState.PENDING, "waiting for the previously launched console"
         )
     return _attach_or_pending(controller, project, RunState.REATTACHED)
+
+
+def _external_ownership(
+    project: WorkspaceProject,
+) -> RunOutcome | None:
+    receipt = (
+        None
+        if project.external_process is None
+        else terminal.ExternalProcessReceipt(
+            project.external_process.boot_id,
+            project.external_process.pid,
+            project.external_process.start_time,
+        )
+    )
+    ownership = terminal.external_ownership(
+        project.provider, project.session_id, project.directory, receipt
+    )
+    if ownership.state is terminal.ExternalOwnershipState.LIVE:
+        return RunOutcome(project.key, RunState.EXTERNAL)
+    if ownership.state is terminal.ExternalOwnershipState.UNKNOWN:
+        return RunOutcome(project.key, RunState.UNKNOWN)
+    return None
+
+
+def _launch_if_unowned(
+    controller: terminal.TerminalController,
+    project: WorkspaceProject,
+    launch: terminal.Launch,
+    state: RunState,
+) -> RunOutcome:
+    ownership = _external_ownership(project) if project.external_process is not None else None
+    if ownership is not None:
+        return ownership
+    if state is RunState.STARTED:
+        controller.create(project.key, project.session_id, project.directory, launch)
+    else:
+        controller.retry(project.key, project.directory, launch)
+    return _attach_or_pending(controller, project, state)
 
 
 def _attach_or_pending(
@@ -547,15 +602,24 @@ def _project(handoff: WorkspaceRegistration) -> WorkspaceProject:
         raise WorkspaceError(f"project {key!r} model must not be empty")
     if model is not None:
         _validate_launch_identifier(model, f"project {key!r} model")
+    if handoff.live_pid is not None and (
+        type(handoff.live_pid) is not int or handoff.live_pid <= 0
+    ):
+        raise WorkspaceError(f"project {key!r} live_pid must be a positive integer")
     return WorkspaceProject(key, canonical, session_id, agent, model, provider)
 
 
 def _project_from_config_record(key: object, record: object, version: int) -> WorkspaceProject:
     if not isinstance(key, str) or not isinstance(record, dict):
         raise WorkspaceError("workspace projects must use project keys and table records")
-    fields = _PROJECT_FIELDS if version == _LEGACY_CONFIG_VERSION else _PROVIDER_PROJECT_FIELDS
+    if version == _LEGACY_CONFIG_VERSION:
+        fields = _PROJECT_FIELDS
+    elif version == _PROVIDER_CONFIG_VERSION:
+        fields = _PROVIDER_PROJECT_FIELDS
+    else:
+        fields = _LIVE_PROJECT_FIELDS
     required = {"path", "session_id", "agent"}
-    if version == _CONFIG_VERSION:
+    if version in {_PROVIDER_CONFIG_VERSION, _CONFIG_VERSION}:
         required.add("provider")
     if set(record) - fields or not required <= set(record):
         raise WorkspaceError(f"project {key!r} has unsupported or missing fields")
@@ -568,7 +632,7 @@ def _project_from_config_record(key: object, record: object, version: int) -> Wo
         if version == _LEGACY_CONFIG_VERSION
         else _provider(record["provider"], f"project {key!r} provider")
     )
-    return _project(
+    project = _project(
         WorkspaceRegistration(
             key,
             directory,
@@ -578,6 +642,30 @@ def _project_from_config_record(key: object, record: object, version: int) -> Wo
             provider=provider,
         )
     )
+    if version != _CONFIG_VERSION:
+        return project
+    receipt = _external_process_from_record(record.get("external_process"), key)
+    if receipt is None:
+        return project
+    return replace(project, external_process=receipt)
+
+
+def _external_process_from_record(value: object, key: object) -> ExternalProcessReceipt | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {"boot_id", "pid", "start_time"}:
+        raise WorkspaceError(f"project {key!r} external process receipt is malformed")
+    boot_id, pid, start_time = value["boot_id"], value["pid"], value["start_time"]
+    if (
+        not isinstance(boot_id, str)
+        or not boot_id
+        or type(pid) is not int
+        or pid <= 0
+        or type(start_time) is not int
+        or start_time <= 0
+    ):
+        raise WorkspaceError(f"project {key!r} external process receipt is malformed")
+    return ExternalProcessReceipt(boot_id, pid, start_time)
 
 
 def _validate_unique_projects(projects: Mapping[str, WorkspaceProject]) -> None:
@@ -865,7 +953,7 @@ def _login_time(value: datetime) -> str:
 
 
 def _write_config(config_path: Path, projects: Mapping[str, WorkspaceProject]) -> None:
-    records = ["version = 2", ""]
+    records = ["version = 3", ""]
     for key, project in projects.items():
         records.extend(
             (
@@ -878,6 +966,14 @@ def _write_config(config_path: Path, projects: Mapping[str, WorkspaceProject]) -
         )
         if project.model is not None:
             records.append(f"model = {json.dumps(project.model)}")
+        if project.external_process is not None:
+            records.append(
+                "external_process = { "
+                f"boot_id = {json.dumps(project.external_process.boot_id)}, "
+                f"pid = {project.external_process.pid}, "
+                f"start_time = {project.external_process.start_time} "
+                "}"
+            )
         records.append("")
     content = "\n".join(records)
     descriptor, temporary_name = tempfile.mkstemp(prefix="workspace.", dir=config_path.parent)

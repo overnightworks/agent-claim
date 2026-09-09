@@ -57,14 +57,14 @@ aco claim 42 --agent "Ada" --scope src/widget.py
 aco release 42 --merged 57
 ```
 
-## Recovering a stopped provider workspace
+## Recovering a provider workspace
 
 `aco register` is a deliberate, local handoff for a stopped native provider
-conversation the operator has already checkpointed. It records the mapping at
+conversation or an explicitly selected running native Codex or Claude resume. It records the mapping at
 `${XDG_CONFIG_HOME:-~/.config}/aco/workspace.toml`; it does not alter the
-conversation, repository files, or its live claim. The acknowledgement is
-required because `aco` cannot prove whether an arbitrary unmanaged provider
-process is still running.
+conversation, repository files, or its live claim. A stopped handoff needs the
+acknowledgement because `aco` cannot prove whether an arbitrary unmanaged provider
+process is still running; live registration instead validates the selected process.
 
 ```bash
 aco register my-project --path /work/my-project \
@@ -79,10 +79,26 @@ the conversation's original native workspace and still exist. `aco` passes its
 canonical form as `grok --resume UUID --cwd PATH`, but does not validate, copy, or
 edit provider history and cannot relocate that UUID. A different path may retain
 Grok's original workspace; that unsupported mismatch is not preflight refused.
-`aco` never passes `--restore-code`. The local mapping upgrades additively to
-version 2 when a new registration succeeds, preserving every existing project field
-with an explicit provider. An older Codex-only installation refuses version 2, and
-an older provider-aware installation refuses an unsupported Grok record rather than
+`aco` never passes `--restore-code`. To register a running Codex or Claude conversation
+without interrupting it, pass its exact native process ID instead of `--stopped`:
+
+```bash
+aco register my-project --path /work/my-project \
+  --session-id 123e4567-e89b-12d3-a456-426614174000 \
+  --agent "Codex workspace head" --live-pid 12345
+```
+
+ACO validates the same-user native executable, exact resumed UUID, canonical working
+directory, and stable process birth before writing a receipt. It never stores command
+arguments. At `aco run` or login recovery it leaves an exact live original or manual
+replacement untouched; uncertain ownership also blocks a launch. Run a manual native
+resume and recovery serially: they do not share a provider lock. An unmanaged live
+conversation is preserved but cannot be attached to a new ACO console.
+
+The local mapping upgrades additively to version 3 when a new registration succeeds,
+preserving every existing project field with an explicit provider. Older installations
+refuse version 3 rather than silently dropping the external-process receipt; an older
+provider-aware installation refuses an unsupported Grok record rather than
 silently dropping provider identity; native provider resume remains available
 independently.
 
