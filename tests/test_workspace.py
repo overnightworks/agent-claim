@@ -1614,6 +1614,77 @@ def test_start_reattaches_a_live_pending_enrollment_without_replacing_it(tmp_pat
 
 
 @pytest.mark.parametrize(
+    "staged_session_id",
+    [
+        "not-a-uuid",
+        "123E4567-E89B-12D3-A456-426614174000",
+    ],
+)
+def test_start_refuses_an_invalid_staged_native_uuid_before_recovery(
+    tmp_path: Path, staged_session_id: str
+) -> None:
+    config_path = tmp_path / "config" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    fake = FakeTerminal(
+        terminal.Target(
+            terminal.TargetState.DETACHED,
+            "alpha",
+            staged_session_id,
+            provider=providers.Provider.CODEX,
+            enrollment=terminal.Enrollment(
+                project_path,
+                "new head",
+                None,
+                "123e4567-e89b-12d3-a456-426614174002",
+                terminal.EnrollmentState.PENDING,
+                staged_session_id,
+            ),
+        )
+    )
+
+    with pytest.raises(workspace.WorkspaceError, match="staged native session_id"):
+        workspace.start_project(
+            workspace.StartRequest("alpha", project_path, "new head"),
+            _start_context(config_path, tmp_path, fake),
+        )
+
+    assert config_path.exists() is False
+    assert fake.target.enrollment is not None
+    assert fake.target.enrollment.state is terminal.EnrollmentState.PENDING
+    assert fake.created == []
+
+
+def test_start_refuses_a_target_with_a_different_requested_definition(tmp_path: Path) -> None:
+    config_path = tmp_path / "config" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    fake = FakeTerminal(
+        terminal.Target(
+            terminal.TargetState.DETACHED,
+            "alpha",
+            provider=providers.Provider.CODEX,
+            enrollment=terminal.Enrollment(
+                project_path,
+                "other head",
+                None,
+                "123e4567-e89b-12d3-a456-426614174002",
+                terminal.EnrollmentState.PENDING,
+            ),
+        )
+    )
+
+    with pytest.raises(workspace.WorkspaceError, match="foreign metadata"):
+        workspace.start_project(
+            workspace.StartRequest("alpha", project_path, "new head"),
+            _start_context(config_path, tmp_path, fake),
+        )
+
+    assert config_path.exists() is False
+    assert fake.created == []
+
+
+@pytest.mark.parametrize(
     ("state", "expected"),
     [
         (terminal.TargetState.ABSENT, workspace.RunState.STARTED),

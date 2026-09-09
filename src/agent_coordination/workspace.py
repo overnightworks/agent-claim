@@ -696,6 +696,8 @@ def _target_index(targets: tuple[terminal.Target, ...]) -> dict[str, terminal.Ta
                 )
             )
             _exact_uuid(enrollment.attempt, "fresh Codex attempt")
+            if enrollment.session_id is not None:
+                _exact_uuid(enrollment.session_id, "staged native session_id")
         indexed[target.project] = target
     return indexed
 
