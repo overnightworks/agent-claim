@@ -1,8 +1,0 @@
-claim_id = "e7f7b52fb66c404fbb3488d7a41e7496"
-agent = "Codex workspace head"
-role = "coordinator"
-base = "14846f80fe9c08fab6642c852249f72132ecde78"
-branch = "codex/issue-226-live-registration"
-scope = ["README.md", "src/agent_coordination/cli.py", "src/agent_coordination/workspace.py", "src/agent_coordination/terminal.py", "src/agent_coordination/providers.py", "src/agent_coordination/process.py", "tests/test_workspace.py", "tests/test_workspace_cli.py", "tests/test_workspace_terminal.py", "tests/test_workspace_providers.py", "tests/test_workspace_codex.py", "tests/test_process.py"]
-opened_commit = "b32142da2ba14cf01f7f3e3a96d9c8dbd2ee3297"
-whole_reason = "One usable live-registration slice must align CLI, durable identity, native process observation, guarded recovery and behavioral proofs; separating these owners would leave unsafe or unusable intermediate behavior."
