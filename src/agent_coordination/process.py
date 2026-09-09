@@ -14,7 +14,7 @@ import selectors
 import subprocess
 import time
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
 
@@ -348,22 +348,38 @@ def inspect_native_process(pid: int, proc_root: Path = Path("/proc")) -> NativeP
     The result intentionally carries raw command bytes only long enough for the
     terminal boundary to classify them.  Callers persist a receipt, never argv.
     """
+    identity = _process_identity(pid, proc_root)
+    if identity.state is not NativeProcessState.LIVE:
+        return identity
+    return _live_process_snapshot(identity, proc_root / str(pid), proc_root)
+
+
+def _process_identity(pid: int, proc_root: Path) -> NativeProcess:
+    identity = _stat_identity(pid, proc_root)
+    if identity.state not in {NativeProcessState.LIVE, NativeProcessState.ZOMBIE}:
+        return identity
+    try:
+        uid = _proc_uid(proc_root / str(pid) / "status")
+    except FileNotFoundError:
+        return NativeProcess(pid, NativeProcessState.ABSENT)
+    except (OSError, ValueError, UnicodeDecodeError):
+        return replace(identity, state=NativeProcessState.UNKNOWN)
+    return replace(identity, uid=uid)
+
+
+def _stat_identity(pid: int, proc_root: Path) -> NativeProcess:
     absent = NativeProcess(pid, NativeProcessState.ABSENT)
     if pid <= 0:
         return absent
-    directory = proc_root / str(pid)
     try:
-        stat_fields = _proc_stat(directory / "stat")
-        uid = _proc_uid(directory / "status")
+        state, comm, start_time = _proc_stat(proc_root / str(pid) / "stat")
     except FileNotFoundError:
         return absent
     except (OSError, ValueError, UnicodeDecodeError):
         return NativeProcess(pid, NativeProcessState.UNKNOWN)
-    state, comm, start_time = stat_fields
     if state == "Z":
-        return NativeProcess(pid, NativeProcessState.ZOMBIE, uid, comm=comm, start_time=start_time)
-    identity = NativeProcess(pid, NativeProcessState.LIVE, uid, start_time=start_time, comm=comm)
-    return _live_process_snapshot(identity, directory, proc_root)
+        return NativeProcess(pid, NativeProcessState.ZOMBIE, comm=comm, start_time=start_time)
+    return NativeProcess(pid, NativeProcessState.LIVE, start_time=start_time, comm=comm)
 
 
 def _live_process_snapshot(
@@ -426,12 +442,20 @@ def scan_native_processes(executable: str, proc_root: Path = Path("/proc")) -> N
             if inspected > _MAX_NATIVE_PROCESS_SCAN:
                 complete = False
                 break
-            snapshot = inspect_native_process(int(entry.name), proc_root)
+            identity = _process_identity(int(entry.name), proc_root)
+            if identity.state is NativeProcessState.ABSENT:
+                continue
+            if identity.comm != executable:
+                continue
+            if identity.uid is not None and identity.uid != os.getuid():
+                continue
+            if identity.state is NativeProcessState.ZOMBIE:
+                continue
+            if identity.state is not NativeProcessState.LIVE:
+                complete = False
+                continue
+            snapshot = _live_process_snapshot(identity, proc_root / entry.name, proc_root)
             if snapshot.state is NativeProcessState.ABSENT:
-                continue
-            if snapshot.comm != executable:
-                continue
-            if snapshot.uid != os.getuid():
                 continue
             if snapshot.state is not NativeProcessState.LIVE:
                 complete = False

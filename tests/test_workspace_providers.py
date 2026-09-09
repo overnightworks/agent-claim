@@ -82,6 +82,11 @@ def test_provider_choices_are_codex_claude_and_grok() -> None:
             "ambiguous",
         ),
         (
+            providers.Provider.CODEX,
+            b"codex\0resume\0" + SESSION_ID.encode() + b"\0--unexpected\0",
+            "ambiguous",
+        ),
+        (
             providers.Provider.CLAUDE,
             b"claude\0--resume\0" + SESSION_ID.encode() + b"\0--model\0model\0",
             "match",

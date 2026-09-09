@@ -298,6 +298,32 @@ def test_external_ownership_does_not_scan_unsupported_live_grok(tmp_path) -> Non
     )
 
 
+def test_external_ownership_recovers_when_a_matching_native_process_is_a_zombie(
+    monkeypatch, tmp_path
+) -> None:
+    proc_root = tmp_path / "proc"
+    zombie = proc_root / "41"
+    zombie.mkdir(parents=True)
+    fields = ["Z", *("0" for _ in range(19)), "31"]
+    (zombie / "stat").write_text("41 (codex) " + " ".join(fields))
+    (zombie / "status").write_text(f"Uid:\t{process.current_user_id()}\t0\t0\t0\n")
+    real_scan = process.scan_native_processes
+    monkeypatch.setattr(
+        process,
+        "inspect_native_process",
+        lambda _pid: process.NativeProcess(41, process.NativeProcessState.ABSENT),
+    )
+    monkeypatch.setattr(
+        process,
+        "scan_native_processes",
+        lambda executable: real_scan(executable, proc_root),
+    )
+
+    ownership = terminal.external_ownership(providers.Provider.CODEX, "session-a", tmp_path, None)
+
+    assert ownership.state is terminal.ExternalOwnershipState.ABSENT
+
+
 def _native_snapshot(pid: int, directory, *, start_time: int = 10) -> process.NativeProcess:
     return process.NativeProcess(
         pid,

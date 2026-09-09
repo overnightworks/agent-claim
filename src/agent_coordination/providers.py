@@ -107,11 +107,7 @@ def _classify_codex_resume(arguments: tuple[str, ...], session_id: str) -> Nativ
             NativeCommandState.MATCH if arguments[4] == session_id else NativeCommandState.UNRELATED
         )
     if len(arguments) >= _RESUME_ARGUMENT_COUNT and arguments[1] == "resume":
-        return (
-            NativeCommandState.UNRELATED
-            if arguments[-1] != session_id
-            else NativeCommandState.AMBIGUOUS
-        )
+        return _unsupported_resume_state(arguments[2:], session_id)
     return NativeCommandState.UNRELATED
 
 
@@ -127,12 +123,18 @@ def _classify_claude_resume(arguments: tuple[str, ...], session_id: str) -> Nati
             NativeCommandState.MATCH if arguments[2] == session_id else NativeCommandState.UNRELATED
         )
     if len(arguments) >= _RESUME_ARGUMENT_COUNT and arguments[1] == "--resume":
-        return (
-            NativeCommandState.UNRELATED
-            if arguments[2] != session_id
-            else NativeCommandState.AMBIGUOUS
-        )
+        return _unsupported_resume_state(arguments[2:], session_id)
     return NativeCommandState.UNRELATED
+
+
+def _unsupported_resume_state(
+    resume_arguments: tuple[str, ...], session_id: str
+) -> NativeCommandState:
+    return (
+        NativeCommandState.AMBIGUOUS
+        if session_id in resume_arguments
+        else NativeCommandState.UNRELATED
+    )
 
 
 def project_environment(environment: Mapping[str, str], agent: str) -> dict[str, str]:

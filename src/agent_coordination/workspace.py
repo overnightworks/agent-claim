@@ -544,7 +544,7 @@ def _launch_if_unowned(
     launch: terminal.Launch,
     state: RunState,
 ) -> RunOutcome:
-    ownership = _external_ownership(project)
+    ownership = _external_ownership(project) if project.external_process is not None else None
     if ownership is not None:
         return ownership
     if state is RunState.STARTED:

@@ -1494,14 +1494,46 @@ def test_run_retries_an_exited_matching_pane_only_when_explicitly_invoked(tmp_pa
     assert fake.retried[0][1].command == ["codex", "resume", SESSION_ID]
 
 
+def test_stopped_mapping_does_not_scan_for_external_ownership(monkeypatch, tmp_path: Path) -> None:
+    config_path = tmp_path / "config" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    workspace.register_project(
+        workspace.WorkspaceRegistration("alpha", project_path, SESSION_ID, "restored head"),
+        config_path,
+    )
+    fake = FakeTerminal(terminal.Target(terminal.TargetState.EXITED, "alpha", SESSION_ID))
+    monkeypatch.setattr(
+        terminal,
+        "external_ownership",
+        lambda *_arguments: pytest.fail("stopped mapping scanned for external ownership"),
+    )
+
+    outcomes = workspace.run_projects(
+        config_path,
+        environment={"XDG_RUNTIME_DIR": str(tmp_path)},
+        runtime_directory=tmp_path,
+        terminal_factory=lambda _socket: fake,
+    )
+
+    assert outcomes == (workspace.RunOutcome("alpha", workspace.RunState.RETRIED),)
+
+
 def test_run_leaves_a_manual_native_replacement_alive_when_its_managed_pane_exited(
     monkeypatch, tmp_path: Path
 ) -> None:
     config_path = tmp_path / "config" / "workspace.toml"
     project_path = tmp_path / "project"
     project_path.mkdir()
+    monkeypatch.setattr(
+        terminal,
+        "register_live_process",
+        lambda *_arguments: terminal.ExternalProcessReceipt("boot", 41, 10),
+    )
     workspace.register_project(
-        workspace.WorkspaceRegistration("alpha", project_path, SESSION_ID, "restored head"),
+        workspace.WorkspaceRegistration(
+            "alpha", project_path, SESSION_ID, "restored head", live_pid=41
+        ),
         config_path,
     )
     fake = FakeTerminal(terminal.Target(terminal.TargetState.EXITED, "alpha", SESSION_ID))
@@ -1528,8 +1560,15 @@ def test_run_reports_unknown_external_ownership_without_retrying(
     config_path = tmp_path / "config" / "workspace.toml"
     project_path = tmp_path / "project"
     project_path.mkdir()
+    monkeypatch.setattr(
+        terminal,
+        "register_live_process",
+        lambda *_arguments: terminal.ExternalProcessReceipt("boot", 41, 10),
+    )
     workspace.register_project(
-        workspace.WorkspaceRegistration("alpha", project_path, SESSION_ID, "restored head"),
+        workspace.WorkspaceRegistration(
+            "alpha", project_path, SESSION_ID, "restored head", live_pid=41
+        ),
         config_path,
     )
     fake = FakeTerminal(terminal.Target(terminal.TargetState.EXITED, "alpha", SESSION_ID))

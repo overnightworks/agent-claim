@@ -53,7 +53,7 @@ def test_process_observation_distinguishes_absent_malformed_zombie_and_racing_pr
     assert process.inspect_native_process(44, tmp_path).state is process.NativeProcessState.UNKNOWN
 
 
-def test_scan_ignores_absent_or_other_user_processes_and_marks_zombies_incomplete(
+def test_scan_ignores_absent_other_user_and_zombie_processes(
     tmp_path: Path,
 ) -> None:
     _write_process(tmp_path, 41, command=b"codex\0resume\0session-a\0", uid=999)
@@ -63,11 +63,37 @@ def test_scan_ignores_absent_or_other_user_processes_and_marks_zombies_incomplet
     scan = process.scan_native_processes("codex", tmp_path)
 
     assert scan.processes == ()
-    assert scan.complete is False
+    assert scan.complete is True
 
 
 def test_scan_marks_an_unreadable_proc_root_incomplete(tmp_path: Path) -> None:
     assert process.scan_native_processes("codex", tmp_path / "missing").complete is False
+
+
+def test_scan_never_reads_an_unrelated_process_command_or_working_directory(tmp_path: Path) -> None:
+    _write_process(
+        tmp_path,
+        41,
+        command=b"x" * (16 * 1024 + 1),
+        comm="unrelated",
+        create_cwd=False,
+    )
+
+    scan = process.scan_native_processes("codex", tmp_path)
+
+    assert scan == process.NativeProcessScan((), True)
+
+
+def test_scan_treats_a_relevant_process_with_unreadable_identity_as_incomplete(
+    tmp_path: Path,
+) -> None:
+    _write_process(tmp_path, 41, command=b"codex\0resume\0session-a\0")
+    (tmp_path / "41" / "status").write_text("Name:\tcodex\n")
+
+    scan = process.scan_native_processes("codex", tmp_path)
+
+    assert scan.processes == ()
+    assert scan.complete is False
 
 
 def _write_process(
@@ -77,12 +103,15 @@ def _write_process(
     command: bytes,
     state: str = "S",
     uid: int | None = None,
+    comm: str = "codex",
+    create_cwd: bool = True,
 ) -> None:
     (proc_root / "sys/kernel/random").mkdir(parents=True, exist_ok=True)
     (proc_root / "sys/kernel/random/boot_id").write_text("boot\n")
     process_directory = proc_root / str(pid)
     process_directory.mkdir()
-    (process_directory / "cwd").symlink_to(proc_root)
+    if create_cwd:
+        (process_directory / "cwd").symlink_to(proc_root)
     fields = [
         state,
         "0",
@@ -105,7 +134,7 @@ def _write_process(
         "0",
         "31",
     ]
-    (process_directory / "stat").write_text(f"{pid} (codex) " + " ".join(fields))
+    (process_directory / "stat").write_text(f"{pid} ({comm}) " + " ".join(fields))
     owner = process.current_user_id() if uid is None else uid
     (process_directory / "status").write_text(f"Uid:\t{owner}\t0\t0\t0\n")
     (process_directory / "cmdline").write_bytes(command)
