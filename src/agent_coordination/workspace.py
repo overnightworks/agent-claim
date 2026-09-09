@@ -38,6 +38,7 @@ _LOGIN_MALFORMED_RECORD = "login attempt record is malformed"
 _LOGIN_MALFORMED_LAUNCHER = "login launcher is malformed"
 _RUNTIME_SOCKET_NAME = "tmux.sock"
 _RUNTIME_LOCK_NAME = "workspace.lock"
+_LOCK_SUFFIX = ".lock"
 
 
 class WorkspaceError(protocol.ClaimError):
@@ -229,7 +230,7 @@ def run_login_recovery(
     _ensure_private_directory(state_path.parent)
     started = _login_time(now())
     attempt = LoginAttempt(new_attempt_id(), started, "running")
-    with _locked(state_path.with_suffix(".lock")):
+    with _locked(state_path.with_suffix(_LOCK_SUFFIX)):
         _write_login_attempt(state_path, attempt)
         try:
             outcomes = run_projects(config_path)
@@ -378,7 +379,7 @@ def register_project(handoff: WorkspaceRegistration, config_path: Path) -> bool:
     """Store one explicit stopped-session handoff; return whether it was new."""
     candidate = _project(handoff)
     config_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    with _locked(config_path.with_suffix(".lock")):
+    with _locked(config_path.with_suffix(_LOCK_SUFFIX)):
         projects = {} if not config_path.exists() else dict(load_config(config_path).projects)
         existing = projects.get(candidate.key)
         if existing is not None:
@@ -671,7 +672,7 @@ def _start_existing_project(
 
 def _commit_capture(*, config_path: Path, candidate: WorkspaceProject) -> None:
     config_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    with _locked(config_path.with_suffix(".lock")):
+    with _locked(config_path.with_suffix(_LOCK_SUFFIX)):
         projects = {} if not config_path.exists() else dict(load_config(config_path).projects)
         existing = projects.get(candidate.key)
         if existing is not None:
