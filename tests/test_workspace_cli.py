@@ -147,6 +147,41 @@ def test_register_writes_an_explicit_stopped_handover_through_the_cli(
     assert project.provider is providers.Provider.CODEX
 
 
+def test_register_live_pid_passes_only_the_selected_process_to_workspace(
+    capsys, monkeypatch, tmp_path: Path
+) -> None:
+    config_path = tmp_path / "config" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    monkeypatch.setattr(cli, "_workspace_config_path", lambda: config_path)
+    monkeypatch.setattr(
+        terminal,
+        "register_live_process",
+        lambda *_arguments: terminal.ExternalProcessReceipt("boot", 41, 31),
+    )
+
+    assert (
+        cli.main(
+            [
+                "register",
+                "alpha",
+                "--path",
+                str(project_path),
+                "--session-id",
+                "123e4567-e89b-12d3-a456-426614174000",
+                "--agent",
+                "restored head",
+                "--live-pid",
+                "41",
+            ]
+        )
+        == 0
+    )
+
+    assert capsys.readouterr().out == "alpha: registered\n"
+    assert workspace.load_config(config_path).projects["alpha"].external_process is not None
+
+
 @pytest.mark.parametrize(
     ("provider", "agent", "expected_provider"),
     [
@@ -325,7 +360,16 @@ def test_login_cli_refuses_a_repository_target(capsys) -> None:
         (
             (workspace.RunOutcome("alpha", workspace.RunState.FAILED),),
             1,
-            "Workspace recovery completed with 1 failed project(s).",
+            "Workspace recovery completed for 0 project(s). 1 project(s) failed recovery.",
+        ),
+        (
+            (
+                workspace.RunOutcome("alpha", workspace.RunState.EXTERNAL),
+                workspace.RunOutcome("beta", workspace.RunState.EXTERNAL),
+            ),
+            0,
+            "Workspace recovery completed for 0 project(s). "
+            "2 project(s) already had live owners; no console was opened.",
         ),
     ],
 )

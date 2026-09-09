@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from agent_coordination import providers
 
 SESSION_ID = "123e4567-e89b-12d3-a456-426614174000"
@@ -55,3 +57,67 @@ def test_provider_choices_are_codex_claude_and_grok() -> None:
         providers.Provider.CLAUDE,
         providers.Provider.GROK,
     )
+
+
+@pytest.mark.parametrize(
+    ("provider", "command", "expected"),
+    [
+        (providers.Provider.CODEX, b"codex\0resume\0" + SESSION_ID.encode() + b"\0", "match"),
+        (providers.Provider.CLAUDE, b"claude\0--resume\0" + SESSION_ID.encode() + b"\0", "match"),
+        (
+            providers.Provider.CLAUDE,
+            b"claude\0--resume\0" + SESSION_ID.encode() + b"\0continue this work\0",
+            "match",
+        ),
+        (
+            providers.Provider.CODEX,
+            b"node\0codex.js\0resume\0" + SESSION_ID.encode() + b"\0",
+            "ambiguous",
+        ),
+        (providers.Provider.GROK, b"grok\0--resume\0" + SESSION_ID.encode() + b"\0", "unrelated"),
+        (providers.Provider.CODEX, b"codex\0resume\0--model\0model\0different\0", "unrelated"),
+        (
+            providers.Provider.CODEX,
+            b"codex\0resume\0--model\0model\0" + SESSION_ID.encode() + b"\0",
+            "match",
+        ),
+        (
+            providers.Provider.CODEX,
+            b"codex\0resume\0--unexpected\0" + SESSION_ID.encode() + b"\0",
+            "ambiguous",
+        ),
+        (
+            providers.Provider.CODEX,
+            b"codex\0resume\0" + SESSION_ID.encode() + b"\0--unexpected\0",
+            "ambiguous",
+        ),
+        (
+            providers.Provider.CODEX,
+            b"codex\0--model\0model\0resume\0" + SESSION_ID.encode() + b"\0",
+            "ambiguous",
+        ),
+        (
+            providers.Provider.CLAUDE,
+            b"claude\0--resume\0" + SESSION_ID.encode() + b"\0--model\0model\0",
+            "match",
+        ),
+        (
+            providers.Provider.CLAUDE,
+            b"claude\0--resume\0" + SESSION_ID.encode() + b"\0--unexpected\0",
+            "ambiguous",
+        ),
+        (
+            providers.Provider.CLAUDE,
+            b"claude\0--model\0model\0--resume\0" + SESSION_ID.encode() + b"\0",
+            "ambiguous",
+        ),
+        (providers.Provider.CLAUDE, b"claude\0--resume\0\xff\0", "ambiguous"),
+        (providers.Provider.CLAUDE, b"claude\0--resume\0different\0", "unrelated"),
+        (providers.Provider.CODEX, b"codex\0--version\0", "unrelated"),
+        (providers.Provider.CLAUDE, b"claude\0--help\0", "unrelated"),
+    ],
+)
+def test_native_command_classification_accepts_only_exact_native_resumes(
+    provider: providers.Provider, command: bytes, expected: str
+) -> None:
+    assert providers.classify_native_command(provider, command, SESSION_ID).value == expected

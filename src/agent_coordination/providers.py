@@ -8,6 +8,12 @@ from enum import StrEnum
 from pathlib import Path
 
 
+class NativeCommandState(StrEnum):
+    MATCH = "match"
+    UNRELATED = "unrelated"
+    AMBIGUOUS = "ambiguous"
+
+
 class Provider(StrEnum):
     CODEX = "codex"
     CLAUDE = "claude"
@@ -27,6 +33,9 @@ _SESSION_IDENTITY_ENVIRONMENTS = frozenset(
         "CLAUDE_PID",
     }
 )
+_RESUME_ARGUMENT_COUNT = 3
+_PROMPTED_RESUME_ARGUMENT_COUNT = 4
+_MODELED_RESUME_ARGUMENT_COUNT = 5
 
 _START_CAPTURE_ENVIRONMENTS = frozenset(
     {
@@ -78,6 +87,92 @@ def fresh_codex_command(directory: Path, model: str | None, callback: str) -> li
         f'[{{type = "command", command = {json.dumps(callback)}}}]}}]'
     )
     return [*command, "-c", f"hooks.SessionStart={hook}"]
+
+
+def native_executable(provider: Provider) -> str | None:
+    """The directly executable native heads that can be safely observed."""
+    return provider.value if provider is not Provider.GROK else None
+
+
+def classify_native_command(
+    provider: Provider, command_line: bytes, session_id: str
+) -> NativeCommandState:
+    """Classify one bounded native argv without retaining its private contents.
+
+    Only the normal native resume forms identify a conversation.  A command for a
+    different UUID is deliberately unrelated; a malformed form of the selected
+    executable remains uncertain instead of being used as evidence of absence.
+    """
+    executable = native_executable(provider)
+    if executable is None:
+        return NativeCommandState.UNRELATED
+    try:
+        arguments = tuple(part.decode("utf-8") for part in command_line.split(b"\0") if part)
+    except UnicodeDecodeError:
+        return NativeCommandState.AMBIGUOUS
+    if not arguments or Path(arguments[0]).name != executable:
+        return NativeCommandState.AMBIGUOUS
+    if provider is Provider.CODEX:
+        return _classify_codex_resume(arguments, session_id)
+    return _classify_claude_resume(arguments, session_id)
+
+
+def _classify_codex_resume(arguments: tuple[str, ...], session_id: str) -> NativeCommandState:
+    if len(arguments) == _RESUME_ARGUMENT_COUNT and arguments[1:] == ("resume", session_id):
+        return NativeCommandState.MATCH
+    if (
+        len(arguments) == _MODELED_RESUME_ARGUMENT_COUNT
+        and arguments[1] == "resume"
+        and arguments[2] == "--model"
+    ):
+        return (
+            NativeCommandState.MATCH if arguments[4] == session_id else NativeCommandState.UNRELATED
+        )
+    if len(arguments) >= _RESUME_ARGUMENT_COUNT and arguments[1] == "resume":
+        return _unsupported_resume_state(arguments[2:], session_id)
+    return _unsupported_command_state(arguments[1:], "resume", session_id)
+
+
+def _classify_claude_resume(arguments: tuple[str, ...], session_id: str) -> NativeCommandState:
+    if len(arguments) == _RESUME_ARGUMENT_COUNT and arguments[1:] == ("--resume", session_id):
+        return NativeCommandState.MATCH
+    if (
+        len(arguments) == _PROMPTED_RESUME_ARGUMENT_COUNT
+        and arguments[1:3] == ("--resume", session_id)
+        and not arguments[3].startswith("-")
+    ):
+        return NativeCommandState.MATCH
+    if (
+        len(arguments) == _MODELED_RESUME_ARGUMENT_COUNT
+        and arguments[1] == "--resume"
+        and arguments[3] == "--model"
+    ):
+        return (
+            NativeCommandState.MATCH if arguments[2] == session_id else NativeCommandState.UNRELATED
+        )
+    if len(arguments) >= _RESUME_ARGUMENT_COUNT and arguments[1] == "--resume":
+        return _unsupported_resume_state(arguments[2:], session_id)
+    return _unsupported_command_state(arguments[1:], "--resume", session_id)
+
+
+def _unsupported_resume_state(
+    resume_arguments: tuple[str, ...], session_id: str
+) -> NativeCommandState:
+    return (
+        NativeCommandState.AMBIGUOUS
+        if session_id in resume_arguments
+        else NativeCommandState.UNRELATED
+    )
+
+
+def _unsupported_command_state(
+    command_arguments: tuple[str, ...], resume_token: str, session_id: str
+) -> NativeCommandState:
+    return (
+        NativeCommandState.AMBIGUOUS
+        if resume_token in command_arguments and session_id in command_arguments
+        else NativeCommandState.UNRELATED
+    )
 
 
 def project_environment(environment: Mapping[str, str], agent: str) -> dict[str, str]:
