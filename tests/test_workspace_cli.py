@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import io
+import os
 from pathlib import Path
 
 import pytest
@@ -153,3 +155,89 @@ def test_run_prints_each_workspace_outcome_and_uses_failure_status(
 
     assert cli.main(["run", "alpha"]) == expected_status
     assert capsys.readouterr().out == expected_output
+
+
+def test_login_status_reports_independent_disabled_and_missing_states(
+    capsys, monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setattr(cli, "_workspace_config_path", lambda: tmp_path / "workspace.toml")
+
+    assert cli.main(["login", "status"]) == 0
+
+    assert capsys.readouterr().out == (
+        "launcher: disabled\nconfiguration: missing\nattempt: no login attempt recorded\n"
+    )
+
+
+def test_hidden_login_runner_reports_workspace_failure_without_private_detail(
+    capsys, monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setattr(cli, "_workspace_config_path", lambda: tmp_path / "missing.toml")
+    notifications: list[str] = []
+    monkeypatch.setattr(terminal, "notify_login_recovery", notifications.append)
+
+    assert cli.main(["_run-at-login"]) == 1
+
+    attempt = workspace.load_login_attempt(workspace.login_attempt_path(os.environ))
+    assert attempt.failure == "workspace failure"
+    assert notifications == ["Workspace recovery failed."]
+    assert "missing.toml" not in capsys.readouterr().out
+
+
+def test_login_status_reports_a_malformed_attempt_without_echoing_its_contents(
+    capsys, monkeypatch, tmp_path: Path
+) -> None:
+    marker = "private-malformed-record"
+    configuration = tmp_path / "config"
+    state = tmp_path / "state"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(configuration))
+    monkeypatch.setenv("XDG_STATE_HOME", str(state))
+    monkeypatch.setattr(cli, "_workspace_config_path", lambda: tmp_path / "workspace.toml")
+    attempt_path = workspace.login_attempt_path(os.environ)
+    attempt_path.parent.mkdir(parents=True)
+    attempt_path.write_text(
+        '{"version": 1, "attempt_id": "' + marker + '", "started_at": "not-a-time", '
+        '"state": "completed", "outcomes": []}\n'
+    )
+
+    assert cli.main(["login", "status"]) == 1
+
+    output = capsys.readouterr().out
+    assert "attempt: malformed" in output
+    assert marker not in output
+
+
+@pytest.mark.parametrize(
+    ("entry", "expected_launcher"),
+    [
+        (
+            "[Desktop Entry]\nType=Application\nName=ACO workspace recovery\n"
+            "Exec=/old/python -I -m agent_coordination.cli _run-at-login\n"
+            "X-Aco-Owner=agent-coordination/login-v1\n",
+            "stale",
+        ),
+        ("[Desktop Entry]\nType=Application\nExec=/bin/sh\n", "conflict"),
+    ],
+)
+def test_login_status_reports_launcher_ownership_state_without_writing(
+    capsys,
+    monkeypatch,
+    tmp_path: Path,
+    entry: str,
+    expected_launcher: str,
+) -> None:
+    configuration = tmp_path / "config"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(configuration))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setattr(cli, "_workspace_config_path", lambda: tmp_path / "workspace.toml")
+    monkeypatch.setattr(cli.sys, "executable", "/new/python")
+    desktop_path = workspace.login_desktop_path(os.environ)
+    desktop_path.parent.mkdir(parents=True, mode=0o700)
+    desktop_path.write_text(entry)
+
+    assert cli.main(["login", "status"]) == 0
+
+    assert capsys.readouterr().out.startswith(f"launcher: {expected_launcher}\n")

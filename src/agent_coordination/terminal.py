@@ -23,6 +23,14 @@ class TerminalError(RuntimeError):
     pass
 
 
+def notify_login_recovery(summary: str) -> None:
+    """Try to report bounded login recovery state without affecting recovery itself."""
+    try:
+        process.run_captured(["notify-send", "ACO workspace recovery", summary])
+    except process.ProcessError:
+        return
+
+
 class TargetState(StrEnum):
     ABSENT = "absent"
     ATTACHED = "attached"

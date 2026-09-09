@@ -100,6 +100,32 @@ Claude's existing `claude-revive` SessionStart hook remains a separate recovery
 owner. Do not use both recovery paths for the same conversation; its replacement,
 enrollment, and retirement remain with #213.
 
+## Restoring the configured workspace at desktop login
+
+`aco login enable` creates one owned desktop-login launcher at
+`${XDG_CONFIG_HOME:-~/.config}/autostart/aco-workspace.desktop`. It first reads
+the whole workspace mapping and refuses an absent, malformed, or empty mapping;
+it never overwrites a launcher it cannot prove it created. Repeating enable is
+safe, and refreshes the installed Python path after an upgrade. `aco login disable`
+removes only that owned launcher, leaving the mapping, provider history, files,
+claims, and surviving tmux heads intact. `aco login status` reports launcher and
+mapping state separately, plus the most recent login attempt, without starting a
+provider or writing a file.
+
+Login recovery is desired-workspace mode: every configured project is resumed in
+configuration order at each desktop login, including one that was previously
+exited. It restores the existing native UUID through the normal promptless
+provider command and stops at the native input line; it never sends a prompt,
+copies authentication, or watches and restarts a same-boot process. Use `aco run`
+for an explicit same-boot retry.
+
+The login runner replaces one bounded record at
+`${XDG_STATE_HOME:-~/.local/state}/aco/login-attempt.json`. It records only an
+aco attempt identifier, times, completion state, project keys, and public outcome
+classes. An interrupted run remains visibly unfinished; a failed project does not
+hide later configured projects. The record contains no provider UUID, workspace
+path, agent, model, configuration, environment, command line, or raw error.
+
 Omitted `--base`/`--branch` bind the current checkout; explicit values must match it.
 Omitted `--agent` on `claim` and `release` is filled from non-empty
 `ACO_AGENT`, else non-empty `GROK_SESSION_ID` as `Grok {session}`, else

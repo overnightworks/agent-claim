@@ -15,7 +15,18 @@ from enum import StrEnum
 from pathlib import Path
 from typing import cast
 
-from . import __version__, board, checkout, forge, github, protocol, providers, store, workspace
+from . import (
+    __version__,
+    board,
+    checkout,
+    forge,
+    github,
+    protocol,
+    providers,
+    store,
+    terminal,
+    workspace,
+)
 
 ACO_AGENT_ENV = checkout.ACO_AGENT_ENV
 CLAUDE_SESSION_ID_ENV = checkout.CLAUDE_SESSION_ID_ENV
@@ -476,6 +487,22 @@ def _add_run_parser(commands: argparse._SubParsersAction) -> None:
     run.add_argument("project", metavar="PROJECT", nargs="?", help="one registered project")
 
 
+def _add_login_parser(commands: argparse._SubParsersAction) -> None:
+    login = commands.add_parser(
+        "login", help="manage configured workspace recovery at desktop login"
+    )
+    login_commands = login.add_subparsers(dest="login_command", required=True)
+    login_commands.add_parser("enable", help="install the owned desktop login launcher")
+    login_commands.add_parser("disable", help="remove the owned desktop login launcher")
+    login_commands.add_parser(
+        "status", help="show launcher, configuration, and latest attempt state"
+    )
+
+
+def _add_run_at_login_parser(commands: argparse._SubParsersAction) -> None:
+    commands.add_parser("_run-at-login", help=argparse.SUPPRESS)
+
+
 _SUBPARSER_BUILDERS: tuple[Callable[[argparse._SubParsersAction], None], ...] = (
     _add_bootstrap_parser,
     _add_status_parser,
@@ -490,6 +517,8 @@ _SUBPARSER_BUILDERS: tuple[Callable[[argparse._SubParsersAction], None], ...] = 
     _add_protect_parser,
     _add_register_parser,
     _add_run_parser,
+    _add_login_parser,
+    _add_run_at_login_parser,
 )
 
 
@@ -2508,23 +2537,90 @@ def _run_workspace(parsed: argparse.Namespace) -> int:
     return 1 if any(outcome.state is workspace.RunState.FAILED for outcome in outcomes) else 0
 
 
+def _login_summary(result: workspace.LoginRunResult) -> str:
+    if result.attempt.failure is not None:
+        return "Workspace recovery failed."
+    failed = sum(state is workspace.RunState.FAILED for _, state in result.attempt.outcomes)
+    if failed:
+        return f"Workspace recovery completed with {failed} failed project(s)."
+    return f"Workspace recovery completed for {len(result.attempt.outcomes)} project(s)."
+
+
+def _run_at_login() -> int:
+    try:
+        result = workspace.run_login_recovery(
+            _workspace_config_path(), workspace.login_attempt_path(os.environ)
+        )
+    except workspace.WorkspaceError:
+        terminal.notify_login_recovery("Workspace recovery could not record its attempt.")
+        return 2
+    terminal.notify_login_recovery(_login_summary(result))
+    return result.exit_status
+
+
+def _login_status() -> int:
+    launcher = workspace.login_launcher_state(os.environ, Path(sys.executable))
+    configuration = workspace.login_configuration_state(_workspace_config_path())
+    print(f"launcher: {launcher}")
+    print(f"configuration: {configuration}")
+    try:
+        attempt = workspace.load_login_attempt(workspace.login_attempt_path(os.environ))
+    except FileNotFoundError:
+        print("attempt: no login attempt recorded")
+        return 0
+    except workspace.WorkspaceError:
+        print("attempt: malformed")
+        return 1
+    print(f"attempt: {attempt.attempt_id} {attempt.started_at} {attempt.state}")
+    for project, outcome in attempt.outcomes:
+        print(f"{project}: {outcome}")
+    if attempt.failure is not None:
+        print(f"workspace: {attempt.failure}")
+    if attempt.completed_at is not None:
+        print(f"completed: {attempt.completed_at}")
+    return 0
+
+
+def _login_operation(parsed: argparse.Namespace) -> int:
+    if parsed.repo is not None:
+        raise protocol.ClaimError("--repo is meaningless for login recovery operations")
+    if parsed.login_command == "enable":
+        changed = workspace.enable_login(_workspace_config_path(), os.environ, Path(sys.executable))
+        print("login launcher enabled" if changed else "login launcher already enabled")
+        return 0
+    if parsed.login_command == "disable":
+        changed = workspace.disable_login(os.environ)
+        print("login launcher disabled" if changed else "login launcher already disabled")
+        return 0
+    return _login_status()
+
+
+def _workspace_operation(parsed: argparse.Namespace) -> int:
+    if parsed.repo is not None:
+        raise protocol.ClaimError("--repo is meaningless for workspace operations")
+    if parsed.command == "register":
+        return _register_workspace(parsed)
+    return _run_workspace(parsed)
+
+
+def _local_operation(parsed: argparse.Namespace) -> int | None:
+    if parsed.command == "_run-at-login":
+        return _run_at_login()
+    if parsed.command == "login":
+        return _login_operation(parsed)
+    if parsed.command in {"register", "run"}:
+        return _workspace_operation(parsed)
+    return None
+
+
 def main(arguments: list[str] | None = None) -> int:
     parsed = _parser().parse_args(arguments)
-    if parsed.command in {"register", "run"}:
-        try:
-            if parsed.repo is not None:
-                raise protocol.ClaimError("--repo is meaningless for workspace operations")
-            return (
-                _register_workspace(parsed)
-                if parsed.command == "register"
-                else _run_workspace(parsed)
-            )
-        except protocol.ClaimError as error:
-            print(f"ERROR: {error}", file=sys.stderr)
-            return 2
-    if parsed.command == "protect":
-        return _protect(parsed.repo)
     try:
+        local_result = _local_operation(parsed)
+        if local_result is not None:
+            return local_result
+        if parsed.command == "protect":
+            return _protect(parsed.repo)
         if parsed.command == "status":
             return _cmd_status(parsed)
         return _dispatch(parsed)
