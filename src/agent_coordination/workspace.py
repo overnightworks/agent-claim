@@ -115,6 +115,8 @@ class LoginRunResult:
     attempt: LoginAttempt
     exit_status: int
 
+
+@dataclass(frozen=True)
 class StartRequest:
     key: str
     directory: Path

@@ -503,6 +503,7 @@ def _add_login_parser(commands: argparse._SubParsersAction) -> None:
 def _add_run_at_login_parser(commands: argparse._SubParsersAction) -> None:
     commands.add_parser("_run-at-login", help=argparse.SUPPRESS)
 
+
 def _add_start_parser(commands: argparse._SubParsersAction) -> None:
     start = commands.add_parser("start", help="open one fresh Codex workspace console")
     start.add_argument("project", metavar="PROJECT", help="a stable local project key")
@@ -2618,6 +2619,7 @@ def _local_operation(parsed: argparse.Namespace) -> int:
         raise protocol.ClaimError("--repo is meaningless for workspace operations")
     return _register_workspace(parsed) if parsed.command == "register" else _run_workspace(parsed)
 
+
 def _start_workspace(parsed: argparse.Namespace) -> int:
     callback = shlex.join(
         [sys.executable, "-I", "-m", "agent_coordination.cli", "_capture-codex-start"]
@@ -2653,21 +2655,30 @@ def _workspace_operation(parsed: argparse.Namespace) -> int:
     return _start_workspace(parsed)
 
 
-def main(arguments: list[str] | None = None) -> int:
-    parsed = _parser().parse_args(arguments)
-    if parsed.command in {"_run-at-login", "register", "run", "login"}:
-        try:
-            return _local_operation(parsed)
-        except protocol.ClaimError as error:
-            print(f"ERROR: {error}", file=sys.stderr)
-            return 2
+def _workspace_command(parsed: argparse.Namespace) -> int:
     if parsed.command == "_capture-codex-start":
         return _capture_start()
-    if parsed.command == "protect":
-        return _protect(parsed.repo)
+    if parsed.command in {"_run-at-login", "login"}:
+        return _local_operation(parsed)
+    return _workspace_operation(parsed)
+
+
+def main(arguments: list[str] | None = None) -> int:
+    parsed = _parser().parse_args(arguments)
+    if parsed.command in {
+        "_capture-codex-start",
+        "_run-at-login",
+        "login",
+        "register",
+        "run",
+        "start",
+    }:
+        try:
+            return _workspace_command(parsed)
+        except (protocol.ClaimError, terminal.TerminalError) as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 2
     try:
-        if parsed.command in {"register", "run", "start"}:
-            return _workspace_operation(parsed)
         if parsed.command == "protect":
             return _protect(parsed.repo)
         if parsed.command == "status":
