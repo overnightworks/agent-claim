@@ -1589,6 +1589,41 @@ def test_run_reports_unknown_external_ownership_without_retrying(
     assert fake.retried == []
 
 
+def test_live_receipt_allows_retry_after_observation_proves_no_external_owner(
+    monkeypatch, tmp_path: Path
+) -> None:
+    config_path = tmp_path / "config" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    monkeypatch.setattr(
+        terminal,
+        "register_live_process",
+        lambda *_arguments: terminal.ExternalProcessReceipt("boot", 41, 10),
+    )
+    workspace.register_project(
+        workspace.WorkspaceRegistration(
+            "alpha", project_path, SESSION_ID, "restored head", live_pid=41
+        ),
+        config_path,
+    )
+    fake = FakeTerminal(terminal.Target(terminal.TargetState.EXITED, "alpha", SESSION_ID))
+    monkeypatch.setattr(
+        terminal,
+        "external_ownership",
+        lambda *_arguments: terminal.ExternalOwnership(terminal.ExternalOwnershipState.ABSENT),
+    )
+
+    outcomes = workspace.run_projects(
+        config_path,
+        environment={"XDG_RUNTIME_DIR": str(tmp_path)},
+        runtime_directory=tmp_path,
+        terminal_factory=lambda _socket: fake,
+    )
+
+    assert outcomes == (workspace.RunOutcome("alpha", workspace.RunState.RETRIED),)
+    assert len(fake.retried) == 1
+
+
 def test_live_registration_refuses_a_nonpositive_pid_before_observation(tmp_path: Path) -> None:
     project_path = tmp_path / "project"
     project_path.mkdir()

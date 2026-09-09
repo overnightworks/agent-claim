@@ -94,6 +94,17 @@ def test_live_registration_requires_the_same_native_birth_before_and_after_obser
         terminal.register_live_process(providers.Provider.CODEX, "session-a", tmp_path, 41)
 
 
+def test_live_registration_returns_a_receipt_after_stable_native_observations(
+    monkeypatch, tmp_path
+) -> None:
+    native = _native_snapshot(41, tmp_path)
+    monkeypatch.setattr(process, "inspect_native_process", lambda _pid: native)
+
+    receipt = terminal.register_live_process(providers.Provider.CODEX, "session-a", tmp_path, 41)
+
+    assert receipt == terminal.ExternalProcessReceipt("boot", 41, 10)
+
+
 def test_live_registration_refuses_a_codex_javascript_wrapper(monkeypatch, tmp_path) -> None:
     wrapper = process.NativeProcess(
         41,
@@ -322,6 +333,31 @@ def test_external_ownership_recovers_when_a_matching_native_process_is_a_zombie(
     ownership = terminal.external_ownership(providers.Provider.CODEX, "session-a", tmp_path, None)
 
     assert ownership.state is terminal.ExternalOwnershipState.ABSENT
+
+
+def test_external_ownership_refuses_a_relevant_process_that_loses_its_cwd(
+    monkeypatch, tmp_path
+) -> None:
+    proc_root = tmp_path / "proc"
+    candidate = proc_root / "41"
+    candidate.mkdir(parents=True)
+    (candidate / "stat").write_text("41 (codex) " + " ".join(["S", *("0" for _ in range(19))]))
+    (candidate / "status").write_text(f"Uid:\t{process.current_user_id()}\t0\t0\t0\n")
+    real_scan = process.scan_native_processes
+    monkeypatch.setattr(
+        process,
+        "inspect_native_process",
+        lambda _pid: process.NativeProcess(41, process.NativeProcessState.ABSENT),
+    )
+    monkeypatch.setattr(
+        process,
+        "scan_native_processes",
+        lambda executable: real_scan(executable, proc_root),
+    )
+
+    ownership = terminal.external_ownership(providers.Provider.CODEX, "session-a", tmp_path, None)
+
+    assert ownership.state is terminal.ExternalOwnershipState.UNKNOWN
 
 
 def _native_snapshot(pid: int, directory, *, start_time: int = 10) -> process.NativeProcess:

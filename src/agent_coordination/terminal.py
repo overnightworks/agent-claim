@@ -122,13 +122,8 @@ def external_ownership(
     original = process.inspect_native_process(receipt.pid) if receipt is not None else None
     if original is not None and receipt is not None and _same_birth(original, receipt):
         if _matches_project(original, provider, session_id, directory):
-            recorded_state = ExternalOwnershipState.LIVE
-        elif original.state is process.NativeProcessState.LIVE:
-            recorded_state = ExternalOwnershipState.UNKNOWN
-        else:
-            recorded_state = ExternalOwnershipState.ABSENT
-        if recorded_state is not ExternalOwnershipState.ABSENT:
-            return ExternalOwnership(recorded_state)
+            return ExternalOwnership(ExternalOwnershipState.LIVE)
+        return ExternalOwnership(ExternalOwnershipState.UNKNOWN)
     scan = process.scan_native_processes(executable)
     matches = [
         snapshot

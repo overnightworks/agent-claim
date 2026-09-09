@@ -86,13 +86,9 @@ def classify_native_command(
         return NativeCommandState.AMBIGUOUS
     if not arguments or Path(arguments[0]).name != executable:
         return NativeCommandState.AMBIGUOUS
-    match provider:
-        case Provider.CODEX:
-            return _classify_codex_resume(arguments, session_id)
-        case Provider.CLAUDE:
-            return _classify_claude_resume(arguments, session_id)
-        case Provider.GROK:
-            return NativeCommandState.UNRELATED
+    if provider is Provider.CODEX:
+        return _classify_codex_resume(arguments, session_id)
+    return _classify_claude_resume(arguments, session_id)
 
 
 def _classify_codex_resume(arguments: tuple[str, ...], session_id: str) -> NativeCommandState:
@@ -108,7 +104,7 @@ def _classify_codex_resume(arguments: tuple[str, ...], session_id: str) -> Nativ
         )
     if len(arguments) >= _RESUME_ARGUMENT_COUNT and arguments[1] == "resume":
         return _unsupported_resume_state(arguments[2:], session_id)
-    return NativeCommandState.UNRELATED
+    return _unsupported_command_state(arguments[1:], "resume", session_id)
 
 
 def _classify_claude_resume(arguments: tuple[str, ...], session_id: str) -> NativeCommandState:
@@ -124,7 +120,7 @@ def _classify_claude_resume(arguments: tuple[str, ...], session_id: str) -> Nati
         )
     if len(arguments) >= _RESUME_ARGUMENT_COUNT and arguments[1] == "--resume":
         return _unsupported_resume_state(arguments[2:], session_id)
-    return NativeCommandState.UNRELATED
+    return _unsupported_command_state(arguments[1:], "--resume", session_id)
 
 
 def _unsupported_resume_state(
@@ -133,6 +129,16 @@ def _unsupported_resume_state(
     return (
         NativeCommandState.AMBIGUOUS
         if session_id in resume_arguments
+        else NativeCommandState.UNRELATED
+    )
+
+
+def _unsupported_command_state(
+    command_arguments: tuple[str, ...], resume_token: str, session_id: str
+) -> NativeCommandState:
+    return (
+        NativeCommandState.AMBIGUOUS
+        if resume_token in command_arguments and session_id in command_arguments
         else NativeCommandState.UNRELATED
     )
 

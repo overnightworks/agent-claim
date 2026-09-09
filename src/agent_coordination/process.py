@@ -402,7 +402,7 @@ def _live_process_snapshot(
             identity.comm,
         )
     except FileNotFoundError:
-        return NativeProcess(identity.pid, NativeProcessState.ABSENT)
+        return replace(identity, state=NativeProcessState.UNKNOWN)
     except (OSError, UnicodeDecodeError):
         return NativeProcess(
             identity.pid,
