@@ -69,6 +69,29 @@ def test_provider_choices_are_codex_claude_and_grok() -> None:
             b"node\0codex.js\0resume\0" + SESSION_ID.encode() + b"\0",
             "ambiguous",
         ),
+        (providers.Provider.GROK, b"grok\0--resume\0" + SESSION_ID.encode() + b"\0", "unrelated"),
+        (providers.Provider.CODEX, b"codex\0resume\0--model\0model\0different\0", "unrelated"),
+        (
+            providers.Provider.CODEX,
+            b"codex\0resume\0--model\0model\0" + SESSION_ID.encode() + b"\0",
+            "match",
+        ),
+        (
+            providers.Provider.CODEX,
+            b"codex\0resume\0--unexpected\0" + SESSION_ID.encode() + b"\0",
+            "ambiguous",
+        ),
+        (
+            providers.Provider.CLAUDE,
+            b"claude\0--resume\0" + SESSION_ID.encode() + b"\0--model\0model\0",
+            "match",
+        ),
+        (
+            providers.Provider.CLAUDE,
+            b"claude\0--resume\0" + SESSION_ID.encode() + b"\0--unexpected\0",
+            "ambiguous",
+        ),
+        (providers.Provider.CLAUDE, b"claude\0--resume\0\xff\0", "ambiguous"),
         (providers.Provider.CLAUDE, b"claude\0--resume\0different\0", "unrelated"),
     ],
 )

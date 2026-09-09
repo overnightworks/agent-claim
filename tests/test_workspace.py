@@ -1522,6 +1522,45 @@ def test_run_leaves_a_manual_native_replacement_alive_when_its_managed_pane_exit
     assert fake.retried == []
 
 
+def test_run_reports_unknown_external_ownership_without_retrying(
+    monkeypatch, tmp_path: Path
+) -> None:
+    config_path = tmp_path / "config" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    workspace.register_project(
+        workspace.WorkspaceRegistration("alpha", project_path, SESSION_ID, "restored head"),
+        config_path,
+    )
+    fake = FakeTerminal(terminal.Target(terminal.TargetState.EXITED, "alpha", SESSION_ID))
+    monkeypatch.setattr(
+        terminal,
+        "external_ownership",
+        lambda *_arguments: terminal.ExternalOwnership(terminal.ExternalOwnershipState.UNKNOWN),
+    )
+
+    outcomes = workspace.run_projects(
+        config_path,
+        environment={"XDG_RUNTIME_DIR": str(tmp_path)},
+        runtime_directory=tmp_path,
+        terminal_factory=lambda _socket: fake,
+    )
+
+    assert outcomes == (workspace.RunOutcome("alpha", workspace.RunState.UNKNOWN),)
+    assert fake.retried == []
+
+
+def test_live_registration_refuses_a_nonpositive_pid_before_observation(tmp_path: Path) -> None:
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+
+    with pytest.raises(workspace.WorkspaceError, match="live_pid"):
+        workspace.register_project(
+            workspace.WorkspaceRegistration("alpha", project_path, SESSION_ID, "head", live_pid=0),
+            tmp_path / "workspace.toml",
+        )
+
+
 @pytest.mark.parametrize(
     ("target", "expected_state"),
     [

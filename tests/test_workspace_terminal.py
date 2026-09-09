@@ -141,6 +141,163 @@ def test_external_manual_resume_blocks_retry_of_an_exited_managed_pane(
     assert ownership.state is terminal.ExternalOwnershipState.LIVE
 
 
+def test_external_ownership_reuses_a_recorded_live_process_without_a_scan(
+    monkeypatch, tmp_path
+) -> None:
+    original = _native_snapshot(41, tmp_path)
+    monkeypatch.setattr(process, "inspect_native_process", lambda _pid: original)
+    monkeypatch.setattr(
+        process, "scan_native_processes", lambda _executable: pytest.fail("scanned")
+    )
+
+    ownership = terminal.external_ownership(
+        providers.Provider.CODEX,
+        "session-a",
+        tmp_path,
+        terminal.ExternalProcessReceipt("boot", 41, 10),
+    )
+
+    assert ownership.state is terminal.ExternalOwnershipState.LIVE
+
+
+def test_external_ownership_refuses_a_live_recorded_process_with_changed_binding(
+    monkeypatch, tmp_path
+) -> None:
+    changed = process.NativeProcess(
+        41,
+        process.NativeProcessState.LIVE,
+        process.current_user_id(),
+        "boot",
+        10,
+        "codex",
+        tmp_path,
+        b"codex\0resume\0different\0",
+    )
+    monkeypatch.setattr(process, "inspect_native_process", lambda _pid: changed)
+
+    ownership = terminal.external_ownership(
+        providers.Provider.CODEX,
+        "session-a",
+        tmp_path,
+        terminal.ExternalProcessReceipt("boot", 41, 10),
+    )
+
+    assert ownership.state is terminal.ExternalOwnershipState.UNKNOWN
+
+
+@pytest.mark.parametrize(
+    "scan",
+    [
+        process.NativeProcessScan(
+            (
+                process.NativeProcess(
+                    42,
+                    process.NativeProcessState.LIVE,
+                    process.current_user_id(),
+                    "boot",
+                    10,
+                    "codex",
+                    Path("/other"),
+                    b"codex\0resume\0session-a\0",
+                ),
+            ),
+            True,
+        ),
+        process.NativeProcessScan(
+            (
+                process.NativeProcess(
+                    42,
+                    process.NativeProcessState.LIVE,
+                    process.current_user_id(),
+                    "boot",
+                    10,
+                    "codex",
+                    Path("/other"),
+                    b"codex\0resume\0session-a\0",
+                ),
+            ),
+            False,
+        ),
+        process.NativeProcessScan(
+            (
+                process.NativeProcess(
+                    42,
+                    process.NativeProcessState.LIVE,
+                    process.current_user_id(),
+                    "boot",
+                    10,
+                    "codex",
+                    Path("/other"),
+                    b"codex\0resume\0session-a\0",
+                ),
+                process.NativeProcess(
+                    43,
+                    process.NativeProcessState.LIVE,
+                    process.current_user_id(),
+                    "boot",
+                    10,
+                    "codex",
+                    Path("/other"),
+                    b"codex\0resume\0session-a\0",
+                ),
+            ),
+            True,
+        ),
+        process.NativeProcessScan(
+            (
+                process.NativeProcess(
+                    42,
+                    process.NativeProcessState.LIVE,
+                    process.current_user_id(),
+                    "boot",
+                    10,
+                    "codex",
+                    Path("/other"),
+                ),
+            ),
+            True,
+        ),
+    ],
+)
+def test_external_ownership_refuses_incomplete_or_ambiguous_scans(
+    monkeypatch, tmp_path, scan
+) -> None:
+    monkeypatch.setattr(
+        process,
+        "inspect_native_process",
+        lambda _pid: process.NativeProcess(41, process.NativeProcessState.ABSENT),
+    )
+    monkeypatch.setattr(process, "scan_native_processes", lambda _executable: scan)
+
+    ownership = terminal.external_ownership(providers.Provider.CODEX, "session-a", tmp_path, None)
+
+    assert ownership.state is terminal.ExternalOwnershipState.UNKNOWN
+
+
+@pytest.mark.parametrize(
+    "snapshot",
+    [
+        process.NativeProcess(41, process.NativeProcessState.LIVE, 999, "boot", 10),
+        process.NativeProcess(41, process.NativeProcessState.ZOMBIE, process.current_user_id()),
+        process.NativeProcess(41, process.NativeProcessState.UNKNOWN, process.current_user_id()),
+    ],
+)
+def test_live_registration_refuses_an_unowned_or_unobservable_process(
+    monkeypatch, tmp_path, snapshot
+) -> None:
+    monkeypatch.setattr(process, "inspect_native_process", lambda _pid: snapshot)
+
+    with pytest.raises(terminal.TerminalError):
+        terminal.register_live_process(providers.Provider.CODEX, "session-a", tmp_path, 41)
+
+
+def test_external_ownership_does_not_scan_unsupported_live_grok(tmp_path) -> None:
+    assert (
+        terminal.external_ownership(providers.Provider.GROK, "session-a", tmp_path, None).state
+        is terminal.ExternalOwnershipState.ABSENT
+    )
+
+
 def _native_snapshot(pid: int, directory, *, start_time: int = 10) -> process.NativeProcess:
     return process.NativeProcess(
         pid,
