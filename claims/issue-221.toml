@@ -1,0 +1,8 @@
+claim_id = "ed58ee7cbe764d04bf56f6cb88f1f842"
+agent = "Codex workspace head"
+role = "coordinator"
+base = "451b431aab7313aa3602d18fa21b86e0e9ba327a"
+branch = "codex/issue-221-start-codex"
+scope = ["src/agent_coordination/providers.py", "src/agent_coordination/terminal.py", "src/agent_coordination/workspace.py", "src/agent_coordination/cli.py", "tests/test_workspace_codex.py", "tests/test_workspace_terminal.py", "tests/test_workspace.py", "tests/test_workspace_cli.py", "README.md"]
+opened_commit = "c23e8f353d4499d93e26fcc7ecb37307531edcad"
+whole_reason = "One reviewed usable vertical slice across the four existing owners, their focused tests and operator documentation; splitting it leaves an unusable callback or provisional target."
