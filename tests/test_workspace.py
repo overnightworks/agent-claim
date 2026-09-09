@@ -376,7 +376,8 @@ def test_login_recovery_serializes_attempts_and_keeps_the_later_result(
     first.join(timeout=1)
     second.join(timeout=1)
 
-    assert not first.is_alive() and not second.is_alive()
+    assert not first.is_alive()
+    assert not second.is_alive()
     assert calls == ["first", "second"]
     assert (
         workspace.load_login_attempt(state_path).attempt_id

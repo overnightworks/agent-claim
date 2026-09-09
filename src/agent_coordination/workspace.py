@@ -33,6 +33,9 @@ _ASCII_CONTROL_LIMIT = 32
 _ASCII_DELETE = 127
 _UUID_VERSION = 4
 _LOGIN_EXEC_ARGUMENTS = ("-I", "-m", "agent_coordination.cli", "_run-at-login")
+_LOGIN_WORKSPACE_FAILURE = "workspace failure"
+_LOGIN_MALFORMED_RECORD = "login attempt record is malformed"
+_LOGIN_MALFORMED_LAUNCHER = "login launcher is malformed"
 
 
 class WorkspaceError(protocol.ClaimError):
@@ -211,7 +214,7 @@ def run_login_recovery(
                 attempt.attempt_id,
                 attempt.started_at,
                 "completed",
-                failure="workspace failure",
+                failure=_LOGIN_WORKSPACE_FAILURE,
                 completed_at=_login_time(now()),
             )
             _write_login_attempt(state_path, completed)
@@ -221,7 +224,7 @@ def run_login_recovery(
                 attempt.attempt_id,
                 attempt.started_at,
                 "completed",
-                failure="workspace failure",
+                failure=_LOGIN_WORKSPACE_FAILURE,
                 completed_at=_login_time(now()),
             )
             _write_login_attempt(state_path, completed)
@@ -245,24 +248,24 @@ def load_login_attempt(state_path: Path) -> LoginAttempt:
     except FileNotFoundError:
         raise
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise WorkspaceError("login attempt record is malformed") from error
+        raise WorkspaceError(_LOGIN_MALFORMED_RECORD) from error
     return _login_attempt_from_record(raw)
 
 
 def _login_attempt_from_record(raw: object) -> LoginAttempt:
     if not isinstance(raw, dict):
-        raise WorkspaceError("login attempt record is malformed")
+        raise WorkspaceError(_LOGIN_MALFORMED_RECORD)
     required = {"version", "attempt_id", "started_at", "state", "outcomes"}
     allowed = required | {"failure", "completed_at"}
     if set(raw) - allowed or not required <= set(raw) or raw.get("version") != 1:
-        raise WorkspaceError("login attempt record is malformed")
+        raise WorkspaceError(_LOGIN_MALFORMED_RECORD)
     attempt_id = raw["attempt_id"]
     started_at = raw["started_at"]
     state = raw["state"]
     _login_attempt_identifier(attempt_id)
     started = _login_timestamp(started_at)
     if state not in {"running", "completed"}:
-        raise WorkspaceError("login attempt record is malformed")
+        raise WorkspaceError(_LOGIN_MALFORMED_RECORD)
     parsed_outcomes = _login_outcomes(raw["outcomes"])
     failure, completed_at = _login_completion(raw, state, parsed_outcomes, started)
     return LoginAttempt(attempt_id, started_at, state, parsed_outcomes, failure, completed_at)
@@ -270,18 +273,18 @@ def _login_attempt_from_record(raw: object) -> LoginAttempt:
 
 def _login_outcomes(raw_outcomes: object) -> tuple[tuple[str, RunState], ...]:
     if not isinstance(raw_outcomes, list):
-        raise WorkspaceError("login attempt record is malformed")
+        raise WorkspaceError(_LOGIN_MALFORMED_RECORD)
     parsed_outcomes: list[tuple[str, RunState]] = []
     for outcome in raw_outcomes:
         if not isinstance(outcome, dict) or set(outcome) != {"project", "outcome"}:
-            raise WorkspaceError("login attempt record is malformed")
+            raise WorkspaceError(_LOGIN_MALFORMED_RECORD)
         project, outcome_state = outcome["project"], outcome["outcome"]
         if not isinstance(project, str) or not _PROJECT_KEY_PATTERN.fullmatch(project):
-            raise WorkspaceError("login attempt record is malformed")
+            raise WorkspaceError(_LOGIN_MALFORMED_RECORD)
         try:
             parsed_outcomes.append((project, RunState(outcome_state)))
         except (TypeError, ValueError) as error:
-            raise WorkspaceError("login attempt record is malformed") from error
+            raise WorkspaceError(_LOGIN_MALFORMED_RECORD) from error
     return tuple(parsed_outcomes)
 
 
@@ -295,23 +298,23 @@ def _login_completion(
     completed_at = _login_completed_at(raw.get("completed_at"))
     completed = None if completed_at is None else _login_timestamp(completed_at)
     if state == "running" and (outcomes or failure is not None or completed_at is not None):
-        raise WorkspaceError("login attempt record is malformed")
+        raise WorkspaceError(_LOGIN_MALFORMED_RECORD)
     if state == "completed" and completed_at is None:
-        raise WorkspaceError("login attempt record is malformed")
+        raise WorkspaceError(_LOGIN_MALFORMED_RECORD)
     if completed is not None and completed < started:
-        raise WorkspaceError("login attempt record is malformed")
+        raise WorkspaceError(_LOGIN_MALFORMED_RECORD)
     if failure is not None and outcomes:
-        raise WorkspaceError("login attempt record is malformed")
+        raise WorkspaceError(_LOGIN_MALFORMED_RECORD)
     if state == "completed" and failure is None and not outcomes:
-        raise WorkspaceError("login attempt record is malformed")
+        raise WorkspaceError(_LOGIN_MALFORMED_RECORD)
     return failure, completed_at
 
 
 def _login_failure(value: object) -> str | None:
     if value is None:
         return None
-    if not isinstance(value, str) or value != "workspace failure":
-        raise WorkspaceError("login attempt record is malformed")
+    if not isinstance(value, str) or value != _LOGIN_WORKSPACE_FAILURE:
+        raise WorkspaceError(_LOGIN_MALFORMED_RECORD)
     return value
 
 
@@ -319,31 +322,31 @@ def _login_completed_at(value: object) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str):
-        raise WorkspaceError("login attempt record is malformed")
+        raise WorkspaceError(_LOGIN_MALFORMED_RECORD)
     _login_timestamp(value)
     return value
 
 
 def _login_attempt_identifier(value: object) -> None:
     if not isinstance(value, str):
-        raise WorkspaceError("login attempt record is malformed")
+        raise WorkspaceError(_LOGIN_MALFORMED_RECORD)
     try:
         identifier = uuid.UUID(value)
     except ValueError as error:
-        raise WorkspaceError("login attempt record is malformed") from error
+        raise WorkspaceError(_LOGIN_MALFORMED_RECORD) from error
     if str(identifier) != value or identifier.version != _UUID_VERSION:
-        raise WorkspaceError("login attempt record is malformed")
+        raise WorkspaceError(_LOGIN_MALFORMED_RECORD)
 
 
 def _login_timestamp(value: object) -> datetime:
     if not isinstance(value, str) or "T" not in value:
-        raise WorkspaceError("login attempt record is malformed")
+        raise WorkspaceError(_LOGIN_MALFORMED_RECORD)
     try:
         parsed = datetime.fromisoformat(value)
     except ValueError as error:
-        raise WorkspaceError("login attempt record is malformed") from error
+        raise WorkspaceError(_LOGIN_MALFORMED_RECORD) from error
     if parsed.tzinfo is None:
-        raise WorkspaceError("login attempt record is malformed")
+        raise WorkspaceError(_LOGIN_MALFORMED_RECORD)
     return parsed
 
 
@@ -682,7 +685,7 @@ def _login_executable(executable: Path) -> Path:
         "=" in str(lexical)
         or "%" in str(lexical)
         or _unsafe_desktop_text(str(lexical))
-        or re.fullmatch(r"python(?:[0-9]+(?:\.[0-9]+)*)?", lexical.name) is None
+        or re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", lexical.name, flags=re.ASCII) is None
     ):
         raise WorkspaceError("login executable must be an absolute safe path")
     return lexical
@@ -734,25 +737,25 @@ def _owned_launcher_executable(path: Path) -> Path | None:
 
 def _launcher_executable(contents: str) -> Path:
     if not contents.endswith("\n"):
-        raise WorkspaceError("login launcher is malformed")
+        raise WorkspaceError(_LOGIN_MALFORMED_LAUNCHER)
     lines = contents.splitlines()
     if not lines or lines[0] != "[Desktop Entry]":
-        raise WorkspaceError("login launcher is malformed")
+        raise WorkspaceError(_LOGIN_MALFORMED_LAUNCHER)
     values: dict[str, str] = {}
     for line in lines[1:]:
         if "=" not in line:
-            raise WorkspaceError("login launcher is malformed")
+            raise WorkspaceError(_LOGIN_MALFORMED_LAUNCHER)
         key, value = line.split("=", maxsplit=1)
         if key not in _LOGIN_ENTRY_KEYS or key in values:
-            raise WorkspaceError("login launcher is malformed")
+            raise WorkspaceError(_LOGIN_MALFORMED_LAUNCHER)
         values[key] = value
     if set(values) != _LOGIN_ENTRY_KEYS or values.get("Type") != "Application":
-        raise WorkspaceError("login launcher is malformed")
+        raise WorkspaceError(_LOGIN_MALFORMED_LAUNCHER)
     if values.get("Name") != "ACO workspace recovery" or values.get("X-Aco-Owner") != _LOGIN_OWNER:
-        raise WorkspaceError("login launcher is malformed")
+        raise WorkspaceError(_LOGIN_MALFORMED_LAUNCHER)
     arguments = _desktop_exec_arguments(values["Exec"])
     if len(arguments) != len(_LOGIN_EXEC_ARGUMENTS) + 1 or arguments[1:] != _LOGIN_EXEC_ARGUMENTS:
-        raise WorkspaceError("login launcher is malformed")
+        raise WorkspaceError(_LOGIN_MALFORMED_LAUNCHER)
     return _login_executable(Path(arguments[0]))
 
 
@@ -762,36 +765,44 @@ def _desktop_exec_arguments(value: str) -> tuple[str, ...]:
     index = 0
     while index < len(unescaped):
         if unescaped[index] == " ":
-            raise WorkspaceError("login launcher is malformed")
-        if unescaped[index] == '"':
-            index += 1
-            characters: list[str] = []
-            while index < len(unescaped) and unescaped[index] != '"':
-                character = unescaped[index]
-                if character == "\\":
-                    index += 1
-                    if index == len(unescaped) or unescaped[index] not in {"\\", '"', "`", "$"}:
-                        raise WorkspaceError("login launcher is malformed")
-                    character = unescaped[index]
-                characters.append(character)
-                index += 1
-            if index == len(unescaped):
-                raise WorkspaceError("login launcher is malformed")
-            argument = "".join(characters)
-            index += 1
-            if index < len(unescaped) and unescaped[index] != " ":
-                raise WorkspaceError("login launcher is malformed")
-        else:
-            start = index
-            while index < len(unescaped) and unescaped[index] != " ":
-                if unescaped[index] in _DESKTOP_RESERVED_CHARACTERS:
-                    raise WorkspaceError("login launcher is malformed")
-                index += 1
-            argument = unescaped[start:index]
+            raise WorkspaceError(_LOGIN_MALFORMED_LAUNCHER)
+        argument, index = (
+            _quoted_desktop_argument(unescaped, index + 1)
+            if unescaped[index] == '"'
+            else _unquoted_desktop_argument(unescaped, index)
+        )
         arguments.append(argument)
         if index < len(unescaped):
             index += 1
     return tuple(arguments)
+
+
+def _quoted_desktop_argument(value: str, index: int) -> tuple[str, int]:
+    characters: list[str] = []
+    while index < len(value) and value[index] != '"':
+        character = value[index]
+        if character == "\\":
+            index += 1
+            if index == len(value) or value[index] not in {"\\", '"', "`", "$"}:
+                raise WorkspaceError(_LOGIN_MALFORMED_LAUNCHER)
+            character = value[index]
+        characters.append(character)
+        index += 1
+    if index == len(value):
+        raise WorkspaceError(_LOGIN_MALFORMED_LAUNCHER)
+    index += 1
+    if index < len(value) and value[index] != " ":
+        raise WorkspaceError(_LOGIN_MALFORMED_LAUNCHER)
+    return "".join(characters), index
+
+
+def _unquoted_desktop_argument(value: str, index: int) -> tuple[str, int]:
+    start = index
+    while index < len(value) and value[index] != " ":
+        if value[index] in _DESKTOP_RESERVED_CHARACTERS:
+            raise WorkspaceError(_LOGIN_MALFORMED_LAUNCHER)
+        index += 1
+    return value[start:index], index
 
 
 def _desktop_string_unescape(value: str) -> str:
@@ -805,7 +816,7 @@ def _desktop_string_unescape(value: str) -> str:
             continue
         index += 1
         if index == len(value) or value[index] != "\\":
-            raise WorkspaceError("login launcher is malformed")
+            raise WorkspaceError(_LOGIN_MALFORMED_LAUNCHER)
         characters.append("\\")
         index += 1
     return "".join(characters)
