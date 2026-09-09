@@ -8,7 +8,7 @@ from threading import Event, Thread
 
 import pytest
 
-from agent_coordination import process, providers, terminal, workspace
+from agent_coordination import providers, terminal, workspace
 
 SESSION_ID = "123e4567-e89b-12d3-a456-426614174000"
 
@@ -79,7 +79,7 @@ def test_login_attempt_is_running_before_recovery_and_records_ordered_safe_outco
     )
 
 
-def test_login_enable_uses_a_desktop_entry_accepted_by_the_system_parser(tmp_path: Path) -> None:
+def test_login_enable_serializes_reserved_executable_characters_exactly(tmp_path: Path) -> None:
     config_path = tmp_path / "config" / "aco" / "workspace.toml"
     project_path = tmp_path / "project"
     project_path.mkdir()
@@ -89,14 +89,18 @@ def test_login_enable_uses_a_desktop_entry_accepted_by_the_system_parser(tmp_pat
     )
     environment = {"XDG_CONFIG_HOME": str(tmp_path / "config")}
 
-    workspace.enable_login(config_path, environment, Path("/opt/aco $bin%/python"))
-    validation = process.run_captured(
-        ["desktop-file-validate", str(workspace.login_desktop_path(environment))]
-    )
+    executable = Path("/opt/aco $bin%/python")
+    workspace.enable_login(config_path, environment, executable)
 
-    assert validation.exit_status == 0, validation.stderr.decode()
+    assert workspace.login_desktop_path(environment).read_text() == (
+        "[Desktop Entry]\n"
+        "Type=Application\n"
+        "Name=ACO workspace recovery\n"
+        'Exec="/opt/aco \\\\$bin%%/python" -I -m agent_coordination.cli _run-at-login\n'
+        "X-Aco-Owner=agent-coordination/login-v1\n"
+    )
     assert (
-        workspace.login_launcher_state(environment, Path("/opt/aco $bin%/python"))
+        workspace.login_launcher_state(environment, executable)
         is workspace.LoginLauncherState.ENABLED
     )
 
