@@ -59,8 +59,8 @@ aco release 42 --merged 57
 
 ## Recovering a stopped provider workspace
 
-`aco register` is a deliberate, local handoff for a Codex or Claude conversation
-the operator has already checkpointed and stopped. It records the mapping at
+`aco register` is a deliberate, local handoff for a stopped native provider
+conversation the operator has already checkpointed. It records the mapping at
 `${XDG_CONFIG_HOME:-~/.config}/aco/workspace.toml`; it does not alter the
 conversation, repository files, or its live claim. The acknowledgement is
 required because `aco` cannot prove whether an arbitrary unmanaged provider
@@ -73,12 +73,18 @@ aco register my-project --path /work/my-project \
 aco run my-project
 ```
 
-Use `--provider claude` to register a stopped Claude UUID; omitted `--provider`
-keeps the existing Codex default. The local mapping upgrades additively to version
-2 when a new registration succeeds, preserving every existing project field with
-an explicit provider. An older Codex-only installation refuses version 2 rather
-than silently dropping provider identity; native `codex resume` and `claude
---resume UUID` remain available independently.
+Use `--provider claude` or `--provider grok` to register a stopped native UUID;
+omitted `--provider` keeps the existing Codex default. For Grok, `--path` must be
+the conversation's original native workspace and still exist. `aco` passes its
+canonical form as `grok --resume UUID --cwd PATH`, but does not validate, copy, or
+edit provider history and cannot relocate that UUID. A different path may retain
+Grok's original workspace; that unsupported mismatch is not preflight refused.
+`aco` never passes `--restore-code`. The local mapping upgrades additively to
+version 2 when a new registration succeeds, preserving every existing project field
+with an explicit provider. An older Codex-only installation refuses version 2, and
+an older provider-aware installation refuses an unsupported Grok record rather than
+silently dropping provider identity; native provider resume remains available
+independently.
 
 `aco run` works outside a Git checkout and never accepts `--repo`. It resumes
 the registered UUID in a dedicated local tmux socket and opens one GNOME

@@ -1,17 +1,22 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from agent_coordination import providers
 
 SESSION_ID = "123e4567-e89b-12d3-a456-426614174000"
+PROJECT_DIRECTORY = Path("/canonical/project")
 
 
 def test_codex_resume_keeps_the_registered_uuid_and_optional_model() -> None:
-    assert providers.resume_command(providers.Provider.CODEX, SESSION_ID) == [
+    assert providers.resume_command(providers.Provider.CODEX, SESSION_ID, PROJECT_DIRECTORY) == [
         "codex",
         "resume",
         SESSION_ID,
     ]
-    assert providers.resume_command(providers.Provider.CODEX, SESSION_ID, "gpt-5.3-codex") == [
+    assert providers.resume_command(
+        providers.Provider.CODEX, SESSION_ID, PROJECT_DIRECTORY, "gpt-5.3-codex"
+    ) == [
         "codex",
         "resume",
         "--model",

@@ -344,7 +344,7 @@ def test_tmux_inspect_refuses_unknown_provider_metadata(monkeypatch, tmp_path) -
         if action == "show-options":
             values = {
                 "@aco_project": b"alpha\n",
-                "@aco_provider": b"grok\n",
+                "@aco_provider": b"gemini\n",
                 "@aco_session_id": b"session-a\n",
             }
             return process.CapturedResult(0, values.get(command[-1], b""), b"")

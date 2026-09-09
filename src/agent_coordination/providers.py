@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from enum import StrEnum
+from pathlib import Path
 
 
 class Provider(StrEnum):
     CODEX = "codex"
     CLAUDE = "claude"
+    GROK = "grok"
 
 
 _SESSION_IDENTITY_ENVIRONMENTS = frozenset(
@@ -31,7 +33,9 @@ def session_identity_environment_names() -> frozenset[str]:
     return _SESSION_IDENTITY_ENVIRONMENTS
 
 
-def resume_command(provider: Provider, session_id: str, model: str | None = None) -> list[str]:
+def resume_command(
+    provider: Provider, session_id: str, directory: Path, model: str | None = None
+) -> list[str]:
     """Build the provider-native command that resumes one registered conversation."""
     match provider:
         case Provider.CODEX:
@@ -41,6 +45,11 @@ def resume_command(provider: Provider, session_id: str, model: str | None = None
             return [*command, session_id]
         case Provider.CLAUDE:
             command = ["claude", "--resume", session_id]
+            if model is not None:
+                command.extend(("--model", model))
+            return command
+        case Provider.GROK:
+            command = ["grok", "--resume", session_id, "--cwd", str(directory)]
             if model is not None:
                 command.extend(("--model", model))
             return command

@@ -180,7 +180,9 @@ def _run_project(
 ) -> RunOutcome:
     target = controller.inspect(project.key)
     launch = terminal.Launch(
-        providers.resume_command(project.provider, project.session_id, project.model),
+        providers.resume_command(
+            project.provider, project.session_id, project.directory, project.model
+        ),
         providers.project_environment(environment, project.agent),
         providers.session_identity_environment_names(),
         project.provider,
