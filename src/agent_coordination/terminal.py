@@ -21,6 +21,21 @@ _ENROLLMENT_DIRECTORY_OPTION = "@aco_enrollment_directory"
 _ENROLLMENT_AGENT_OPTION = "@aco_enrollment_agent"
 _ENROLLMENT_MODEL_OPTION = "@aco_enrollment_model"
 _ENROLLMENT_SESSION_OPTION = "@aco_enrollment_session_id"
+_ENROLLMENT_OPTIONS = (
+    _ENROLLMENT_STATE_OPTION,
+    _ENROLLMENT_ATTEMPT_OPTION,
+    _ENROLLMENT_DIRECTORY_OPTION,
+    _ENROLLMENT_AGENT_OPTION,
+    _ENROLLMENT_MODEL_OPTION,
+    _ENROLLMENT_SESSION_OPTION,
+)
+_TARGET_OPTIONS = (
+    _PROJECT_OPTION,
+    _SESSION_OPTION,
+    _PROVIDER_OPTION,
+    _VIEWER_PENDING_OPTION,
+    *_ENROLLMENT_OPTIONS,
+)
 _ASCII_CONTROL_LIMIT = 32
 _ASCII_DELETE = 127
 
@@ -141,6 +156,38 @@ def _target_provider(value: str) -> providers.Provider | None:
         raise TerminalError("tmux target has unsupported provider metadata") from error
 
 
+def _enrollment(metadata: Mapping[str, str]) -> Enrollment | None:
+    state_value = metadata[_ENROLLMENT_STATE_OPTION]
+    if not state_value:
+        if any(metadata[option] for option in _ENROLLMENT_OPTIONS[1:]):
+            raise TerminalError("tmux target has incomplete enrollment metadata")
+        return None
+    attempt = metadata[_ENROLLMENT_ATTEMPT_OPTION]
+    directory = metadata[_ENROLLMENT_DIRECTORY_OPTION]
+    agent = metadata[_ENROLLMENT_AGENT_OPTION]
+    if not attempt or not directory or not agent:
+        raise TerminalError("tmux target has incomplete enrollment metadata")
+    try:
+        state = EnrollmentState(state_value)
+    except ValueError as error:
+        raise TerminalError("tmux target has invalid enrollment metadata") from error
+    enrollment = Enrollment(
+        Path(directory),
+        agent,
+        metadata[_ENROLLMENT_MODEL_OPTION] or None,
+        attempt,
+        state,
+        metadata[_ENROLLMENT_SESSION_OPTION] or None,
+    )
+    if enrollment.state is EnrollmentState.FINAL and enrollment.session_id is None:
+        raise TerminalError("tmux target has incomplete final enrollment metadata")
+    if metadata[_SESSION_OPTION] and enrollment.session_id is None:
+        raise TerminalError("tmux target has interrupted enrollment UUID metadata")
+    if enrollment.session_id is not None and metadata[_SESSION_OPTION] != enrollment.session_id:
+        raise TerminalError("tmux target has mismatched enrollment UUID metadata")
+    return enrollment
+
+
 class TmuxTerminal:
     """A dedicated-socket tmux adapter; all command execution stays in process."""
 
@@ -153,21 +200,7 @@ class TmuxTerminal:
         if result.exit_status == 1:
             return Target(TargetState.ABSENT)
         self._require_success(result, "inspect tmux target")
-        metadata = {
-            option: self._option(name, option)
-            for option in (
-                _PROJECT_OPTION,
-                _SESSION_OPTION,
-                _PROVIDER_OPTION,
-                _VIEWER_PENDING_OPTION,
-                _ENROLLMENT_STATE_OPTION,
-                _ENROLLMENT_ATTEMPT_OPTION,
-                _ENROLLMENT_DIRECTORY_OPTION,
-                _ENROLLMENT_AGENT_OPTION,
-                _ENROLLMENT_MODEL_OPTION,
-                _ENROLLMENT_SESSION_OPTION,
-            )
-        }
+        metadata = {option: self._option(name, option) for option in _TARGET_OPTIONS}
         dead = self._run("list-panes", "-t", name, "-F", "#{pane_dead}")
         self._require_success(dead, "inspect tmux pane")
         if any(line == "1" for line in self._lines(dead)):
@@ -176,51 +209,13 @@ class TmuxTerminal:
             attached = self._run("display-message", "-p", "-t", name, "#{session_attached}")
             self._require_success(attached, "inspect tmux attachment")
             state = TargetState.ATTACHED if self._text(attached) != "0" else TargetState.DETACHED
-        enrollment = None
-        enrollment_options = (
-            _ENROLLMENT_STATE_OPTION,
-            _ENROLLMENT_ATTEMPT_OPTION,
-            _ENROLLMENT_DIRECTORY_OPTION,
-            _ENROLLMENT_AGENT_OPTION,
-            _ENROLLMENT_MODEL_OPTION,
-            _ENROLLMENT_SESSION_OPTION,
-        )
-        if metadata[_ENROLLMENT_STATE_OPTION]:
-            attempt = metadata[_ENROLLMENT_ATTEMPT_OPTION]
-            directory = metadata[_ENROLLMENT_DIRECTORY_OPTION]
-            agent = metadata[_ENROLLMENT_AGENT_OPTION]
-            if not attempt or not directory or not agent:
-                raise TerminalError("tmux target has incomplete enrollment metadata")
-            try:
-                enrollment_state = EnrollmentState(metadata[_ENROLLMENT_STATE_OPTION])
-            except ValueError as error:
-                raise TerminalError("tmux target has invalid enrollment metadata") from error
-            enrollment = Enrollment(
-                Path(directory),
-                agent,
-                metadata[_ENROLLMENT_MODEL_OPTION] or None,
-                attempt,
-                enrollment_state,
-                metadata[_ENROLLMENT_SESSION_OPTION] or None,
-            )
-            if enrollment.state is EnrollmentState.FINAL and enrollment.session_id is None:
-                raise TerminalError("tmux target has incomplete final enrollment metadata")
-            if metadata[_SESSION_OPTION] and enrollment.session_id is None:
-                raise TerminalError("tmux target has interrupted enrollment UUID metadata")
-            if (
-                enrollment.session_id is not None
-                and metadata[_SESSION_OPTION] != enrollment.session_id
-            ):
-                raise TerminalError("tmux target has mismatched enrollment UUID metadata")
-        elif any(metadata[option] for option in enrollment_options[1:]):
-            raise TerminalError("tmux target has incomplete enrollment metadata")
         return Target(
             state,
             metadata[_PROJECT_OPTION] or None,
             metadata[_SESSION_OPTION] or None,
             metadata[_VIEWER_PENDING_OPTION] == "1",
             _target_provider(metadata[_PROVIDER_OPTION]),
-            enrollment,
+            _enrollment(metadata),
         )
 
     def inspect_all(self) -> tuple[Target, ...]:

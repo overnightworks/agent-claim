@@ -1489,12 +1489,11 @@ def test_start_refuses_a_second_pending_project_for_the_same_canonical_path(
         enrollment=_pending_enrollment(project_path),
     )
     monkeypatch.setattr(fake, "inspect_all", lambda: (pending,))
+    request = workspace.StartRequest("alpha", project_path, "new head")
+    context = _start_context(config_path, tmp_path, fake)
 
     with pytest.raises(workspace.WorkspaceError, match="pending Codex start"):
-        workspace.start_project(
-            workspace.StartRequest("alpha", project_path, "new head"),
-            _start_context(config_path, tmp_path, fake),
-        )
+        workspace.start_project(request, context)
 
     assert fake.created == []
 
@@ -1517,12 +1516,11 @@ def test_start_refuses_a_definition_already_owned_by_configuration(
         config_path,
     )
     fake = FakeTerminal(terminal.Target(terminal.TargetState.ABSENT))
+    request = workspace.StartRequest("alpha", project_path, request_agent)
+    context = _start_context(config_path, tmp_path, fake)
 
     with pytest.raises(workspace.WorkspaceError, match=message):
-        workspace.start_project(
-            workspace.StartRequest("alpha", project_path, request_agent),
-            _start_context(config_path, tmp_path, fake),
-        )
+        workspace.start_project(request, context)
 
     assert fake.created == []
 
@@ -1545,12 +1543,11 @@ def test_start_refuses_an_initializing_target_until_its_setup_is_complete(tmp_pa
             ),
         )
     )
+    request = workspace.StartRequest("alpha", project_path, "new head")
+    context = _start_context(config_path, tmp_path, fake)
 
     with pytest.raises(workspace.WorkspaceError, match="setup is incomplete"):
-        workspace.start_project(
-            workspace.StartRequest("alpha", project_path, "new head"),
-            _start_context(config_path, tmp_path, fake),
-        )
+        workspace.start_project(request, context)
 
     assert fake.created == []
 
@@ -1642,12 +1639,11 @@ def test_start_refuses_an_invalid_staged_native_uuid_before_recovery(
             ),
         )
     )
+    request = workspace.StartRequest("alpha", project_path, "new head")
+    context = _start_context(config_path, tmp_path, fake)
 
     with pytest.raises(workspace.WorkspaceError, match="staged native session_id"):
-        workspace.start_project(
-            workspace.StartRequest("alpha", project_path, "new head"),
-            _start_context(config_path, tmp_path, fake),
-        )
+        workspace.start_project(request, context)
 
     assert config_path.exists() is False
     assert fake.target.enrollment is not None
@@ -1673,12 +1669,11 @@ def test_start_refuses_a_target_with_a_different_requested_definition(tmp_path: 
             ),
         )
     )
+    request = workspace.StartRequest("alpha", project_path, "new head")
+    context = _start_context(config_path, tmp_path, fake)
 
     with pytest.raises(workspace.WorkspaceError, match="foreign metadata"):
-        workspace.start_project(
-            workspace.StartRequest("alpha", project_path, "new head"),
-            _start_context(config_path, tmp_path, fake),
-        )
+        workspace.start_project(request, context)
 
     assert config_path.exists() is False
     assert fake.created == []
@@ -1782,12 +1777,11 @@ def test_start_refuses_an_inconsistent_registered_pending_target(
             enrollment=target_enrollment,
         )
     )
+    request = workspace.StartRequest("alpha", project_path, "new head")
+    context = _start_context(config_path, tmp_path, fake)
 
     with pytest.raises(workspace.WorkspaceError, match=message):
-        workspace.start_project(
-            workspace.StartRequest("alpha", project_path, "new head"),
-            _start_context(config_path, tmp_path, fake),
-        )
+        workspace.start_project(request, context)
 
 
 def test_start_refuses_an_ordinary_target_whose_path_is_not_terminal_owned(tmp_path: Path) -> None:
@@ -1802,12 +1796,11 @@ def test_start_refuses_an_ordinary_target_whose_path_is_not_terminal_owned(tmp_p
             provider=providers.Provider.CODEX,
         )
     )
+    request = workspace.StartRequest("alpha", project_path, "new head")
+    context = _start_context(config_path, tmp_path, fake)
 
     with pytest.raises(workspace.WorkspaceError, match="unknown ownership or path"):
-        workspace.start_project(
-            workspace.StartRequest("alpha", project_path, "new head"),
-            _start_context(config_path, tmp_path, fake),
-        )
+        workspace.start_project(request, context)
 
     assert fake.created == []
 
@@ -1864,12 +1857,11 @@ def test_start_refuses_an_invalid_terminal_snapshot(
             ),
         )
     monkeypatch.setattr(fake, "inspect_all", lambda: (target,))
+    request = workspace.StartRequest("alpha", project_path, "new head")
+    context = _start_context(config_path, tmp_path, fake)
 
     with pytest.raises(error, match=message):
-        workspace.start_project(
-            workspace.StartRequest("alpha", project_path, "new head"),
-            _start_context(config_path, tmp_path, fake),
-        )
+        workspace.start_project(request, context)
 
 
 def test_run_refuses_a_registered_path_held_by_another_pending_start(
@@ -1941,10 +1933,14 @@ def test_start_replaces_only_an_exited_uncaptured_attempt(tmp_path: Path) -> Non
             {"hook_event_name": "SessionStart", "source": "startup", "cwd": "/tmp"},
             "cwd does not match",
         ),
+        (
+            {"hook_event_name": "SessionStart", "source": "startup", "cwd": None},
+            "native cwd must be a string",
+        ),
     ],
 )
 def test_capture_rejects_invalid_native_events_without_writing_configuration(
-    monkeypatch, tmp_path: Path, payload: dict[str, str], message: str
+    monkeypatch, tmp_path: Path, payload: dict[str, object], message: str
 ) -> None:
     config_path = tmp_path / "config" / "workspace.toml"
     project_path = tmp_path / "project"
@@ -1955,7 +1951,7 @@ def test_capture_rejects_invalid_native_events_without_writing_configuration(
         _start_context(config_path, tmp_path, fake),
     )
     monkeypatch.setattr(terminal, "TmuxTerminal", lambda _socket: fake)
-    event = {
+    event: dict[str, object] = {
         "hook_event_name": "SessionStart",
         "source": "startup",
         "session_id": SESSION_ID,
@@ -1965,6 +1961,23 @@ def test_capture_rejects_invalid_native_events_without_writing_configuration(
     launch = fake.created[0][3]
 
     with pytest.raises(workspace.WorkspaceError, match=message):
+        workspace.capture_codex_start(event, launch.environment)
+
+    assert config_path.exists() is False
+    assert fake.target.enrollment is not None
+    assert fake.target.enrollment.session_id is None
+
+
+@pytest.mark.parametrize("suffix", ["/", "/."])
+def test_capture_refuses_noncanonical_native_cwd_text_without_writing_configuration(
+    monkeypatch, tmp_path: Path, suffix: str
+) -> None:
+    config_path, project_path, fake, launch = _pending_capture(tmp_path)
+    monkeypatch.setattr(terminal, "TmuxTerminal", lambda _socket: fake)
+    event = _startup_event(project_path)
+    event["cwd"] = f"{project_path}{suffix}"
+
+    with pytest.raises(workspace.WorkspaceError, match="cwd does not match"):
         workspace.capture_codex_start(event, launch.environment)
 
     assert config_path.exists() is False
@@ -2004,9 +2017,10 @@ def test_capture_refuses_a_missing_fresh_identity_without_writing_configuration(
 def test_capture_refuses_an_invalid_runtime_identity_before_inspecting_tmux(tmp_path: Path) -> None:
     _config_path, project_path, _fake, launch = _pending_capture(tmp_path)
     environment = {**launch.environment, "ACO_CAPTURE_RUNTIME": str(tmp_path)}
+    event = _startup_event(project_path)
 
     with pytest.raises(workspace.WorkspaceError, match="runtime identity is invalid"):
-        workspace.capture_codex_start(_startup_event(project_path), environment)
+        workspace.capture_codex_start(event, environment)
 
 
 def test_capture_stages_the_native_uuid_before_an_atomic_config_failure(
@@ -2176,9 +2190,10 @@ def test_capture_refuses_an_unready_or_differently_staged_target(
         ),
     )
     monkeypatch.setattr(terminal, "TmuxTerminal", lambda _socket: fake)
+    event = _startup_event(project_path)
 
     with pytest.raises(workspace.WorkspaceError, match=message):
-        workspace.capture_codex_start(_startup_event(project_path), launch.environment)
+        workspace.capture_codex_start(event, launch.environment)
 
     assert config_path.exists() is False
 
@@ -2272,12 +2287,11 @@ def test_final_target_without_its_workspace_mapping_is_not_adopted(tmp_path: Pat
             ),
         )
     )
+    request = workspace.StartRequest("alpha", project_path, "new head")
+    context = _start_context(config_path, tmp_path, fake)
 
     with pytest.raises(workspace.WorkspaceError, match="final without a workspace mapping"):
-        workspace.start_project(
-            workspace.StartRequest("alpha", project_path, "new head"),
-            _start_context(config_path, tmp_path, fake),
-        )
+        workspace.start_project(request, context)
 
     assert config_path.exists() is False
 

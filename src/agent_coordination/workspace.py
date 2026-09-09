@@ -36,6 +36,8 @@ _LOGIN_EXEC_ARGUMENTS = ("-I", "-m", "agent_coordination.cli", "_run-at-login")
 _LOGIN_WORKSPACE_FAILURE = "workspace failure"
 _LOGIN_MALFORMED_RECORD = "login attempt record is malformed"
 _LOGIN_MALFORMED_LAUNCHER = "login launcher is malformed"
+_RUNTIME_SOCKET_NAME = "tmux.sock"
+_RUNTIME_LOCK_NAME = "workspace.lock"
 
 
 class WorkspaceError(protocol.ClaimError):
@@ -452,10 +454,10 @@ def run_projects(
         else tuple(config.projects.values())
     )
     runtime = _runtime_directory(runtime_directory, environment or os.environ)
-    controller = terminal_factory(runtime / "tmux.sock")
+    controller = terminal_factory(runtime / _RUNTIME_SOCKET_NAME)
     child_environment = environment or os.environ
     outcomes: list[RunOutcome] = []
-    with _locked(runtime / "workspace.lock"):
+    with _locked(runtime / _RUNTIME_LOCK_NAME):
         targets = _target_index(controller.inspect_all())
         for project in selected:
             try:
@@ -473,8 +475,8 @@ def start_project(
     key, directory, agent, model = _start_definition(request)
     source_environment = context.environment if context.environment is not None else os.environ
     runtime = _runtime_directory(context.runtime_directory, source_environment)
-    controller = context.terminal_factory(runtime / "tmux.sock")
-    with _locked(runtime / "workspace.lock"):
+    controller = context.terminal_factory(runtime / _RUNTIME_SOCKET_NAME)
+    with _locked(runtime / _RUNTIME_LOCK_NAME):
         projects = (
             {} if not context.config_path.exists() else load_config(context.config_path).projects
         )
@@ -491,53 +493,65 @@ def start_project(
         if any(target.enrollment is None for target in targets.values()):
             raise WorkspaceError("tmux target has unknown ownership or path")
         _refuse_pending_directory(targets, directory, key)
-        target = controller.inspect(key)
-        if target.state is not terminal.TargetState.ABSENT:
-            _require_matching_enrollment(target, key, directory, agent, model)
-            enrollment = target.enrollment
-            assert enrollment is not None
-            if enrollment.state is terminal.EnrollmentState.INITIALIZING:
-                raise WorkspaceError("fresh Codex target setup is incomplete")
-            if enrollment.state is terminal.EnrollmentState.FINAL:
-                raise WorkspaceError("fresh Codex target is final without a workspace mapping")
-            if enrollment.session_id is not None:
-                candidate = WorkspaceProject(key, directory, enrollment.session_id, agent, model)
-                _commit_capture(config_path=context.config_path, candidate=candidate)
-                controller.finalize_enrollment(key)
-                return _run_project(controller, candidate, source_environment, targets)
-            if target.state is terminal.TargetState.EXITED:
-                launch = _fresh_launch(
-                    StartRequest(key, directory, agent, model),
-                    str(uuid.uuid4()),
-                    context,
-                    runtime,
-                    source_environment,
-                )
-                controller.retry_enrollment(key, launch)
-                return _attach_or_pending(
-                    controller,
-                    WorkspaceProject(key, directory, "", agent, model),
-                    RunState.ENROLLMENT_PENDING,
-                )
-            return _attach_or_pending(
-                controller,
-                WorkspaceProject(key, directory, "", agent, model),
-                RunState.ENROLLMENT_PENDING,
-            )
-        attempt = str(uuid.uuid4())
-        launch = _fresh_launch(
+        return _start_unregistered_project(
+            controller,
             StartRequest(key, directory, agent, model),
-            attempt,
             context,
             runtime,
-            source_environment,
+            targets,
         )
-        controller.create(key, None, directory, launch)
+
+
+def _start_unregistered_project(
+    controller: terminal.TerminalController,
+    request: StartRequest,
+    context: StartContext,
+    runtime: Path,
+    targets: Mapping[str, terminal.Target],
+) -> RunOutcome:
+    environment = context.environment if context.environment is not None else os.environ
+    target = controller.inspect(request.key)
+    if target.state is terminal.TargetState.ABSENT:
+        launch = _fresh_launch(
+            request,
+            str(uuid.uuid4()),
+            context,
+            runtime,
+            environment,
+        )
+        controller.create(request.key, None, request.directory, launch)
         return _attach_or_pending(
             controller,
-            WorkspaceProject(key, directory, "", agent, model),
+            WorkspaceProject(request.key, request.directory, "", request.agent, request.model),
             RunState.ENROLLMENT_PENDING,
         )
+    _require_matching_enrollment(
+        target, request.key, request.directory, request.agent, request.model
+    )
+    enrollment = target.enrollment
+    assert enrollment is not None
+    if enrollment.state is terminal.EnrollmentState.INITIALIZING:
+        raise WorkspaceError("fresh Codex target setup is incomplete")
+    if enrollment.state is terminal.EnrollmentState.FINAL:
+        raise WorkspaceError("fresh Codex target is final without a workspace mapping")
+    if enrollment.session_id is not None:
+        candidate = WorkspaceProject(
+            request.key, request.directory, enrollment.session_id, request.agent, request.model
+        )
+        _commit_capture(config_path=context.config_path, candidate=candidate)
+        controller.finalize_enrollment(request.key)
+        return _run_project(controller, candidate, environment, targets)
+    pending = WorkspaceProject(request.key, request.directory, "", request.agent, request.model)
+    if target.state is terminal.TargetState.EXITED:
+        launch = _fresh_launch(
+            request,
+            str(uuid.uuid4()),
+            context,
+            runtime,
+            environment,
+        )
+        controller.retry_enrollment(request.key, launch)
+    return _attach_or_pending(controller, pending, RunState.ENROLLMENT_PENDING)
 
 
 def capture_codex_start(payload: Mapping[str, object], environment: Mapping[str, str]) -> None:
@@ -555,7 +569,7 @@ def capture_codex_start(payload: Mapping[str, object], environment: Mapping[str,
     if payload.get("hook_event_name") != "SessionStart" or payload.get("source") != "startup":
         raise WorkspaceError("fresh Codex capture requires a startup SessionStart event")
     session_id = _string(payload.get("session_id"), "native session_id")
-    cwd = _canonical_config_directory(_string(payload.get("cwd"), "native cwd"))
+    cwd = _string(payload.get("cwd"), "native cwd")
     request = StartRequest(
         environment["ACO_CAPTURE_PROJECT"],
         _canonical_config_directory(environment["ACO_CAPTURE_DIRECTORY"]),
@@ -563,14 +577,14 @@ def capture_codex_start(payload: Mapping[str, object], environment: Mapping[str,
         environment.get("ACO_CAPTURE_MODEL"),
     )
     key, directory, agent, model = _start_definition(request)
-    if cwd != directory:
+    if cwd != str(directory):
         raise WorkspaceError("native startup cwd does not match the pending project")
     _exact_uuid(session_id, "native session_id")
     _exact_uuid(environment["ACO_CAPTURE_ATTEMPT"], "fresh Codex attempt")
     config_path = Path(environment["ACO_CAPTURE_CONFIG"])
     runtime = _capture_runtime_directory(environment["ACO_CAPTURE_RUNTIME"])
-    controller = terminal.TmuxTerminal(runtime / "tmux.sock")
-    with _locked(runtime / "workspace.lock"):
+    controller = terminal.TmuxTerminal(runtime / _RUNTIME_SOCKET_NAME)
+    with _locked(runtime / _RUNTIME_LOCK_NAME):
         target = controller.inspect(key)
         _require_matching_enrollment(target, key, directory, agent, model)
         enrollment = target.enrollment

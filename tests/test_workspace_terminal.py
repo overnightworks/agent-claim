@@ -497,9 +497,10 @@ def test_tmux_inspect_refuses_incomplete_enrollment_metadata(
         raise AssertionError(command)
 
     monkeypatch.setattr(process, "run_captured", run)
+    adapter = terminal.TmuxTerminal(tmp_path / "tmux.sock")
 
     with pytest.raises(terminal.TerminalError, match=message):
-        terminal.TmuxTerminal(tmp_path / "tmux.sock").inspect("alpha")
+        adapter.inspect("alpha")
 
 
 def test_tmux_inspect_all_refuses_a_foreign_session(monkeypatch, tmp_path) -> None:
@@ -652,9 +653,10 @@ def test_tmux_retries_existing_targets_with_current_launch_environment(
 
 def test_tmux_refuses_to_retry_enrollment_without_fresh_metadata(tmp_path) -> None:
     launch = terminal.Launch(["codex", "-C", "/workspace"], {"ACO_AGENT": "new head"}, frozenset())
+    adapter = terminal.TmuxTerminal(tmp_path / "tmux.sock")
 
     with pytest.raises(terminal.TerminalError, match="missing metadata"):
-        terminal.TmuxTerminal(tmp_path / "tmux.sock").retry_enrollment("alpha", launch)
+        adapter.retry_enrollment("alpha", launch)
 
 
 def test_tmux_updates_enrollment_metadata_for_a_captured_session(monkeypatch, tmp_path) -> None:
