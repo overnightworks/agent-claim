@@ -688,8 +688,6 @@ def _target_index(targets: tuple[terminal.Target, ...]) -> dict[str, terminal.Ta
     for target in targets:
         if target.state is terminal.TargetState.ABSENT or target.project is None:
             raise terminal.TerminalError("tmux target has incomplete project metadata")
-        if target.project in indexed:
-            raise terminal.TerminalError("tmux target has duplicate project metadata")
         if target.enrollment is not None:
             enrollment = target.enrollment
             _start_definition(
@@ -698,12 +696,6 @@ def _target_index(targets: tuple[terminal.Target, ...]) -> dict[str, terminal.Ta
                 )
             )
             _exact_uuid(enrollment.attempt, "fresh Codex attempt")
-            if enrollment.session_id is not None:
-                _exact_uuid(enrollment.session_id, "staged native session_id")
-                if target.session_id != enrollment.session_id:
-                    raise terminal.TerminalError(
-                        "tmux target has mismatched enrollment UUID metadata"
-                    )
         indexed[target.project] = target
     return indexed
 
@@ -979,9 +971,7 @@ def _capture_runtime_directory(value: str) -> Path:
     runtime = Path(value)
     if not runtime.is_absolute() or runtime.name != "aco":
         raise WorkspaceError("fresh Codex runtime identity is invalid")
-    resolved = _runtime_directory(runtime.parent, {})
-    if resolved != runtime:
-        raise WorkspaceError("fresh Codex runtime identity is not canonical")
+    _runtime_directory(runtime.parent, {})
     return runtime
 
 

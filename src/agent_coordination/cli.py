@@ -2637,7 +2637,7 @@ def _capture_start() -> int:
         if not isinstance(payload, dict):
             raise workspace.WorkspaceError("native startup hook payload must be an object")
         workspace.capture_codex_start(payload, os.environ)
-    except (json.JSONDecodeError, protocol.ClaimError) as error:
+    except (json.JSONDecodeError, protocol.ClaimError, terminal.TerminalError) as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 2
     return 0

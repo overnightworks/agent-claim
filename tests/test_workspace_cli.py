@@ -90,6 +90,19 @@ def test_capture_callback_reports_an_invalid_payload(capsys, monkeypatch) -> Non
     assert capsys.readouterr().err == "ERROR: native startup hook payload must be an object\n"
 
 
+def test_capture_callback_reports_a_terminal_refusal(capsys, monkeypatch) -> None:
+    monkeypatch.setattr(cli.sys, "stdin", io.StringIO("{}"))
+
+    def refuse(*_arguments: object) -> None:
+        raise terminal.TerminalError("target has foreign metadata")
+
+    monkeypatch.setattr(workspace, "capture_codex_start", refuse)
+
+    assert cli.main(["_capture-codex-start"]) == 2
+
+    assert capsys.readouterr().err == "ERROR: target has foreign metadata\n"
+
+
 def test_capture_callback_emits_no_model_context_on_success(capsys, monkeypatch) -> None:
     received: dict[str, object] = {}
     monkeypatch.setattr(cli.sys, "stdin", io.StringIO('{"hook_event_name": "SessionStart"}'))

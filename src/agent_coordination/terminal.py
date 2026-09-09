@@ -283,11 +283,8 @@ class TmuxTerminal:
         name = target_name(project)
         self._set_enrollment_metadata(name, launch.enrollment, EnrollmentState.INITIALIZING)
         self._set_option(name, _SESSION_OPTION, "")
-        try:
-            self._configure_environment(name, launch)
-            self._set_option(name, _ENROLLMENT_STATE_OPTION, EnrollmentState.PENDING.value)
-        except TerminalError:
-            raise
+        self._configure_environment(name, launch)
+        self._set_option(name, _ENROLLMENT_STATE_OPTION, EnrollmentState.PENDING.value)
         self._start_fresh_window(name, launch)
 
     def open_viewer(self, project: str) -> None:

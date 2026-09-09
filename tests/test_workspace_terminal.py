@@ -432,6 +432,10 @@ def test_tmux_inspect_refuses_unknown_provider_metadata(monkeypatch, tmp_path) -
     ("metadata", "message"),
     [
         (
+            {"@aco_enrollment_attempt": "attempt"},
+            "incomplete enrollment",
+        ),
+        (
             {"@aco_enrollment_state": "pending"},
             "incomplete enrollment",
         ),
@@ -508,6 +512,31 @@ def test_tmux_inspect_all_refuses_a_foreign_session(monkeypatch, tmp_path) -> No
 
     with pytest.raises(terminal.TerminalError, match="foreign metadata"):
         adapter.inspect_all()
+
+
+@pytest.mark.parametrize(
+    ("target", "message"),
+    [
+        (terminal.Target(terminal.TargetState.DETACHED, "alpha", "session-a"), None),
+        (terminal.Target(terminal.TargetState.DETACHED, "beta", "session-a"), "incomplete project"),
+    ],
+)
+def test_tmux_inspect_all_reads_each_owned_target(
+    monkeypatch, tmp_path, target: terminal.Target, message: str | None
+) -> None:
+    monkeypatch.setattr(
+        process,
+        "run_captured",
+        lambda *_arguments, **_kwargs: process.CapturedResult(0, b"aco-alpha\n", b""),
+    )
+    adapter = terminal.TmuxTerminal(tmp_path / "tmux.sock")
+    monkeypatch.setattr(adapter, "inspect", lambda _project: target)
+
+    if message is None:
+        assert adapter.inspect_all() == (target,)
+    else:
+        with pytest.raises(terminal.TerminalError, match=message):
+            adapter.inspect_all()
 
 
 def test_tmux_inspect_all_reports_no_targets_when_the_socket_has_no_server(
@@ -619,6 +648,13 @@ def test_tmux_retries_existing_targets_with_current_launch_environment(
             ["@aco_enrollment_state", "initializing"],
             ["@aco_enrollment_attempt", "attempt"],
         ]
+
+
+def test_tmux_refuses_to_retry_enrollment_without_fresh_metadata(tmp_path) -> None:
+    launch = terminal.Launch(["codex", "-C", "/workspace"], {"ACO_AGENT": "new head"}, frozenset())
+
+    with pytest.raises(terminal.TerminalError, match="missing metadata"):
+        terminal.TmuxTerminal(tmp_path / "tmux.sock").retry_enrollment("alpha", launch)
 
 
 def test_tmux_updates_enrollment_metadata_for_a_captured_session(monkeypatch, tmp_path) -> None:
