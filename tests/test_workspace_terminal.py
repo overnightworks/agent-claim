@@ -336,6 +336,31 @@ def test_tmux_inspect_reports_each_live_attachment_state(
     )
 
 
+def test_tmux_inspect_refuses_unknown_provider_metadata(monkeypatch, tmp_path) -> None:
+    def run(command: list[str], **_kwargs: object) -> process.CapturedResult:
+        action = command[3]
+        if action == "has-session":
+            return process.CapturedResult(0, b"", b"")
+        if action == "show-options":
+            values = {
+                "@aco_project": b"alpha\n",
+                "@aco_provider": b"grok\n",
+                "@aco_session_id": b"session-a\n",
+            }
+            return process.CapturedResult(0, values.get(command[-1], b""), b"")
+        if action == "list-panes":
+            return process.CapturedResult(0, b"0\n", b"")
+        if action == "display-message":
+            return process.CapturedResult(0, b"0\n", b"")
+        raise AssertionError(command)
+
+    monkeypatch.setattr(process, "run_captured", run)
+    adapter = terminal.TmuxTerminal(tmp_path / "tmux.sock")
+
+    with pytest.raises(terminal.TerminalError, match="unsupported provider metadata"):
+        adapter.inspect("alpha")
+
+
 def test_tmux_inspect_reports_an_absent_or_exited_target(monkeypatch, tmp_path) -> None:
     def absent(command: list[str], **_kwargs: object) -> process.CapturedResult:
         return process.CapturedResult(1, b"", b"")
