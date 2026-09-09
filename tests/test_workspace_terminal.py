@@ -191,6 +191,75 @@ def test_external_ownership_reuses_a_recorded_live_process_without_a_scan(
     assert ownership.state is terminal.ExternalOwnershipState.LIVE
 
 
+@pytest.mark.parametrize(
+    ("boot_id", "start_time", "alternate_pid", "expected"),
+    [
+        ("new-boot", 10, None, terminal.ExternalOwnershipState.ABSENT),
+        ("boot", 11, None, terminal.ExternalOwnershipState.ABSENT),
+        ("new-boot", 10, 52, terminal.ExternalOwnershipState.LIVE),
+    ],
+)
+def test_external_ownership_rechecks_an_invalidated_receipt(
+    monkeypatch, tmp_path, boot_id, start_time, alternate_pid, expected
+) -> None:
+    original = _native_snapshot(41, tmp_path, boot_id=boot_id, start_time=start_time)
+    alternates = () if alternate_pid is None else (_native_snapshot(alternate_pid, tmp_path),)
+    monkeypatch.setattr(process, "inspect_native_process", lambda _pid: original)
+    monkeypatch.setattr(
+        process,
+        "scan_native_processes",
+        lambda _executable: process.NativeProcessScan(alternates, True),
+    )
+
+    ownership = terminal.external_ownership(
+        providers.Provider.CODEX,
+        "session-a",
+        tmp_path,
+        terminal.ExternalProcessReceipt("boot", 41, 10),
+    )
+
+    assert ownership.state is expected
+
+
+@pytest.mark.parametrize("uncertainty", ["incomplete", "wrong-cwd", "ambiguous"])
+def test_external_ownership_refuses_uncertainty_alongside_an_exact_owner(
+    monkeypatch, tmp_path, uncertainty
+) -> None:
+    processes = [_native_snapshot(42, tmp_path)]
+    complete = True
+    if uncertainty == "incomplete":
+        complete = False
+    elif uncertainty == "wrong-cwd":
+        processes.append(_native_snapshot(43, Path("/other")))
+    else:
+        processes.append(
+            process.NativeProcess(
+                43,
+                process.NativeProcessState.LIVE,
+                process.current_user_id(),
+                "boot",
+                10,
+                "codex",
+                tmp_path,
+                b"codex\0resume\0--unexpected\0session-a\0",
+            )
+        )
+    monkeypatch.setattr(
+        process,
+        "inspect_native_process",
+        lambda _pid: process.NativeProcess(41, process.NativeProcessState.ABSENT),
+    )
+    monkeypatch.setattr(
+        process,
+        "scan_native_processes",
+        lambda _executable: process.NativeProcessScan(tuple(processes), complete),
+    )
+
+    ownership = terminal.external_ownership(providers.Provider.CODEX, "session-a", tmp_path, None)
+
+    assert ownership.state is terminal.ExternalOwnershipState.UNKNOWN
+
+
 def test_external_ownership_refuses_a_live_recorded_process_with_changed_binding(
     monkeypatch, tmp_path
 ) -> None:
@@ -380,12 +449,14 @@ def test_external_ownership_refuses_a_relevant_process_that_loses_its_cwd(
     assert ownership.state is terminal.ExternalOwnershipState.UNKNOWN
 
 
-def _native_snapshot(pid: int, directory, *, start_time: int = 10) -> process.NativeProcess:
+def _native_snapshot(
+    pid: int, directory, *, boot_id: str = "boot", start_time: int = 10
+) -> process.NativeProcess:
     return process.NativeProcess(
         pid,
         process.NativeProcessState.LIVE,
         process.current_user_id(),
-        "boot",
+        boot_id,
         start_time,
         "codex",
         directory,

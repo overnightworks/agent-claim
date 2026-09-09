@@ -272,7 +272,16 @@ def test_login_cli_refuses_a_repository_target(capsys) -> None:
         (
             (workspace.RunOutcome("alpha", workspace.RunState.FAILED),),
             1,
-            "Workspace recovery completed with 1 failed project(s).",
+            "Workspace recovery completed for 0 project(s). 1 project(s) failed recovery.",
+        ),
+        (
+            (
+                workspace.RunOutcome("alpha", workspace.RunState.EXTERNAL),
+                workspace.RunOutcome("beta", workspace.RunState.EXTERNAL),
+            ),
+            0,
+            "Workspace recovery completed for 0 project(s). "
+            "2 project(s) already had live owners; no console was opened.",
         ),
     ],
 )

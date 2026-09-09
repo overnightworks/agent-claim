@@ -2550,13 +2550,17 @@ def _run_workspace(parsed: argparse.Namespace) -> int:
 def _login_summary(result: workspace.LoginRunResult) -> str:
     if result.attempt.failure is not None:
         return "Workspace recovery failed."
-    failed = sum(
-        state in {workspace.RunState.FAILED, workspace.RunState.UNKNOWN}
-        for _, state in result.attempt.outcomes
-    )
+    outcomes = result.attempt.outcomes
+    failed_states = {workspace.RunState.FAILED, workspace.RunState.UNKNOWN}
+    failed = sum(state in failed_states for _, state in outcomes)
+    already_live = sum(state is workspace.RunState.EXTERNAL for _, state in outcomes)
+    recovered = len(outcomes) - failed - already_live
+    summary = f"Workspace recovery completed for {recovered} project(s)."
+    if already_live:
+        summary += f" {already_live} project(s) already had live owners; no console was opened."
     if failed:
-        return f"Workspace recovery completed with {failed} failed project(s)."
-    return f"Workspace recovery completed for {len(result.attempt.outcomes)} project(s)."
+        summary += f" {failed} project(s) failed recovery."
+    return summary
 
 
 def _run_at_login() -> int:
