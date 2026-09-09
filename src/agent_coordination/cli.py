@@ -457,28 +457,30 @@ def _add_protect_parser(commands: argparse._SubParsersAction) -> None:
 
 def _add_register_parser(commands: argparse._SubParsersAction) -> None:
     register = commands.add_parser(
-        "register", help="record one stopped provider session for later workspace recovery"
+        "register",
+        help="record one stopped or validated live provider session for workspace recovery",
     )
     register.add_argument("project", metavar="PROJECT", help="a stable local project key")
     register.add_argument(
         "--path", required=True, type=Path, help="the project's canonical directory"
     )
-    register.add_argument(
-        "--session-id", required=True, help="the exact stopped provider session UUID"
-    )
+    register.add_argument("--session-id", required=True, help="the exact provider session UUID")
     register.add_argument("--agent", required=True, help="the inherited logical claim identity")
     register.add_argument(
         "--provider",
         choices=tuple(provider.value for provider in providers.Provider),
         default=providers.Provider.CODEX.value,
-        help="the stopped conversation provider (default: codex)",
+        help="the conversation provider (default: codex)",
     )
     register.add_argument("--model", help="optional provider model override")
-    register.add_argument(
+    handover = register.add_mutually_exclusive_group(required=True)
+    handover.add_argument(
         "--stopped",
         action="store_true",
-        required=True,
         help="acknowledge that the existing provider session was checkpointed and stopped",
+    )
+    handover.add_argument(
+        "--live-pid", type=int, help="the exact running native Codex or Claude process ID"
     )
 
 
@@ -2522,6 +2524,7 @@ def _register_workspace(parsed: argparse.Namespace) -> int:
         parsed.agent,
         parsed.model,
         provider=providers.Provider(parsed.provider),
+        live_pid=parsed.live_pid,
     )
     created = workspace.register_project(handoff, _workspace_config_path())
     status = "registered" if created else "already registered"
@@ -2534,13 +2537,23 @@ def _run_workspace(parsed: argparse.Namespace) -> int:
     for outcome in outcomes:
         suffix = f": {outcome.detail}" if outcome.detail else ""
         print(f"{outcome.project}: {outcome.state}{suffix}")
-    return 1 if any(outcome.state is workspace.RunState.FAILED for outcome in outcomes) else 0
+    return (
+        1
+        if any(
+            outcome.state in {workspace.RunState.FAILED, workspace.RunState.UNKNOWN}
+            for outcome in outcomes
+        )
+        else 0
+    )
 
 
 def _login_summary(result: workspace.LoginRunResult) -> str:
     if result.attempt.failure is not None:
         return "Workspace recovery failed."
-    failed = sum(state is workspace.RunState.FAILED for _, state in result.attempt.outcomes)
+    failed = sum(
+        state in {workspace.RunState.FAILED, workspace.RunState.UNKNOWN}
+        for _, state in result.attempt.outcomes
+    )
     if failed:
         return f"Workspace recovery completed with {failed} failed project(s)."
     return f"Workspace recovery completed for {len(result.attempt.outcomes)} project(s)."

@@ -79,6 +79,81 @@ def test_explicit_target_provider_mismatch_is_not_adopted() -> None:
     )
 
 
+def test_live_registration_requires_the_same_native_birth_before_and_after_observation(
+    monkeypatch, tmp_path
+) -> None:
+    snapshots = iter(
+        (
+            _native_snapshot(41, tmp_path, start_time=10),
+            _native_snapshot(41, tmp_path, start_time=11),
+        )
+    )
+    monkeypatch.setattr(process, "inspect_native_process", lambda _pid: next(snapshots))
+
+    with pytest.raises(terminal.TerminalError, match="changed"):
+        terminal.register_live_process(providers.Provider.CODEX, "session-a", tmp_path, 41)
+
+
+def test_live_registration_refuses_a_codex_javascript_wrapper(monkeypatch, tmp_path) -> None:
+    wrapper = process.NativeProcess(
+        41,
+        process.NativeProcessState.LIVE,
+        process.current_user_id(),
+        "boot",
+        10,
+        "node",
+        tmp_path,
+        b"node\0codex.js\0resume\0session-a\0",
+    )
+    monkeypatch.setattr(process, "inspect_native_process", lambda _pid: wrapper)
+
+    with pytest.raises(terminal.TerminalError, match="exact resumed native conversation"):
+        terminal.register_live_process(providers.Provider.CODEX, "session-a", tmp_path, 41)
+
+
+def test_live_registration_refuses_grok_until_it_has_a_native_owner_shape(tmp_path) -> None:
+    with pytest.raises(terminal.TerminalError, match="does not support live registration"):
+        terminal.register_live_process(providers.Provider.GROK, "session-a", tmp_path, 41)
+
+
+def test_external_manual_resume_blocks_retry_of_an_exited_managed_pane(
+    monkeypatch, tmp_path
+) -> None:
+    replacement = _native_snapshot(52, tmp_path)
+    monkeypatch.setattr(
+        process,
+        "inspect_native_process",
+        lambda _pid: process.NativeProcess(41, process.NativeProcessState.ABSENT),
+    )
+    monkeypatch.setattr(
+        process,
+        "scan_native_processes",
+        lambda _executable: process.NativeProcessScan((replacement,), True),
+    )
+
+    ownership = terminal.external_ownership(
+        providers.Provider.CODEX,
+        "session-a",
+        tmp_path,
+        terminal.ExternalProcessReceipt("boot", 41, 10),
+    )
+
+    assert ownership.state is terminal.ExternalOwnershipState.LIVE
+
+
+def _native_snapshot(pid: int, directory, *, start_time: int = 10) -> process.NativeProcess:
+    return process.NativeProcess(
+        pid,
+        process.NativeProcessState.LIVE,
+        process.current_user_id(),
+        "boot",
+        start_time,
+        "codex",
+        directory,
+        b"codex\0resume\0session-a\0",
+    )
+
+
 def test_tmux_sets_dead_pane_preservation_and_metadata_before_starting_codex(
     monkeypatch, tmp_path
 ) -> None:

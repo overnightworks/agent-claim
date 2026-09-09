@@ -38,6 +38,24 @@ class TargetState(StrEnum):
     EXITED = "exited"
 
 
+class ExternalOwnershipState(StrEnum):
+    ABSENT = "absent"
+    LIVE = "external live"
+    UNKNOWN = "ownership unknown"
+
+
+@dataclass(frozen=True)
+class ExternalProcessReceipt:
+    boot_id: str
+    pid: int
+    start_time: int
+
+
+@dataclass(frozen=True)
+class ExternalOwnership:
+    state: ExternalOwnershipState
+
+
 @dataclass(frozen=True)
 class Target:
     state: TargetState
@@ -75,6 +93,122 @@ class TerminalController(Protocol):
     def open_viewer(self, project: str) -> None: ...
 
     def clear_viewer_pending(self, project: str) -> None: ...
+
+
+def register_live_process(
+    provider: providers.Provider, session_id: str, directory: Path, pid: int
+) -> ExternalProcessReceipt:
+    """Validate a selected native conversation twice before its receipt is stored."""
+    if providers.native_executable(provider) is None:
+        raise TerminalError(f"{provider.value} does not support live registration")
+    before = process.inspect_native_process(pid)
+    receipt = _validated_receipt(before, provider, session_id, directory)
+    after = process.inspect_native_process(pid)
+    if _validated_receipt(after, provider, session_id, directory) != receipt:
+        raise TerminalError("selected native process changed while it was observed")
+    return receipt
+
+
+def external_ownership(
+    provider: providers.Provider,
+    session_id: str,
+    directory: Path,
+    receipt: ExternalProcessReceipt | None,
+) -> ExternalOwnership:
+    """Decide whether a native owner prevents a tmux launch for one project."""
+    executable = providers.native_executable(provider)
+    if executable is None:
+        return ExternalOwnership(ExternalOwnershipState.ABSENT)
+    original = process.inspect_native_process(receipt.pid) if receipt is not None else None
+    if original is not None and receipt is not None and _same_birth(original, receipt):
+        if _matches_project(original, provider, session_id, directory):
+            recorded_state = ExternalOwnershipState.LIVE
+        elif original.state is process.NativeProcessState.LIVE:
+            recorded_state = ExternalOwnershipState.UNKNOWN
+        else:
+            recorded_state = ExternalOwnershipState.ABSENT
+        if recorded_state is not ExternalOwnershipState.ABSENT:
+            return ExternalOwnership(recorded_state)
+    scan = process.scan_native_processes(executable)
+    matches = [
+        snapshot
+        for snapshot in scan.processes
+        if _matches_project(snapshot, provider, session_id, directory)
+    ]
+    uncertain = (
+        any(
+            snapshot.command_line is not None
+            and providers.classify_native_command(provider, snapshot.command_line, session_id)
+            is providers.NativeCommandState.MATCH
+            and snapshot.directory != directory
+            for snapshot in scan.processes
+        )
+        or any(
+            _relevant_but_uncertain(snapshot, provider, session_id) for snapshot in scan.processes
+        )
+        or not scan.complete
+    )
+    state = (
+        ExternalOwnershipState.LIVE
+        if len(matches) == 1
+        else ExternalOwnershipState.UNKNOWN
+        if len(matches) > 1 or uncertain
+        else ExternalOwnershipState.ABSENT
+    )
+    return ExternalOwnership(state)
+
+
+def _validated_receipt(
+    snapshot: process.NativeProcess,
+    provider: providers.Provider,
+    session_id: str,
+    directory: Path,
+) -> ExternalProcessReceipt:
+    if snapshot.uid != process.current_user_id():
+        raise TerminalError("selected native process is not owned by this user")
+    if snapshot.state is process.NativeProcessState.ZOMBIE:
+        raise TerminalError("selected native process is a zombie")
+    if snapshot.state is not process.NativeProcessState.LIVE:
+        raise TerminalError("selected native process cannot be safely observed")
+    if not _matches_project(snapshot, provider, session_id, directory):
+        raise TerminalError("selected process is not the exact resumed native conversation")
+    assert snapshot.boot_id is not None and snapshot.start_time is not None
+    return ExternalProcessReceipt(snapshot.boot_id, snapshot.pid, snapshot.start_time)
+
+
+def _same_birth(snapshot: process.NativeProcess, receipt: ExternalProcessReceipt) -> bool:
+    return (
+        snapshot.state is process.NativeProcessState.LIVE
+        and snapshot.boot_id == receipt.boot_id
+        and snapshot.start_time == receipt.start_time
+    )
+
+
+def _matches_project(
+    snapshot: process.NativeProcess,
+    provider: providers.Provider,
+    session_id: str,
+    directory: Path,
+) -> bool:
+    return (
+        snapshot.state is process.NativeProcessState.LIVE
+        and snapshot.comm == providers.native_executable(provider)
+        and snapshot.directory == directory
+        and snapshot.command_line is not None
+        and providers.classify_native_command(provider, snapshot.command_line, session_id)
+        is providers.NativeCommandState.MATCH
+    )
+
+
+def _relevant_but_uncertain(
+    snapshot: process.NativeProcess, provider: providers.Provider, session_id: str
+) -> bool:
+    if snapshot.command_line is None:
+        return True
+    return (
+        providers.classify_native_command(provider, snapshot.command_line, session_id)
+        is providers.NativeCommandState.AMBIGUOUS
+    )
 
 
 def target_name(project: str) -> str:
