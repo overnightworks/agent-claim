@@ -612,13 +612,12 @@ def _project(handoff: WorkspaceRegistration) -> WorkspaceProject:
 def _project_from_config_record(key: object, record: object, version: int) -> WorkspaceProject:
     if not isinstance(key, str) or not isinstance(record, dict):
         raise WorkspaceError("workspace projects must use project keys and table records")
-    fields = (
-        _PROJECT_FIELDS
-        if version == _LEGACY_CONFIG_VERSION
-        else _PROVIDER_PROJECT_FIELDS
-        if version == _PROVIDER_CONFIG_VERSION
-        else _LIVE_PROJECT_FIELDS
-    )
+    if version == _LEGACY_CONFIG_VERSION:
+        fields = _PROJECT_FIELDS
+    elif version == _PROVIDER_CONFIG_VERSION:
+        fields = _PROVIDER_PROJECT_FIELDS
+    else:
+        fields = _LIVE_PROJECT_FIELDS
     required = {"path", "session_id", "agent"}
     if version in {_PROVIDER_CONFIG_VERSION, _CONFIG_VERSION}:
         required.add("provider")

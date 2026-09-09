@@ -362,7 +362,7 @@ def _process_identity(pid: int, proc_root: Path) -> NativeProcess:
         uid = _proc_uid(proc_root / str(pid) / "status")
     except FileNotFoundError:
         return NativeProcess(pid, NativeProcessState.ABSENT)
-    except (OSError, ValueError, UnicodeDecodeError):
+    except (OSError, ValueError):
         return replace(identity, state=NativeProcessState.UNKNOWN)
     return replace(identity, uid=uid)
 
@@ -375,7 +375,7 @@ def _stat_identity(pid: int, proc_root: Path) -> NativeProcess:
         state, comm, start_time = _proc_stat(proc_root / str(pid) / "stat")
     except FileNotFoundError:
         return absent
-    except (OSError, ValueError, UnicodeDecodeError):
+    except (OSError, ValueError):
         return NativeProcess(pid, NativeProcessState.UNKNOWN)
     if state == "Z":
         return NativeProcess(pid, NativeProcessState.ZOMBIE, comm=comm, start_time=start_time)
@@ -442,20 +442,8 @@ def scan_native_processes(executable: str, proc_root: Path = Path("/proc")) -> N
             if inspected > _MAX_NATIVE_PROCESS_SCAN:
                 complete = False
                 break
-            identity = _process_identity(int(entry.name), proc_root)
-            if identity.state is NativeProcessState.ABSENT:
-                continue
-            if identity.comm != executable:
-                continue
-            if identity.uid is not None and identity.uid != os.getuid():
-                continue
-            if identity.state is NativeProcessState.ZOMBIE:
-                continue
-            if identity.state is not NativeProcessState.LIVE:
-                complete = False
-                continue
-            snapshot = _live_process_snapshot(identity, proc_root / entry.name, proc_root)
-            if snapshot.state is NativeProcessState.ABSENT:
+            snapshot = _scan_native_process_candidate(entry, executable, proc_root)
+            if snapshot is None or snapshot.state is NativeProcessState.ABSENT:
                 continue
             if snapshot.state is not NativeProcessState.LIVE:
                 complete = False
@@ -464,6 +452,21 @@ def scan_native_processes(executable: str, proc_root: Path = Path("/proc")) -> N
     except OSError:
         complete = False
     return NativeProcessScan(tuple(observed), complete)
+
+
+def _scan_native_process_candidate(
+    entry: Path, executable: str, proc_root: Path
+) -> NativeProcess | None:
+    identity = _process_identity(int(entry.name), proc_root)
+    if identity.state is NativeProcessState.ABSENT or identity.comm != executable:
+        return None
+    if identity.uid is not None and identity.uid != os.getuid():
+        return None
+    if identity.state is NativeProcessState.ZOMBIE:
+        return None
+    if identity.state is not NativeProcessState.LIVE:
+        return identity
+    return _live_process_snapshot(identity, entry, proc_root)
 
 
 class _ProcReadBoundedError(Exception):

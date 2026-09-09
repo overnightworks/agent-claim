@@ -1627,10 +1627,13 @@ def test_live_receipt_allows_retry_after_observation_proves_no_external_owner(
 def test_live_registration_refuses_a_nonpositive_pid_before_observation(tmp_path: Path) -> None:
     project_path = tmp_path / "project"
     project_path.mkdir()
+    registration = workspace.WorkspaceRegistration(
+        "alpha", project_path, SESSION_ID, "head", live_pid=0
+    )
 
     with pytest.raises(workspace.WorkspaceError, match="live_pid"):
         workspace.register_project(
-            workspace.WorkspaceRegistration("alpha", project_path, SESSION_ID, "head", live_pid=0),
+            registration,
             tmp_path / "workspace.toml",
         )
 

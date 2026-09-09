@@ -143,13 +143,12 @@ def external_ownership(
         )
         or not scan.complete
     )
-    state = (
-        ExternalOwnershipState.LIVE
-        if len(matches) == 1
-        else ExternalOwnershipState.UNKNOWN
-        if len(matches) > 1 or uncertain
-        else ExternalOwnershipState.ABSENT
-    )
+    if len(matches) == 1:
+        state = ExternalOwnershipState.LIVE
+    elif len(matches) > 1 or uncertain:
+        state = ExternalOwnershipState.UNKNOWN
+    else:
+        state = ExternalOwnershipState.ABSENT
     return ExternalOwnership(state)
 
 
