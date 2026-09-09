@@ -116,6 +116,11 @@ The installed Python path must not contain `%`. ACO refuses that path before it
 creates or replaces a launcher; move the installation to a percent-free path and
 enable login again.
 
+Enable also requires `${XDG_CONFIG_HOME:-~/.config}/autostart` to be a normal
+directory owned by the user with no group or other permission bits. If an existing
+directory you own is more permissive, run `chmod 700 "${XDG_CONFIG_HOME:-$HOME/.config}/autostart"`;
+the same user's desktop session can still read its autostart entry.
+
 Login recovery is desired-workspace mode: every configured project is resumed in
 configuration order at each desktop login, including one that was previously
 exited. It restores the existing native UUID through the normal promptless

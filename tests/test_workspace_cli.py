@@ -171,6 +171,29 @@ def test_login_status_reports_independent_disabled_and_missing_states(
     )
 
 
+def test_login_status_reports_an_owned_launcher_as_stale_when_its_current_interpreter_is_unsafe(
+    capsys, monkeypatch, tmp_path: Path
+) -> None:
+    configuration = tmp_path / "config"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(configuration))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setattr(cli, "_workspace_config_path", lambda: tmp_path / "workspace.toml")
+    monkeypatch.setattr(cli.sys, "executable", "/new%installation/python")
+    desktop_path = workspace.login_desktop_path(os.environ)
+    desktop_path.parent.mkdir(parents=True, mode=0o700)
+    desktop_path.write_text(
+        "[Desktop Entry]\nType=Application\nName=ACO workspace recovery\n"
+        "Exec=/old/python -I -m agent_coordination.cli _run-at-login\n"
+        "X-Aco-Owner=agent-coordination/login-v1\n"
+    )
+
+    assert cli.main(["login", "status"]) == 0
+
+    assert capsys.readouterr().out == (
+        "launcher: stale\nconfiguration: missing\nattempt: no login attempt recorded\n"
+    )
+
+
 def test_login_cli_enables_and_disables_the_owned_launcher(
     capsys, monkeypatch, tmp_path: Path
 ) -> None:

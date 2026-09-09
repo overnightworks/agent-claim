@@ -12,12 +12,22 @@ import pytest
 from agent_coordination import process, providers, terminal
 
 
-def test_login_notification_is_best_effort_and_uses_only_its_bounded_summary(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    "failure",
+    [
+        process.ExecutableMissingError("notify-send"),
+        PermissionError("notify-send"),
+        IsADirectoryError("notify-send"),
+    ],
+)
+def test_login_notification_is_best_effort_and_uses_only_its_bounded_summary(
+    monkeypatch, failure: process.ProcessError | OSError
+) -> None:
     commands: list[list[str]] = []
 
     def unavailable(command: list[str], **_kwargs: object) -> process.CapturedResult:
         commands.append(command)
-        raise process.ExecutableMissingError("notify-send")
+        raise failure
 
     monkeypatch.setattr(process, "run_captured", unavailable)
 

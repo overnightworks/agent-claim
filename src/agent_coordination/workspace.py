@@ -177,9 +177,13 @@ def login_launcher_state(environment: Mapping[str, str], executable: Path) -> Lo
     owned_executable = _owned_launcher_executable(desktop_path)
     if owned_executable is None:
         return LoginLauncherState.CONFLICT
+    try:
+        current_executable = _login_executable(executable)
+    except WorkspaceError:
+        return LoginLauncherState.STALE
     return (
         LoginLauncherState.ENABLED
-        if owned_executable == _login_executable(executable)
+        if owned_executable == current_executable
         else LoginLauncherState.STALE
     )
 
