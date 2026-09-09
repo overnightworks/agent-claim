@@ -87,6 +87,7 @@ class TerminalController(Protocol):
     def retry(
         self,
         project: str,
+        directory: Path,
         launch: Launch,
     ) -> None: ...
 
@@ -301,11 +302,12 @@ class TmuxTerminal:
     def retry(
         self,
         project: str,
+        directory: Path,
         launch: Launch,
     ) -> None:
         name = target_name(project)
         self._configure_environment(name, launch)
-        self._start_fresh_window(name, launch)
+        self._start_fresh_window(name, launch, directory)
 
     def open_viewer(self, project: str) -> None:
         name = target_name(project)
@@ -460,9 +462,7 @@ class TmuxTerminal:
             line.removeprefix("-").split("=", maxsplit=1)[0] for line in self._lines(result)
         )
 
-    def _start_fresh_window(
-        self, target: str, launch: Launch, directory: Path | None = None
-    ) -> None:
+    def _start_fresh_window(self, target: str, launch: Launch, directory: Path) -> None:
         old_window = self._text(
             self._successful_result(
                 self._run("display-message", "-p", "-t", target, "#{window_id}"),
@@ -472,8 +472,7 @@ class TmuxTerminal:
         if not old_window:
             raise TerminalError("inspect tmux window failed: missing window id")
         command = ["new-window", "-d", "-P", "-F", "#{window_id}", "-t", target]
-        if directory is not None:
-            command.extend(("-c", str(directory)))
+        command.extend(("-c", str(directory)))
         command.append(shlex.join(self._provider_command(launch)))
         new_window = self._text(
             self._successful_result(

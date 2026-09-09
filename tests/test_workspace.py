@@ -1288,7 +1288,7 @@ class FakeTerminal:
             self.pending_after_create,
         )
 
-    def retry(self, project: str, launch: terminal.Launch) -> None:
+    def retry(self, project: str, directory: Path, launch: terminal.Launch) -> None:
         self.retried.append((project, launch))
         self.target = terminal.Target(
             terminal.TargetState.ATTACHED

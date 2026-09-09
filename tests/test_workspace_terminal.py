@@ -782,6 +782,7 @@ def test_initial_and_retried_codex_children_receive_the_sanitized_environment(
     fake_codex = executable_directory / "codex"
     fake_codex.write_text(
         "#!/bin/sh\n"
+        'export ACO_PROOF_CWD="$(pwd)"\n'
         'env -0 > "$ACO_PROOF_OUTPUT"\n'
         'tmux -S "$ACO_PROOF_SOCKET" wait-for -S aco-env-proof\n'
     )
@@ -852,7 +853,7 @@ def test_initial_and_retried_codex_children_receive_the_sanitized_environment(
                     if name != "ACO_PROOF_AUTH"
                 },
             )
-            adapter.retry("alpha", retry_launch)
+            adapter.retry("alpha", tmp_path, retry_launch)
             _wait_for_probe(socket_path)
             retried_environment = _environment(output_path)
             retried_pane_command = process.run_captured(
@@ -888,6 +889,7 @@ def test_initial_and_retried_codex_children_receive_the_sanitized_environment(
     assert "ACO_PROOF_STALE_GLOBAL" not in first_environment
     assert "ACO_PROOF_STALE_GLOBAL" not in retried_environment
     assert "ACO_PROOF_STALE_GLOBAL" not in second_project_environment
+    assert retried_environment["ACO_PROOF_CWD"] == str(tmp_path)
     assert injected_target.exit_status == 1
     assert synthetic_secret not in pane_command
     assert synthetic_secret not in retried_pane_command

@@ -550,7 +550,7 @@ def _launch_if_unowned(
     if state is RunState.STARTED:
         controller.create(project.key, project.session_id, project.directory, launch)
     else:
-        controller.retry(project.key, launch)
+        controller.retry(project.key, project.directory, launch)
     return _attach_or_pending(controller, project, state)
 
 
