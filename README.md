@@ -112,6 +112,15 @@ channels; it does not copy credentials or alter provider permissions. Claude
 uses the caller's existing `CLAUDE_CONFIG_DIR` when set and its normal home when
 unset; `aco` does not select an account or search provider homes.
 
+If an older installation reports unowned viewer-pending metadata, do not clear
+it while a console may still be attaching. First confirm the named target has
+no attached client (`tmux -S "$XDG_RUNTIME_DIR/aco/tmux.sock" display-message
+-p -t aco-my-project '#{session_attached}'` prints `0`) and confirm that no
+earlier GNOME Terminal launch for that project remains in progress. Only then
+clear that stale value with `tmux -S "$XDG_RUNTIME_DIR/aco/tmux.sock"
+set-option -t aco-my-project @aco_viewer_pending ""`, then run `aco run
+my-project` again.
+
 Claude's existing `claude-revive` SessionStart hook remains a separate recovery
 owner. Do not use both recovery paths for the same conversation; its replacement,
 enrollment, and retirement remain with #213.
