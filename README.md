@@ -166,6 +166,15 @@ classes. An interrupted run remains visibly unfinished; a failed project does no
 hide later configured projects. The record contains no provider UUID, workspace
 path, agent, model, configuration, environment, command line, or raw error.
 
+## Starting a fresh Codex workspace
+
+`aco start PROJECT --path DIR --agent NAME [--model MODEL]` opens one promptless
+Codex console and reports enrollment pending. It does not send a prompt or claim
+the empty native conversation is recoverable. Codex offers its launch-only
+SessionStart hook for native trust; if the operator accepts it, the first real
+user submission records the exact UUID for later `aco run`. ACO does not accept
+the trust prompt, edit existing hooks, or validate or alter Codex history.
+
 Omitted `--base`/`--branch` bind the current checkout; explicit values must match it.
 Omitted `--agent` on `claim` and `release` is filled from non-empty
 `ACO_AGENT`, else non-empty `GROK_SESSION_ID` as `Grok {session}`, else

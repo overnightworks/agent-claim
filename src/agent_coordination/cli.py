@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import sys
 import uuid
 from collections.abc import Callable, Mapping
@@ -505,6 +506,18 @@ def _add_run_at_login_parser(commands: argparse._SubParsersAction) -> None:
     commands.add_parser("_run-at-login", help=argparse.SUPPRESS)
 
 
+def _add_start_parser(commands: argparse._SubParsersAction) -> None:
+    start = commands.add_parser("start", help="open one fresh Codex workspace console")
+    start.add_argument("project", metavar="PROJECT", help="a stable local project key")
+    start.add_argument("--path", required=True, type=Path, help="the project's canonical directory")
+    start.add_argument("--agent", required=True, help="the logical claim identity for the new head")
+    start.add_argument("--model", help="optional Codex model override")
+
+
+def _add_capture_start_parser(commands: argparse._SubParsersAction) -> None:
+    commands.add_parser("_capture-codex-start", help=argparse.SUPPRESS)
+
+
 _SUBPARSER_BUILDERS: tuple[Callable[[argparse._SubParsersAction], None], ...] = (
     _add_bootstrap_parser,
     _add_status_parser,
@@ -521,6 +534,8 @@ _SUBPARSER_BUILDERS: tuple[Callable[[argparse._SubParsersAction], None], ...] = 
     _add_run_parser,
     _add_login_parser,
     _add_run_at_login_parser,
+    _add_start_parser,
+    _add_capture_start_parser,
 )
 
 
@@ -2612,31 +2627,73 @@ def _login_operation(parsed: argparse.Namespace) -> int:
     return _login_status()
 
 
-def _local_operation(parsed: argparse.Namespace) -> int:
+def _start_workspace(parsed: argparse.Namespace) -> int:
+    callback = shlex.join(
+        [sys.executable, "-I", "-m", "agent_coordination.cli", "_capture-codex-start"]
+    )
+    outcome = workspace.start_project(
+        workspace.StartRequest(parsed.project, parsed.path, parsed.agent, parsed.model),
+        workspace.StartContext(_workspace_config_path(), callback),
+    )
+    suffix = f": {outcome.detail}" if outcome.detail else ""
+    print(f"{outcome.project}: {outcome.state}{suffix}")
+    return 0
+
+
+def _capture_start() -> int:
+    try:
+        payload = json.load(sys.stdin)
+        if not isinstance(payload, dict):
+            raise workspace.WorkspaceError("native startup hook payload must be an object")
+        workspace.capture_codex_start(payload, os.environ)
+    except (json.JSONDecodeError, protocol.ClaimError, terminal.TerminalError) as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return 2
+    return 0
+
+
+def _workspace_operation(parsed: argparse.Namespace) -> int:
+    if parsed.repo is not None:
+        raise protocol.ClaimError("--repo is meaningless for workspace operations")
+    if parsed.command == "register":
+        return _register_workspace(parsed)
+    if parsed.command == "run":
+        return _run_workspace(parsed)
+    return _start_workspace(parsed)
+
+
+def _workspace_command(parsed: argparse.Namespace) -> int:
+    if parsed.command == "_capture-codex-start":
+        return _capture_start()
     if parsed.command == "_run-at-login":
         return _run_at_login()
     if parsed.command == "login":
         return _login_operation(parsed)
-    if parsed.repo is not None:
-        raise protocol.ClaimError("--repo is meaningless for workspace operations")
-    return _register_workspace(parsed) if parsed.command == "register" else _run_workspace(parsed)
+    return _workspace_operation(parsed)
 
 
 def main(arguments: list[str] | None = None) -> int:
     parsed = _parser().parse_args(arguments)
-    if parsed.command in {"_run-at-login", "register", "run", "login"}:
+    if parsed.command in {
+        "_capture-codex-start",
+        "_run-at-login",
+        "login",
+        "register",
+        "run",
+        "start",
+    }:
         try:
-            return _local_operation(parsed)
-        except protocol.ClaimError as error:
+            return _workspace_command(parsed)
+        except (protocol.ClaimError, terminal.TerminalError) as error:
             print(f"ERROR: {error}", file=sys.stderr)
             return 2
-    if parsed.command == "protect":
-        return _protect(parsed.repo)
     try:
+        if parsed.command == "protect":
+            return _protect(parsed.repo)
         if parsed.command == "status":
             return _cmd_status(parsed)
         return _dispatch(parsed)
-    except protocol.ClaimError as error:
+    except (protocol.ClaimError, terminal.TerminalError) as error:
         print(f"ERROR: {error}", file=sys.stderr)
         if getattr(parsed, "json", False):
             print(json.dumps({"ok": False, "error": str(error)}))

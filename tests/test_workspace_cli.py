@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 from pathlib import Path
@@ -28,6 +29,93 @@ def test_register_requires_the_explicit_stopped_handover() -> None:
 def test_run_refuses_a_repository_target(capsys) -> None:
     assert cli.main(["--repo", "example/repository", "run"]) == 2
     assert "--repo" in capsys.readouterr().err
+
+
+def test_start_requires_a_path_and_logical_agent() -> None:
+    with pytest.raises(SystemExit, match="2"):
+        cli.main(["start", "alpha"])
+
+
+def test_start_uses_its_own_isolated_python_callback(capsys, monkeypatch, tmp_path: Path) -> None:
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    observed: dict[str, object] = {}
+    monkeypatch.setattr(cli.sys, "executable", "/candidate/bin/python")
+    monkeypatch.setattr(cli, "_workspace_config_path", lambda: tmp_path / "workspace.toml")
+
+    def start(
+        request: workspace.StartRequest, context: workspace.StartContext
+    ) -> workspace.RunOutcome:
+        observed["request"] = request
+        observed["context"] = context
+        return workspace.RunOutcome("alpha", workspace.RunState.ENROLLMENT_PENDING)
+
+    monkeypatch.setattr(workspace, "start_project", start)
+
+    assert cli.main(["start", "alpha", "--path", str(project_path), "--agent", "new head"]) == 0
+
+    assert observed["request"] == workspace.StartRequest("alpha", project_path, "new head")
+    assert isinstance(observed["context"], workspace.StartContext)
+    assert observed["context"].callback == (
+        "/candidate/bin/python -I -m agent_coordination.cli _capture-codex-start"
+    )
+    assert capsys.readouterr().out == "alpha: enrollment pending\n"
+
+
+def test_start_reports_a_terminal_refusal_without_a_traceback(
+    capsys, monkeypatch, tmp_path: Path
+) -> None:
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+
+    def refuse(*_arguments: object) -> workspace.RunOutcome:
+        raise terminal.TerminalError("foreign metadata")
+
+    monkeypatch.setattr(
+        workspace,
+        "start_project",
+        refuse,
+    )
+
+    assert cli.main(["start", "alpha", "--path", str(project_path), "--agent", "new head"]) == 2
+
+    assert capsys.readouterr().err == "ERROR: foreign metadata\n"
+
+
+def test_capture_callback_reports_an_invalid_payload(capsys, monkeypatch) -> None:
+    monkeypatch.setattr(cli.sys, "stdin", io.StringIO("[]"))
+
+    assert cli.main(["_capture-codex-start"]) == 2
+
+    assert capsys.readouterr().err == "ERROR: native startup hook payload must be an object\n"
+
+
+def test_capture_callback_reports_a_terminal_refusal(capsys, monkeypatch) -> None:
+    monkeypatch.setattr(cli.sys, "stdin", io.StringIO("{}"))
+
+    def refuse(*_arguments: object) -> None:
+        raise terminal.TerminalError("target has foreign metadata")
+
+    monkeypatch.setattr(workspace, "capture_codex_start", refuse)
+
+    assert cli.main(["_capture-codex-start"]) == 2
+
+    assert capsys.readouterr().err == "ERROR: target has foreign metadata\n"
+
+
+def test_capture_callback_emits_no_model_context_on_success(capsys, monkeypatch) -> None:
+    received: dict[str, object] = {}
+    monkeypatch.setattr(cli.sys, "stdin", io.StringIO('{"hook_event_name": "SessionStart"}'))
+    monkeypatch.setattr(
+        workspace,
+        "capture_codex_start",
+        lambda payload, environment: received.update(payload=payload, environment=environment),
+    )
+
+    assert cli.main(["_capture-codex-start"]) == 0
+
+    assert received["payload"] == {"hook_event_name": "SessionStart"}
+    assert capsys.readouterr().out == ""
 
 
 def test_register_writes_an_explicit_stopped_handover_through_the_cli(
