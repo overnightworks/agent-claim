@@ -1609,6 +1609,38 @@ def test_start_surfaces_and_consumes_a_viewer_failure_without_retrying_enrollmen
     assert fake.consumed_failures == [("alpha", "00000000-0000-4000-8000-000000000000")]
 
 
+@pytest.mark.parametrize(
+    "target_state", [terminal.TargetState.DETACHED, terminal.TargetState.EXITED]
+)
+def test_start_consumes_a_preexisting_failed_viewer_receipt_without_retrying_enrollment(
+    tmp_path: Path, target_state: terminal.TargetState
+) -> None:
+    config_path = tmp_path / "config" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    fake = FakeTerminal(
+        terminal.Target(
+            target_state,
+            "alpha",
+            viewer_attempt=_viewer_attempt(terminal.ViewerAttemptState.FAILED),
+            provider=providers.Provider.CODEX,
+            enrollment=_pending_enrollment(project_path),
+        )
+    )
+
+    outcome = workspace.start_project(
+        workspace.StartRequest("alpha", project_path, "new head"),
+        _start_context(config_path, tmp_path, fake),
+    )
+
+    assert outcome == workspace.RunOutcome(
+        "alpha", workspace.RunState.FAILED, "project console failed to attach"
+    )
+    assert fake.consumed_failures == [("alpha", "00000000-0000-4000-8000-000000000000")]
+    assert fake.retried == []
+    assert fake.opened == []
+
+
 def test_capture_commits_the_matching_pending_native_uuid(tmp_path: Path, monkeypatch) -> None:
     config_path = tmp_path / "config" / "workspace.toml"
     project_path = tmp_path / "project"
