@@ -1257,6 +1257,7 @@ class FakeTerminal:
         attach_viewer: bool = True,
         pending_after_create: bool = False,
         pending_after_open: bool = False,
+        failure_after_open: bool = False,
         pending_after_retry: bool = False,
         attach_after_launch: bool = False,
         failure_consumption_error: bool = False,
@@ -1266,6 +1267,7 @@ class FakeTerminal:
         self.attach_viewer = attach_viewer
         self.pending_after_create = pending_after_create
         self.pending_after_open = pending_after_open
+        self.failure_after_open = failure_after_open
         self.pending_after_retry = pending_after_retry
         self.attach_after_launch = attach_after_launch
         self.failure_consumption_error = failure_consumption_error
@@ -1319,6 +1321,13 @@ class FakeTerminal:
                 project,
                 self.target.session_id,
                 _viewer_attempt(),
+            )
+        elif self.failure_after_open:
+            self.target = terminal.Target(
+                terminal.TargetState.DETACHED,
+                project,
+                self.target.session_id,
+                _viewer_attempt(terminal.ViewerAttemptState.FAILED),
             )
 
     def consume_viewer_failure(self, project: str, token: str) -> None:
@@ -1479,6 +1488,38 @@ def test_run_reports_pending_only_while_the_new_viewer_owner_has_its_token(tmp_p
 
     assert outcomes[0].state is workspace.RunState.PENDING
     assert fake.opened == [("alpha", {"XDG_RUNTIME_DIR": str(tmp_path)})]
+
+
+def test_run_consumes_a_failed_viewer_attempt_recorded_after_opening(tmp_path: Path) -> None:
+    config_path = tmp_path / "config" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    workspace.register_project(
+        workspace.WorkspaceRegistration("alpha", project_path, SESSION_ID, "restored head"),
+        config_path,
+    )
+    environment = {"XDG_RUNTIME_DIR": str(tmp_path)}
+    fake = FakeTerminal(
+        terminal.Target(terminal.TargetState.ABSENT),
+        attach_viewer=False,
+        failure_after_open=True,
+    )
+
+    outcomes = workspace.run_projects(
+        config_path,
+        environment=environment,
+        runtime_directory=tmp_path,
+        terminal_factory=lambda _socket: fake,
+    )
+
+    assert outcomes == (
+        workspace.RunOutcome(
+            "alpha", workspace.RunState.FAILED, "project console failed to attach"
+        ),
+    )
+    assert fake.opened == [("alpha", environment)]
+    assert fake.retried == []
+    assert fake.consumed_failures == [("alpha", "attempt-token")]
 
 
 def test_run_does_not_open_a_second_viewer_after_retry_finds_a_live_owner_token(
