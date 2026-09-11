@@ -1579,14 +1579,10 @@ def test_run_reports_a_fast_viewer_failure_and_allows_a_later_attempt(tmp_path: 
     )
 
     assert first == (
-        workspace.RunOutcome(
-            "alpha", workspace.RunState.FAILED, "project console ended before attaching"
-        ),
+        workspace.RunOutcome("alpha", workspace.RunState.FAILED, "project console is not attached"),
     )
     assert second == (
-        workspace.RunOutcome(
-            "alpha", workspace.RunState.FAILED, "project console ended before attaching"
-        ),
+        workspace.RunOutcome("alpha", workspace.RunState.FAILED, "project console is not attached"),
     )
     assert fake.opened == [("alpha", environment), ("alpha", environment)]
 

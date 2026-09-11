@@ -576,7 +576,7 @@ def _attach_or_pending(
     )
     if existing is not None:
         return existing
-    return RunOutcome(project.key, RunState.FAILED, "project console ended before attaching")
+    return RunOutcome(project.key, RunState.FAILED, "project console is not attached")
 
 
 def _existing_viewer_outcome(
