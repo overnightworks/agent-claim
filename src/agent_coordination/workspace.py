@@ -554,6 +554,7 @@ def _start_unregistered_project(
             controller,
             WorkspaceProject(request.key, request.directory, "", request.agent, request.model),
             RunState.ENROLLMENT_PENDING,
+            environment,
         )
     _require_matching_enrollment(
         target, request.key, request.directory, request.agent, request.model
@@ -572,6 +573,8 @@ def _start_unregistered_project(
         controller.finalize_enrollment(request.key)
         return _run_project(controller, candidate, environment, targets)
     pending = WorkspaceProject(request.key, request.directory, "", request.agent, request.model)
+    if _is_failed_viewer_attempt(target):
+        return _consume_failed_viewer_attempt(controller, pending, target)
     if target.state is terminal.TargetState.EXITED:
         launch = _fresh_launch(
             request,
@@ -581,7 +584,7 @@ def _start_unregistered_project(
             environment,
         )
         controller.retry_enrollment(request.key, request.directory, launch)
-    return _attach_or_pending(controller, pending, RunState.ENROLLMENT_PENDING)
+    return _attach_or_pending(controller, pending, RunState.ENROLLMENT_PENDING, environment)
 
 
 def capture_codex_start(payload: Mapping[str, object], environment: Mapping[str, str]) -> None:
@@ -820,7 +823,7 @@ def _run_project(
         project.provider,
     )
     if target.state is terminal.TargetState.ABSENT:
-        return _launch_if_unowned(controller, project, launch, RunState.STARTED)
+        return _launch_if_unowned(controller, project, launch, RunState.STARTED, environment)
     if not terminal.target_matches(
         {
             "@aco_project": target.project or "",
@@ -834,16 +837,18 @@ def _run_project(
         raise terminal.TerminalError(
             f"tmux target {terminal.target_name(project.key)!r} has foreign metadata"
         )
-    if target.state is terminal.TargetState.EXITED:
-        return _launch_if_unowned(controller, project, launch, RunState.RETRIED)
     if target.state is terminal.TargetState.ATTACHED:
-        controller.clear_viewer_pending(project.key)
+        _consume_attached_viewer_failure(controller, project, target)
         return RunOutcome(project.key, RunState.REUSED)
-    if target.viewer_pending:
+    if _is_failed_viewer_attempt(target):
+        return _consume_failed_viewer_attempt(controller, project, target)
+    if target.state is terminal.TargetState.EXITED:
+        return _launch_if_unowned(controller, project, launch, RunState.RETRIED, environment)
+    if target.viewer_attempt is not None:
         return RunOutcome(
             project.key, RunState.PENDING, "waiting for the previously launched console"
         )
-    return _attach_or_pending(controller, project, RunState.REATTACHED)
+    return _attach_or_pending(controller, project, RunState.REATTACHED, environment)
 
 
 def _external_ownership(
@@ -873,6 +878,7 @@ def _launch_if_unowned(
     project: WorkspaceProject,
     launch: terminal.Launch,
     state: RunState,
+    environment: Mapping[str, str],
 ) -> RunOutcome:
     ownership = _external_ownership(project) if project.external_process is not None else None
     if ownership is not None:
@@ -881,32 +887,84 @@ def _launch_if_unowned(
         controller.create(project.key, project.session_id, project.directory, launch)
     else:
         controller.retry(project.key, project.directory, launch)
-    return _attach_or_pending(controller, project, state)
+    return _attach_or_pending(controller, project, state, environment)
 
 
 def _attach_or_pending(
-    controller: terminal.TerminalController, project: WorkspaceProject, state: RunState
+    controller: terminal.TerminalController,
+    project: WorkspaceProject,
+    state: RunState,
+    environment: Mapping[str, str],
 ) -> RunOutcome:
     target = controller.inspect(project.key)
-    if target.state is terminal.TargetState.ATTACHED:
-        controller.clear_viewer_pending(project.key)
-        return RunOutcome(project.key, state)
-    if target.viewer_pending:
-        if state is RunState.ENROLLMENT_PENDING:
-            return RunOutcome(project.key, state, "waiting for first user submission")
-        return RunOutcome(
-            project.key, RunState.PENDING, "waiting for the previously launched console"
-        )
-    controller.open_viewer(project.key)
-    observed = controller.inspect(project.key)
-    if observed.state is terminal.TargetState.ATTACHED:
-        controller.clear_viewer_pending(project.key)
-        return RunOutcome(project.key, state)
-    return RunOutcome(
-        project.key,
-        state if state is RunState.ENROLLMENT_PENDING else RunState.PENDING,
-        "console launch is pending",
+    existing = _existing_viewer_outcome(
+        controller, project, target, state, "waiting for the previously launched console"
     )
+    if existing is not None:
+        return existing
+    controller.open_viewer(project.key, environment)
+    observed = controller.inspect(project.key)
+    existing = _existing_viewer_outcome(
+        controller, project, observed, state, "console launch is pending"
+    )
+    if existing is not None:
+        return existing
+    return RunOutcome(project.key, RunState.FAILED, "project console is not attached")
+
+
+def _existing_viewer_outcome(
+    controller: terminal.TerminalController,
+    project: WorkspaceProject,
+    target: terminal.Target,
+    state: RunState,
+    pending_detail: str,
+) -> RunOutcome | None:
+    if target.state is terminal.TargetState.ATTACHED:
+        stale_failure = _consume_attached_viewer_failure(controller, project, target)
+        outcome_state = (
+            RunState.REUSED if stale_failure and state is not RunState.ENROLLMENT_PENDING else state
+        )
+        return RunOutcome(project.key, outcome_state)
+    if _is_failed_viewer_attempt(target):
+        return _consume_failed_viewer_attempt(controller, project, target)
+    if target.viewer_attempt is not None:
+        outcome_state = (
+            RunState.ENROLLMENT_PENDING
+            if state is RunState.ENROLLMENT_PENDING
+            else RunState.PENDING
+        )
+        detail = (
+            "waiting for first user submission"
+            if state is RunState.ENROLLMENT_PENDING
+            else pending_detail
+        )
+        return RunOutcome(project.key, outcome_state, detail)
+    return None
+
+
+def _is_failed_viewer_attempt(target: terminal.Target) -> bool:
+    return (
+        target.viewer_attempt is not None
+        and target.viewer_attempt.state is terminal.ViewerAttemptState.FAILED
+    )
+
+
+def _consume_attached_viewer_failure(
+    controller: terminal.TerminalController, project: WorkspaceProject, target: terminal.Target
+) -> bool:
+    if _is_failed_viewer_attempt(target):
+        assert target.viewer_attempt is not None
+        controller.consume_viewer_failure(project.key, target.viewer_attempt.token)
+        return True
+    return False
+
+
+def _consume_failed_viewer_attempt(
+    controller: terminal.TerminalController, project: WorkspaceProject, target: terminal.Target
+) -> RunOutcome:
+    assert target.viewer_attempt is not None
+    controller.consume_viewer_failure(project.key, target.viewer_attempt.token)
+    return RunOutcome(project.key, RunState.FAILED, "project console failed to attach")
 
 
 def _project(handoff: WorkspaceRegistration) -> WorkspaceProject:

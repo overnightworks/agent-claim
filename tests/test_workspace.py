@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import uuid
+from collections.abc import Mapping
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event, Thread
@@ -1254,17 +1256,23 @@ class FakeTerminal:
         *,
         attach_viewer: bool = True,
         pending_after_create: bool = False,
+        pending_after_open: bool = False,
+        failure_after_open: bool = False,
         attach_after_launch: bool = False,
+        failure_consumption_error: bool = False,
     ):
         self.target = target
         self.failed_project = failed_project
         self.attach_viewer = attach_viewer
         self.pending_after_create = pending_after_create
+        self.pending_after_open = pending_after_open
+        self.failure_after_open = failure_after_open
         self.attach_after_launch = attach_after_launch
+        self.failure_consumption_error = failure_consumption_error
         self.created: list[tuple[str, str | None, Path, terminal.Launch]] = []
         self.retried: list[tuple[str, terminal.Launch]] = []
-        self.opened: list[str] = []
-        self.cleared: list[str] = []
+        self.opened: list[tuple[str, Mapping[str, str]]] = []
+        self.consumed_failures: list[tuple[str, str]] = []
 
     def inspect(self, project: str) -> terminal.Target:
         if project == self.failed_project:
@@ -1299,9 +1307,9 @@ class FakeTerminal:
             else terminal.TargetState.DETACHED,
             project,
             session_id,
-            self.pending_after_create,
+            _viewer_attempt() if self.pending_after_create else None,
             launch.provider,
-            enrollment=enrollment,
+            enrollment,
         )
 
     def retry(self, project: str, directory: Path, launch: terminal.Launch) -> None:
@@ -1330,8 +1338,8 @@ class FakeTerminal:
             ),
         )
 
-    def open_viewer(self, project: str) -> None:
-        self.opened.append(project)
+    def open_viewer(self, project: str, environment: Mapping[str, str]) -> None:
+        self.opened.append((project, environment))
         if self.attach_viewer:
             self.target = terminal.Target(
                 terminal.TargetState.ATTACHED,
@@ -1340,9 +1348,22 @@ class FakeTerminal:
                 provider=self.target.provider,
                 enrollment=self.target.enrollment,
             )
+        elif self.pending_after_open:
+            self.target = replace(self.target, viewer_attempt=_viewer_attempt())
+        elif self.failure_after_open:
+            self.target = replace(
+                self.target,
+                viewer_attempt=_viewer_attempt(terminal.ViewerAttemptState.FAILED),
+            )
+        else:
+            self.target = replace(self.target, viewer_attempt=_viewer_attempt())
 
-    def clear_viewer_pending(self, project: str) -> None:
-        self.cleared.append(project)
+    def consume_viewer_failure(self, project: str, token: str) -> None:
+        self.consumed_failures.append((project, token))
+        if self.failure_consumption_error:
+            raise terminal.TerminalError("consume failed viewer attempt failed")
+        if self.target.viewer_attempt == _viewer_attempt(terminal.ViewerAttemptState.FAILED, token):
+            self.target = replace(self.target, viewer_attempt=None)
 
     def finalize_enrollment(self, project: str) -> None:
         assert self.target.enrollment is not None
@@ -1352,7 +1373,7 @@ class FakeTerminal:
             self.target.state,
             project,
             self.target.session_id,
-            self.target.viewer_pending,
+            self.target.viewer_attempt,
             self.target.provider,
             terminal.Enrollment(
                 enrollment.directory,
@@ -1371,7 +1392,7 @@ class FakeTerminal:
             self.target.state,
             project,
             session_id,
-            self.target.viewer_pending,
+            self.target.viewer_attempt,
             self.target.provider,
             terminal.Enrollment(
                 enrollment.directory,
@@ -1382,6 +1403,13 @@ class FakeTerminal:
                 session_id,
             ),
         )
+
+
+def _viewer_attempt(
+    state: terminal.ViewerAttemptState = terminal.ViewerAttemptState.PENDING,
+    token: str = "00000000-0000-4000-8000-000000000000",
+) -> terminal.ViewerAttempt:
+    return terminal.ViewerAttempt(state, token)
 
 
 def _pending_enrollment(
@@ -1480,6 +1508,38 @@ def test_start_reports_when_a_pending_console_already_has_a_viewer(tmp_path: Pat
         "alpha", workspace.RunState.ENROLLMENT_PENDING, "waiting for first user submission"
     )
     assert fake.opened == []
+
+
+def test_start_surfaces_and_consumes_a_viewer_failure_without_retrying_enrollment(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    environment = {"XDG_RUNTIME_DIR": str(tmp_path)}
+    fake = FakeTerminal(
+        terminal.Target(terminal.TargetState.ABSENT),
+        attach_viewer=False,
+        failure_after_open=True,
+    )
+
+    outcome = workspace.start_project(
+        workspace.StartRequest("alpha", project_path, "new head"),
+        workspace.StartContext(
+            config_path,
+            "/venv/bin/python -I -m agent_coordination.cli _capture-codex-start",
+            environment,
+            tmp_path,
+            lambda _socket: fake,
+        ),
+    )
+
+    assert outcome == workspace.RunOutcome(
+        "alpha", workspace.RunState.FAILED, "project console failed to attach"
+    )
+    assert fake.opened == [("alpha", environment)]
+    assert fake.retried == []
+    assert fake.consumed_failures == [("alpha", "00000000-0000-4000-8000-000000000000")]
 
 
 def test_capture_commits_the_matching_pending_native_uuid(tmp_path: Path, monkeypatch) -> None:
@@ -2450,7 +2510,7 @@ def test_run_starts_the_exact_registered_session_with_its_logical_identity(tmp_p
     assert isinstance(launch, terminal.Launch)
     assert launch.command == ["codex", "resume", SESSION_ID]
     assert launch.environment == {"XDG_RUNTIME_DIR": str(tmp_path), "ACO_AGENT": "restored head"}
-    assert fake.opened == ["alpha"]
+    assert fake.opened == [("alpha", {"XDG_RUNTIME_DIR": str(tmp_path), "ACO_AGENT": "launcher"})]
 
 
 def test_run_refuses_a_registered_target_that_is_still_pending_enrollment(tmp_path: Path) -> None:
@@ -2504,7 +2564,7 @@ def test_run_does_not_create_a_second_viewer_while_an_attachment_is_pending(tmp_
         config_path,
     )
     fake = FakeTerminal(
-        terminal.Target(terminal.TargetState.DETACHED, "alpha", SESSION_ID, viewer_pending=True)
+        terminal.Target(terminal.TargetState.DETACHED, "alpha", SESSION_ID, _viewer_attempt())
     )
 
     outcomes = workspace.run_projects(
@@ -2537,7 +2597,7 @@ def test_run_reattaches_a_matching_detached_head(tmp_path: Path) -> None:
 
     assert outcomes == (workspace.RunOutcome("alpha", workspace.RunState.REATTACHED),)
     assert fake.created == []
-    assert fake.opened == ["alpha"]
+    assert fake.opened == [("alpha", {"XDG_RUNTIME_DIR": str(tmp_path)})]
 
 
 @pytest.mark.parametrize(
@@ -2548,9 +2608,7 @@ def test_run_reattaches_a_matching_detached_head(tmp_path: Path) -> None:
             workspace.RunState.REUSED,
         ),
         (
-            terminal.Target(
-                terminal.TargetState.DETACHED, "alpha", SESSION_ID, viewer_pending=True
-            ),
+            terminal.Target(terminal.TargetState.DETACHED, "alpha", SESSION_ID, _viewer_attempt()),
             workspace.RunState.PENDING,
         ),
     ],
@@ -2576,7 +2634,7 @@ def test_run_reuses_an_attached_head_or_reports_an_existing_viewer_pending(
 
     assert outcomes[0].state is expected_state
     assert fake.opened == []
-    assert fake.cleared == (["alpha"] if expected_state is workspace.RunState.REUSED else [])
+    assert fake.consumed_failures == []
 
 
 @pytest.mark.parametrize(
@@ -2830,7 +2888,7 @@ def test_run_reports_a_console_that_attached_during_launch_without_opening_anoth
 
     assert outcomes == (workspace.RunOutcome("alpha", expected_state),)
     assert fake.opened == []
-    assert fake.cleared == ["alpha"]
+    assert fake.consumed_failures == []
 
 
 def test_runtime_failure_for_one_project_does_not_hide_the_later_project(tmp_path: Path) -> None:

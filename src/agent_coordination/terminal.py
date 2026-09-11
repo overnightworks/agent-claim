@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shlex
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
@@ -15,6 +16,8 @@ _PROJECT_OPTION = "@aco_project"
 _SESSION_OPTION = "@aco_session_id"
 _PROVIDER_OPTION = "@aco_provider"
 _VIEWER_PENDING_OPTION = "@aco_viewer_pending"
+_VIEWER_ACCEPTED_PREFIX = "accepted:"
+_VIEWER_FAILED_PREFIX = "failed:"
 _ENROLLMENT_STATE_OPTION = "@aco_enrollment_state"
 _ENROLLMENT_ATTEMPT_OPTION = "@aco_enrollment_attempt"
 _ENROLLMENT_DIRECTORY_OPTION = "@aco_enrollment_directory"
@@ -36,6 +39,14 @@ _TARGET_OPTIONS = (
     _VIEWER_PENDING_OPTION,
     *_ENROLLMENT_OPTIONS,
 )
+_VIEWER_ENVIRONMENT_NAMES = (
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "XDG_RUNTIME_DIR",
+    "XAUTHORITY",
+)
+_PENDING_TOKEN_VERSION = 4
 _ASCII_CONTROL_LIMIT = 32
 _ASCII_DELETE = 127
 
@@ -59,10 +70,32 @@ class TargetState(StrEnum):
     EXITED = "exited"
 
 
+class ViewerAttemptState(StrEnum):
+    PENDING = "pending"
+    ACCEPTED = "accepted"
+    FAILED = "failed"
+
+
 class EnrollmentState(StrEnum):
     INITIALIZING = "initializing"
     PENDING = "pending"
     FINAL = "final"
+
+
+@dataclass(frozen=True)
+class ViewerAttempt:
+    state: ViewerAttemptState
+    token: str
+
+
+@dataclass(frozen=True)
+class Enrollment:
+    directory: Path
+    agent: str
+    model: str | None
+    attempt: str
+    state: EnrollmentState
+    session_id: str | None = None
 
 
 class ExternalOwnershipState(StrEnum):
@@ -88,19 +121,9 @@ class Target:
     state: TargetState
     project: str | None = None
     session_id: str | None = None
-    viewer_pending: bool = False
+    viewer_attempt: ViewerAttempt | None = None
     provider: providers.Provider | None = None
     enrollment: Enrollment | None = None
-
-
-@dataclass(frozen=True)
-class Enrollment:
-    directory: Path
-    agent: str
-    model: str | None
-    attempt: str
-    state: EnrollmentState
-    session_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -132,9 +155,9 @@ class TerminalController(Protocol):
         launch: Launch,
     ) -> None: ...
 
-    def open_viewer(self, project: str) -> None: ...
+    def open_viewer(self, project: str, environment: Mapping[str, str]) -> None: ...
 
-    def clear_viewer_pending(self, project: str) -> None: ...
+    def consume_viewer_failure(self, project: str, token: str) -> None: ...
 
     def finalize_enrollment(self, project: str) -> None: ...
 
@@ -285,6 +308,28 @@ def _target_provider(value: str) -> providers.Provider | None:
         raise TerminalError("tmux target has unsupported provider metadata") from error
 
 
+def _viewer_attempt(value: str) -> ViewerAttempt | None:
+    if not value:
+        return None
+    state = ViewerAttemptState.PENDING
+    token = value
+    for prefix, candidate in (
+        (_VIEWER_ACCEPTED_PREFIX, ViewerAttemptState.ACCEPTED),
+        (_VIEWER_FAILED_PREFIX, ViewerAttemptState.FAILED),
+    ):
+        if value.startswith(prefix):
+            state = candidate
+            token = value.removeprefix(prefix)
+            break
+    try:
+        parsed = uuid.UUID(token)
+    except ValueError as error:
+        raise TerminalError("tmux target has unowned viewer pending metadata") from error
+    if parsed.version != _PENDING_TOKEN_VERSION or str(parsed) != token:
+        raise TerminalError("tmux target has unowned viewer pending metadata")
+    return ViewerAttempt(state, token)
+
+
 def _enrollment(metadata: Mapping[str, str]) -> Enrollment | None:
     state_value = metadata[_ENROLLMENT_STATE_OPTION]
     if not state_value:
@@ -321,6 +366,8 @@ class TmuxTerminal:
     """A dedicated-socket tmux adapter; all command execution stays in process."""
 
     def __init__(self, socket_path: Path):
+        if "\0" in str(socket_path):
+            raise TerminalError("tmux socket path cannot contain a NUL")
         self._socket_path = socket_path
 
     def inspect(self, project: str) -> Target:
@@ -342,7 +389,7 @@ class TmuxTerminal:
             state,
             metadata[_PROJECT_OPTION] or None,
             metadata[_SESSION_OPTION] or None,
-            metadata[_VIEWER_PENDING_OPTION] == "1",
+            _viewer_attempt(metadata[_VIEWER_PENDING_OPTION]),
             _target_provider(metadata[_PROVIDER_OPTION]),
             _enrollment(metadata),
         )
@@ -412,29 +459,17 @@ class TmuxTerminal:
         self._set_option(name, _ENROLLMENT_STATE_OPTION, EnrollmentState.PENDING.value)
         self._start_fresh_window(name, launch, directory)
 
-    def open_viewer(self, project: str) -> None:
-        name = target_name(project)
-        self._set_option(name, _VIEWER_PENDING_OPTION, "1")
-        try:
-            process.start_detached(
-                [
-                    "gnome-terminal",
-                    f"--title={console_title(project)}",
-                    "--",
-                    "tmux",
-                    "-S",
-                    str(self._socket_path),
-                    "attach-session",
-                    "-t",
-                    name,
-                ]
-            )
-        except process.ProcessError as error:
-            self._set_option(name, _VIEWER_PENDING_OPTION, "")
-            raise TerminalError(f"open project console: {error}") from error
+    def open_viewer(self, project: str, environment: Mapping[str, str]) -> None:
+        target = target_name(project)
+        self._configure_viewer_environment(target, environment)
+        token = str(uuid.uuid4())
+        self._enqueue_viewer(target, token)
 
-    def clear_viewer_pending(self, project: str) -> None:
-        self._set_option(target_name(project), _VIEWER_PENDING_OPTION, "")
+    def consume_viewer_failure(self, project: str, token: str) -> None:
+        target = target_name(project)
+        self._conditionally_clear_viewer_attempt(
+            target, ViewerAttemptState.FAILED, token, "consume failed viewer attempt"
+        )
 
     def finalize_enrollment(self, project: str) -> None:
         self._set_option(
@@ -445,6 +480,133 @@ class TmuxTerminal:
         target = target_name(project)
         self._set_option(target, _SESSION_OPTION, session_id)
         self._set_option(target, _ENROLLMENT_SESSION_OPTION, session_id)
+
+    def _enqueue_viewer(self, target: str, token: str) -> None:
+        commands = (
+            _control_command("set-option", "-t", target, _VIEWER_PENDING_OPTION, token),
+            _control_command(
+                "run-shell", "-b", "-t", target, self._viewer_owner_command(target, token)
+            ),
+        )
+        try:
+            result = process.run_bounded(
+                ["tmux", "-C", "-S", str(self._socket_path)],
+                input_data=("\n".join(commands) + "\n").encode(),
+            )
+        except process.ProcessError as error:
+            self._clear_viewer_token_after_enqueue_failure(target, token)
+            raise TerminalError("open project console failed") from error
+        if result.exit_status != 0 or b"%error" in result.output:
+            self._clear_viewer_token_after_enqueue_failure(target, token)
+            raise TerminalError("open project console failed")
+
+    def _clear_viewer_token_after_enqueue_failure(self, target: str, token: str) -> None:
+        try:
+            self._conditionally_clear_viewer_attempt(
+                target, ViewerAttemptState.PENDING, token, "clear viewer launch token"
+            )
+        except TerminalError:
+            return
+
+    def _conditionally_clear_viewer_attempt(
+        self, target: str, state: ViewerAttemptState, token: str, purpose: str
+    ) -> None:
+        self._require_success(
+            self._run(
+                "if-shell",
+                "-t",
+                target,
+                "-F",
+                self._attempt_matches_format(state, token),
+                self._clear_viewer_token_command(target),
+            ),
+            purpose,
+        )
+
+    def _viewer_owner_command(self, target: str, token: str) -> str:
+        socket_path = str(self._socket_path)
+        viewer = shlex.join(
+            [
+                "gnome-terminal",
+                f"--title={console_title(target.removeprefix('aco-'))}",
+                "--wait",
+                "--",
+                "tmux",
+                "-S",
+                socket_path,
+                "attach-session",
+                "-t",
+                target,
+                ";",
+                "if-shell",
+                "-t",
+                target,
+                "-F",
+                self._attempt_matches_format(ViewerAttemptState.PENDING, token),
+                self._set_viewer_attempt_command(target, ViewerAttemptState.ACCEPTED, token),
+            ]
+        )
+        pending_cleanup = shlex.join(
+            [
+                "tmux",
+                "-S",
+                socket_path,
+                "if-shell",
+                "-t",
+                target,
+                "-F",
+                self._attempt_matches_format(ViewerAttemptState.PENDING, token),
+                self._set_viewer_attempt_command(target, ViewerAttemptState.FAILED, token),
+            ]
+        )
+        accepted_cleanup = shlex.join(
+            [
+                "tmux",
+                "-S",
+                socket_path,
+                "if-shell",
+                "-t",
+                target,
+                "-F",
+                self._attempt_matches_format(ViewerAttemptState.ACCEPTED, token),
+                self._clear_viewer_token_command(target),
+            ]
+        )
+        return _escape_tmux_formats(
+            f"{viewer}; viewer_status=$?; {pending_cleanup}; pending_cleanup_status=$?; "
+            f"{accepted_cleanup}; accepted_cleanup_status=$?; "
+            'if [ "$viewer_status" -ne 0 ]; then exit "$viewer_status"; fi; '
+            'if [ "$pending_cleanup_status" -ne 0 ]; then exit "$pending_cleanup_status"; fi; '
+            'exit "$accepted_cleanup_status"'
+        )
+
+    @staticmethod
+    def _attempt_value(state: ViewerAttemptState, token: str) -> str:
+        if state is ViewerAttemptState.PENDING:
+            return token
+        prefix = (
+            _VIEWER_ACCEPTED_PREFIX
+            if state is ViewerAttemptState.ACCEPTED
+            else _VIEWER_FAILED_PREFIX
+        )
+        return f"{prefix}{token}"
+
+    @classmethod
+    def _attempt_matches_format(cls, state: ViewerAttemptState, token: str) -> str:
+        prefix = "#"
+        attempt = cls._attempt_value(state, token)
+        return f"{prefix}{{==:{prefix}{{{_VIEWER_PENDING_OPTION}}},{attempt}}}"
+
+    @classmethod
+    def _set_viewer_attempt_command(cls, target: str, state: ViewerAttemptState, token: str) -> str:
+        return (
+            f"set-option -t {shlex.quote(target)} {_VIEWER_PENDING_OPTION} "
+            f"{shlex.quote(cls._attempt_value(state, token))}"
+        )
+
+    @staticmethod
+    def _clear_viewer_token_command(target: str) -> str:
+        return f"set-option -t {shlex.quote(target)} {_VIEWER_PENDING_OPTION} ''"
 
     def _run(
         self, *arguments: str, environment: Mapping[str, str] | None = None
@@ -625,24 +787,32 @@ class TmuxTerminal:
             _control_command("set-environment", "-r", "-t", target, name)
             for name in self._environment_names_to_remove(target, launch, environment_names)
         )
-        commands.append(_control_command("detach-client"))
+        self._run_control_commands(target, commands, "prepare session environment failed")
+
+    def _configure_viewer_environment(self, target: str, environment: Mapping[str, str]) -> None:
+        commands = [
+            (
+                _control_command("set-environment", "-t", target, name, environment[name])
+                if name in environment
+                else _control_command("set-environment", "-r", "-t", target, name)
+            )
+            for name in _VIEWER_ENVIRONMENT_NAMES
+        ]
+        self._run_control_commands(target, commands, "prepare viewer environment failed")
+
+    def _run_control_commands(
+        self, target: str, commands: list[str] | tuple[str, ...], failure: str
+    ) -> None:
+        control_commands = [*commands, _control_command("detach-client")]
         try:
             result = process.run_bounded(
-                [
-                    "tmux",
-                    "-C",
-                    "-S",
-                    str(self._socket_path),
-                    "attach-session",
-                    "-t",
-                    target,
-                ],
-                input_data=("\n".join(commands) + "\n").encode(),
+                ["tmux", "-C", "-S", str(self._socket_path), "attach-session", "-t", target],
+                input_data=("\n".join(control_commands) + "\n").encode(),
             )
         except process.ProcessError as error:
-            raise TerminalError("prepare session environment failed") from error
+            raise TerminalError(failure) from error
         if result.exit_status != 0 or b"%error" in result.output:
-            raise TerminalError("prepare session environment failed")
+            raise TerminalError(failure)
 
     def _environment_names_to_remove(
         self, target: str, launch: Launch, environment_names: frozenset[str]
@@ -748,3 +918,7 @@ def _control_character(character: str, *, leading: bool) -> str:
     if ord(character) < _ASCII_CONTROL_LIMIT or ord(character) == _ASCII_DELETE:
         return f"\\{ord(character):03o}"
     return character
+
+
+def _escape_tmux_formats(value: str) -> str:
+    return value.replace("#", "##")
