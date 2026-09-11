@@ -327,21 +327,6 @@ def run_captured(
     return CapturedResult(completed.returncode, completed.stdout, completed.stderr)
 
 
-def start_detached(command: list[str], *, env: dict[str, str] | None = None) -> None:
-    """Start an interactive child without making the caller its process parent.
-
-    GNOME Terminal owns the eventual viewer process. The launcher only needs to
-    know whether that terminal could be started, so it deliberately does not
-    capture output or wait for the terminal to close.
-    """
-    try:
-        subprocess.Popen(command, env=env, start_new_session=True)
-    except FileNotFoundError as error:
-        raise ExecutableMissingError(command[0]) from error
-    except OSError as error:
-        raise ProcessStartFailedError(str(error)) from error
-
-
 def inspect_native_process(pid: int, proc_root: Path = Path("/proc")) -> NativeProcess:
     """Read one Linux process twice-safe identity snapshot without shelling out.
 
