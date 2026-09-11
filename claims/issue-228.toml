@@ -1,0 +1,8 @@
+claim_id = "37859140be5141b0994141b2ff0619b0"
+agent = "Codex workspace head"
+role = "coordinator"
+base = "df20a8ee3dfb74810559a9aa0e3195336dc4c3d5"
+branch = "codex/issue-228-viewer-recovery"
+scope = ["src/agent_coordination/terminal.py", "src/agent_coordination/workspace.py", "tests/test_workspace_terminal.py", "tests/test_workspace.py", "README.md", "src/agent_coordination/process.py"]
+opened_commit = "bb38c1bfb68d54ec04413081e56d7c97309f5138"
+whole_reason = "One viewer lifecycle repair spans its existing terminal and workspace owners, focused behavior tests, operator recovery guidance, and removal of the unused detached-launch helper."
