@@ -1545,6 +1545,38 @@ def test_start_reuses_an_attached_pending_console_after_consuming_its_failed_rec
     assert fake.retried == []
 
 
+@pytest.mark.parametrize(
+    "attempt_state",
+    [terminal.ViewerAttemptState.PENDING, terminal.ViewerAttemptState.ACCEPTED],
+)
+def test_start_retries_an_exited_pending_console_without_opening_another_viewer(
+    tmp_path: Path, attempt_state: terminal.ViewerAttemptState
+) -> None:
+    config_path = tmp_path / "config" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    attempt = _viewer_attempt(attempt_state)
+    fake = FakeTerminal(
+        terminal.Target(
+            terminal.TargetState.EXITED,
+            "alpha",
+            viewer_attempt=attempt,
+            provider=providers.Provider.CODEX,
+            enrollment=_pending_enrollment(project_path),
+        )
+    )
+
+    outcome = workspace.start_project(
+        workspace.StartRequest("alpha", project_path, "new head"),
+        _start_context(config_path, tmp_path, fake),
+    )
+
+    assert outcome.state is workspace.RunState.ENROLLMENT_PENDING
+    assert len(fake.retried) == 1
+    assert fake.target.viewer_attempt == attempt
+    assert fake.opened == []
+
+
 def test_start_surfaces_and_consumes_a_viewer_failure_without_retrying_enrollment(
     tmp_path: Path,
 ) -> None:
