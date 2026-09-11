@@ -46,10 +46,18 @@ def test_terminal_title_identifies_the_project() -> None:
     assert terminal.console_title("alpha") == "ACO: alpha"
 
 
-def test_viewer_pending_token_accepts_a_canonical_uuidv4() -> None:
+def test_viewer_attempt_parses_canonical_pending_and_failed_uuidv4_tokens() -> None:
     token = "00000000-0000-4000-8000-000000000000"
 
-    assert terminal._viewer_pending_token(token) == token
+    assert terminal._viewer_attempt(token) == terminal.ViewerAttempt(
+        terminal.ViewerAttemptState.PENDING, token
+    )
+    assert terminal._viewer_attempt(f"failed:{token}") == terminal.ViewerAttempt(
+        terminal.ViewerAttemptState.FAILED, token
+    )
+    assert terminal._viewer_attempt(f"accepted:{token}") == terminal.ViewerAttempt(
+        terminal.ViewerAttemptState.ACCEPTED, token
+    )
 
 
 def test_target_metadata_conflict_is_not_adopted() -> None:
@@ -589,6 +597,9 @@ def test_open_viewer_enqueues_one_token_owned_waiting_console_without_exposing_e
     assert b"--wait" in private_inputs[1]
     assert b"##{session_name}" in private_inputs[1]
     assert b"if-shell -t aco-alpha -F" in private_inputs[1]
+    assert b"accepted:" + token.encode() in private_inputs[1]
+    assert b"failed:" + token.encode() in private_inputs[1]
+    assert b"##{==:##{@aco_viewer_pending}" in private_inputs[1]
     assert b"viewer_status=\\$?" in private_inputs[1]
     assert b"cleanup_status=\\$?" in private_inputs[1]
     assert b'exit \\"\\$viewer_status\\"' in private_inputs[1]
@@ -661,6 +672,34 @@ def test_open_viewer_hides_enqueue_and_cleanup_failures(monkeypatch, tmp_path) -
     assert synthetic_secret not in str(raised.value)
 
 
+def test_terminal_consumes_only_the_matching_failed_viewer_attempt(monkeypatch, tmp_path) -> None:
+    commands: list[list[str]] = []
+    token = "00000000-0000-4000-8000-000000000000"
+
+    def run(command: list[str], **_kwargs: object) -> process.CapturedResult:
+        commands.append(command)
+        return process.CapturedResult(0, b"", b"")
+
+    monkeypatch.setattr(process, "run_captured", run)
+    adapter = terminal.TmuxTerminal(tmp_path / "tmux.sock")
+
+    adapter.consume_viewer_failure("alpha", token)
+
+    assert commands == [
+        [
+            "tmux",
+            "-S",
+            str(tmp_path / "tmux.sock"),
+            "if-shell",
+            "-t",
+            "aco-alpha",
+            "-F",
+            f"#{{==:#{{@aco_viewer_pending}},failed:{token}}}",
+            "set-option -t aco-alpha @aco_viewer_pending ''",
+        ]
+    ]
+
+
 def test_old_viewer_cleanup_keeps_a_newer_attempt_token(tmp_path) -> None:
     socket_path = tmp_path / "tmux.sock"
     target = "aco-alpha"
@@ -691,8 +730,127 @@ def test_old_viewer_cleanup_keeps_a_newer_attempt_token(tmp_path) -> None:
                 == 0
             )
 
-            terminal.TmuxTerminal(socket_path)._conditionally_clear_viewer_token(target, old_token)
+            terminal.TmuxTerminal(socket_path)._conditionally_clear_viewer_attempt(
+                target,
+                terminal.ViewerAttemptState.PENDING,
+                old_token,
+                "clear viewer launch token",
+            )
 
+            pending = process.run_captured(
+                [
+                    "tmux",
+                    "-S",
+                    str(socket_path),
+                    "show-options",
+                    "-t",
+                    target,
+                    "-v",
+                    "@aco_viewer_pending",
+                ]
+            )
+        finally:
+            process.run_captured(["tmux", "-S", str(socket_path), "kill-server"])
+
+    assert pending == process.CapturedResult(0, f"{new_token}\n".encode(), b"")
+
+
+def test_open_viewer_acceptance_keeps_a_newer_attempt_token_after_its_condition_runs(
+    monkeypatch, tmp_path
+) -> None:
+    socket_path = tmp_path / "tmux.sock"
+    target = "aco-alpha"
+    token = "00000000-0000-4000-8000-000000000000"
+    new_token = "00000000-0000-4000-8000-000000000001"
+    channel_prefix = f"aco-viewer-{tmp_path.name}"
+    ready = f"{channel_prefix}-ready"
+    gate = f"{channel_prefix}-gate"
+    done = f"{channel_prefix}-done"
+    fake_gnome = tmp_path / "gnome-terminal"
+    fake_gnome.write_text(
+        f"""#!/usr/bin/env python3
+import os
+import subprocess
+import sys
+
+arguments = sys.argv[sys.argv.index("--") + 1 :]
+separator = arguments.index(";")
+tmux_command = [arguments[0], *arguments[1:3]]
+subprocess.run([*tmux_command, "wait-for", "-S", "{ready}"], check=True)
+subprocess.run([*tmux_command, "wait-for", "{gate}"], check=True)
+status = subprocess.run(
+    [*tmux_command, *arguments[separator + 1 :]], check=False
+).returncode
+subprocess.run([*tmux_command, "wait-for", "-S", "{done}"], check=True)
+sys.exit(status)
+""",
+        encoding="utf-8",
+    )
+    fake_gnome.chmod(0o700)
+    environment = {
+        **os.environ,
+        "PATH": f"{tmp_path}:{os.environ['PATH']}",
+    }
+    adapter = terminal.TmuxTerminal(socket_path)
+    monkeypatch.setattr(terminal.uuid, "uuid4", lambda: terminal.uuid.UUID(token))
+
+    with _probe_lock():
+        try:
+            assert (
+                process.run_captured(
+                    ["tmux", "-S", str(socket_path), "new-session", "-d", "-s", target, "sleep 60"],
+                    env=environment,
+                ).exit_status
+                == 0
+            )
+            assert (
+                process.run_captured(
+                    [
+                        "tmux",
+                        "-S",
+                        str(socket_path),
+                        "set-environment",
+                        "-g",
+                        "PATH",
+                        environment["PATH"],
+                    ]
+                ).exit_status
+                == 0
+            )
+            adapter.open_viewer("alpha", {})
+            assert (
+                process.run_captured(
+                    ["tmux", "-S", str(socket_path), "wait-for", ready], timeout=5
+                ).exit_status
+                == 0
+            )
+            assert (
+                process.run_captured(
+                    [
+                        "tmux",
+                        "-S",
+                        str(socket_path),
+                        "set-option",
+                        "-t",
+                        target,
+                        "@aco_viewer_pending",
+                        new_token,
+                    ]
+                ).exit_status
+                == 0
+            )
+            assert (
+                process.run_captured(
+                    ["tmux", "-S", str(socket_path), "wait-for", "-S", gate]
+                ).exit_status
+                == 0
+            )
+            assert (
+                process.run_captured(
+                    ["tmux", "-S", str(socket_path), "wait-for", done], timeout=5
+                ).exit_status
+                == 0
+            )
             pending = process.run_captured(
                 [
                     "tmux",
@@ -901,7 +1059,14 @@ def test_tmux_inspect_refuses_unknown_provider_metadata(monkeypatch, tmp_path) -
 
 
 @pytest.mark.parametrize(
-    "pending", ["1", "not-a-launch-token", "00000000-0000-1000-8000-000000000000"]
+    "pending",
+    [
+        "1",
+        "not-a-launch-token",
+        "00000000-0000-1000-8000-000000000000",
+        "failed:not-a-launch-token",
+        "accepted:00000000-0000-1000-8000-000000000000",
+    ],
 )
 def test_tmux_inspect_refuses_unowned_viewer_pending_metadata(
     monkeypatch, tmp_path, pending: str

@@ -4,6 +4,7 @@ import json
 import os
 import uuid
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event, Thread
@@ -1258,6 +1259,7 @@ class FakeTerminal:
         pending_after_open: bool = False,
         pending_after_retry: bool = False,
         attach_after_launch: bool = False,
+        failure_consumption_error: bool = False,
     ):
         self.target = target
         self.failed_project = failed_project
@@ -1266,9 +1268,11 @@ class FakeTerminal:
         self.pending_after_open = pending_after_open
         self.pending_after_retry = pending_after_retry
         self.attach_after_launch = attach_after_launch
+        self.failure_consumption_error = failure_consumption_error
         self.created: list[tuple[str, str, Path, terminal.Launch]] = []
         self.retried: list[tuple[str, terminal.Launch]] = []
         self.opened: list[tuple[str, Mapping[str, str]]] = []
+        self.consumed_failures: list[tuple[str, str]] = []
 
     def inspect(self, project: str) -> terminal.Target:
         if project == self.failed_project:
@@ -1289,7 +1293,7 @@ class FakeTerminal:
             else terminal.TargetState.DETACHED,
             project,
             session_id,
-            "attempt-token" if self.pending_after_create else None,
+            _viewer_attempt() if self.pending_after_create else None,
         )
 
     def retry(self, project: str, directory: Path, launch: terminal.Launch) -> None:
@@ -1300,7 +1304,7 @@ class FakeTerminal:
             else terminal.TargetState.DETACHED,
             project,
             SESSION_ID,
-            "attempt-token" if self.pending_after_retry else None,
+            _viewer_attempt() if self.pending_after_retry else None,
         )
 
     def open_viewer(self, project: str, environment: Mapping[str, str]) -> None:
@@ -1314,8 +1318,22 @@ class FakeTerminal:
                 terminal.TargetState.DETACHED,
                 project,
                 self.target.session_id,
-                "attempt-token",
+                _viewer_attempt(),
             )
+
+    def consume_viewer_failure(self, project: str, token: str) -> None:
+        self.consumed_failures.append((project, token))
+        if self.failure_consumption_error:
+            raise terminal.TerminalError("consume failed viewer attempt failed")
+        if self.target.viewer_attempt == _viewer_attempt(terminal.ViewerAttemptState.FAILED, token):
+            self.target = replace(self.target, viewer_attempt=None)
+
+
+def _viewer_attempt(
+    state: terminal.ViewerAttemptState = terminal.ViewerAttemptState.PENDING,
+    token: str = "attempt-token",
+) -> terminal.ViewerAttempt:
+    return terminal.ViewerAttempt(state, token)
 
 
 def test_run_starts_the_exact_registered_session_with_its_logical_identity(tmp_path: Path) -> None:
@@ -1352,9 +1370,7 @@ def test_run_does_not_create_a_second_viewer_while_an_attachment_is_pending(tmp_
         config_path,
     )
     fake = FakeTerminal(
-        terminal.Target(
-            terminal.TargetState.DETACHED, "alpha", SESSION_ID, viewer_pending_token="attempt-token"
-        )
+        terminal.Target(terminal.TargetState.DETACHED, "alpha", SESSION_ID, _viewer_attempt())
     )
 
     outcomes = workspace.run_projects(
@@ -1402,7 +1418,16 @@ def test_run_reattaches_a_matching_detached_head(tmp_path: Path) -> None:
                 terminal.TargetState.DETACHED,
                 "alpha",
                 SESSION_ID,
-                viewer_pending_token="attempt-token",
+                _viewer_attempt(),
+            ),
+            workspace.RunState.PENDING,
+        ),
+        (
+            terminal.Target(
+                terminal.TargetState.DETACHED,
+                "alpha",
+                SESSION_ID,
+                _viewer_attempt(terminal.ViewerAttemptState.ACCEPTED),
             ),
             workspace.RunState.PENDING,
         ),
@@ -1471,7 +1496,7 @@ def test_run_does_not_open_a_second_viewer_after_retry_finds_a_live_owner_token(
             terminal.TargetState.EXITED,
             "alpha",
             SESSION_ID,
-            viewer_pending_token="attempt-token",
+            _viewer_attempt(),
         ),
         pending_after_retry=True,
     )
@@ -1523,6 +1548,135 @@ def test_run_reports_a_fast_viewer_failure_and_allows_a_later_attempt(tmp_path: 
         ),
     )
     assert fake.opened == [("alpha", environment), ("alpha", environment)]
+
+
+def test_run_consumes_a_failed_viewer_attempt_before_a_later_recovery(tmp_path: Path) -> None:
+    config_path = tmp_path / "config" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    workspace.register_project(
+        workspace.WorkspaceRegistration("alpha", project_path, SESSION_ID, "restored head"),
+        config_path,
+    )
+    attempt = terminal.ViewerAttempt(terminal.ViewerAttemptState.FAILED, "attempt-token")
+    fake = FakeTerminal(
+        terminal.Target(terminal.TargetState.DETACHED, "alpha", SESSION_ID, viewer_attempt=attempt)
+    )
+    environment = {"XDG_RUNTIME_DIR": str(tmp_path)}
+
+    first = workspace.run_projects(
+        config_path,
+        environment=environment,
+        runtime_directory=tmp_path,
+        terminal_factory=lambda _socket: fake,
+    )
+    second = workspace.run_projects(
+        config_path,
+        environment=environment,
+        runtime_directory=tmp_path,
+        terminal_factory=lambda _socket: fake,
+    )
+
+    assert first == (
+        workspace.RunOutcome(
+            "alpha", workspace.RunState.FAILED, "project console failed to attach"
+        ),
+    )
+    assert second == (workspace.RunOutcome("alpha", workspace.RunState.REATTACHED),)
+    assert fake.consumed_failures == [("alpha", "attempt-token")]
+    assert fake.opened == [("alpha", environment)]
+
+
+def test_run_reuses_an_attached_target_after_consuming_its_failed_attempt(tmp_path: Path) -> None:
+    config_path = tmp_path / "config" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    workspace.register_project(
+        workspace.WorkspaceRegistration("alpha", project_path, SESSION_ID, "restored head"),
+        config_path,
+    )
+    attempt = terminal.ViewerAttempt(terminal.ViewerAttemptState.FAILED, "attempt-token")
+    fake = FakeTerminal(
+        terminal.Target(terminal.TargetState.ATTACHED, "alpha", SESSION_ID, viewer_attempt=attempt)
+    )
+
+    outcomes = workspace.run_projects(
+        config_path,
+        environment={"XDG_RUNTIME_DIR": str(tmp_path)},
+        runtime_directory=tmp_path,
+        terminal_factory=lambda _socket: fake,
+    )
+
+    assert outcomes == (workspace.RunOutcome("alpha", workspace.RunState.REUSED),)
+    assert fake.consumed_failures == [("alpha", "attempt-token")]
+    assert fake.opened == []
+
+
+def test_run_reports_a_failed_attempt_before_retrying_an_exited_provider(tmp_path: Path) -> None:
+    config_path = tmp_path / "config" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    workspace.register_project(
+        workspace.WorkspaceRegistration("alpha", project_path, SESSION_ID, "restored head"),
+        config_path,
+    )
+    fake = FakeTerminal(
+        terminal.Target(
+            terminal.TargetState.EXITED,
+            "alpha",
+            SESSION_ID,
+            _viewer_attempt(terminal.ViewerAttemptState.FAILED),
+        )
+    )
+
+    outcomes = workspace.run_projects(
+        config_path,
+        environment={"XDG_RUNTIME_DIR": str(tmp_path)},
+        runtime_directory=tmp_path,
+        terminal_factory=lambda _socket: fake,
+    )
+
+    assert outcomes == (
+        workspace.RunOutcome(
+            "alpha", workspace.RunState.FAILED, "project console failed to attach"
+        ),
+    )
+    assert fake.retried == []
+    assert fake.consumed_failures == [("alpha", "attempt-token")]
+    assert fake.opened == []
+
+
+def test_run_does_not_launch_after_failed_attempt_consumption_fails(tmp_path: Path) -> None:
+    config_path = tmp_path / "config" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    workspace.register_project(
+        workspace.WorkspaceRegistration("alpha", project_path, SESSION_ID, "restored head"),
+        config_path,
+    )
+    fake = FakeTerminal(
+        terminal.Target(
+            terminal.TargetState.DETACHED,
+            "alpha",
+            SESSION_ID,
+            _viewer_attempt(terminal.ViewerAttemptState.FAILED),
+        ),
+        failure_consumption_error=True,
+    )
+
+    outcomes = workspace.run_projects(
+        config_path,
+        environment={"XDG_RUNTIME_DIR": str(tmp_path)},
+        runtime_directory=tmp_path,
+        terminal_factory=lambda _socket: fake,
+    )
+
+    assert outcomes == (
+        workspace.RunOutcome(
+            "alpha", workspace.RunState.FAILED, "consume failed viewer attempt failed"
+        ),
+    )
+    assert fake.opened == []
 
 
 def test_run_reports_foreign_tmux_metadata_without_adopting_it(tmp_path: Path) -> None:

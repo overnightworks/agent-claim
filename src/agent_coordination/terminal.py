@@ -16,6 +16,8 @@ _PROJECT_OPTION = "@aco_project"
 _SESSION_OPTION = "@aco_session_id"
 _PROVIDER_OPTION = "@aco_provider"
 _VIEWER_PENDING_OPTION = "@aco_viewer_pending"
+_VIEWER_ACCEPTED_PREFIX = "accepted:"
+_VIEWER_FAILED_PREFIX = "failed:"
 _VIEWER_ENVIRONMENT_NAMES = (
     "DISPLAY",
     "WAYLAND_DISPLAY",
@@ -47,6 +49,18 @@ class TargetState(StrEnum):
     EXITED = "exited"
 
 
+class ViewerAttemptState(StrEnum):
+    PENDING = "pending"
+    ACCEPTED = "accepted"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True)
+class ViewerAttempt:
+    state: ViewerAttemptState
+    token: str
+
+
 class ExternalOwnershipState(StrEnum):
     ABSENT = "absent"
     LIVE = "external live"
@@ -70,7 +84,7 @@ class Target:
     state: TargetState
     project: str | None = None
     session_id: str | None = None
-    viewer_pending_token: str | None = None
+    viewer_attempt: ViewerAttempt | None = None
     provider: providers.Provider | None = None
 
 
@@ -101,6 +115,8 @@ class TerminalController(Protocol):
     ) -> None: ...
 
     def open_viewer(self, project: str, environment: Mapping[str, str]) -> None: ...
+
+    def consume_viewer_failure(self, project: str, token: str) -> None: ...
 
 
 def register_live_process(
@@ -245,16 +261,26 @@ def _target_provider(value: str) -> providers.Provider | None:
         raise TerminalError("tmux target has unsupported provider metadata") from error
 
 
-def _viewer_pending_token(value: str) -> str | None:
+def _viewer_attempt(value: str) -> ViewerAttempt | None:
     if not value:
         return None
+    state = ViewerAttemptState.PENDING
+    token = value
+    for prefix, candidate in (
+        (_VIEWER_ACCEPTED_PREFIX, ViewerAttemptState.ACCEPTED),
+        (_VIEWER_FAILED_PREFIX, ViewerAttemptState.FAILED),
+    ):
+        if value.startswith(prefix):
+            state = candidate
+            token = value.removeprefix(prefix)
+            break
     try:
-        parsed = uuid.UUID(value)
+        parsed = uuid.UUID(token)
     except ValueError as error:
         raise TerminalError("tmux target has unowned viewer pending metadata") from error
-    if parsed.version != _PENDING_TOKEN_VERSION or str(parsed) != value:
+    if parsed.version != _PENDING_TOKEN_VERSION or str(parsed) != token:
         raise TerminalError("tmux target has unowned viewer pending metadata")
-    return value
+    return ViewerAttempt(state, token)
 
 
 class TmuxTerminal:
@@ -292,7 +318,7 @@ class TmuxTerminal:
             state,
             metadata[_PROJECT_OPTION] or None,
             metadata[_SESSION_OPTION] or None,
-            _viewer_pending_token(metadata[_VIEWER_PENDING_OPTION]),
+            _viewer_attempt(metadata[_VIEWER_PENDING_OPTION]),
             _target_provider(metadata[_PROVIDER_OPTION]),
         )
 
@@ -336,6 +362,12 @@ class TmuxTerminal:
         token = str(uuid.uuid4())
         self._enqueue_viewer(target, token)
 
+    def consume_viewer_failure(self, project: str, token: str) -> None:
+        target = target_name(project)
+        self._conditionally_clear_viewer_attempt(
+            target, ViewerAttemptState.FAILED, token, "consume failed viewer attempt"
+        )
+
     def _enqueue_viewer(self, target: str, token: str) -> None:
         commands = (
             _control_command("set-option", "-t", target, _VIEWER_PENDING_OPTION, token),
@@ -357,21 +389,25 @@ class TmuxTerminal:
 
     def _clear_viewer_token_after_enqueue_failure(self, target: str, token: str) -> None:
         try:
-            self._conditionally_clear_viewer_token(target, token)
+            self._conditionally_clear_viewer_attempt(
+                target, ViewerAttemptState.PENDING, token, "clear viewer launch token"
+            )
         except TerminalError:
             return
 
-    def _conditionally_clear_viewer_token(self, target: str, token: str) -> None:
+    def _conditionally_clear_viewer_attempt(
+        self, target: str, state: ViewerAttemptState, token: str, purpose: str
+    ) -> None:
         self._require_success(
             self._run(
                 "if-shell",
                 "-t",
                 target,
                 "-F",
-                self._token_matches_format(token),
+                self._attempt_matches_format(state, token),
                 self._clear_viewer_token_command(target),
             ),
-            "clear viewer launch token",
+            purpose,
         )
 
     def _viewer_owner_command(self, target: str, token: str) -> str:
@@ -388,9 +424,16 @@ class TmuxTerminal:
                 "attach-session",
                 "-t",
                 target,
+                ";",
+                "if-shell",
+                "-t",
+                target,
+                "-F",
+                self._attempt_matches_format(ViewerAttemptState.PENDING, token),
+                self._set_viewer_attempt_command(target, ViewerAttemptState.ACCEPTED, token),
             ]
         )
-        cleanup = shlex.join(
+        pending_cleanup = shlex.join(
             [
                 "tmux",
                 "-S",
@@ -399,19 +442,54 @@ class TmuxTerminal:
                 "-t",
                 target,
                 "-F",
-                self._token_matches_format(token),
+                self._attempt_matches_format(ViewerAttemptState.PENDING, token),
+                self._set_viewer_attempt_command(target, ViewerAttemptState.FAILED, token),
+            ]
+        )
+        accepted_cleanup = shlex.join(
+            [
+                "tmux",
+                "-S",
+                socket_path,
+                "if-shell",
+                "-t",
+                target,
+                "-F",
+                self._attempt_matches_format(ViewerAttemptState.ACCEPTED, token),
                 self._clear_viewer_token_command(target),
             ]
         )
         return _escape_tmux_formats(
-            f"{viewer}; viewer_status=$?; {cleanup}; cleanup_status=$?; "
+            f"{viewer}; viewer_status=$?; {pending_cleanup}; pending_cleanup_status=$?; "
+            f"{accepted_cleanup}; accepted_cleanup_status=$?; "
             'if [ "$viewer_status" -ne 0 ]; then exit "$viewer_status"; fi; '
-            'exit "$cleanup_status"'
+            'if [ "$pending_cleanup_status" -ne 0 ]; then exit "$pending_cleanup_status"; fi; '
+            'exit "$accepted_cleanup_status"'
         )
 
     @staticmethod
-    def _token_matches_format(token: str) -> str:
-        return f"#{{==:#{{{_VIEWER_PENDING_OPTION}}},{token}}}"
+    def _attempt_value(state: ViewerAttemptState, token: str) -> str:
+        if state is ViewerAttemptState.PENDING:
+            return token
+        prefix = (
+            _VIEWER_ACCEPTED_PREFIX
+            if state is ViewerAttemptState.ACCEPTED
+            else _VIEWER_FAILED_PREFIX
+        )
+        return f"{prefix}{token}"
+
+    @classmethod
+    def _attempt_matches_format(cls, state: ViewerAttemptState, token: str) -> str:
+        prefix = "#"
+        attempt = cls._attempt_value(state, token)
+        return f"{prefix}{{==:{prefix}{{{_VIEWER_PENDING_OPTION}}},{attempt}}}"
+
+    @classmethod
+    def _set_viewer_attempt_command(cls, target: str, state: ViewerAttemptState, token: str) -> str:
+        return (
+            f"set-option -t {shlex.quote(target)} {_VIEWER_PENDING_OPTION} "
+            f"{shlex.quote(cls._attempt_value(state, token))}"
+        )
 
     @staticmethod
     def _clear_viewer_token_command(target: str) -> str:
