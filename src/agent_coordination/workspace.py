@@ -41,6 +41,7 @@ _LOGIN_MALFORMED_LAUNCHER = "login launcher is malformed"
 _RUNTIME_SOCKET_NAME = "tmux.sock"
 _RUNTIME_LOCK_NAME = "workspace.lock"
 _LOCK_SUFFIX = ".lock"
+_PENDING_VIEWER_DETAIL = "waiting for the previously launched console"
 
 
 class WorkspaceError(protocol.ClaimError):
@@ -579,7 +580,7 @@ def _start_unregistered_project(
             pending,
             target,
             RunState.ENROLLMENT_PENDING,
-            "waiting for the previously launched console",
+            _PENDING_VIEWER_DETAIL,
         )
         assert existing is not None
         return existing
@@ -855,9 +856,7 @@ def _run_project(
     if target.state is terminal.TargetState.EXITED:
         return _launch_if_unowned(controller, project, launch, RunState.RETRIED, environment)
     if target.viewer_attempt is not None:
-        return RunOutcome(
-            project.key, RunState.PENDING, "waiting for the previously launched console"
-        )
+        return RunOutcome(project.key, RunState.PENDING, _PENDING_VIEWER_DETAIL)
     return _attach_or_pending(controller, project, RunState.REATTACHED, environment)
 
 
@@ -907,9 +906,7 @@ def _attach_or_pending(
     environment: Mapping[str, str],
 ) -> RunOutcome:
     target = controller.inspect(project.key)
-    existing = _existing_viewer_outcome(
-        controller, project, target, state, "waiting for the previously launched console"
-    )
+    existing = _existing_viewer_outcome(controller, project, target, state, _PENDING_VIEWER_DETAIL)
     if existing is not None:
         return existing
     controller.open_viewer(project.key, environment)

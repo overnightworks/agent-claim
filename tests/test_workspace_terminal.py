@@ -1437,9 +1437,10 @@ def test_tmux_inspect_refuses_unowned_viewer_pending_metadata(
         raise AssertionError(command)
 
     monkeypatch.setattr(process, "run_captured", run)
+    adapter = terminal.TmuxTerminal(tmp_path / "tmux.sock")
 
     with pytest.raises(terminal.TerminalError, match="unowned viewer pending"):
-        terminal.TmuxTerminal(tmp_path / "tmux.sock").inspect("alpha")
+        adapter.inspect("alpha")
 
 
 def test_tmux_inspect_reports_an_absent_or_exited_target(monkeypatch, tmp_path) -> None:
