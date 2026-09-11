@@ -573,8 +573,15 @@ def _start_unregistered_project(
         controller.finalize_enrollment(request.key)
         return _run_project(controller, candidate, environment, targets)
     pending = WorkspaceProject(request.key, request.directory, "", request.agent, request.model)
-    if _is_failed_viewer_attempt(target):
-        return _consume_failed_viewer_attempt(controller, pending, target)
+    existing = _existing_viewer_outcome(
+        controller,
+        pending,
+        target,
+        RunState.ENROLLMENT_PENDING,
+        "waiting for the previously launched console",
+    )
+    if existing is not None:
+        return existing
     if target.state is terminal.TargetState.EXITED:
         launch = _fresh_launch(
             request,

@@ -1258,6 +1258,7 @@ class FakeTerminal:
         pending_after_create: bool = False,
         pending_after_open: bool = False,
         failure_after_open: bool = False,
+        ownerless_after_open: bool = False,
         attach_after_launch: bool = False,
         failure_consumption_error: bool = False,
     ):
@@ -1267,6 +1268,7 @@ class FakeTerminal:
         self.pending_after_create = pending_after_create
         self.pending_after_open = pending_after_open
         self.failure_after_open = failure_after_open
+        self.ownerless_after_open = ownerless_after_open
         self.attach_after_launch = attach_after_launch
         self.failure_consumption_error = failure_consumption_error
         self.created: list[tuple[str, str | None, Path, terminal.Launch]] = []
@@ -1320,6 +1322,9 @@ class FakeTerminal:
             else terminal.TargetState.DETACHED,
             project,
             SESSION_ID,
+            self.target.viewer_attempt,
+            self.target.provider,
+            self.target.enrollment,
         )
 
     def retry_enrollment(self, project: str, directory: Path, launch: terminal.Launch) -> None:
@@ -1328,6 +1333,7 @@ class FakeTerminal:
         self.target = terminal.Target(
             terminal.TargetState.DETACHED,
             project,
+            viewer_attempt=self.target.viewer_attempt,
             provider=providers.Provider.CODEX,
             enrollment=terminal.Enrollment(
                 launch.enrollment.directory,
@@ -1355,6 +1361,8 @@ class FakeTerminal:
                 self.target,
                 viewer_attempt=_viewer_attempt(terminal.ViewerAttemptState.FAILED),
             )
+        elif self.ownerless_after_open:
+            self.target = replace(self.target, viewer_attempt=None)
         else:
             self.target = replace(self.target, viewer_attempt=_viewer_attempt())
 
@@ -1508,6 +1516,33 @@ def test_start_reports_when_a_pending_console_already_has_a_viewer(tmp_path: Pat
         "alpha", workspace.RunState.ENROLLMENT_PENDING, "waiting for first user submission"
     )
     assert fake.opened == []
+
+
+def test_start_reuses_an_attached_pending_console_after_consuming_its_failed_receipt(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    fake = FakeTerminal(
+        terminal.Target(
+            terminal.TargetState.ATTACHED,
+            "alpha",
+            viewer_attempt=_viewer_attempt(terminal.ViewerAttemptState.FAILED),
+            provider=providers.Provider.CODEX,
+            enrollment=_pending_enrollment(project_path),
+        )
+    )
+
+    outcome = workspace.start_project(
+        workspace.StartRequest("alpha", project_path, "new head"),
+        _start_context(config_path, tmp_path, fake),
+    )
+
+    assert outcome == workspace.RunOutcome("alpha", workspace.RunState.ENROLLMENT_PENDING)
+    assert fake.consumed_failures == [("alpha", "00000000-0000-4000-8000-000000000000")]
+    assert fake.opened == []
+    assert fake.retried == []
 
 
 def test_start_surfaces_and_consumes_a_viewer_failure_without_retrying_enrollment(
@@ -2668,6 +2703,157 @@ def test_run_reports_pending_when_a_new_viewer_has_not_attached(
     )
 
     assert outcomes[0].state is expected
+    if pending_after_create:
+        assert fake.opened == []
+    else:
+        assert fake.opened == [("alpha", {"XDG_RUNTIME_DIR": str(tmp_path)})]
+
+
+def _run_registered_project(tmp_path: Path, fake: FakeTerminal) -> tuple[workspace.RunOutcome, ...]:
+    config_path = tmp_path / "config" / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir(exist_ok=True)
+    workspace.register_project(
+        workspace.WorkspaceRegistration("alpha", project_path, SESSION_ID, "restored head"),
+        config_path,
+    )
+    return workspace.run_projects(
+        config_path,
+        environment={"XDG_RUNTIME_DIR": str(tmp_path)},
+        runtime_directory=tmp_path,
+        terminal_factory=lambda _socket: fake,
+    )
+
+
+def test_run_reports_an_ownerless_post_open_failure_then_allows_an_explicit_retry(
+    tmp_path: Path,
+) -> None:
+    fake = FakeTerminal(
+        terminal.Target(terminal.TargetState.ABSENT),
+        attach_viewer=False,
+        ownerless_after_open=True,
+    )
+
+    first = _run_registered_project(tmp_path, fake)
+    fake.attach_viewer = True
+    second = _run_registered_project(tmp_path, fake)
+
+    assert first == (
+        workspace.RunOutcome("alpha", workspace.RunState.FAILED, "project console is not attached"),
+    )
+    assert second == (workspace.RunOutcome("alpha", workspace.RunState.REATTACHED),)
+    assert len(fake.opened) == 2
+
+
+def test_run_consumes_a_post_open_failed_receipt_without_retrying(tmp_path: Path) -> None:
+    fake = FakeTerminal(
+        terminal.Target(terminal.TargetState.ABSENT),
+        attach_viewer=False,
+        failure_after_open=True,
+    )
+
+    outcomes = _run_registered_project(tmp_path, fake)
+
+    assert outcomes == (
+        workspace.RunOutcome(
+            "alpha", workspace.RunState.FAILED, "project console failed to attach"
+        ),
+    )
+    assert fake.retried == []
+    assert fake.consumed_failures == [("alpha", "00000000-0000-4000-8000-000000000000")]
+
+
+def test_run_consumes_a_detached_failed_receipt_before_a_later_recovery(tmp_path: Path) -> None:
+    fake = FakeTerminal(
+        terminal.Target(
+            terminal.TargetState.DETACHED,
+            "alpha",
+            SESSION_ID,
+            _viewer_attempt(terminal.ViewerAttemptState.FAILED),
+        )
+    )
+
+    first = _run_registered_project(tmp_path, fake)
+    second = _run_registered_project(tmp_path, fake)
+
+    assert first[0].state is workspace.RunState.FAILED
+    assert second == (workspace.RunOutcome("alpha", workspace.RunState.REATTACHED),)
+    assert len(fake.opened) == 1
+
+
+def test_run_reuses_an_attached_target_after_consuming_its_failed_receipt(tmp_path: Path) -> None:
+    fake = FakeTerminal(
+        terminal.Target(
+            terminal.TargetState.ATTACHED,
+            "alpha",
+            SESSION_ID,
+            _viewer_attempt(terminal.ViewerAttemptState.FAILED),
+        )
+    )
+
+    outcomes = _run_registered_project(tmp_path, fake)
+
+    assert outcomes == (workspace.RunOutcome("alpha", workspace.RunState.REUSED),)
+    assert fake.consumed_failures == [("alpha", "00000000-0000-4000-8000-000000000000")]
+    assert fake.opened == []
+
+
+def test_run_consumes_an_exited_failed_receipt_before_retrying_the_provider(tmp_path: Path) -> None:
+    fake = FakeTerminal(
+        terminal.Target(
+            terminal.TargetState.EXITED,
+            "alpha",
+            SESSION_ID,
+            _viewer_attempt(terminal.ViewerAttemptState.FAILED),
+        )
+    )
+
+    outcomes = _run_registered_project(tmp_path, fake)
+
+    assert outcomes[0].state is workspace.RunState.FAILED
+    assert fake.retried == []
+    assert fake.opened == []
+
+
+def test_run_refuses_to_launch_when_failed_receipt_consumption_fails(tmp_path: Path) -> None:
+    fake = FakeTerminal(
+        terminal.Target(
+            terminal.TargetState.DETACHED,
+            "alpha",
+            SESSION_ID,
+            _viewer_attempt(terminal.ViewerAttemptState.FAILED),
+        ),
+        failure_consumption_error=True,
+    )
+
+    outcomes = _run_registered_project(tmp_path, fake)
+
+    assert outcomes[0].state is workspace.RunState.FAILED
+    assert fake.opened == []
+
+
+@pytest.mark.parametrize(
+    "attempt_state",
+    [terminal.ViewerAttemptState.PENDING, terminal.ViewerAttemptState.ACCEPTED],
+)
+def test_run_retry_preserves_a_live_viewer_attempt_without_opening_another(
+    tmp_path: Path, attempt_state: terminal.ViewerAttemptState
+) -> None:
+    fake = FakeTerminal(
+        terminal.Target(
+            terminal.TargetState.EXITED,
+            "alpha",
+            SESSION_ID,
+            _viewer_attempt(attempt_state),
+        )
+    )
+
+    outcomes = _run_registered_project(tmp_path, fake)
+
+    assert outcomes[0].state is workspace.RunState.PENDING
+    assert len(fake.retried) == 1
+    assert fake.target.viewer_attempt == _viewer_attempt(attempt_state)
+    assert fake.opened == []
 
 
 def test_run_reports_foreign_tmux_metadata_without_adopting_it(tmp_path: Path) -> None:

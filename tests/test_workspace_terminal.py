@@ -562,6 +562,10 @@ def test_launch_keeps_a_synthetic_secret_out_of_tmux_argv_and_errors(monkeypatch
 
     def run(command: list[str], **_kwargs: object) -> process.CapturedResult:
         commands.append(command)
+        if command[3] == "display-message":
+            return process.CapturedResult(0, b"@0\n", b"")
+        if command[3] == "new-window":
+            return process.CapturedResult(0, b"@1\n", b"")
         return process.CapturedResult(0, b"", b"")
 
     def fail(
@@ -723,6 +727,9 @@ def test_terminal_consumes_only_the_matching_failed_viewer_attempt(monkeypatch, 
         return process.CapturedResult(0, b"", b"")
 
     monkeypatch.setattr(process, "run_captured", run)
+    monkeypatch.setattr(
+        process, "run_bounded", lambda *_arguments, **_kwargs: process.BoundedResult(0, b"")
+    )
     adapter = terminal.TmuxTerminal(tmp_path / "tmux.sock")
 
     adapter.consume_viewer_failure("alpha", token)
@@ -1350,6 +1357,53 @@ def test_tmux_updates_enrollment_metadata_for_a_captured_session(monkeypatch, tm
         ["@aco_enrollment_session_id", "session-a"],
         ["@aco_enrollment_state", "final"],
     ]
+
+
+@pytest.mark.parametrize(
+    "viewer_attempt",
+    [
+        "00000000-0000-4000-8000-000000000000",
+        "accepted:00000000-0000-4000-8000-000000000000",
+        "failed:00000000-0000-4000-8000-000000000000",
+    ],
+)
+def test_enrollment_transitions_do_not_write_the_viewer_attempt(
+    monkeypatch, tmp_path, viewer_attempt: str
+) -> None:
+    commands: list[list[str]] = []
+
+    def run(command: list[str], **_kwargs: object) -> process.CapturedResult:
+        commands.append(command)
+        if command[3] == "display-message":
+            return process.CapturedResult(0, b"@0\n", b"")
+        if command[3] == "new-window":
+            return process.CapturedResult(0, b"@1\n", b"")
+        return process.CapturedResult(0, b"", b"")
+
+    monkeypatch.setattr(process, "run_captured", run)
+    monkeypatch.setattr(
+        process, "run_bounded", lambda *_arguments, **_kwargs: process.BoundedResult(0, b"")
+    )
+    adapter = terminal.TmuxTerminal(tmp_path / "tmux.sock")
+    launch = terminal.Launch(
+        ["codex", "-C", str(tmp_path)],
+        {"ACO_AGENT": "new head"},
+        frozenset(),
+        enrollment=terminal.Enrollment(
+            tmp_path,
+            "new head",
+            None,
+            "attempt",
+            terminal.EnrollmentState.INITIALIZING,
+        ),
+    )
+
+    adapter.stage_enrollment("alpha", "session-a")
+    adapter.finalize_enrollment("alpha")
+    adapter.retry_enrollment("alpha", tmp_path, launch)
+
+    assert terminal._viewer_attempt(viewer_attempt) is not None
+    assert all(command[-2] != "@aco_viewer_pending" for command in commands)
 
 
 @pytest.mark.parametrize(
