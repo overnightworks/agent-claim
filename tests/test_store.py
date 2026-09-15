@@ -729,9 +729,10 @@ def test_read_schema_toml_fails_loud_when_schema_toml_is_not_a_blob(worktree: Pa
         _raw_tree(worktree, [("040000", "tree", inner_tree, "schema.toml")])
     )
     entries = store._list_tree(worktree, outer_tree_oid, tip=_PLACEHOLDER_TIP, context="state")
+    top_level_entries = _top_level(entries)
 
     with pytest.raises(protocol.MalformedStateTreeError, match="is not a blob"):
-        store._read_schema_toml(_top_level(entries), {}, tip=_PLACEHOLDER_TIP)
+        store._read_schema_toml(top_level_entries, {}, tip=_PLACEHOLDER_TIP)
 
 
 def test_parse_state_tree_fails_loud_when_a_blob_is_missing_from_the_object_database(
@@ -768,9 +769,10 @@ def test_parse_state_tree_fails_loud_when_a_blob_is_missing_from_the_object_data
     )
     loose_object = worktree / ".git" / "objects" / blob_oid[:2] / blob_oid[2:]
     loose_object.unlink()
+    commit_oid = protocol.ObjectId(commit)
 
     with pytest.raises(protocol.MalformedStateTreeError, match="cannot read the state tree"):
-        store._parse_state_tree(worktree, protocol.ObjectId(commit))
+        store._parse_state_tree(worktree, commit_oid)
 
 
 def test_write_lineage_stamp_cleans_up_its_temp_file_on_failure(
