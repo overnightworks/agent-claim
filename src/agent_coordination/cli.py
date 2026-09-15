@@ -1907,7 +1907,61 @@ def _selected_store_claim(
     return selected
 
 
-MUTATING_HOOK_TOOLS = frozenset({"Edit", "MultiEdit", "Write", "search_replace", "write"})
+class HookToolEffect(StrEnum):
+    """What a `PreToolUse` hook name does to files, for `protect`'s verdict.
+
+    `READ` never touches a file's contents, so it clears without a claim
+    check. `MUTATING` can write, so it is gated on a live overlapping claim
+    exactly as today. Any name in neither set is unproven -- `protect` must
+    fail closed on it rather than default it to either bucket (issue #238).
+    """
+
+    READ = "read"
+    MUTATING = "mutating"
+
+
+HOOK_TOOL_EFFECTS: Mapping[str, HookToolEffect] = {
+    # Read-only: cannot mutate a file, so no claim check is needed.
+    # `Bash`/`shell` are here too -- the hook payload carries no file path
+    # for a shell command, so `protect` cannot gate what it cannot see; this
+    # is a named limit (README, "PreToolUse write gate"), not an oversight.
+    "Read": HookToolEffect.READ,
+    "Glob": HookToolEffect.READ,
+    "Grep": HookToolEffect.READ,
+    "LS": HookToolEffect.READ,
+    "WebFetch": HookToolEffect.READ,
+    "WebSearch": HookToolEffect.READ,
+    "TodoWrite": HookToolEffect.READ,
+    "Task": HookToolEffect.READ,
+    "Agent": HookToolEffect.READ,
+    "Bash": HookToolEffect.READ,
+    "shell": HookToolEffect.READ,
+    # Other providers' names for the same read-only or path-blind operations
+    # (Grok, Codex): a snake_case terminal command is the same blind spot as
+    # `Bash`/`shell` above, and the rest never write a file.
+    "read_file": HookToolEffect.READ,
+    "grep": HookToolEffect.READ,
+    "list_dir": HookToolEffect.READ,
+    "run_terminal_command": HookToolEffect.READ,
+    "spawn_subagent": HookToolEffect.READ,
+    # Mutating: gated on a live claim whose scope overlaps the written path.
+    "Edit": HookToolEffect.MUTATING,
+    "MultiEdit": HookToolEffect.MUTATING,
+    "Write": HookToolEffect.MUTATING,
+    "search_replace": HookToolEffect.MUTATING,
+    "write": HookToolEffect.MUTATING,
+    "NotebookEdit": HookToolEffect.MUTATING,
+    "apply_patch": HookToolEffect.MUTATING,
+    "create_file": HookToolEffect.MUTATING,
+    "str_replace_editor": HookToolEffect.MUTATING,
+}
+
+
+def _unknown_hook_tool_reason(tool_name: str) -> str:
+    return (
+        f"{tool_name!r} is not in aco's hook tool table (HOOK_TOOL_EFFECTS in "
+        "cli.py, issue #238); add it there as read-only or mutating before use"
+    )
 
 
 def _hook_allow() -> int:
@@ -1965,7 +2019,7 @@ def _protect_hook_path(payload: dict[str, object]) -> str | None:
 
 
 def _protect_checkout_refusal(branch: str) -> str | None:
-    if branch in {"main", "master"}:
+    if checkout.is_default_branch(branch):
         return "not main"
     git_directory = Path(checkout._git_output(["rev-parse", "--git-dir"])).resolve()
     common_directory = Path(checkout._git_output(["rev-parse", "--git-common-dir"])).resolve()
@@ -2024,7 +2078,10 @@ def _protect(repository: str | None) -> int:
         tool_name = _hook_field(payload, "toolName", "tool_name")
         if not isinstance(tool_name, str):
             return _hook_deny("invalid hook payload")
-        if tool_name not in MUTATING_HOOK_TOOLS:
+        effect = HOOK_TOOL_EFFECTS.get(tool_name)
+        if effect is None:
+            return _hook_deny(_unknown_hook_tool_reason(tool_name))
+        if effect is HookToolEffect.READ:
             return _hook_allow()
         return _protect_write(repository, payload)
     except Exception as error:

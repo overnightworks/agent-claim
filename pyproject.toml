@@ -54,6 +54,7 @@ include_external_packages = true
 name = "Layers"
 type = "layers"
 containers = ["agent_coordination"]
+exhaustive = true
 layers = [
     "cli",
     "workspace",

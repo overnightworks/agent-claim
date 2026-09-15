@@ -152,7 +152,7 @@ def _validate_worktree_branch(
     Rescope uses this without also binding HEAD to the claim base or requiring
     a clean tree, so a lane can sharpen scope after it has already committed.
     """
-    if branch in {"main", "master"}:
+    if is_default_branch(branch):
         raise ClaimError(
             "build claims require an isolated non-main worktree branch; "
             f"{_worktree_repair_instruction(repair, branch=None)}"
@@ -191,13 +191,46 @@ def _validate_checkout(request: ClaimRequest) -> None:
         raise ClaimError(f"claim must be acquired before the first worktree edit: {named}")
 
 
-def _trunk_ref() -> str:
+DEFAULT_BRANCH_FALLBACK = frozenset({"main", "master"})
+
+
+def _origin_head_ref() -> str | None:
+    """The `origin/HEAD` symbolic ref (e.g. `refs/remotes/origin/trunk`), or
+    `None` when a clone or `git remote set-head` never recorded one -- the
+    two-name fallback below is the caller's job (issue #238), since `claim`
+    and `protect` word their refusals differently."""
     try:
         symbolic = _git_output(["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"])
-        if symbolic:
-            return symbolic
     except ClaimError:
-        pass
+        return None
+    return symbolic or None
+
+
+def default_branch_name() -> str | None:
+    """The repository's default branch name, read from `origin/HEAD`, or
+    `None` when git cannot resolve it."""
+    ref = _origin_head_ref()
+    if ref is None:
+        return None
+    return ref.removeprefix("refs/remotes/origin/")
+
+
+def is_default_branch(branch: str) -> bool:
+    """Whether `branch` is the repository's default branch (issue #238):
+    the name `origin/HEAD` resolves to, or the historical `{"main", "master"}`
+    guess when a repository has no recorded `origin/HEAD`. One owner for both
+    `claim`'s worktree precondition and `protect`'s "not main" refusal, so a
+    repository whose default branch is `trunk` is guarded the same way."""
+    resolved = default_branch_name()
+    if resolved is not None:
+        return branch == resolved
+    return branch in DEFAULT_BRANCH_FALLBACK
+
+
+def _trunk_ref() -> str:
+    ref = _origin_head_ref()
+    if ref is not None:
+        return ref
     for candidate in (
         "refs/remotes/origin/main",
         "refs/remotes/origin/master",
