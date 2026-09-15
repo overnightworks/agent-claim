@@ -669,9 +669,7 @@ def _reuse_or_write_mapping_subtree(
             _kind, oid = existing.children[entry_name]
             entries.append(("100644", "blob", ObjectId(oid), entry_name))
         else:
-            entries.append(
-                ("100644", "blob", _write_blob(worktree, serialize(value)), entry_name)
-            )
+            entries.append(("100644", "blob", _write_blob(worktree, serialize(value)), entry_name))
     return _mktree(worktree, entries)
 
 
