@@ -10,23 +10,27 @@ linked-worktree stamp collision `_lineage_stamp_path` exists to avoid.
 
 `cli` (issue #176, slice C2) is this module's production caller: `bootstrap`
 and `commit_transition`. It never checks the state ref out: every read goes
-through plumbing (`ls-remote`, `fetch` to `FETCH_HEAD`, `ls-tree`,
-`cat-file`), and every write builds a tree with `hash-object`/`mktree` and a
-commit with `commit-tree`.
+through plumbing (`ls-remote`, `fetch` to `FETCH_HEAD`, one recursive
+`ls-tree` and one `archive`, never a `cat-file` per entry), and every write
+builds a tree with `hash-object`/`mktree` -- reusing whatever a
+transition's already-committed parent tree still carries unchanged (issue
+#241) -- and a commit with `commit-tree`.
 """
 
 from __future__ import annotations
 
 import os
+import tarfile
 import tempfile
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from io import BytesIO
 from pathlib import Path
 from types import MappingProxyType
-from typing import Protocol
+from typing import Protocol, TypeVar
 
 from . import process
 from .protocol import (
@@ -287,36 +291,89 @@ def _tree_oid(worktree: Path, tip: ObjectId) -> ObjectId:
 
 
 def _list_tree(
-    worktree: Path, tree_oid: ObjectId, *, tip: ObjectId, context: str
+    worktree: Path, tree_ref: ObjectId, *, tip: ObjectId, context: str
 ) -> dict[str, tuple[str, str]]:
-    """`{name: (kind, oid)}` for one tree's direct entries."""
-    listing = _run_git(worktree, ["ls-tree", str(tree_oid)])
+    """`{path: (kind, oid)}` for every entry under `tree_ref`, at every depth.
+
+    `tree_ref` may be a tree oid or a commit (git dereferences a commit to
+    its tree); `-t` keeps intermediate tree entries in the recursive listing
+    git would otherwise omit, so a caller can validate `claims`/`ids`/
+    `resources` themselves as well as their direct children from this one
+    call (issue #241) -- the read side's bulk-listing counterpart to
+    `_read_state_archive`, and the write side's own lookup of what it may
+    reuse unchanged.
+    """
+    listing = _run_git(worktree, ["ls-tree", "-r", "-t", str(tree_ref)])
     if listing.exit_status != 0:
-        raise MalformedStateTreeError(f"cannot list the {context} tree {tree_oid} at {tip}")
+        raise MalformedStateTreeError(f"cannot list the {context} tree {tree_ref} at {tip}")
     entries: dict[str, tuple[str, str]] = {}
     for line in listing.stdout.decode().splitlines():
-        mode_type, _, name = line.partition("\t")
+        mode_type, _, path = line.partition("\t")
         _mode, kind, oid = mode_type.split(" ")
-        entries[name] = (kind, oid)
+        entries[path] = (kind, oid)
     return entries
 
 
-def _read_blob(worktree: Path, oid: str, *, tip: ObjectId, context: str) -> str:
-    content = _run_git(worktree, ["cat-file", "-p", oid])
-    if content.exit_status != 0:
-        raise MalformedStateTreeError(f"cannot read {context} blob {oid} at {tip}")
-    return content.stdout.decode()
+def _direct_children(
+    entries: dict[str, tuple[str, str]], directory: str
+) -> dict[str, tuple[str, str]]:
+    """Only `directory`'s immediate children from a full recursive `_list_tree`
+    listing, keyed by their own name -- never a nested descendant: `claims`,
+    `ids`, and `resources` are flat directories by contract, so a deeper path
+    is exactly the malformed shape the caller must reject, the same shape a
+    non-recursive `ls-tree` on the subtree's own oid used to reject.
+    """
+    prefix = f"{directory}/"
+    return {
+        path.removeprefix(prefix): value
+        for path, value in entries.items()
+        if path.startswith(prefix) and "/" not in path.removeprefix(prefix)
+    }
+
+
+def _extract_archive_member(archive: tarfile.TarFile, member: tarfile.TarInfo) -> bytes:
+    handle = archive.extractfile(member)
+    assert handle is not None  # `member.isfile()` guarantees an extractable stream
+    return handle.read()
+
+
+def _read_state_archive(worktree: Path, tree_oid: ObjectId, *, tip: ObjectId) -> dict[str, bytes]:
+    """Every blob's raw bytes under `tree_oid`, read via one `git archive`
+    instead of one `cat-file -p` per file (issue #241, audit findings 20-21):
+    a state tree with hundreds of claims used to cost one process per file
+    to read; this costs one regardless of how many. `tarfile` owns the
+    framing, never a hand-rolled parse of git's batch output.
+
+    A missing object fails the whole `git archive` loud, the same doctrine a
+    per-blob read used to enforce (ruling 9c): a broken tree is corrupt
+    state, never a single quarantinable claim.
+    """
+    result = _run_git(worktree, ["archive", "--format=tar", str(tree_oid)])
+    if result.exit_status != 0:
+        detail = result.stderr.decode().strip() or _UNKNOWN_GIT_FAILURE
+        raise MalformedStateTreeError(f"cannot read the state tree at {tip}: {detail}")
+    try:
+        with tarfile.open(fileobj=BytesIO(result.stdout), mode="r:") as archive:
+            return {
+                member.name: _extract_archive_member(archive, member)
+                for member in archive.getmembers()
+                if member.isfile()
+            }
+    except tarfile.TarError as error:
+        raise MalformedStateTreeError(
+            f"cannot read the state tree at {tip}: malformed archive"
+        ) from error
 
 
 def _read_schema_toml(
-    worktree: Path, top_entries: dict[str, tuple[str, str]], *, tip: ObjectId
+    top_level: dict[str, tuple[str, str]], archive: dict[str, bytes], *, tip: ObjectId
 ) -> str:
-    if SCHEMA_TOML_FILENAME not in top_entries:
+    if SCHEMA_TOML_FILENAME not in top_level:
         raise MalformedStateTreeError(f"state tree at {tip} is missing {SCHEMA_TOML_FILENAME}")
-    kind, blob_oid = top_entries[SCHEMA_TOML_FILENAME]
+    kind, _oid = top_level[SCHEMA_TOML_FILENAME]
     if kind != "blob":
         raise MalformedStateTreeError(f"{SCHEMA_TOML_FILENAME} at {tip} is not a blob")
-    return _read_blob(worktree, blob_oid, tip=tip, context=SCHEMA_TOML_FILENAME)
+    return archive[SCHEMA_TOML_FILENAME].decode()
 
 
 def _subtree_oid(
@@ -331,29 +388,27 @@ def _subtree_oid(
 
 
 def _parse_claims_subtree(
-    worktree: Path, oid: ObjectId | None, *, tip: ObjectId
+    entries: dict[str, tuple[str, str]], archive: dict[str, bytes], *, present: bool, tip: ObjectId
 ) -> Mapping[str, ActiveClaim]:
-    if oid is None:
+    if not present:
         return MappingProxyType({})
     claims: dict[str, ActiveClaim] = {}
-    listing = _list_tree(worktree, oid, tip=tip, context=CLAIMS_DIRECTORY)
-    for name, (kind, blob_oid) in listing.items():
+    for name, (kind, _oid) in _direct_children(entries, CLAIMS_DIRECTORY).items():
         if kind != "blob" or not name.endswith(TOML_SUFFIX):
             raise MalformedStateTreeError(f"{CLAIMS_DIRECTORY}/{name} at {tip} is not a claim file")
         key = name.removesuffix(TOML_SUFFIX)
-        content = _read_blob(worktree, blob_oid, tip=tip, context=f"{CLAIMS_DIRECTORY}/{name}")
+        content = archive[f"{CLAIMS_DIRECTORY}/{name}"].decode()
         claims[key] = parse_claim_toml(content, key=key, tip=tip)
     return MappingProxyType(claims)
 
 
 def _parse_ids_subtree(
-    worktree: Path, oid: ObjectId | None, *, tip: ObjectId
+    entries: dict[str, tuple[str, str]], *, present: bool, tip: ObjectId
 ) -> frozenset[ClaimId]:
-    if oid is None:
+    if not present:
         return frozenset()
     consumed: set[ClaimId] = set()
-    listing = _list_tree(worktree, oid, tip=tip, context=IDS_DIRECTORY)
-    for name, (kind, _blob_oid) in listing.items():
+    for name, (kind, _oid) in _direct_children(entries, IDS_DIRECTORY).items():
         if kind != "blob" or CLAIM_ID_PATTERN.fullmatch(name) is None:
             raise MalformedStateTreeError(f"{IDS_DIRECTORY}/{name} at {tip} is not a claim id")
         consumed.add(ClaimId(name))
@@ -361,20 +416,18 @@ def _parse_ids_subtree(
 
 
 def _parse_resources_subtree(
-    worktree: Path, oid: ObjectId | None, *, tip: ObjectId
+    entries: dict[str, tuple[str, str]], archive: dict[str, bytes], *, present: bool, tip: ObjectId
 ) -> Mapping[str, ResourceRecord]:
-    if oid is None:
+    if not present:
         return MappingProxyType({})
     resources: dict[str, ResourceRecord] = {}
-    for name, (kind, blob_oid) in _list_tree(
-        worktree, oid, tip=tip, context=RESOURCES_DIRECTORY
-    ).items():
+    for name, (kind, _oid) in _direct_children(entries, RESOURCES_DIRECTORY).items():
         if kind != "blob" or not name.endswith(TOML_SUFFIX):
             raise MalformedStateTreeError(
                 f"{RESOURCES_DIRECTORY}/{name} at {tip} is not a resource file"
             )
         resource_name = name.removesuffix(TOML_SUFFIX)
-        content = _read_blob(worktree, blob_oid, tip=tip, context=f"{RESOURCES_DIRECTORY}/{name}")
+        content = archive[f"{RESOURCES_DIRECTORY}/{name}"].decode()
         resources[resource_name] = parse_resource_toml(content, name=resource_name, tip=tip)
     return MappingProxyType(resources)
 
@@ -383,26 +436,41 @@ def _parse_state_tree(worktree: Path, tip: ObjectId) -> ClaimState:
     """Parse the full state tree at `tip`: `schema.toml` plus whichever of
     `claims/`, `ids/`, `resources/` are present (issue #176, slice C2).
 
+    One recursive `ls-tree` for structure and one `git archive` for every
+    blob's bytes (issue #241) replace what used to be one `ls-tree` and one
+    `cat-file -p` per entry -- the process count this function pays is fixed
+    regardless of how many claims, ids, or resources the tree holds.
+
     A defect anywhere fails the whole read loud (ruling 9c): a commit is the
     unit a writer writes, so a broken tree is corrupt state, never a single
     quarantinable claim.
     """
     tree_oid = _tree_oid(worktree, tip)
-    top_entries = _list_tree(worktree, tree_oid, tip=tip, context="state")
-    unknown = set(top_entries) - _STATE_TOP_LEVEL_NAMES
+    entries = _list_tree(worktree, tree_oid, tip=tip, context="state")
+    top_level = {name: value for name, value in entries.items() if "/" not in name}
+    unknown = set(top_level) - _STATE_TOP_LEVEL_NAMES
     if unknown:
         raise MalformedStateTreeError(f"state tree at {tip} has unknown entries: {sorted(unknown)}")
-    parse_schema_toml(_read_schema_toml(worktree, top_entries, tip=tip), tip=tip)
+    archive = _read_state_archive(worktree, tree_oid, tip=tip)
+    parse_schema_toml(_read_schema_toml(top_level, archive, tip=tip), tip=tip)
     return ClaimState(
         tip=tip,
         claims=_parse_claims_subtree(
-            worktree, _subtree_oid(top_entries, CLAIMS_DIRECTORY, tip=tip), tip=tip
+            entries,
+            archive,
+            present=_subtree_oid(top_level, CLAIMS_DIRECTORY, tip=tip) is not None,
+            tip=tip,
         ),
         consumed_ids=_parse_ids_subtree(
-            worktree, _subtree_oid(top_entries, IDS_DIRECTORY, tip=tip), tip=tip
+            entries,
+            present=_subtree_oid(top_level, IDS_DIRECTORY, tip=tip) is not None,
+            tip=tip,
         ),
         resources=_parse_resources_subtree(
-            worktree, _subtree_oid(top_entries, RESOURCES_DIRECTORY, tip=tip), tip=tip
+            entries,
+            archive,
+            present=_subtree_oid(top_level, RESOURCES_DIRECTORY, tip=tip) is not None,
+            tip=tip,
         ),
     )
 
@@ -542,64 +610,160 @@ def _mktree(worktree: Path, entries: list[_TreeEntry]) -> ObjectId:
     return ObjectId(_run_git_with_input(worktree, ["mktree"], input_data=mktree_input.encode()))
 
 
-def _write_claims_subtree(worktree: Path, claims: Mapping[str, ActiveClaim]) -> ObjectId:
-    return _mktree(
-        worktree,
-        [
-            (
-                "100644",
-                "blob",
-                _write_blob(worktree, serialize_claim_toml(claim)),
-                f"{key}{TOML_SUFFIX}",
-            )
-            for key, claim in claims.items()
-        ],
-    )
-
-
-def _write_ids_subtree(worktree: Path, consumed_ids: frozenset[ClaimId]) -> ObjectId:
-    empty_blob = _empty_blob_oid(worktree)
-    return _mktree(
-        worktree, [("100644", "blob", empty_blob, claim_id) for claim_id in consumed_ids]
-    )
-
-
-def _write_resources_subtree(worktree: Path, resources: Mapping[str, ResourceRecord]) -> ObjectId:
-    return _mktree(
-        worktree,
-        [
-            (
-                "100644",
-                "blob",
-                _write_blob(worktree, serialize_resource_toml(record)),
-                f"{name}{TOML_SUFFIX}",
-            )
-            for name, record in resources.items()
-        ],
-    )
-
-
-def _write_state_tree(worktree: Path, state: ClaimState) -> ObjectId:
-    """Serialize `state` into a full git tree: `schema.toml` always, plus
-    `claims/`, `ids/`, `resources/` only while non-empty -- C1's `bootstrap`
-    writes only `schema.toml`; these subtrees appear the first time `apply`
-    puts something in them (§1)."""
+def _write_bootstrap_tree(worktree: Path) -> ObjectId:
+    """The one tree `bootstrap` ever writes: `schema.toml` alone (issue #176
+    slice C1). Every later transition's tree comes from
+    `_write_incremental_state_tree` instead (issue #241), which diffs
+    against an already-committed tree -- exactly what bootstrap's own first
+    commit has none of yet.
+    """
     schema_blob = _write_blob(worktree, serialize_empty_schema_toml())
-    top_entries: list[_TreeEntry] = [("100644", "blob", schema_blob, SCHEMA_TOML_FILENAME)]
-    if state.claims:
-        top_entries.append(
-            ("040000", "tree", _write_claims_subtree(worktree, state.claims), CLAIMS_DIRECTORY)
-        )
-    if state.consumed_ids:
-        top_entries.append(
-            ("040000", "tree", _write_ids_subtree(worktree, state.consumed_ids), IDS_DIRECTORY)
-        )
-    if state.resources:
+    return _mktree(worktree, [("100644", "blob", schema_blob, SCHEMA_TOML_FILENAME)])
+
+
+_SubtreeValueT = TypeVar("_SubtreeValueT")
+
+
+@dataclass(frozen=True)
+class _ExistingSubtree:
+    """One subtree's already-committed shape from `observed.tip` (issue
+    #241): its own oid (`None` when the directory did not exist yet) and its
+    direct children's `(kind, oid)` by bare name -- exactly what the
+    incremental writer needs to decide what it may reuse, and no more, so
+    the writers below stay at one `existing`-shaped parameter each.
+    """
+
+    oid: str | None
+    children: dict[str, tuple[str, str]]
+
+
+def _existing_subtree(existing: dict[str, tuple[str, str]], directory: str) -> _ExistingSubtree:
+    entry = existing.get(directory)
+    return _ExistingSubtree(
+        oid=entry[1] if entry is not None else None,
+        children=_direct_children(existing, directory),
+    )
+
+
+def _reuse_or_write_mapping_subtree(
+    worktree: Path,
+    *,
+    existing: _ExistingSubtree,
+    old_members: Mapping[str, _SubtreeValueT],
+    new_members: Mapping[str, _SubtreeValueT],
+    serialize: Callable[[_SubtreeValueT], str],
+) -> ObjectId:
+    """A `claims/`- or `resources/`-shaped subtree's new oid, reusing every
+    member unchanged since `old_members` (issue #241): frozen-dataclass
+    equality on the parsed record is exactly serialization equality --
+    `serialize` is a pure function of the record's fields -- so an identical
+    record needs neither a new blob nor a new tree; only `mktree` for a
+    directory that actually changed, never once per unchanged entry.
+    """
+    if old_members == new_members and existing.oid is not None:
+        return ObjectId(existing.oid)
+    entries: list[_TreeEntry] = []
+    for name, value in new_members.items():
+        entry_name = f"{name}{TOML_SUFFIX}"
+        if old_members.get(name) == value:
+            _kind, oid = existing.children[entry_name]
+            entries.append(("100644", "blob", ObjectId(oid), entry_name))
+        else:
+            entries.append(
+                ("100644", "blob", _write_blob(worktree, serialize(value)), entry_name)
+            )
+    return _mktree(worktree, entries)
+
+
+def _reuse_or_write_ids_subtree(
+    worktree: Path,
+    *,
+    existing: _ExistingSubtree,
+    old_ids: frozenset[ClaimId],
+    new_ids: frozenset[ClaimId],
+) -> ObjectId:
+    """`ids/`'s new subtree oid (issue #241): every id's blob is the same
+    empty content, so reuse is membership-only -- the empty blob is written
+    at most once per call, never once per newly consumed id.
+    """
+    if old_ids == new_ids and existing.oid is not None:
+        return ObjectId(existing.oid)
+    empty_blob: ObjectId | None = None
+    entries: list[_TreeEntry] = []
+    for claim_id in new_ids:
+        if claim_id in old_ids:
+            _kind, oid = existing.children[claim_id]
+            entries.append(("100644", "blob", ObjectId(oid), claim_id))
+        else:
+            if empty_blob is None:
+                empty_blob = _empty_blob_oid(worktree)
+            entries.append(("100644", "blob", empty_blob, claim_id))
+    return _mktree(worktree, entries)
+
+
+def _write_incremental_state_tree(
+    worktree: Path, *, observed: ClaimState, new_state: ClaimState
+) -> ObjectId:
+    """`new_state`'s tree, reusing every blob and subtree oid `observed.tip`'s
+    already-committed tree still carries unchanged (issue #241): the write
+    seam inside `commit_transition`'s retry loop, read fresh every attempt
+    against that attempt's own `observed.tip` -- never lifted above the
+    loop, never cached on `ClaimState` itself, which stays free of this
+    adapter detail.
+
+    `schema.toml` never changes after bootstrap, so its oid is always
+    reused; each of `claims/`/`ids/`/`resources/` costs `mktree` only when
+    it actually differs from `observed`, plus one `mktree` for the top --
+    the process count below is fixed regardless of the tree's size. Unlike
+    `_write_bootstrap_tree`, which has no prior commit to diff against on a
+    ref's very first write.
+    """
+    assert observed.tip is not None  # commit_transition already refused a missing ref
+    existing = _list_tree(worktree, observed.tip, tip=observed.tip, context="state")
+    top_entries: list[_TreeEntry] = [
+        ("100644", "blob", ObjectId(existing[SCHEMA_TOML_FILENAME][1]), SCHEMA_TOML_FILENAME)
+    ]
+    if new_state.claims:
         top_entries.append(
             (
                 "040000",
                 "tree",
-                _write_resources_subtree(worktree, state.resources),
+                _reuse_or_write_mapping_subtree(
+                    worktree,
+                    existing=_existing_subtree(existing, CLAIMS_DIRECTORY),
+                    old_members=observed.claims,
+                    new_members=new_state.claims,
+                    serialize=serialize_claim_toml,
+                ),
+                CLAIMS_DIRECTORY,
+            )
+        )
+    if new_state.consumed_ids:
+        top_entries.append(
+            (
+                "040000",
+                "tree",
+                _reuse_or_write_ids_subtree(
+                    worktree,
+                    existing=_existing_subtree(existing, IDS_DIRECTORY),
+                    old_ids=observed.consumed_ids,
+                    new_ids=new_state.consumed_ids,
+                ),
+                IDS_DIRECTORY,
+            )
+        )
+    if new_state.resources:
+        top_entries.append(
+            (
+                "040000",
+                "tree",
+                _reuse_or_write_mapping_subtree(
+                    worktree,
+                    existing=_existing_subtree(existing, RESOURCES_DIRECTORY),
+                    old_members=observed.resources,
+                    new_members=new_state.resources,
+                    serialize=serialize_resource_toml,
+                ),
                 RESOURCES_DIRECTORY,
             )
         )
@@ -637,9 +801,10 @@ def commit_transition(
         raise ClaimError(MISSING_STATE_REF)
     for _attempt in range(_MAX_TRANSITION_ATTEMPTS):
         new_state = apply(observed, intent)
+        new_tree = _write_incremental_state_tree(worktree, observed=observed, new_state=new_state)
         new_commit = _commit_tree(
             worktree,
-            tree_oid=_write_state_tree(worktree, new_state),
+            tree_oid=new_tree,
             parent=observed.tip,
             message=_transition_message(subject, intent),
         )
@@ -670,10 +835,6 @@ def commit_transition(
     )
 
 
-def _write_empty_state_tree(worktree: Path) -> ObjectId:
-    return _write_state_tree(worktree, EMPTY_STATE)
-
-
 def bootstrap(
     *,
     worktree: Path,
@@ -694,7 +855,7 @@ def bootstrap(
         return observed.tip
     operation_id = uuid.uuid4().hex
     pending = PendingCommit(
-        tree_oid=_write_empty_state_tree(worktree),
+        tree_oid=_write_bootstrap_tree(worktree),
         message=f"bootstrap empty claim state\n\noperation_id: {operation_id}\n",
         operation_id=operation_id,
     )

@@ -246,7 +246,9 @@ call against a repository that has not been bootstrapped refuses by name
 instead of silently creating it. `release --coordinator-override` is for an
 explicit coordinator action; a stale takeover is that same override-release
 followed by an ordinary `claim` -- two commits, no separate verb, and the new
-claim never reuses a resource integer the released claim held.
+claim never reuses a resource integer the released claim held. The number of
+git invocations a transition or a state read costs is fixed, independent of
+how many claims the state tree holds.
 
 `bootstrap` has one job: it creates or reports the state ref. A present ref
 is a pure read (prints the ref's commit id, writes nothing); an absent ref

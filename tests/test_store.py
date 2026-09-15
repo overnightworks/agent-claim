@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import subprocess
 import threading
+from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -36,6 +38,33 @@ def _git_identity(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GIT_AUTHOR_EMAIL", "test@example.com")
     monkeypatch.setenv("GIT_COMMITTER_NAME", "Test")
     monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@example.com")
+
+
+@pytest.fixture
+def git_call_spy(monkeypatch: pytest.MonkeyPatch) -> Counter[str]:
+    """Counts real git subprocess invocations by subcommand, patched at the
+    `process` chokepoint both of `store`'s call shapes go through --
+    `_run_git` (`process.run_captured`) and `_run_git_with_input`
+    (`process.run_bounded`) -- the proof that a transition's or a read's
+    git-invocation count is independent of how many claims the state tree
+    holds (issue #241).
+    """
+    counts: Counter[str] = Counter()
+
+    def record(command: list[str]) -> None:
+        if command[0] == "git":
+            counts[command[3]] += 1
+
+    def spy(real: Callable[..., object]) -> Callable[..., object]:
+        def wrapped(command: list[str], **kwargs: object) -> object:
+            record(command)
+            return real(command, **kwargs)
+
+        return wrapped
+
+    monkeypatch.setattr(store.process, "run_captured", spy(process.run_captured))
+    monkeypatch.setattr(store.process, "run_bounded", spy(process.run_bounded))
+    return counts
 
 
 def _git(*arguments: str, cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -504,7 +533,7 @@ def test_push_retry_finds_the_operation_id_after_an_accept_then_raise_and_does_n
     transport = _AcceptThenRaiseTransport()
     operation_id = "operation-under-test"
     pending = store.PendingCommit(
-        tree_oid=store._write_empty_state_tree(worktree),
+        tree_oid=store._write_bootstrap_tree(worktree),
         message=f"bootstrap empty claim state\n\noperation_id: {operation_id}\n",
         operation_id=operation_id,
     )
@@ -539,7 +568,7 @@ def test_push_retry_exhausts_and_fails_loud_when_the_ref_never_stops_moving(
     store.bootstrap(worktree=worktree, remote=str(bare_remote))
     observed = store.fetch_state(worktree=worktree, remote=str(bare_remote))
     pending = store.PendingCommit(
-        tree_oid=store._write_empty_state_tree(worktree),
+        tree_oid=store._write_bootstrap_tree(worktree),
         message="bootstrap empty claim state\n\noperation_id: never-applied\n",
         operation_id="never-applied",
     )
@@ -559,7 +588,7 @@ def test_git_push_transport_raises_on_a_non_fast_forward_push(
     bare_remote: Path, worktree: Path
 ) -> None:
     store.bootstrap(worktree=worktree, remote=str(bare_remote))
-    orphan_tree = store._write_empty_state_tree(worktree)
+    orphan_tree = store._write_bootstrap_tree(worktree)
     orphan_commit = store._commit_tree(
         worktree, tree_oid=orphan_tree, parent=None, message="unrelated root commit\n"
     )
@@ -680,6 +709,10 @@ def test_list_tree_fails_loud_when_the_tree_is_unresolvable(worktree: Path) -> N
         store._list_tree(worktree, _UNRESOLVABLE_OBJECT_ID, tip=_PLACEHOLDER_TIP, context="state")
 
 
+def _top_level(entries: dict[str, tuple[str, str]]) -> dict[str, tuple[str, str]]:
+    return {name: value for name, value in entries.items() if "/" not in name}
+
+
 def test_read_schema_toml_fails_loud_when_schema_toml_is_not_a_blob(worktree: Path) -> None:
     inner_blob = (
         subprocess.run(
@@ -695,17 +728,24 @@ def test_read_schema_toml_fails_loud_when_schema_toml_is_not_a_blob(worktree: Pa
     outer_tree_oid = protocol.ObjectId(
         _raw_tree(worktree, [("040000", "tree", inner_tree, "schema.toml")])
     )
-    top_entries = store._list_tree(worktree, outer_tree_oid, tip=_PLACEHOLDER_TIP, context="state")
+    entries = store._list_tree(worktree, outer_tree_oid, tip=_PLACEHOLDER_TIP, context="state")
 
     with pytest.raises(protocol.MalformedStateTreeError, match="is not a blob"):
-        store._read_schema_toml(worktree, top_entries, tip=_PLACEHOLDER_TIP)
+        store._read_schema_toml(_top_level(entries), {}, tip=_PLACEHOLDER_TIP)
 
 
-def test_read_schema_toml_fails_loud_when_the_blob_is_unresolvable(worktree: Path) -> None:
-    # `git mktree` itself refuses a fabricated oid, so the dangling reference
-    # this exercises is built the only way one can occur against a real
-    # object database: reference a real blob, then remove its loose object,
-    # simulating a corrupted or incomplete local store.
+def test_parse_state_tree_fails_loud_when_a_blob_is_missing_from_the_object_database(
+    worktree: Path,
+) -> None:
+    # `git mktree`/`ls-tree` never verify a referenced blob exists, so the
+    # dangling reference this exercises is built the only way one can occur
+    # against a real object database: reference a real blob, then remove its
+    # loose object, simulating a corrupted or incomplete local store. A real
+    # remote would re-supply the object on the next `fetch`, so this drives
+    # `_parse_state_tree` directly against a commit this worktree never
+    # pushed or fetched. `git archive` -- the bulk-read boundary (issue
+    # #241) -- is what notices, not `ls-tree`, which happily lists a
+    # dangling entry.
     blob_oid = (
         subprocess.run(
             ["git", "-C", str(worktree), "hash-object", "-w", "--stdin"],
@@ -716,13 +756,21 @@ def test_read_schema_toml_fails_loud_when_the_blob_is_unresolvable(worktree: Pat
         .stdout.decode()
         .strip()
     )
-    tree = protocol.ObjectId(_raw_tree(worktree, [("100644", "blob", blob_oid, "schema.toml")]))
+    tree = _raw_tree(worktree, [("100644", "blob", blob_oid, "schema.toml")])
+    commit = (
+        subprocess.run(
+            ["git", "-C", str(worktree), "commit-tree", tree, "-m", "test fixture"],
+            check=True,
+            capture_output=True,
+        )
+        .stdout.decode()
+        .strip()
+    )
     loose_object = worktree / ".git" / "objects" / blob_oid[:2] / blob_oid[2:]
     loose_object.unlink()
-    top_entries = store._list_tree(worktree, tree, tip=_PLACEHOLDER_TIP, context="state")
 
-    with pytest.raises(protocol.MalformedStateTreeError, match=r"cannot read schema\.toml blob"):
-        store._read_schema_toml(worktree, top_entries, tip=_PLACEHOLDER_TIP)
+    with pytest.raises(protocol.MalformedStateTreeError, match="cannot read the state tree"):
+        store._parse_state_tree(worktree, protocol.ObjectId(commit))
 
 
 def test_write_lineage_stamp_cleans_up_its_temp_file_on_failure(
@@ -780,7 +828,7 @@ def test_push_retry_stops_instead_of_committing_again_when_the_search_fails(
     transport = _AcceptThenRaiseTransport()
     operation_id = "operation-under-test"
     pending = store.PendingCommit(
-        tree_oid=store._write_empty_state_tree(worktree),
+        tree_oid=store._write_bootstrap_tree(worktree),
         message=f"bootstrap empty claim state\n\noperation_id: {operation_id}\n",
         operation_id=operation_id,
     )
@@ -857,7 +905,7 @@ def test_committer_date_refuses_a_commit_that_is_not_an_ancestor_of_the_tip(
     bare_remote: Path, worktree: Path
 ) -> None:
     tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
-    orphan_tree = store._write_empty_state_tree(worktree)
+    orphan_tree = store._write_bootstrap_tree(worktree)
     orphan_commit = store._commit_tree(
         worktree, tree_oid=orphan_tree, parent=None, message="unrelated root commit\n"
     )
@@ -1104,6 +1152,279 @@ def test_commit_transition_ten_thread_contention_lands_every_distinct_key(
     assert errors == []
     state = store.fetch_state(worktree=main_repo, remote=str(bare_remote))
     assert set(state.claims) == {f"issue-{issue}" for issue in issue_numbers}
+    # Ten writers land in one linear chain (issue #241, "proven sound -- do
+    # not break"): the bootstrap commit plus ten claim commits, never a
+    # merge -- every losing racer's retry re-reads its own fresh
+    # `observed.tip` and rebuilds against it rather than merging histories.
+    commit_count = subprocess.run(
+        ["git", "--git-dir", str(bare_remote), "rev-list", "--count", store.STATE_REF],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert commit_count.stdout.strip() == str(len(issue_numbers) + 1)
+    merge_count = subprocess.run(
+        ["git", "--git-dir", str(bare_remote), "rev-list", "--count", "--merges", store.STATE_REF],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert merge_count.stdout.strip() == "0"
+
+
+# --- Incremental write/bulk read: git-invocation count is independent of ---
+# --- how many claims the state tree holds (issue #241) ---------------------
+
+
+def _seeded_claims_state(count: int) -> protocol.ClaimState:
+    """`count` distinct live claims and their consumed ids, built by
+    `protocol.apply` alone -- pure and git-free, so seeding a state this
+    large for the tests below costs no subprocess beyond the raw tree
+    `_push_seeded_state` builds from it.
+    """
+    state = protocol.ClaimState(tip=_PLACEHOLDER_TIP)
+    for n in range(count):
+        state = protocol.apply(
+            state,
+            protocol.ClaimIntent(
+                identity=protocol.IssueIdentity(n + 1),
+                agent="Ada",
+                role="builder",
+                base=_UNRESOLVABLE_OBJECT_ID,
+                branch=f"claude/issue-{n + 1}-cut",
+                scope=(f"src/module_{n}.py",),
+                claim_id=protocol.ClaimId(f"c{n}"),
+                operation_id=f"seed-op-{n}",
+            ),
+        )
+    return state
+
+
+def _push_seeded_state(bare_remote: Path, worktree: Path, count: int) -> protocol.ClaimState:
+    """Push `count` claims onto `STATE_REF` via raw git plumbing plus the
+    real TOML codec, once -- never `count` round trips through
+    `commit_transition`, and never `store`'s own incremental writer, which
+    has nothing yet to diff against on a tree's first write; `bootstrap`
+    itself only ever writes `schema.toml` alone (issue #241)."""
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    parent = store.fetch_state(worktree=worktree, remote=str(bare_remote)).tip
+    seeded = _seeded_claims_state(count)
+    claims_tree = _raw_tree(
+        worktree,
+        [
+            (
+                "100644",
+                "blob",
+                _blob(worktree, protocol.serialize_claim_toml(claim).encode()),
+                f"{key}.toml",
+            )
+            for key, claim in seeded.claims.items()
+        ],
+    )
+    empty_blob = _blob(worktree, b"")
+    ids_tree = _raw_tree(
+        worktree, [("100644", "blob", empty_blob, claim_id) for claim_id in seeded.consumed_ids]
+    )
+    schema_blob = _blob(worktree, protocol.serialize_empty_schema_toml().encode())
+    top_tree = protocol.ObjectId(
+        _raw_tree(
+            worktree,
+            [
+                ("100644", "blob", schema_blob, store.SCHEMA_TOML_FILENAME),
+                ("040000", "tree", claims_tree, store.CLAIMS_DIRECTORY),
+                ("040000", "tree", ids_tree, store.IDS_DIRECTORY),
+            ],
+        )
+    )
+    commit = store._commit_tree(
+        worktree, tree_oid=top_tree, parent=parent, message="seed\n\noperation_id: seed\n"
+    )
+    store.GitPushTransport().push(
+        worktree=worktree, remote=str(bare_remote), ref=store.STATE_REF, new_oid=commit
+    )
+    return store.fetch_state(worktree=worktree, remote=str(bare_remote))
+
+
+@pytest.mark.parametrize("claim_count", [10, 300])
+def test_fetch_state_git_call_count_is_independent_of_claim_count(
+    bare_remote: Path,
+    worktree: Path,
+    tmp_path: Path,
+    git_call_spy: Counter[str],
+    claim_count: int,
+) -> None:
+    """One `ls-tree` and one `archive` read every claim regardless of how
+    many there are (issue #241, audit findings 20-21) -- replacing what used
+    to be one `ls-tree` and one `cat-file -p` per claim.
+    """
+    _push_seeded_state(bare_remote, worktree, claim_count)
+    reader = tmp_path / "reader"
+    reader.mkdir()
+    _git("init", "-b", "main", cwd=reader)
+    git_call_spy.clear()
+
+    state = store.fetch_state(worktree=reader, remote=str(bare_remote))
+
+    assert len(state.claims) == claim_count
+    assert dict(git_call_spy) == {
+        "ls-remote": 1,
+        "fetch": 1,
+        "rev-parse": 4,
+        "ls-tree": 1,
+        "archive": 1,
+    }
+
+
+def _add_one_more_claim(claim_count: int) -> protocol.ClaimIntent:
+    """A `claim` intent that both adds a new `claims/` entry and consumes a
+    new id, touching two of the three subtrees at once."""
+    return protocol.ClaimIntent(
+        identity=protocol.IssueIdentity(claim_count + 1000),
+        agent="Ada",
+        role="builder",
+        base=_UNRESOLVABLE_OBJECT_ID,
+        branch="claude/issue-new-cut",
+        scope=("src/new_module.py",),
+        claim_id=protocol.ClaimId("new-claim"),
+        operation_id="new-op",
+    )
+
+
+def _release_first_claim(_claim_count: int) -> protocol.ReleaseIntent:
+    """A `release` intent that only ever shrinks `claims/`: `ids/` and
+    `resources/` are untouched (a released id is never reused)."""
+    return protocol.ReleaseIntent(
+        claim_id=protocol.ClaimId("c0"),
+        agent="Ada",
+        role="builder",
+        outcome=protocol.AbandonedRelease("test"),
+        operation_id="release-op",
+    )
+
+
+@pytest.mark.parametrize("claim_count", [10, 300])
+@pytest.mark.parametrize(
+    ("build_intent", "expected_hash_object", "expected_mktree"),
+    [
+        pytest.param(_add_one_more_claim, 2, 3, id="claim"),
+        pytest.param(_release_first_claim, 0, 2, id="release"),
+    ],
+)
+def test_commit_transition_git_call_count_is_independent_of_claim_count(
+    bare_remote: Path,
+    worktree: Path,
+    git_call_spy: Counter[str],
+    claim_count: int,
+    build_intent: Callable[[int], protocol.ClaimTransitionIntent],
+    expected_hash_object: int,
+    expected_mktree: int,
+) -> None:
+    """A transition's git-invocation count is fixed by which subtrees the
+    intent touches, never by how many claims the tree already holds (issue
+    #241): the write seam's own `ls-tree` (inside the retry loop, against
+    that attempt's `observed.tip`) plus `hash-object` only for entries that
+    actually changed, `mktree` only for subtrees that actually changed plus
+    the top, and one `commit-tree`.
+    """
+    _push_seeded_state(bare_remote, worktree, claim_count)
+    git_call_spy.clear()
+
+    store.commit_transition(
+        worktree=worktree,
+        remote=str(bare_remote),
+        subject="transition under measurement",
+        intent=build_intent(claim_count),
+    )
+
+    assert git_call_spy["ls-tree"] == 2
+    assert git_call_spy["hash-object"] == expected_hash_object
+    assert git_call_spy["mktree"] == expected_mktree
+    assert git_call_spy["commit-tree"] == 1
+    assert git_call_spy["merge-base"] == 0
+
+
+def test_commit_transition_reuses_an_unchanged_claims_blob_byte_for_byte(
+    bare_remote: Path, worktree: Path
+) -> None:
+    """An entry a transition does not touch keeps its exact bytes and oid
+    (issue #241): today's normalisation-on-every-write would still produce
+    the same bytes for an unchanged record (the codec is deterministic), so
+    this pins the oid, the sharper claim reuse actually makes.
+    """
+    seeded = _push_seeded_state(bare_remote, worktree, 3)
+    tip = seeded.tip
+    assert tip is not None
+    before = store._list_tree(worktree, tip, tip=tip, context="state")
+
+    result = store.commit_transition(
+        worktree=worktree,
+        remote=str(bare_remote),
+        subject="release c0",
+        intent=_release_first_claim(3),
+    )
+
+    assert result.tip is not None
+    after = store._list_tree(worktree, result.tip, tip=result.tip, context="state")
+    # `c0` is the claim id released, held by tree key `issue-1` (identity
+    # `n + 1`, per `_seeded_claims_state`); `issue-2`/`issue-3` are untouched.
+    assert after["claims/issue-2.toml"] == before["claims/issue-2.toml"]
+    assert after["claims/issue-3.toml"] == before["claims/issue-3.toml"]
+    assert after[store.SCHEMA_TOML_FILENAME] == before[store.SCHEMA_TOML_FILENAME]
+    assert "claims/issue-1.toml" not in after
+
+
+def test_commit_transition_reuses_a_whole_unchanged_subtree_by_its_own_oid(
+    bare_remote: Path, worktree: Path
+) -> None:
+    """A subtree no member of which changed is reused by its own oid --
+    never rebuilt with `mktree` (issue #241): claiming issue 2 without a
+    resource leaves `resources/`, populated by issue 1's claim, byte for
+    byte the same tree object.
+    """
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    store.commit_transition(
+        worktree=worktree,
+        remote=str(bare_remote),
+        subject="claim issue 1",
+        intent=_issue_claim_intent(1, resource_name="display"),
+    )
+    before_tip = store.fetch_state(worktree=worktree, remote=str(bare_remote)).tip
+    assert before_tip is not None
+    before = store._list_tree(worktree, before_tip, tip=before_tip, context="state")
+
+    result = store.commit_transition(
+        worktree=worktree,
+        remote=str(bare_remote),
+        subject="claim issue 2",
+        intent=_issue_claim_intent(2, claim_id="a2", operation_id="op-2"),
+    )
+
+    assert result.tip is not None
+    after = store._list_tree(worktree, result.tip, tip=result.tip, context="state")
+    assert after[store.RESOURCES_DIRECTORY] == before[store.RESOURCES_DIRECTORY]
+    assert after["resources/display.toml"] == before["resources/display.toml"]
+
+
+def test_parse_state_tree_fails_loud_on_malformed_archive_framing(
+    monkeypatch: pytest.MonkeyPatch, bare_remote: Path, worktree: Path
+) -> None:
+    """`git archive`'s exit status cannot signal a framing problem in bytes
+    it already returned successfully (issue #241) -- `tarfile` owns that
+    failure, which a real git repository cannot itself produce, so this
+    fabricates one at the `process` chokepoint.
+    """
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    real_run_captured = process.run_captured
+
+    def fake_run_captured(command: list[str], **kwargs: object) -> process.CapturedResult:
+        if command[0] == "git" and command[3] == "archive":
+            return process.CapturedResult(exit_status=0, stdout=b"not a tar stream", stderr=b"")
+        return real_run_captured(command, **kwargs)
+
+    monkeypatch.setattr(store.process, "run_captured", fake_run_captured)
+
+    with pytest.raises(protocol.MalformedStateTreeError, match="malformed archive"):
+        store.fetch_state(worktree=worktree, remote=str(bare_remote))
 
 
 # --- `apply`, the claim-key codec, and the claim/resource TOML codecs ------
