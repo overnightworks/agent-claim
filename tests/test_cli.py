@@ -7320,42 +7320,31 @@ def test_checkout_validation_names_the_base_repair(monkeypatch: pytest.MonkeyPat
     )
 
 
-def test_checkout_validation_names_the_isolated_worktree_recipe_for_a_trunk_branch(
+@pytest.mark.parametrize(
+    ("branch", "origin_head"),
+    [
+        pytest.param("main", "refs/remotes/origin/main", id="hardcoded-main"),
+        pytest.param("trunk", "refs/remotes/origin/trunk", id="repository-default-trunk"),
+    ],
+)
+def test_checkout_validation_names_the_isolated_worktree_recipe_for_the_default_branch(
     monkeypatch: pytest.MonkeyPatch,
+    branch: str,
+    origin_head: str,
 ) -> None:
-    """Claiming from a checkout of `main`/`master` names the exact `git
-    worktree add` recipe (#52), not just the rule it violates."""
+    """Claiming from a checkout of the repository's default branch names the
+    exact `git worktree add` recipe (#52), not just the rule it violates --
+    whether that default is the hardcoded `main` or one read from
+    `origin/HEAD` (issue #238: a repository whose default is `trunk` refuses
+    a claim from `trunk` the same way)."""
     values = {
         ("rev-parse", "HEAD"): BASE,
-        ("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"): "refs/remotes/origin/main",
-    }
-    monkeypatch.setattr(checkout, "_git_output", lambda arguments: values[tuple(arguments)])
-    candidate = request(branch="main")
-
-    with pytest.raises(ClaimError) as error:
-        issue_claim._validate_checkout(candidate)
-
-    assert str(error.value) == (
-        "build claims require an isolated non-main worktree branch; "
-        f"run {checkout.ISOLATED_WORKTREE_RECIPE}"
-    )
-
-
-def test_checkout_validation_refuses_a_repository_default_branch_named_trunk(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Default-branch detection reads `origin/HEAD` (issue #238), not the
-    hardcoded `{"main", "master"}` guess: a repository whose default branch
-    is `trunk` refuses a claim from `trunk` the same way `main` is refused
-    elsewhere."""
-    values = {
-        ("rev-parse", "HEAD"): BASE,
-        ("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"): "refs/remotes/origin/trunk",
+        ("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"): origin_head,
     }
     monkeypatch.setattr(checkout, "_git_output", lambda arguments: values[tuple(arguments)])
 
     with pytest.raises(ClaimError) as error:
-        issue_claim._validate_checkout(request(branch="trunk"))
+        issue_claim._validate_checkout(request(branch=branch))
 
     assert str(error.value) == (
         "build claims require an isolated non-main worktree branch; "
@@ -7658,6 +7647,31 @@ def _git_checkout(
     }
 
 
+_ORIGIN_HEAD_SYMBOLIC_REF = ("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
+
+
+def _fallback_git_output(
+    values: dict[tuple[str, ...], str], *, origin_head_empty: bool
+) -> Callable[[list[str]], str]:
+    """A `_git_output` fake for a clone whose `origin/HEAD` never got recorded
+    (issue #238, Grok review): measured locally, real
+    `git symbolic-ref --quiet refs/remotes/origin/HEAD` then exits non-zero
+    with empty stdout and stderr, which `_git_output` turns into
+    `ClaimError("unknown git failure")` -- the `origin_head_empty=True` branch
+    additionally covers the otherwise-untested case of git exiting 0 with an
+    empty ref name."""
+
+    def git(arguments: list[str]) -> str:
+        key = tuple(arguments)
+        if key == _ORIGIN_HEAD_SYMBOLIC_REF:
+            if origin_head_empty:
+                return ""
+            raise ClaimError("unknown git failure")
+        return values[key]
+
+    return git
+
+
 def _set_agent_identity_env(
     monkeypatch: pytest.MonkeyPatch, environ: dict[str, str] | None = None
 ) -> None:
@@ -7767,7 +7781,12 @@ def _parse_claim_command(*flags: str):
             "does not match checkout HEAD",
         ),
         ((), _git_checkout(branch="main"), "isolated non-main worktree branch"),
-        ((), _git_checkout(branch="master"), "isolated non-main worktree branch"),
+        # `master` is not this repository's default branch (`_git_checkout`'s
+        # `origin/HEAD` resolves to `main`), so it binds like any other
+        # non-default branch (issue #238) -- the fallback-denied case for an
+        # unresolvable `origin/HEAD` is pinned separately, in
+        # test_claim_default_branch_fallback_denies_only_main_and_master.
+        ((), _git_checkout(branch="master"), None),
         (
             (),
             _git_checkout(git_directory="/repo/.git", common_directory="/repo/.git"),
@@ -7798,6 +7817,37 @@ def test_claim_request_binds_omitted_base_and_branch_to_checkout(
     claimed = issue_claim._request(parsed)
     assert claimed.base == git_values[("rev-parse", "HEAD")]
     assert claimed.branch == git_values[("branch", "--show-current")]
+
+
+@pytest.mark.parametrize(
+    ("branch", "denied"),
+    [("main", True), ("master", True), ("trunk", False)],
+)
+@pytest.mark.parametrize("origin_head_empty", [False, True], ids=["raises", "empty"])
+def test_claim_default_branch_fallback_denies_only_main_and_master(
+    monkeypatch: pytest.MonkeyPatch,
+    origin_head_empty: bool,
+    branch: str,
+    denied: bool,
+) -> None:
+    """When `origin/HEAD` cannot be resolved, `claim`'s fallback (issue #238,
+    Grok review) still denies exactly the historical `{"main", "master"}`
+    guess and nothing else -- `trunk` is not treated as default without a
+    resolved `origin/HEAD`, so deleting `DEFAULT_BRANCH_FALLBACK` would fail
+    this test by letting `main`/`master` through instead. Proven with both
+    the fake's raising shape (git's real behaviour, measured locally) and an
+    empty resolved name, so both routes to "unresolved" are pinned."""
+    values = _git_checkout(branch=branch)
+    monkeypatch.setattr(
+        checkout, "_git_output", _fallback_git_output(values, origin_head_empty=origin_head_empty)
+    )
+
+    if not denied:
+        issue_claim._validate_checkout(request(branch=branch))
+        return
+
+    with pytest.raises(ClaimError, match="isolated non-main worktree branch"):
+        issue_claim._validate_checkout(request(branch=branch))
 
 
 def test_claim_request_refuses_a_base_that_is_not_a_full_commit_sha() -> None:
@@ -12127,6 +12177,55 @@ def test_protect_main_branch_denies_without_github(
         == 2
     )
     _assert_protect_decision(capsys, decision="deny", reason="not main")
+
+
+@pytest.mark.parametrize(
+    ("branch", "denied"),
+    [("main", True), ("master", True), ("trunk", False)],
+)
+@pytest.mark.parametrize("origin_head_empty", [False, True], ids=["raises", "empty"])
+def test_protect_default_branch_fallback_denies_only_main_and_master(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    origin_head_empty: bool,
+    branch: str,
+    denied: bool,
+) -> None:
+    """Same fallback pin as `claim`'s (issue #238, Grok review) at `protect`'s
+    own "not main" gate: when `origin/HEAD` cannot be resolved, `main` and
+    `master` are still denied by the historical two-name guess and `trunk` is
+    not, whether the unresolved symbolic ref raises (git's real shape,
+    measured locally) or resolves to an empty name."""
+    _isolate_protect_home(monkeypatch, tmp_path)
+    work = tmp_path / "work"
+    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    values = _protect_git_values(work, {("branch", "--show-current"): branch})
+    monkeypatch.setattr(
+        checkout, "_git_output", _fallback_git_output(values, origin_head_empty=origin_head_empty)
+    )
+
+    if denied:
+        _forbid_github_construction(monkeypatch)
+        assert (
+            _protect_main(
+                monkeypatch,
+                {"toolName": "write", "toolInput": {"path": "src/widget.py"}},
+            )
+            == 2
+        )
+        _assert_protect_decision(capsys, decision="deny", reason="not main")
+        return
+
+    _patch_protect_claim(monkeypatch, branch=branch)
+    assert (
+        _protect_main(
+            monkeypatch,
+            {"toolName": "write", "toolInput": {"path": "src/widget.py"}},
+        )
+        == 0
+    )
+    _assert_protect_decision(capsys, decision="allow")
 
 
 @pytest.mark.parametrize(
