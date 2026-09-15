@@ -1142,10 +1142,7 @@ def test_rulings_reads_expectation_progress_from_the_block_not_stale_prose(
     _write_block_pin(tmp_path)
 
     assert issue_claim.main(["--repo", "example/agent-claim", "rulings"]) == 0
-    assert (
-        capsys.readouterr().out
-        == "#400 1/1: Block-only expectations\n  1 open: Proposed\n"
-    )
+    assert capsys.readouterr().out == "#400 1/1: Block-only expectations\n  1 open: Proposed\n"
 
 
 def test_rulings_renders_text_json_and_empty_success(
@@ -2863,9 +2860,7 @@ def test_rule_writes_a_ruling_and_reports_remaining_open_lines(
     )
 
     assert exit_code == 0
-    assert (
-        capsys.readouterr().out == f"RULED #{RULE_ITEM} line 1 {ruling}; 1 line(s) still open\n"
-    )
+    assert capsys.readouterr().out == f"RULED #{RULE_ITEM} line 1 {ruling}; 1 line(s) still open\n"
     lines = board.expectation_lines(client.item_bodies[RULE_ITEM])
     assert lines[0] == board.ExpectationLine(1, "Ship it?", ruling, RULE_TODAY)
     assert lines[1] == board.ExpectationLine(2, "Ship it too?", None, None)

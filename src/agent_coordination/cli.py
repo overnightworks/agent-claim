@@ -436,9 +436,7 @@ def _add_cut_parser(commands: argparse._SubParsersAction) -> None:
 
 
 def _add_ask_parser(commands: argparse._SubParsersAction) -> None:
-    ask = commands.add_parser(
-        "ask", help="append one proposed expectation line to an item's block"
-    )
+    ask = commands.add_parser("ask", help="append one proposed expectation line to an item's block")
     ask.add_argument("item", type=int, help="the item to append the expectation line to")
     ask.add_argument("--text", required=True, help="the expectation line's prose")
     ask.add_argument(
@@ -466,9 +464,7 @@ def _add_rule_parser(commands: argparse._SubParsersAction) -> None:
     outcome.add_argument("--yes", action="store_const", dest="ruling", const="yes")
     outcome.add_argument("--no", action="store_const", dest="ruling", const="no")
     outcome.add_argument("--later", action="store_const", dest="ruling", const="later")
-    rule.add_argument(
-        "--note", help="appended to the line's own text as ' Anmerkung: TEXT'"
-    )
+    rule.add_argument("--note", help="appended to the line's own text as ' Anmerkung: TEXT'")
     rule.add_argument("--json", action="store_true", help=JSON_HELP)
 
 
@@ -1038,9 +1034,7 @@ class _RulingsRow:
     lines: tuple[board.ExpectationLine, ...]
 
 
-def _rulings_rows(
-    projected: board.Board, bodies: Mapping[int, str]
-) -> tuple[_RulingsRow, ...]:
+def _rulings_rows(projected: board.Board, bodies: Mapping[int, str]) -> tuple[_RulingsRow, ...]:
     """Every open board item that still carries an open expectation line,
     board-ranked then by fewer open lines then issue number (unchanged from
     before #240), each paired with its lines read fresh from `bodies` --
