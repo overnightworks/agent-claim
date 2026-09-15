@@ -23,7 +23,7 @@ import os
 import tarfile
 import tempfile
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -217,27 +217,59 @@ def _check_lineage(worktree: Path, tip: ObjectId) -> None:
         )
 
 
-def committer_date(*, worktree: Path, tip: ObjectId, commit: ObjectId) -> datetime:
-    """The committer date of `commit`, e.g. a live claim's `opened_commit`.
+# Field separator for the batched `git log` read below: %x09 is git's own
+# escape for a literal tab, unambiguous inside a `--format` string.
+_LOG_FORMAT = "%H%x09%cI"
 
-    Refuses with `StateLineageError` when `commit` is not an ancestor of the
-    already-fetched `tip` (§1 "Status age..."): a claim's age display reads
+
+def _first_parent_commit_dates(worktree: Path, tip: ObjectId) -> dict[ObjectId, datetime]:
+    """Every commit reachable from `tip` by first-parent descent, mapped to
+    its committer date, in one `git log` call.
+
+    `refs/aco/state`'s own history is always linear by construction --
+    `commit_transition` never writes a merge, every retry parents its new
+    commit onto a freshly observed tip (issue #241, "never a merge") -- so a
+    first-parent walk from `tip` reaches every commit the ref has ever held.
+    """
+    result = _run_git(worktree, ["log", "--first-parent", f"--format={_LOG_FORMAT}", str(tip)])
+    if result.exit_status != 0:
+        raise ClaimError(f"cannot read the commit history of {tip}")
+    dates: dict[ObjectId, datetime] = {}
+    for line in result.stdout.decode().splitlines():
+        commit_hex, _, raw_date = line.partition("\t")
+        try:
+            parsed = datetime.fromisoformat(raw_date)
+        except ValueError as error:
+            raise ClaimError(f"git returned a malformed committer date for {commit_hex}") from error
+        dates[ObjectId(commit_hex)] = parsed.astimezone(UTC)
+    return dates
+
+
+def claim_ages(
+    *, worktree: Path, tip: ObjectId, claims: Iterable[ActiveClaim]
+) -> dict[str, datetime]:
+    """Each `claim`'s age -- its `opened_commit`'s committer date -- from one
+    walk of `tip`'s history (issue #242, replacing a `merge-base` plus `log`
+    pair per claim).
+
+    Refuses with `StateLineageError` for a claim whose `opened_commit` the
+    walk never reaches (§1 "Status age..."): a claim's age display reads
     real history, it never guesses across a lineage break.
     """
-    ancestry = _run_git(worktree, ["merge-base", "--is-ancestor", str(commit), str(tip)])
-    if ancestry.exit_status != 0:
-        raise StateLineageError(
-            f"{commit} is not an ancestor of {tip}; the ref may have been rewritten"
-        )
-    result = _run_git(worktree, ["log", "-1", "--format=%cI", str(commit)])
-    if result.exit_status != 0:
-        raise ClaimError(f"cannot read the committer date for {commit}")
-    raw = result.stdout.decode().strip()
-    try:
-        parsed = datetime.fromisoformat(raw)
-    except ValueError as error:
-        raise ClaimError(f"git returned a malformed committer date for {commit}") from error
-    return parsed.astimezone(UTC)
+    claim_list = tuple(claims)
+    if not claim_list:
+        return {}
+    dates = _first_parent_commit_dates(worktree, tip)
+    ages: dict[str, datetime] = {}
+    for claim in claim_list:
+        try:
+            ages[claim.claim_id] = dates[claim.opened_commit]
+        except KeyError:
+            raise StateLineageError(
+                f"{claim.opened_commit} is not an ancestor of {tip}; the ref may "
+                "have been rewritten"
+            ) from None
+    return ages
 
 
 def _ls_remote_state(worktree: Path, remote: str) -> ObjectId | None:

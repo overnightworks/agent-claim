@@ -893,17 +893,51 @@ def _issue_claim_intent(
     )
 
 
-def test_committer_date_reads_the_commit_that_introduced_a_claim(
-    bare_remote: Path, worktree: Path
+def _committed_claim(bare_remote: Path, worktree: Path, *, issue: int) -> protocol.ActiveClaim:
+    """Land one real claim transition and hand back its resulting `ActiveClaim`
+    -- its `opened_commit` is the real state-ref commit the transition wrote,
+    not a placeholder, so a `claim_ages` walk of that history finds it."""
+    state = store.commit_transition(
+        worktree=worktree,
+        remote=str(bare_remote),
+        subject=f"claim issue {issue}",
+        intent=_issue_claim_intent(issue, claim_id=f"c{issue}", operation_id=f"op-{issue}"),
+    )
+    return next(
+        claim for claim in state.claims.values() if claim.identity == protocol.IssueIdentity(issue)
+    )
+
+
+def test_claim_ages_reads_the_committer_date_of_each_claim_from_one_log_walk(
+    bare_remote: Path, worktree: Path, git_call_spy: Counter[str]
+) -> None:
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    first = _committed_claim(bare_remote, worktree, issue=1)
+    second = _committed_claim(bare_remote, worktree, issue=2)
+    state = store.fetch_state(worktree=worktree, remote=str(bare_remote))
+    assert state.tip is not None
+    git_call_spy.clear()
+
+    ages = store.claim_ages(worktree=worktree, tip=state.tip, claims=state.claims.values())
+
+    assert set(ages) == {first.claim_id, second.claim_id}
+    assert all(age.tzinfo is not None for age in ages.values())
+    assert git_call_spy["log"] == 1
+
+
+def test_claim_ages_returns_empty_without_a_git_call_for_no_live_claims(
+    bare_remote: Path, worktree: Path, git_call_spy: Counter[str]
 ) -> None:
     tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    git_call_spy.clear()
 
-    date = store.committer_date(worktree=worktree, tip=tip, commit=tip)
+    ages = store.claim_ages(worktree=worktree, tip=tip, claims=())
 
-    assert date.tzinfo is not None
+    assert ages == {}
+    assert git_call_spy["log"] == 0
 
 
-def test_committer_date_refuses_a_commit_that_is_not_an_ancestor_of_the_tip(
+def test_claim_ages_refuses_a_claim_whose_opened_commit_is_not_an_ancestor_of_the_tip(
     bare_remote: Path, worktree: Path
 ) -> None:
     tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
@@ -911,24 +945,27 @@ def test_committer_date_refuses_a_commit_that_is_not_an_ancestor_of_the_tip(
     orphan_commit = store._commit_tree(
         worktree, tree_oid=orphan_tree, parent=None, message="unrelated root commit\n"
     )
+    stray = protocol.ActiveClaim(
+        identity=protocol.IssueIdentity(1),
+        claim_id=protocol.ClaimId("c1"),
+        agent="Ada",
+        role="builder",
+        base=_UNRESOLVABLE_OBJECT_ID,
+        branch="claude/issue-1-cut",
+        scope=("src/issue-1.py",),
+        opened_commit=orphan_commit,
+    )
 
     with pytest.raises(protocol.StateLineageError, match="is not an ancestor"):
-        store.committer_date(worktree=worktree, tip=tip, commit=orphan_commit)
-
-
-def test_committer_date_fails_loud_when_the_commit_is_unresolvable(worktree: Path) -> None:
-    with pytest.raises(protocol.StateLineageError):
-        store.committer_date(
-            worktree=worktree, tip=_PLACEHOLDER_TIP, commit=_UNRESOLVABLE_OBJECT_ID
-        )
+        store.claim_ages(worktree=worktree, tip=tip, claims=(stray,))
 
 
 def _fake_git_log_result(
     monkeypatch: pytest.MonkeyPatch, *, exit_status: int, stdout: bytes
 ) -> None:
     """Let every real git subprocess run except `log`, which returns a fixed
-    result -- isolates `committer_date`'s date-read/parse steps from its
-    ancestry check, which a real `merge-base` call still proves."""
+    result -- isolates `claim_ages`'s date-read/parse step from the rest of
+    its plumbing."""
     real_run_captured = process.run_captured
 
     def fake_run_captured(arguments: list[str]) -> process.CapturedResult:
@@ -939,24 +976,32 @@ def _fake_git_log_result(
     monkeypatch.setattr(store.process, "run_captured", fake_run_captured)
 
 
-def test_committer_date_fails_loud_when_the_log_read_fails(
+def test_claim_ages_fails_loud_when_the_log_read_fails(
     monkeypatch: pytest.MonkeyPatch, bare_remote: Path, worktree: Path
 ) -> None:
-    tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    claim = _committed_claim(bare_remote, worktree, issue=1)
+    state = store.fetch_state(worktree=worktree, remote=str(bare_remote))
+    assert state.tip is not None
     _fake_git_log_result(monkeypatch, exit_status=1, stdout=b"")
 
-    with pytest.raises(protocol.ClaimError, match="cannot read the committer date"):
-        store.committer_date(worktree=worktree, tip=tip, commit=tip)
+    with pytest.raises(protocol.ClaimError, match="cannot read the commit history"):
+        store.claim_ages(worktree=worktree, tip=state.tip, claims=(claim,))
 
 
-def test_committer_date_fails_loud_on_a_malformed_date(
+def test_claim_ages_fails_loud_on_a_malformed_date(
     monkeypatch: pytest.MonkeyPatch, bare_remote: Path, worktree: Path
 ) -> None:
-    tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
-    _fake_git_log_result(monkeypatch, exit_status=0, stdout=b"not-a-date\n")
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    claim = _committed_claim(bare_remote, worktree, issue=1)
+    state = store.fetch_state(worktree=worktree, remote=str(bare_remote))
+    assert state.tip is not None
+    _fake_git_log_result(
+        monkeypatch, exit_status=0, stdout=f"{claim.opened_commit}\tnot-a-date\n".encode()
+    )
 
     with pytest.raises(protocol.ClaimError, match="malformed committer date"):
-        store.committer_date(worktree=worktree, tip=tip, commit=tip)
+        store.claim_ages(worktree=worktree, tip=state.tip, claims=(claim,))
 
 
 def test_commit_transition_and_fetch_state_round_trip_a_claim_with_a_resource(
@@ -1178,13 +1223,16 @@ def test_commit_transition_ten_thread_contention_lands_every_distinct_key(
 # --- how many claims the state tree holds (issue #241) ---------------------
 
 
-def _seeded_claims_state(count: int) -> protocol.ClaimState:
+def _seeded_claims_state(count: int, *, opened_commit: protocol.ObjectId) -> protocol.ClaimState:
     """`count` distinct live claims and their consumed ids, built by
     `protocol.apply` alone -- pure and git-free, so seeding a state this
     large for the tests below costs no subprocess beyond the raw tree
-    `_push_seeded_state` builds from it.
+    `_push_seeded_state` builds from it. Every seeded claim's `opened_commit`
+    is `opened_commit` (`apply` always stamps it from the state's own tip),
+    so a caller that passes the real bootstrap commit gets claims a
+    `claim_ages` walk can resolve.
     """
-    state = protocol.ClaimState(tip=_PLACEHOLDER_TIP)
+    state = protocol.ClaimState(tip=opened_commit)
     for n in range(count):
         state = protocol.apply(
             state,
@@ -1210,7 +1258,8 @@ def _push_seeded_state(bare_remote: Path, worktree: Path, count: int) -> protoco
     itself only ever writes `schema.toml` alone (issue #241)."""
     store.bootstrap(worktree=worktree, remote=str(bare_remote))
     parent = store.fetch_state(worktree=worktree, remote=str(bare_remote)).tip
-    seeded = _seeded_claims_state(count)
+    assert parent is not None
+    seeded = _seeded_claims_state(count, opened_commit=parent)
     claims_tree = _raw_tree(
         worktree,
         [
@@ -1274,6 +1323,41 @@ def test_fetch_state_git_call_count_is_independent_of_claim_count(
         "rev-parse": 4,
         "ls-tree": 1,
         "archive": 1,
+    }
+
+
+@pytest.mark.parametrize("claim_count", [10, 300])
+def test_status_git_call_count_is_independent_of_claim_count(
+    bare_remote: Path,
+    worktree: Path,
+    tmp_path: Path,
+    git_call_spy: Counter[str],
+    claim_count: int,
+) -> None:
+    """`status`'s two store reads -- `fetch_state` then `claim_ages` -- make a
+    fixed number of git calls regardless of how many live claims the state
+    tree holds (issue #242): one `ls-tree`/`archive` pair for the claims
+    (issue #241) plus one batched `log` walk for their ages, never one
+    `merge-base`+`log` per claim.
+    """
+    _push_seeded_state(bare_remote, worktree, claim_count)
+    reader = tmp_path / "reader"
+    reader.mkdir()
+    _git("init", "-b", "main", cwd=reader)
+    git_call_spy.clear()
+
+    state = store.fetch_state(worktree=reader, remote=str(bare_remote))
+    assert state.tip is not None
+    ages = store.claim_ages(worktree=reader, tip=state.tip, claims=state.claims.values())
+
+    assert len(ages) == claim_count
+    assert dict(git_call_spy) == {
+        "ls-remote": 1,
+        "fetch": 1,
+        "rev-parse": 4,
+        "ls-tree": 1,
+        "archive": 1,
+        "log": 1,
     }
 
 

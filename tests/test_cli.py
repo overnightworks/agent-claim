@@ -11,7 +11,7 @@ import subprocess
 import sys
 import threading
 import tomllib
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -8962,13 +8962,14 @@ class _FakeStore:
         self.state = protocol.apply(self.state, intent)
         return self.state
 
-    def committer_date(
-        self, *, worktree: Path, tip: protocol.ObjectId, commit: protocol.ObjectId
-    ) -> datetime:
-        matching = next(
-            claim for claim in self.state.claims.values() if claim.opened_commit == commit
-        )
-        return self._ages.get(matching.claim_id, _STATUS_NOW)
+    def claim_ages(
+        self,
+        *,
+        worktree: Path,
+        tip: protocol.ObjectId,
+        claims: Iterable[protocol.ActiveClaim],
+    ) -> dict[str, datetime]:
+        return {claim.claim_id: self._ages.get(claim.claim_id, _STATUS_NOW) for claim in claims}
 
 
 def _patch_store_write(
@@ -8988,7 +8989,7 @@ def _patch_store_write(
     )
     monkeypatch.setattr(store, "fetch_state", fake.fetch_state)
     monkeypatch.setattr(store, "commit_transition", fake.commit_transition)
-    monkeypatch.setattr(store, "committer_date", fake.committer_date)
+    monkeypatch.setattr(store, "claim_ages", fake.claim_ages)
     monkeypatch.setattr(checkout, "remote_url", lambda remote: f"git@github.com:{REPOSITORY}.git")
     return fake
 
@@ -9008,11 +9009,11 @@ def _patch_status_store(
     ages: Mapping[str, datetime] | None = None,
 ) -> None:
     """Fake `status`'s two store reads (issue #176): the fetched claim state,
-    and each claim's `opened_commit` committer date (every claim reads as
-    opened at `_STATUS_NOW` -- 0h 0m old -- unless `ages` names it by claim
-    id). Every `status`/`status --path` test builds its live claims via
-    `_active_claim` and wires them in here instead of posting through a
-    ledger-comment `FakeForge`.
+    and each claim's age (every claim reads as opened at `_STATUS_NOW` -- 0h
+    0m old -- unless `ages` names it by claim id). Every `status`/
+    `status --path` test builds its live claims via `_active_claim` and
+    wires them in here instead of posting through a ledger-comment
+    `FakeForge`.
     """
     monkeypatch.setattr(checkout, "remote_url", lambda remote: f"git@github.com:{REPOSITORY}.git")
     keyed = {protocol.claim_key(claim.identity, claim.branch): claim for claim in claims}
@@ -9022,13 +9023,15 @@ def _patch_status_store(
     if ages is not None:
         resolved_ages.update(ages)
 
-    def fake_committer_date(
-        *, worktree: Path, tip: protocol.ObjectId, commit: protocol.ObjectId
-    ) -> datetime:
-        matching = next(claim for claim in claims if claim.opened_commit == commit)
-        return resolved_ages[matching.claim_id]
+    def fake_claim_ages(
+        *,
+        worktree: Path,
+        tip: protocol.ObjectId,
+        claims: Iterable[protocol.ActiveClaim],
+    ) -> dict[str, datetime]:
+        return {claim.claim_id: resolved_ages[claim.claim_id] for claim in claims}
 
-    monkeypatch.setattr(store, "committer_date", fake_committer_date)
+    monkeypatch.setattr(store, "claim_ages", fake_claim_ages)
     monkeypatch.setattr(issue_claim, "datetime", FixedDateTime)
 
 
@@ -10507,6 +10510,32 @@ def test_cli_status_path_json_prints_holder_or_unclaimed(
         "state": "UNCLAIMED",
         "claims": [],
     }
+
+
+def test_cli_status_path_answers_even_when_a_claim_age_read_would_raise(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`--path` prints no age, so it never reads claim ancestry (README
+    "status --path"): a lineage break in some claim's `opened_commit` must
+    not stop this answer.
+    """
+    claimed_claim = _active_claim("Ada", claim_id="mine", issue=72, scope=("docs/PRODUCT.md",))
+    _patch_status_store(monkeypatch, claimed_claim)
+
+    def raising_claim_ages(
+        *, worktree: Path, tip: protocol.ObjectId, claims: object
+    ) -> dict[str, datetime]:
+        raise protocol.StateLineageError("must not be called by status --path")
+
+    monkeypatch.setattr(store, "claim_ages", raising_claim_ages)
+
+    status = issue_claim.main(
+        ["--repo", "example/agent-claim", "status", "--path", "docs/PRODUCT.md"]
+    )
+
+    assert status == 0
+    assert "CLAIMED docs/PRODUCT.md issue #72: Ada (builder) claim=mine" in capsys.readouterr().out
 
 
 def test_cli_rescope_refuses_adding_a_directory_without_whole(
