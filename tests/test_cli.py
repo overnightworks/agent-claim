@@ -8908,7 +8908,7 @@ class _FakeStore:
     resource conflicts, coordinator override, and the codec all behave
     exactly as the real store would, without a git subprocess. This is the
     "store fake" the plan's own acceptance criteria name for claim/release/
-    rescope tests. `committer_date` answers every live claim's age as
+    rescope tests. `claim_ages` answers every live claim's age as
     `_STATUS_NOW` (matching the file's autouse `FixedDateTime` "now") unless
     `ages` names a claim id's age explicitly -- board/rulings/next read ages
     through this same fake rather than a separate one.
