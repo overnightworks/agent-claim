@@ -2264,7 +2264,6 @@ def _cmd_status(parsed: argparse.Namespace) -> int:
 
 
 def _observed_board(
-    parsed: argparse.Namespace,
     session: _ReadSession,
     *,
     issues: tuple[board.Issue, ...] | None = None,
@@ -2282,13 +2281,13 @@ def _observed_board(
 
 
 def _cmd_board(parsed: argparse.Namespace, session: _ReadSession) -> None:
-    projected = _observed_board(parsed, session)
+    projected = _observed_board(session)
     print(board.board_json(projected) if parsed.json else board.render(projected))
 
 
 def _cmd_rulings(parsed: argparse.Namespace, session: _ReadSession) -> None:
     issues = session.forge().list_open_board_issues()
-    projected = _observed_board(parsed, session, issues=issues)
+    projected = _observed_board(session, issues=issues)
     bodies = {issue.number: issue.body for issue in issues}
     _rulings(projected, bodies, as_json=parsed.json)
 
@@ -2302,7 +2301,7 @@ def _next_action_container_number(action: board.NextAction | None) -> int | None
 
 
 def _cmd_next(parsed: argparse.Namespace, session: _ReadSession) -> int:
-    projected = _observed_board(parsed, session)
+    projected = _observed_board(session)
     action = board.next_action(projected)
     chosen_container = _next_action_container_number(action)
     skipped = tuple(item for item in _unworkable(projected) if item.number != chosen_container)
