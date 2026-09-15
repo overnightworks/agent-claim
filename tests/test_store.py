@@ -1416,10 +1416,15 @@ def test_parse_state_tree_fails_loud_on_malformed_archive_framing(
     store.bootstrap(worktree=worktree, remote=str(bare_remote))
     real_run_captured = process.run_captured
 
-    def fake_run_captured(command: list[str], **kwargs: object) -> process.CapturedResult:
+    def fake_run_captured(
+        command: list[str],
+        *,
+        env: dict[str, str] | None = None,
+        timeout: float = process.DEFAULT_TIMEOUT_SECONDS,
+    ) -> process.CapturedResult:
         if command[0] == "git" and command[3] == "archive":
             return process.CapturedResult(exit_status=0, stdout=b"not a tar stream", stderr=b"")
-        return real_run_captured(command, **kwargs)
+        return real_run_captured(command, env=env, timeout=timeout)
 
     monkeypatch.setattr(store.process, "run_captured", fake_run_captured)
 
