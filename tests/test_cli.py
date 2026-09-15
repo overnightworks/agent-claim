@@ -7223,6 +7223,7 @@ def test_checkout_validation_binds_clean_head_and_branch(
 ) -> None:
     values = {
         ("rev-parse", "HEAD"): BASE,
+        ("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"): "refs/remotes/origin/main",
         ("branch", "--show-current"): "codex/issue-71-claims",
         ("rev-parse", "--git-dir"): "/repo/.git/worktrees/issue-71",
         ("rev-parse", "--git-common-dir"): "/repo/.git",
@@ -7251,6 +7252,7 @@ def test_checkout_validation_binds_clean_head_and_branch(
             request(),
             {
                 ("rev-parse", "HEAD"): BASE,
+                ("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"): "refs/remotes/origin/main",
                 ("branch", "--show-current"): "other",
                 ("rev-parse", "--git-dir"): "/repo/.git/worktrees/issue-71",
                 ("rev-parse", "--git-common-dir"): "/repo/.git",
@@ -7262,6 +7264,7 @@ def test_checkout_validation_binds_clean_head_and_branch(
             request(),
             {
                 ("rev-parse", "HEAD"): BASE,
+                ("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"): "refs/remotes/origin/main",
                 ("branch", "--show-current"): "codex/issue-71-claims",
                 ("rev-parse", "--git-dir"): "/repo/.git",
                 ("rev-parse", "--git-common-dir"): "/repo/.git",
@@ -7273,6 +7276,7 @@ def test_checkout_validation_binds_clean_head_and_branch(
             request(),
             {
                 ("rev-parse", "HEAD"): BASE,
+                ("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"): "refs/remotes/origin/main",
                 ("branch", "--show-current"): "codex/issue-71-claims",
                 ("rev-parse", "--git-dir"): "/repo/.git/worktrees/issue-71",
                 ("rev-parse", "--git-common-dir"): "/repo/.git",
@@ -7321,12 +7325,37 @@ def test_checkout_validation_names_the_isolated_worktree_recipe_for_a_trunk_bran
 ) -> None:
     """Claiming from a checkout of `main`/`master` names the exact `git
     worktree add` recipe (#52), not just the rule it violates."""
-    values = {("rev-parse", "HEAD"): BASE}
+    values = {
+        ("rev-parse", "HEAD"): BASE,
+        ("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"): "refs/remotes/origin/main",
+    }
     monkeypatch.setattr(checkout, "_git_output", lambda arguments: values[tuple(arguments)])
     candidate = request(branch="main")
 
     with pytest.raises(ClaimError) as error:
         issue_claim._validate_checkout(candidate)
+
+    assert str(error.value) == (
+        "build claims require an isolated non-main worktree branch; "
+        f"run {checkout.ISOLATED_WORKTREE_RECIPE}"
+    )
+
+
+def test_checkout_validation_refuses_a_repository_default_branch_named_trunk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default-branch detection reads `origin/HEAD` (issue #238), not the
+    hardcoded `{"main", "master"}` guess: a repository whose default branch
+    is `trunk` refuses a claim from `trunk` the same way `main` is refused
+    elsewhere."""
+    values = {
+        ("rev-parse", "HEAD"): BASE,
+        ("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"): "refs/remotes/origin/trunk",
+    }
+    monkeypatch.setattr(checkout, "_git_output", lambda arguments: values[tuple(arguments)])
+
+    with pytest.raises(ClaimError) as error:
+        issue_claim._validate_checkout(request(branch="trunk"))
 
     assert str(error.value) == (
         "build claims require an isolated non-main worktree branch; "
@@ -7341,6 +7370,7 @@ def test_checkout_validation_names_the_isolated_worktree_recipe_for_a_shared_che
     worktree) names the same recipe as the trunk-branch refusal above."""
     values = {
         ("rev-parse", "HEAD"): BASE,
+        ("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"): "refs/remotes/origin/main",
         ("branch", "--show-current"): "codex/issue-71-claims",
         ("rev-parse", "--git-dir"): "/repo/.git",
         ("rev-parse", "--git-common-dir"): "/repo/.git",
@@ -7358,12 +7388,17 @@ def test_checkout_validation_names_the_isolated_worktree_recipe_for_a_shared_che
     )
 
 
-def test_checkout_validation_return_to_claim_names_no_branch_from_the_trunk() -> None:
+def test_checkout_validation_return_to_claim_names_no_branch_from_the_trunk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """`rescope` shares this check with `claim` (issue #211), but its honest
     repair differs: its claim's worktree already exists, so recommending the
     `git worktree add` recipe builds a second, foreign one. From the trunk
     branch no other branch is known here to name, so `RETURN_TO_CLAIM` points
     back at the claim's own worktree without inventing one."""
+    values = {("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"): "refs/remotes/origin/main"}
+    monkeypatch.setattr(checkout, "_git_output", lambda arguments: values[tuple(arguments)])
+
     with pytest.raises(ClaimError) as error:
         checkout._validate_worktree_branch("main", repair=checkout.WorktreeRepair.RETURN_TO_CLAIM)
 
@@ -7381,6 +7416,7 @@ def test_checkout_validation_return_to_claim_names_the_known_branch(
     caller resolved its identity from -- so `RETURN_TO_CLAIM` names it
     instead of leaving the sentence branch-less."""
     values = {
+        ("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"): "refs/remotes/origin/main",
         ("branch", "--show-current"): "codex/issue-211-worktree-repair-sentence",
         ("rev-parse", "--git-dir"): "/repo/.git",
         ("rev-parse", "--git-common-dir"): "/repo/.git",
@@ -7497,6 +7533,7 @@ def test_checkout_validation_names_the_first_three_dirty_paths_and_the_rest_as_a
     )
     values = {
         ("rev-parse", "HEAD"): BASE,
+        ("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"): "refs/remotes/origin/main",
         ("branch", "--show-current"): "codex/issue-71-claims",
         ("rev-parse", "--git-dir"): "/repo/.git/worktrees/issue-71",
         ("rev-parse", "--git-common-dir"): "/repo/.git",
@@ -7521,6 +7558,7 @@ def test_checkout_validation_names_every_dirty_path_when_three_or_fewer(
     three named."""
     values = {
         ("rev-parse", "HEAD"): BASE,
+        ("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"): "refs/remotes/origin/main",
         ("branch", "--show-current"): "codex/issue-71-claims",
         ("rev-parse", "--git-dir"): "/repo/.git/worktrees/issue-71",
         ("rev-parse", "--git-common-dir"): "/repo/.git",
@@ -11640,6 +11678,9 @@ def _protect_git_values(
         # The canonical-remote comparison (issue #176, Erwartung 6) reads this
         # to confirm the fake forge target (REPOSITORY) matches it.
         ("config", "--get", "remote.origin.url"): f"git@github.com:{REPOSITORY}.git",
+        # `protect`'s "not main" check reads the default branch through the
+        # same `origin/HEAD` owner `claim` uses (issue #238).
+        ("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"): "refs/remotes/origin/main",
     }
     if overrides:
         values.update(overrides)
@@ -11808,7 +11849,7 @@ def test_protect_allowed_write_resolves_identity_then_git_then_store(
         == 0
     )
     _assert_protect_decision(capsys, decision="allow")
-    assert calls == ["identity", "git", "git", "git", "git", "store"]
+    assert calls == ["identity", "git", "git", "git", "git", "git", "store"]
 
 
 @pytest.mark.parametrize(
@@ -11816,11 +11857,11 @@ def test_protect_allowed_write_resolves_identity_then_git_then_store(
     [
         {"toolName": "Bash", "toolInput": {"path": "src/cli.py", "command": "rm -rf /"}},
         {"tool_name": "run_terminal_command", "tool_input": {"command": "git status"}},
+        {"toolName": "Read", "toolInput": {"path": "src/secret.py"}},
         {"toolName": "read_file", "toolInput": {"path": "src/secret.py"}},
         {"tool_name": "grep", "tool_input": {"pattern": "secret"}},
         {"toolName": "list_dir", "toolInput": {"path": "src"}},
         {"tool_name": "spawn_subagent", "tool_input": {"prompt": "edit src"}},
-        {"toolName": "unknown"},
     ],
 )
 def test_protect_non_mutating_tools_allow_without_identity_git_or_github(
@@ -12047,17 +12088,35 @@ def test_protect_missing_identity_denies_without_github(
     _assert_missing_identity_message(payload["reason"])
 
 
-@pytest.mark.parametrize("branch", ["main", "master"])
+@pytest.mark.parametrize(
+    ("branch", "origin_head"),
+    [
+        ("main", "refs/remotes/origin/main"),
+        ("master", "refs/remotes/origin/master"),
+        ("trunk", "refs/remotes/origin/trunk"),
+    ],
+)
 def test_protect_main_branch_denies_without_github(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     branch: str,
+    origin_head: str,
 ) -> None:
+    """`protect` reads the repository's default branch the same way `claim`
+    does (issue #238): a repository whose `origin/HEAD` names `trunk` denies
+    a write from `trunk`, not just from the hardcoded `main`/`master`."""
     _isolate_protect_home(monkeypatch, tmp_path)
     work = tmp_path / "work"
     _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
-    _patch_protect_git(monkeypatch, work, {("branch", "--show-current"): branch})
+    _patch_protect_git(
+        monkeypatch,
+        work,
+        {
+            ("branch", "--show-current"): branch,
+            ("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"): origin_head,
+        },
+    )
     _forbid_github_construction(monkeypatch)
 
     assert (
@@ -12068,6 +12127,54 @@ def test_protect_main_branch_denies_without_github(
         == 2
     )
     _assert_protect_decision(capsys, decision="deny", reason="not main")
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"toolName": "apply_patch", "toolInput": {"path": "src/widget.py"}},
+        {"toolName": "NotebookEdit", "toolInput": {"path": "notebook.ipynb"}},
+    ],
+)
+def test_protect_extended_mutating_tools_deny_on_main_without_a_claim(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    payload: dict[str, object],
+) -> None:
+    """`apply_patch` (Codex) and `NotebookEdit` (Claude Code) joined the
+    mutating table (issue #238): both are gated exactly like `Write`, denied
+    from `main` before a claim is even looked up."""
+    _isolate_protect_home(monkeypatch, tmp_path)
+    work = tmp_path / "work"
+    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    _patch_protect_git(monkeypatch, work, {("branch", "--show-current"): "main"})
+    _forbid_github_construction(monkeypatch)
+
+    assert _protect_main(monkeypatch, payload) == 2
+    _assert_protect_decision(capsys, decision="deny", reason="not main")
+
+
+def test_protect_unknown_tool_name_denies_with_a_repair_sentence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A tool name in neither the read nor the mutating table fails closed
+    (issue #238) instead of the old default-allow, and the refusal names the
+    table to extend rather than a bare 'unknown tool'."""
+    _isolate_protect_home(monkeypatch, tmp_path)
+    _set_agent_identity_env(monkeypatch)
+    _forbid_protect_git_github_and_identity(monkeypatch)
+
+    assert _protect_main(monkeypatch, {"toolName": "invented_tool"}) == 2
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    payload = json.loads(captured.out)
+    assert payload["decision"] == "deny"
+    assert "invented_tool" in payload["reason"]
+    assert "HOOK_TOOL_EFFECTS" in payload["reason"]
+    assert "238" in payload["reason"]
 
 
 def test_protect_primary_checkout_denies_worktree_without_github(

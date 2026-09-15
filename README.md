@@ -638,15 +638,16 @@ override or not, so a foreign stuck claim needs the id).
 ## PreToolUse write gate
 
 Copy this hook once into the file the provider actually loads. Skip when
-`Write|Edit|MultiEdit|write|search_replace` is already present. Never overwrite
-an existing hook file. The CLI does not write `~/.grok`.
+`Write|Edit|MultiEdit|write|search_replace|NotebookEdit|apply_patch|create_file|str_replace_editor`
+is already present. Never overwrite an existing hook file. The CLI does not
+write `~/.grok`.
 
 ```json
 {
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Write|Edit|MultiEdit|write|search_replace",
+        "matcher": "Write|Edit|MultiEdit|write|search_replace|NotebookEdit|apply_patch|create_file|str_replace_editor",
         "hooks": [
           {
             "type": "command",
@@ -659,6 +660,12 @@ an existing hook file. The CLI does not write `~/.grok`.
   }
 }
 ```
+
+`protect` fails closed on the tool name (issue #238): a name it does not
+recognize as read-only or mutating is denied outright, naming the table to
+extend, rather than allowed by default. `Bash`/`shell` are the one named
+exception -- the hook payload carries no file path for a shell command, so
+`protect` cannot gate what it cannot see, and both stay allowed.
 
 ## Refusals and `--json`
 
