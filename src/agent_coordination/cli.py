@@ -1039,13 +1039,12 @@ def _rulings_rows(projected: board.Board, bodies: Mapping[int, str]) -> tuple[_R
     board-ranked then by fewer open lines then issue number (unchanged from
     before #240), each paired with its lines read fresh from `bodies` --
     `projected.items` itself carries only the open/total counters."""
-    candidates = tuple(
-        (item, item.expectation_progress)
-        for item in projected.items
-        if item.expectation_progress.open > 0
-    )
     ranked = sorted(
-        candidates,
+        (
+            (item, item.expectation_progress)
+            for item in projected.items
+            if item.expectation_progress.open > 0
+        ),
         key=lambda entry: (*board.board_rank(entry[0])[:2], entry[1].open, entry[0].number),
     )
     return tuple(

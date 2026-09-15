@@ -96,8 +96,10 @@ def test_rule_expectation_refuses_an_already_ruled_line() -> None:
         'ruling = "yes"\nruled_on = 2026-09-01\n'
     )
 
+    ruled_at = date(2026, 9, 15)
+
     with pytest.raises(protocol.ClaimError, match="line 1 is already ruled"):
-        board.rule_expectation(body, 1, "no", date(2026, 9, 15))
+        board.rule_expectation(body, 1, "no", ruled_at)
 
 
 @pytest.mark.parametrize("index", [0, 2])
@@ -106,8 +108,10 @@ def test_rule_expectation_refuses_an_out_of_range_line(index: int) -> None:
         f'{MINIMAL_BLOCK_TOML}[[expectation]]\ntext = "Ship it?"\ndefault = "later"\n'
     )
 
+    ruled_at = date(2026, 9, 15)
+
     with pytest.raises(protocol.ClaimError, match="out of range"):
-        board.rule_expectation(body, index, "yes", date(2026, 9, 15))
+        board.rule_expectation(body, index, "yes", ruled_at)
 
 
 def test_rule_expectation_refuses_an_unknown_ruling_value() -> None:
@@ -115,8 +119,10 @@ def test_rule_expectation_refuses_an_unknown_ruling_value() -> None:
         f'{MINIMAL_BLOCK_TOML}[[expectation]]\ntext = "Ship it?"\ndefault = "later"\n'
     )
 
+    ruled_at = date(2026, 9, 15)
+
     with pytest.raises(protocol.ClaimError, match="ruling must be"):
-        board.rule_expectation(body, 1, "maybe", date(2026, 9, 15))
+        board.rule_expectation(body, 1, "maybe", ruled_at)
 
 
 def test_rule_expectation_appends_a_note_to_the_ruled_line_text() -> None:
