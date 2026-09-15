@@ -1869,9 +1869,7 @@ def _claim_ages(worktree: Path, state: protocol.ClaimState) -> dict[str, datetim
     return store.claim_ages(worktree=worktree, tip=state.tip, claims=state.claims.values())
 
 
-def _store_observation(
-    parsed: argparse.Namespace,
-) -> tuple[Path, str, protocol.ClaimState]:
+def _store_observation() -> tuple[Path, str, protocol.ClaimState]:
     """One fetch of `refs/aco/state` for a store command -- forge-free by
     itself (issue #245). A command that also needs a forge resolves and
     Erwartung-6-checks that target separately, the first time its session's
@@ -2232,7 +2230,7 @@ def _cmd_check(parsed: argparse.Namespace, session: _ReadSession) -> int:
     if reference.state is forge.ItemState.MISSING:
         outcome = _missing_number(repository, number)
     elif reference.is_landing:
-        _worktree, _remote, observed = _store_observation(parsed)
+        _worktree, _remote, observed = _store_observation()
         outcome = _pull_request_check(client, tuple(observed.claims.values()), repository, number)
     else:
         outcome = _issue_check(client, repository, reference.body or "", number)
@@ -2274,7 +2272,7 @@ def _observed_board(
     """`board`/`rulings`/`next` share this: the store's live claims, projected
     onto forge board data (issue #176 -- claims no longer come from the
     ledger; the forge is still the board's own data source)."""
-    worktree, _remote, observed = _store_observation(parsed)
+    worktree, _remote, observed = _store_observation()
     return _board(
         session.forge(),
         tuple(observed.claims.values()),
@@ -2322,7 +2320,7 @@ def _cmd_next(parsed: argparse.Namespace, session: _ReadSession) -> int:
 
 def _cmd_rescope(parsed: argparse.Namespace, _session: _WriteSession) -> None:
     requested = _rescope_command(parsed)
-    worktree, canonical_remote, observed = _store_observation(parsed)
+    worktree, canonical_remote, observed = _store_observation()
     _require_state_ref(observed)
     selected = _selected_store_claim(
         observed, requested.identity, requested.branch, requested.claim_id
@@ -2363,7 +2361,7 @@ def _cmd_claim(parsed: argparse.Namespace, session: _WriteSession) -> int:
     versioned = checkout.versioned_paths()
     _reject_ungrounded_comma_scope(requested.scope, versioned, flag="--scope")
     n, total, share = _reject_wide_scope(requested.scope, versioned, requested.whole_reason)
-    worktree, canonical_remote, observed = _store_observation(parsed)
+    worktree, canonical_remote, observed = _store_observation()
     _require_state_ref(observed)
     checks: tuple[SliceCheck, ...] = ()
     target_issue: int | None = None
@@ -2434,7 +2432,7 @@ def _cmd_release(parsed: argparse.Namespace, session: _WriteSession) -> None:
         # invokes `gh`.
         client = session.forge()
         _verify_merged_release(client, client.repository.path, identity, outcome)
-    worktree, canonical_remote, observed = _store_observation(parsed)
+    worktree, canonical_remote, observed = _store_observation()
     _require_state_ref(observed)
     selected = _selected_store_claim(observed, identity, session.release_branch, parsed.claim_id)
     role = parsed.role
@@ -2737,7 +2735,7 @@ def _release_branch_for(parsed: argparse.Namespace) -> str | None:
     )
 
 
-def _bootstrap_state(parsed: argparse.Namespace) -> int:
+def _bootstrap_state() -> int:
     """Create `refs/aco/state` if proven absent; report the existing tip
     untouched when it is already there. Forge-free (issue #245): `--repo` is
     meaningless here and unused."""
@@ -2750,7 +2748,7 @@ def _dispatch(parsed: argparse.Namespace) -> int:
     if parsed.command in {"claim", "release", "rescope"}:
         parsed.agent = checkout._resolved_agent(parsed.agent)
     if parsed.command == "bootstrap":
-        return _bootstrap_state(parsed)
+        return _bootstrap_state()
     release_branch = _release_branch_for(parsed) if parsed.command == "release" else None
     forge_accessor = _LazyForge(parsed.repo)
     if parsed.command in _READ_HANDLERS:

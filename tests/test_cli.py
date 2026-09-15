@@ -6588,8 +6588,10 @@ def test_refuse_unsupported_forge_host_refuses_another_host() -> None:
     """No forge adapter but GitHub's exists yet (#230 slice 2) -- a forge
     command against any other host refuses by its own name (issue #245),
     never with GitHub's "does not name a GitHub repository" text."""
+    location = checkout.RemoteLocation("gitlab.com", "o/r")
+
     with pytest.raises(ClaimUnavailableError, match=r"no forge adapter for host gitlab\.com"):
-        issue_claim._refuse_unsupported_forge_host(checkout.RemoteLocation("gitlab.com", "o/r"))
+        issue_claim._refuse_unsupported_forge_host(location)
 
 
 def test_refuse_canonical_remote_mismatch_allows_a_matching_target() -> None:
@@ -6601,14 +6603,13 @@ def test_refuse_canonical_remote_mismatch_allows_a_matching_target() -> None:
 
 def test_refuse_canonical_remote_mismatch_names_both_repositories() -> None:
     mismatched = forge.RepositoryId(github.GITHUB_HOST, ("other",), "repo")
+    canonical_remote = checkout.RemoteLocation(github.GITHUB_HOST, "owner/repo")
 
     with pytest.raises(
         ClaimUnavailableError,
         match="forge target other/repo does not match canonical remote owner/repo",
     ):
-        issue_claim._refuse_canonical_remote_mismatch(
-            mismatched, checkout.RemoteLocation(github.GITHUB_HOST, "owner/repo")
-        )
+        issue_claim._refuse_canonical_remote_mismatch(mismatched, canonical_remote)
 
 
 def test_resolved_forge_target_refuses_before_asking_gh_on_a_non_github_host(
