@@ -231,7 +231,8 @@ occupies the integer it would have been assigned. A second live hold of the same
 value is refused: only the earliest live claim of that pair is the holder. Sequential
 allocations stay unique even after a release. `claim` prints
 how many versioned files the scope covers and which open claims it overlaps.
-`status --path <path>` prints every live claim that holds a path.
+`status --path <path>` prints every live claim that holds a path; it computes no age and so
+checks no claim's ancestry (the fetched tip itself stays guarded on every read).
 Agents should read `--json` from `status`, `claim`, `release`, and `rescope`.
 `status` prints each live claim's age from its `opened_commit`'s committer date
 (the state-ref commit that first introduced it) as `Xh Ym`, and marks it `old`

@@ -1844,28 +1844,13 @@ def _resolved_canonical_remote(repository: str | None, toplevel: Path) -> str:
 
 
 def _claim_ages(worktree: Path, state: protocol.ClaimState) -> dict[str, datetime]:
-    """Each live claim's age in an already-fetched state (its `opened_commit`'s
-    committer date, from the same fetched tip's ancestry -- §1 "Status age
-    ..."). Split from `_fetched_claims_and_ages` so a caller that already
-    holds a `ClaimState` (`claim`/`rescope`/`release`/`board`/`rulings`/
-    `next`) never fetches twice just to get ages too.
+    """Each live claim's age in an already-fetched state -- one batched read
+    of `state.tip`'s history (`store.claim_ages`, issue #242), never a git
+    call per claim.
     """
     if state.tip is None:
         return {}
-    tip = state.tip
-    return {
-        claim.claim_id: store.committer_date(worktree=worktree, tip=tip, commit=claim.opened_commit)
-        for claim in state.claims.values()
-    }
-
-
-def _fetched_claims_and_ages(
-    worktree: Path, canonical_remote: str
-) -> tuple[tuple[protocol.ActiveClaim, ...], dict[str, datetime]]:
-    """The store's live claims, plus each one's age -- for a caller (`status`)
-    that has not already fetched the state itself."""
-    state = store.fetch_state(worktree=worktree, remote=canonical_remote)
-    return tuple(state.claims.values()), _claim_ages(worktree, state)
+    return store.claim_ages(worktree=worktree, tip=state.tip, claims=state.claims.values())
 
 
 def _store_observation(
@@ -2218,12 +2203,18 @@ def _cmd_status(parsed: argparse.Namespace) -> int:
     resolution (a cut-over repository may have no ledger issue left at all).
     """
     canonical_remote = _resolved_canonical_remote(parsed.repo, _resolve_toplevel())
-    claims, ages = _fetched_claims_and_ages(Path.cwd(), canonical_remote)
+    worktree = Path.cwd()
+    state = store.fetch_state(worktree=worktree, remote=canonical_remote)
+    claims = tuple(state.claims.values())
     if parsed.path is not None:
+        # `--path` prints no age, so it never reads a claim's ancestry: a
+        # lineage break in one unrelated claim must not stop this answer
+        # (README "status --path").
         if parsed.json:
             return _status_path_json(claims, parsed.path)
         _status_path(claims, parsed.path)
         return 0
+    ages = _claim_ages(worktree, state)
     issue = _optional_issue_number(parsed.issue)
     now = datetime.now(UTC)
     if parsed.json:
