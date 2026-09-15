@@ -406,11 +406,34 @@ carries the same items under `recovery`.
 the command made through the forge port; `board --json` carries the same
 count as a top-level `"requests"` field.
 
-`aco rulings` lists only open board items with open expectation lines
-as `#NUMBER OPEN/TOTAL: TITLE`; `rulings --json` returns the same `number`,
-`title`, `open`, and `total` values. It is read-only and uses the board's
-priority category and score first, then fewer open expectation lines and the
-issue number. An empty list succeeds.
+`aco ask <item> --text TEXT [--default yes|no|later]` appends one fresh
+*proposed* `[[expectation]]` entry to `<item>`'s block (default `yes`).
+It refuses by name when `<item>` has no valid `agent-claim` block to append
+to (`aco check <item>` shows the exact defect) and when `--text` is empty.
+`--json` returns `item`, `index` (the new line's 1-based, block-order
+position), `text`, and `default`.
+
+`aco rule <item> --line N (--yes | --no | --later) [--note TEXT]` rules the
+`N`-th (1-based, block order — the same index `rulings` prints) *proposed*
+`[[expectation]]` entry: its `default` falls, `ruling` and today's UTC date
+(`ruled_on`) take its place — `--later` is a genuine ruling, an explicit
+operator decision to defer, not only a proposer's guessed default.
+`--note TEXT`, when given, is appended to the line's own text as
+` Anmerkung: TEXT` — the schema has no separate note field. It refuses an
+already-ruled line by name before any write (a changed ruling is a new
+line, never an overwrite) and a `--line` outside the item's expectation
+lines, naming the range. `--json` returns `item`, `index`, `ruling`,
+`ruled_on`, and `open` (how many of the item's lines are still open).
+
+`aco rulings` lists every open board item that still carries an open
+expectation line, and under it every one of that item's `[[expectation]]`
+lines by index, state (`open`, or `ruled <ruling> <ruled_on>`), and text
+(truncated to one line for the human form; `--json` carries the full text).
+`rulings --json` returns the same `number`, `title`, `open`, and `total`
+values as before, plus a `lines` array of `{index, text, state}` objects.
+It is read-only and uses the board's priority category and score first,
+then fewer open expectation lines and the issue number. An empty list
+succeeds.
 
 Use `aco next` (or `aco next --json`) to name the board's
 top-ranked qualifying row — the same `board_rank` order `board` shows.
@@ -520,8 +543,10 @@ may be the empty string (an unfilled skeleton — incomplete, but still a valid
 block). `frozen_until`, `expectation`, and `slice` are optional; an explicit
 `slice = []` is a table intentionally left present but empty (it still counts
 as "has a table" for `cut --row`). Each `[[expectation]]` is either *proposed*
-(`default = "yes" | "no" | "later"`) or *ruled* (`ruling = "yes" | "no"` with a
-TOML date `ruled_on`) — never both, never neither. Per-slice files, done-when,
+(`default = "yes" | "no" | "later"`) or *ruled* (`ruling = "yes" | "no" | "later"`
+with a TOML date `ruled_on`) — never both, never neither; a ruled `"later"`
+transcribes an explicit operator decision to defer, not merely a proposer's
+guessed default. Per-slice files, done-when,
 and dependencies stay in the human prose beside the block; only a slice's
 `index` and `title` are typed. Schema and version tokens, and an expectation's
 `default`/`ruling` values, are protocol — always this exact English spelling;

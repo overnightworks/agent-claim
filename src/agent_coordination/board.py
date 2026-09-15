@@ -106,7 +106,11 @@ BLOCK_TOP_LEVEL_KEYS = frozenset(
 )
 BLOCK_VERSION = 1
 BLOCK_EXPECTATION_DEFAULTS = frozenset({"yes", "no", "later"})
-BLOCK_EXPECTATION_RULINGS = frozenset({"yes", "no"})
+# A ruling transcribes the operator's word (#240): "later" is a legitimate
+# final answer -- an explicit, dated decision to defer -- not only a
+# proposer's guessed default, so it rules exactly like "yes"/"no" (`rule
+# --later` writes `ruling = "later"` the same way `--yes`/`--no` do).
+BLOCK_EXPECTATION_RULINGS = frozenset({"yes", "no", "later"})
 
 
 class ItemKind(StrEnum):
@@ -725,7 +729,9 @@ def _block_expectation_variant_defects(
     if has_ruling or has_ruled_on:
         defects = []
         if entry.get("ruling") not in BLOCK_EXPECTATION_RULINGS:
-            defects.append(ContractDefect(f"{prefix}.ruling", f"{prefix}.ruling must be yes or no"))
+            defects.append(
+                ContractDefect(f"{prefix}.ruling", f"{prefix}.ruling must be yes, no, or later")
+            )
         if type(entry.get("ruled_on")) is not date:
             defects.append(
                 ContractDefect(f"{prefix}.ruled_on", f"{prefix}.ruled_on must be a TOML local date")
@@ -1088,6 +1094,113 @@ def replace_agent_claim_block(body: str, located: LocatedBlock, data: Mapping[st
         + render_block(data, located.newline)
         + body[located.content_end :]
     )
+
+
+EXPECTATION_LINE_TEXT_MAXIMUM = 100
+
+
+@dataclass(frozen=True)
+class ExpectationLine:
+    """One `[[expectation]]` entry as `rule --line`, `ask`, and `rulings`
+    see it: `index` is its 1-based position in block order -- what `rule
+    --line` accepts and what `rulings` prints -- `text` its full prose, and
+    `ruling`/`ruled_on` present only once a `rule` call has replaced its
+    `default`."""
+
+    index: int
+    text: str
+    ruling: str | None
+    ruled_on: date | None
+
+
+def expectation_lines(body: str) -> tuple[ExpectationLine, ...]:
+    """Every `[[expectation]]` entry of `body`'s `agent-claim` block, in
+    block order -- the one projection `rulings`, `rule --line`, and `ask`'s
+    fresh index all share, so a printed index always matches what `rule`
+    accepts. Empty for a body with no block, no expectations, or one
+    `parse_body` reads as LEGACY/MALFORMED -- a malformed body's lines are
+    not addressable until it is fixed by hand."""
+    if parse_body(body).read_state is not BodyReadState.VALID:
+        return ()
+    entries = _block_expectation_dicts(locate_agent_claim_block(body).data)
+    return tuple(
+        ExpectationLine(
+            index=position,
+            text=cast(str, entry["text"]),
+            ruling=cast("str | None", entry.get("ruling")),
+            ruled_on=cast("date | None", entry.get("ruled_on")),
+        )
+        for position, entry in enumerate(entries, start=1)
+    )
+
+
+def expectation_line_state(line: ExpectationLine) -> str:
+    """`open`, or `ruled <ruling> <ruled_on>` -- the one state text
+    `rulings` prints, in both its human and JSON forms."""
+    if line.ruling is None:
+        return "open"
+    ruled_on = cast(date, line.ruled_on)
+    return f"ruled {line.ruling} {ruled_on.isoformat()}"
+
+
+def expectation_line_summary(line: ExpectationLine) -> str:
+    """`line.text` on one line, truncated to `EXPECTATION_LINE_TEXT_MAXIMUM`
+    characters -- `rulings`' human form; `--json` carries the full text."""
+    return _brief(line.text, maximum=EXPECTATION_LINE_TEXT_MAXIMUM)
+
+
+def rule_expectation(
+    body: str, index: int, ruling: str, ruled_on: date, *, note: str | None = None
+) -> str:
+    """`body` with its `index`-th (1-based, block order) `[[expectation]]`
+    entry moved from proposed to ruled: `default` falls, `ruling` and
+    `ruled_on` take its place. Byte-preserving outside that one entry
+    (`locate_agent_claim_block` -> `replace_agent_claim_block`, #150 §4/§7 --
+    the same pair `cut` writes through). `note`, when given, is appended to
+    the line's own text as ` Anmerkung: <note>`: the schema has no dedicated
+    note field, and the ruled line's own text is the one place a
+    transcribed remark belongs.
+
+    Refuses an already-ruled entry by name -- a changed ruling is a new
+    line, never an overwrite -- and an out-of-range index. This is also the
+    write path `board --serve` (#234) will call from a click, so it
+    validates `ruling` itself rather than trust only its CLI caller.
+    """
+    if ruling not in BLOCK_EXPECTATION_RULINGS:
+        raise protocol.ClaimError(
+            f"ruling must be one of {', '.join(sorted(BLOCK_EXPECTATION_RULINGS))}"
+        )
+    located = locate_agent_claim_block(body)
+    entries = _block_expectation_dicts(located.data)
+    if not 1 <= index <= len(entries):
+        raise protocol.ClaimError(
+            f"line {index} out of range: this item has {len(entries)} expectation line(s)"
+        )
+    entry = entries[index - 1]
+    if "ruling" in entry:
+        raise protocol.ClaimError(f"line {index} is already ruled; a changed ruling is a new line")
+    text = cast(str, entry["text"]) if note is None else f"{entry['text']} Anmerkung: {note}"
+    ruled_entry: dict[str, object] = {"text": text, "ruling": ruling, "ruled_on": ruled_on}
+    new_entries = [*entries[: index - 1], ruled_entry, *entries[index:]]
+    new_data = {**located.data, "expectation": new_entries}
+    return replace_agent_claim_block(body, located, new_data)
+
+
+def append_expectation(body: str, text: str, default: str) -> str:
+    """`body` with one fresh proposed `[[expectation]]` entry appended:
+    `text` verbatim, `default` as given. Byte-preserving outside the
+    appended entry, the same write path as `rule_expectation`."""
+    if not text.strip():
+        raise protocol.ClaimError("expectation text must be a non-empty string")
+    if default not in BLOCK_EXPECTATION_DEFAULTS:
+        raise protocol.ClaimError(
+            f"default must be one of {', '.join(sorted(BLOCK_EXPECTATION_DEFAULTS))}"
+        )
+    located = locate_agent_claim_block(body)
+    entries = _block_expectation_dicts(located.data)
+    new_entries = [*entries, {"text": text, "default": default}]
+    new_data = {**located.data, "expectation": new_entries}
+    return replace_agent_claim_block(body, located, new_data)
 
 
 def missing_or_empty_sections(contract: Contract) -> tuple[str, ...]:
