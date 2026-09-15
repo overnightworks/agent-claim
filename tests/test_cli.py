@@ -7342,9 +7342,10 @@ def test_checkout_validation_names_the_isolated_worktree_recipe_for_the_default_
         ("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"): origin_head,
     }
     monkeypatch.setattr(checkout, "_git_output", lambda arguments: values[tuple(arguments)])
+    candidate = request(branch=branch)
 
     with pytest.raises(ClaimError) as error:
-        issue_claim._validate_checkout(request(branch=branch))
+        issue_claim._validate_checkout(candidate)
 
     assert str(error.value) == (
         "build claims require an isolated non-main worktree branch; "
@@ -7841,13 +7842,14 @@ def test_claim_default_branch_fallback_denies_only_main_and_master(
     monkeypatch.setattr(
         checkout, "_git_output", _fallback_git_output(values, origin_head_empty=origin_head_empty)
     )
+    candidate = request(branch=branch)
 
     if not denied:
-        issue_claim._validate_checkout(request(branch=branch))
+        issue_claim._validate_checkout(candidate)
         return
 
     with pytest.raises(ClaimError, match="isolated non-main worktree branch"):
-        issue_claim._validate_checkout(request(branch=branch))
+        issue_claim._validate_checkout(candidate)
 
 
 def test_claim_request_refuses_a_base_that_is_not_a_full_commit_sha() -> None:
