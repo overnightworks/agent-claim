@@ -86,12 +86,17 @@ def discover_repository(
 ) -> forge.RepositoryId:
     """Resolve the repository `--repo` did not name.
 
-    Reads `gh repo view`'s stdout alone -- a separate-stream result, so a
-    stderr warning can neither corrupt a good answer nor suppress the
-    fall-back to the git remote below.
+    Reads the git remote first (issue #245): almost every checkout's remote
+    already names its GitHub repository, and that read is a local `git
+    config` lookup, not a network round trip -- so `gh repo view` (a real
+    `gh` API call, `GH_TIMEOUT_SECONDS` long) only runs as a fallback, when
+    the remote's own URL names no repository at all.
     """
     if explicit:
         return _repository_id(explicit)
+    match = GITHUB_REMOTE_PATTERN.search(remote_url())
+    if match is not None:
+        return _repository_id(f"{match.group(1)}/{match.group(2)}")
     try:
         result = process.run_captured(
             ["gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"],
@@ -102,13 +107,12 @@ def discover_repository(
         raise ClaimError("gh is required for issue claims") from None
     except process.ProcessTimedOutError:
         raise ClaimError("gh timed out while resolving the repository") from None
+    # `gh repo view`'s stdout alone -- a separate-stream result, so a stderr
+    # warning can neither corrupt a good answer nor mask a real failure.
     cleaned = strip_ansi(result.stdout.decode("utf-8")).strip()
     if result.exit_status == 0 and cleaned:
         return _repository_id(cleaned)
-    match = GITHUB_REMOTE_PATTERN.search(remote_url())
-    if match is None:
-        raise ClaimError("cannot resolve GitHub repository; pass --repo OWNER/REPO")
-    return _repository_id(f"{match.group(1)}/{match.group(2)}")
+    raise ClaimError("cannot resolve GitHub repository; pass --repo OWNER/REPO")
 
 
 def _head_repository(pull_request: dict[str, object]) -> forge.RepositoryId | None:
