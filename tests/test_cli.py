@@ -1113,7 +1113,8 @@ def test_rulings_lists_open_expectations_by_board_priority_then_open_count(
     )
 
     assert issue_claim.main(["--repo", "example/agent-claim", "rulings"]) == 0
-    assert capsys.readouterr().out.splitlines() == [
+    headers = [line for line in capsys.readouterr().out.splitlines() if line.startswith("#")]
+    assert headers == [
         "#50 2/3: In-flight security work",
         "#30 1/2: Later security tie",
         "#10 2/3: Earlier security tie",
@@ -1141,7 +1142,7 @@ def test_rulings_reads_expectation_progress_from_the_block_not_stale_prose(
     _write_block_pin(tmp_path)
 
     assert issue_claim.main(["--repo", "example/agent-claim", "rulings"]) == 0
-    assert capsys.readouterr().out == "#400 1/1: Block-only expectations\n"
+    assert capsys.readouterr().out == "#400 1/1: Block-only expectations\n  1 open: Proposed\n"
 
 
 def test_rulings_renders_text_json_and_empty_success(
@@ -1156,11 +1157,28 @@ def test_rulings_renders_text_json_and_empty_success(
     client = _configured_board_client(monkeypatch, tmp_path, open_issues=(open_issue,))
 
     assert issue_claim.main(["--repo", "example/agent-claim", "rulings"]) == 0
-    assert capsys.readouterr().out == "#10 1/2: Open expectation\n"
+    assert capsys.readouterr().out == (
+        "#10 1/2: Open expectation\n"
+        "  1 open: Open decision 0.\n"
+        f"  2 ruled yes {RULED_ON.isoformat()}: Settled decision 0.\n"
+    )
 
     assert issue_claim.main(["--repo", "example/agent-claim", "rulings", "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == [
-        {"number": 10, "title": "Open expectation", "open": 1, "total": 2}
+        {
+            "number": 10,
+            "title": "Open expectation",
+            "open": 1,
+            "total": 2,
+            "lines": [
+                {"index": 1, "text": "Open decision 0.", "state": "open"},
+                {
+                    "index": 2,
+                    "text": "Settled decision 0.",
+                    "state": f"ruled yes {RULED_ON.isoformat()}",
+                },
+            ],
+        }
     ]
 
     monkeypatch.setattr(
@@ -2800,6 +2818,254 @@ def test_cut_names_the_created_child_when_linking_fails(
         in err
     )
     assert "do not re-run" in err
+
+
+RULE_ITEM = 90
+RULE_TODAY = date(2026, 8, 21)  # `_freeze_cli_now` (autouse) pins `datetime.now(UTC)` here.
+
+
+def _client_with_item(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    number: int,
+    body: str,
+    *,
+    title: str = "Decide something",
+    is_landing: bool = False,
+    closed: bool = False,
+) -> FakeForge:
+    client = _configured_board_client(monkeypatch, tmp_path)
+    state = forge.ItemState.CLOSED if closed else forge.ItemState.OPEN
+    client.issue_references[number] = forge.ItemReference(state, title, body, is_landing)
+    return client
+
+
+@pytest.mark.parametrize("flag,ruling", [("--yes", "yes"), ("--no", "no"), ("--later", "later")])
+def test_rule_writes_a_ruling_and_reports_remaining_open_lines(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    flag: str,
+    ruling: str,
+) -> None:
+    toml_text = (
+        f"{MINIMAL_BLOCK_TOML}"
+        '[[expectation]]\ntext = "Ship it?"\ndefault = "later"\n'
+        '[[expectation]]\ntext = "Ship it too?"\ndefault = "later"\n'
+    )
+    client = _client_with_item(monkeypatch, tmp_path, RULE_ITEM, agent_claim_body(toml_text))
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "rule", str(RULE_ITEM), "--line", "1", flag]
+    )
+
+    assert exit_code == 0
+    assert capsys.readouterr().out == f"RULED #{RULE_ITEM} line 1 {ruling}; 1 line(s) still open\n"
+    lines = board.expectation_lines(client.item_bodies[RULE_ITEM])
+    assert lines[0] == board.ExpectationLine(1, "Ship it?", ruling, RULE_TODAY)
+    assert lines[1] == board.ExpectationLine(2, "Ship it too?", None, None)
+
+
+def test_rule_json_reports_item_index_ruling_date_and_open(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    toml_text = f'{MINIMAL_BLOCK_TOML}[[expectation]]\ntext = "Ship it?"\ndefault = "later"\n'
+    _client_with_item(monkeypatch, tmp_path, RULE_ITEM, agent_claim_body(toml_text))
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "rule", str(RULE_ITEM), "--line", "1", "--yes", "--json"]
+    )
+
+    assert exit_code == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "item": RULE_ITEM,
+        "index": 1,
+        "ruling": "yes",
+        "ruled_on": RULE_TODAY.isoformat(),
+        "open": 0,
+    }
+
+
+def test_rule_appends_a_note_to_the_ruled_line_via_cli(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    toml_text = f'{MINIMAL_BLOCK_TOML}[[expectation]]\ntext = "Ship it?"\ndefault = "later"\n'
+    client = _client_with_item(monkeypatch, tmp_path, RULE_ITEM, agent_claim_body(toml_text))
+
+    exit_code = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "rule",
+            str(RULE_ITEM),
+            "--line",
+            "1",
+            "--yes",
+            "--note",
+            "Ja, sofort.",
+        ]
+    )
+
+    assert exit_code == 0
+    lines = board.expectation_lines(client.item_bodies[RULE_ITEM])
+    assert lines[0].text == "Ship it? Anmerkung: Ja, sofort."
+
+
+def test_rule_refuses_an_already_ruled_line_before_any_write(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    toml_text = (
+        f'{MINIMAL_BLOCK_TOML}[[expectation]]\ntext = "Ship it?"\n'
+        'ruling = "yes"\nruled_on = 2026-08-01\n'
+    )
+    client = _client_with_item(monkeypatch, tmp_path, RULE_ITEM, agent_claim_body(toml_text))
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "rule", str(RULE_ITEM), "--line", "1", "--no"]
+    )
+
+    assert exit_code == 2
+    assert "line 1 is already ruled" in capsys.readouterr().err
+    assert client.item_bodies == {}
+
+
+def test_rule_refuses_an_out_of_range_line_before_any_write(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    toml_text = f'{MINIMAL_BLOCK_TOML}[[expectation]]\ntext = "Ship it?"\ndefault = "later"\n'
+    client = _client_with_item(monkeypatch, tmp_path, RULE_ITEM, agent_claim_body(toml_text))
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "rule", str(RULE_ITEM), "--line", "2", "--yes"]
+    )
+
+    assert exit_code == 2
+    assert "out of range" in capsys.readouterr().err
+    assert client.item_bodies == {}
+
+
+def test_rule_refuses_when_the_forge_cannot_update_item_body(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    toml_text = f'{MINIMAL_BLOCK_TOML}[[expectation]]\ntext = "Ship it?"\ndefault = "later"\n'
+    client = _client_with_item(monkeypatch, tmp_path, RULE_ITEM, agent_claim_body(toml_text))
+    client.capability_overrides[forge.ForgeOperation.UPDATE_ITEM_BODY] = forge.Capability.READ_ONLY
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "rule", str(RULE_ITEM), "--line", "1", "--yes"]
+    )
+
+    assert exit_code == 2
+    assert client.item_bodies == {}
+    assert "ERROR: this forge cannot update_item_body; rule by hand" in capsys.readouterr().err
+
+
+def test_rule_refuses_a_missing_item_before_any_write(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    client = _configured_board_client(monkeypatch, tmp_path)
+    client.issue_references[RULE_ITEM] = forge.ItemReference(forge.ItemState.MISSING)
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "rule", str(RULE_ITEM), "--line", "1", "--yes"]
+    )
+
+    assert exit_code == 2
+    assert client.item_bodies == {}
+    assert f"#{RULE_ITEM} does not exist" in capsys.readouterr().err
+
+
+def test_rule_refuses_a_pull_request_target_before_any_write(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    toml_text = f'{MINIMAL_BLOCK_TOML}[[expectation]]\ntext = "Ship it?"\ndefault = "later"\n'
+    client = _client_with_item(
+        monkeypatch, tmp_path, RULE_ITEM, agent_claim_body(toml_text), is_landing=True
+    )
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "rule", str(RULE_ITEM), "--line", "1", "--yes"]
+    )
+
+    assert exit_code == 2
+    assert client.item_bodies == {}
+    assert (
+        f"#{RULE_ITEM} is a pull request, not an issue; rule needs an issue"
+        in capsys.readouterr().err
+    )
+
+
+def test_ask_appends_a_proposed_line_and_rulings_shows_it_as_open(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    toml_text = (
+        f'{MINIMAL_BLOCK_TOML}[[expectation]]\ntext = "Ship it?"\n'
+        'ruling = "yes"\nruled_on = 2026-08-01\n'
+    )
+    client = _client_with_item(monkeypatch, tmp_path, RULE_ITEM, agent_claim_body(toml_text))
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "ask", str(RULE_ITEM), "--text", "New question?"]
+    )
+
+    assert exit_code == 0
+    assert capsys.readouterr().out == f"ASKED #{RULE_ITEM} line 2: New question?\n"
+
+    new_body = client.item_bodies[RULE_ITEM]
+    monkeypatch.setattr(
+        client,
+        "list_open_board_issues",
+        lambda: (board_issue(RULE_ITEM, "Decide something", new_body),),
+    )
+
+    assert issue_claim.main(["--repo", "example/agent-claim", "rulings"]) == 0
+    assert capsys.readouterr().out == (
+        f"#{RULE_ITEM} 1/2: Decide something\n"
+        "  1 ruled yes 2026-08-01: Ship it?\n"
+        "  2 open: New question?\n"
+    )
+
+
+def test_ask_json_reports_item_index_text_and_default(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    _client_with_item(monkeypatch, tmp_path, RULE_ITEM, agent_claim_body(MINIMAL_BLOCK_TOML))
+
+    exit_code = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "ask",
+            str(RULE_ITEM),
+            "--text",
+            "New question?",
+            "--default",
+            "later",
+            "--json",
+        ]
+    )
+
+    assert exit_code == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "item": RULE_ITEM,
+        "index": 1,
+        "text": "New question?",
+        "default": "later",
+    }
+
+
+def test_ask_refuses_a_legacy_item_before_any_write(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    client = _client_with_item(monkeypatch, tmp_path, RULE_ITEM, "## Now\nOld prose.\n")
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "ask", str(RULE_ITEM), "--text", "New question?"]
+    )
+
+    assert exit_code == 2
+    assert "body legacy; ask needs a valid agent-claim block" in capsys.readouterr().err
+    assert client.item_bodies == {}
 
 
 def test_next_prints_a_cut_command_block_mode_accepts_for_a_valid_container(

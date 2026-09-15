@@ -10,7 +10,7 @@ import uuid
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import cast
@@ -435,6 +435,39 @@ def _add_cut_parser(commands: argparse._SubParsersAction) -> None:
     cut.add_argument("--json", action="store_true", help=JSON_HELP)
 
 
+def _add_ask_parser(commands: argparse._SubParsersAction) -> None:
+    ask = commands.add_parser("ask", help="append one proposed expectation line to an item's block")
+    ask.add_argument("item", type=int, help="the item to append the expectation line to")
+    ask.add_argument("--text", required=True, help="the expectation line's prose")
+    ask.add_argument(
+        "--default",
+        choices=sorted(board.BLOCK_EXPECTATION_DEFAULTS),
+        default="yes",
+        help="the proposer's suggested outcome; default yes",
+    )
+    ask.add_argument("--json", action="store_true", help=JSON_HELP)
+
+
+def _add_rule_parser(commands: argparse._SubParsersAction) -> None:
+    rule = commands.add_parser(
+        "rule", help="rule one proposed expectation line, transcribing the operator's word"
+    )
+    rule.add_argument("item", type=int, help="the item whose expectation line is ruled")
+    rule.add_argument(
+        "--line",
+        type=int,
+        required=True,
+        metavar="N",
+        help="the 1-based expectation line index, as rulings prints it",
+    )
+    outcome = rule.add_mutually_exclusive_group(required=True)
+    outcome.add_argument("--yes", action="store_const", dest="ruling", const="yes")
+    outcome.add_argument("--no", action="store_const", dest="ruling", const="no")
+    outcome.add_argument("--later", action="store_const", dest="ruling", const="later")
+    rule.add_argument("--note", help="appended to the line's own text as ' Anmerkung: TEXT'")
+    rule.add_argument("--json", action="store_true", help=JSON_HELP)
+
+
 def _add_check_parser(commands: argparse._SubParsersAction) -> None:
     check = commands.add_parser(
         "check",
@@ -515,6 +548,8 @@ _SUBPARSER_BUILDERS: tuple[Callable[[argparse._SubParsersAction], None], ...] = 
     _add_release_parser,
     _add_rescope_parser,
     _add_cut_parser,
+    _add_ask_parser,
+    _add_rule_parser,
     _add_check_parser,
     _add_protect_parser,
     _add_register_parser,
@@ -988,45 +1023,72 @@ def _board(
     )
 
 
-def _rulings(projected: board.Board, *, as_json: bool) -> None:
-    items = tuple(
-        sorted(
-            (
-                (item, item.expectation_progress)
-                for item in projected.items
-                if item.expectation_progress.open > 0
-            ),
-            key=lambda entry: (
-                *board.board_rank(entry[0])[:2],
-                entry[1].open,
-                entry[0].number,
-            ),
-        )
+@dataclass(frozen=True)
+class _RulingsRow:
+    """One `rulings` row: the item, its open/total counts, and every one of
+    its `[[expectation]]` lines (open and already-ruled alike) in block
+    order -- the detail `rulings` prints beneath the item's own summary."""
+
+    item: board.BoardItem
+    progress: board.ExpectationProgress
+    lines: tuple[board.ExpectationLine, ...]
+
+
+def _rulings_rows(projected: board.Board, bodies: Mapping[int, str]) -> tuple[_RulingsRow, ...]:
+    """Every open board item that still carries an open expectation line,
+    board-ranked then by fewer open lines then issue number (unchanged from
+    before #240), each paired with its lines read fresh from `bodies` --
+    `projected.items` itself carries only the open/total counters."""
+    ranked = sorted(
+        (
+            (item, item.expectation_progress)
+            for item in projected.items
+            if item.expectation_progress.open > 0
+        ),
+        key=lambda entry: (*board.board_rank(entry[0])[:2], entry[1].open, entry[0].number),
     )
+    return tuple(
+        _RulingsRow(item, progress, board.expectation_lines(bodies.get(item.number, "")))
+        for item, progress in ranked
+    )
+
+
+def _rulings_line_json(line: board.ExpectationLine) -> dict[str, object]:
+    return {"index": line.index, "text": line.text, "state": board.expectation_line_state(line)}
+
+
+def _rulings_line_text(line: board.ExpectationLine) -> str:
+    state = board.expectation_line_state(line)
+    return f"  {line.index} {state}: {board.expectation_line_summary(line)}"
+
+
+def _rulings_row_text(row: _RulingsRow) -> str:
+    header = f"#{row.item.number} {row.progress.open}/{row.progress.total}: {row.item.title}"
+    return "\n".join((header, *(_rulings_line_text(line) for line in row.lines)))
+
+
+def _rulings(projected: board.Board, bodies: Mapping[int, str], *, as_json: bool) -> None:
+    rows = _rulings_rows(projected, bodies)
     if as_json:
         print(
             json.dumps(
                 [
                     {
-                        "number": item.number,
-                        "title": item.title,
-                        "open": progress.open,
-                        "total": progress.total,
+                        "number": row.item.number,
+                        "title": row.item.title,
+                        "open": row.progress.open,
+                        "total": row.progress.total,
+                        "lines": [_rulings_line_json(line) for line in row.lines],
                     }
-                    for item, progress in items
+                    for row in rows
                 ]
             )
         )
         return
-    if not items:
+    if not rows:
         print("No open expectation lines.")
         return
-    print(
-        "\n".join(
-            f"#{item.number} {progress.open}/{progress.total}: {item.title}"
-            for item, progress in items
-        )
-    )
+    print("\n".join(_rulings_row_text(row) for row in rows))
 
 
 def _ruling_pull_hint(item: board.BoardItem) -> str | None:
@@ -2195,7 +2257,8 @@ def _cmd_board(parsed: argparse.Namespace, session: _ReadSession) -> None:
 def _cmd_rulings(parsed: argparse.Namespace, session: _ReadSession) -> None:
     issues = session.forge.list_open_board_issues()
     projected = _observed_board(parsed, session, issues=issues)
-    _rulings(projected, as_json=parsed.json)
+    bodies = {issue.number: issue.body for issue in issues}
+    _rulings(projected, bodies, as_json=parsed.json)
 
 
 def _next_action_container_number(action: board.NextAction | None) -> int | None:
@@ -2453,23 +2516,27 @@ def _require_matching_title(number: int, link: board.SliceRow, title: str) -> No
         )
 
 
-def _cut_target_block(number: int, target: board.Issue) -> board.LocatedBlock:
-    parsed = board.parse_body(target.body)
+def _located_block_or_refuse(number: int, body: str, *, command: str) -> board.LocatedBlock:
+    """`body`'s located `agent-claim` block, or a by-name refusal before any
+    write: `cut`, `rule`, and `ask` all need a body `parse_body` reads as
+    VALID before they touch it, and share this one gate so the message is
+    the same shape for all three."""
+    parsed = board.parse_body(body)
     if parsed.read_state is board.BodyReadState.LEGACY:
         raise protocol.ClaimUnavailableError(
-            f"#{number} body legacy; cut needs a valid agent-claim block"
+            f"#{number} body legacy; {command} needs a valid agent-claim block"
         )
     if parsed.read_state is board.BodyReadState.MALFORMED:
         defect = parsed.contract.defects[0]
         raise protocol.ClaimUnavailableError(
-            f"#{number} {board.body_defect_text(defect)}; cut needs a valid agent-claim block"
+            f"#{number} {board.body_defect_text(defect)}; {command} needs a valid agent-claim block"
         )
-    return board.locate_agent_claim_block(target.body)
+    return board.locate_agent_claim_block(body)
 
 
 def _cut_slice(client: forge.ForgeWriter, target: board.Issue, parsed: argparse.Namespace) -> int:
     number = target.number
-    located = _cut_target_block(number, target)
+    located = _located_block_or_refuse(number, target.body, command="cut")
     link = _cut_link(number, located.data, parsed.row)
     if link is not None:
         _require_matching_title(number, link, parsed.title)
@@ -2511,6 +2578,88 @@ def _cmd_cut(parsed: argparse.Namespace, session: _WriteSession) -> int:
     return _cut_slice(client, _cut_target(client, number), parsed)
 
 
+def _item_body_or_refuse(client: forge.ForgeReader, number: int, *, command: str) -> str:
+    """The live body of issue `number`, or a by-name refusal before any
+    write: `rule` and `ask` both target one existing issue, never a pull
+    request."""
+    reference = client.item_reference(number)
+    if reference.state is forge.ItemState.MISSING:
+        raise protocol.ClaimUnavailableError(f"#{number} does not exist")
+    if reference.is_landing:
+        raise protocol.ClaimUnavailableError(
+            f"#{number} is a pull request, not an issue; {command} needs an issue"
+        )
+    return reference.body or ""
+
+
+def _require_update_item_body(client: forge.ForgeWriter, *, command: str) -> None:
+    if client.capability(forge.ForgeOperation.UPDATE_ITEM_BODY) is not forge.Capability.READ_WRITE:
+        raise protocol.ClaimUnavailableError(
+            f"this forge cannot update_item_body; {command} by hand"
+        )
+
+
+def _rule_remaining_open(new_body: str) -> int:
+    return sum(1 for line in board.expectation_lines(new_body) if line.ruling is None)
+
+
+def _print_rule_result(
+    number: int, line: board.ExpectationLine, open_remaining: int, *, as_json: bool
+) -> None:
+    ruling = cast(str, line.ruling)
+    ruled_on = cast(date, line.ruled_on)
+    if as_json:
+        print(
+            json.dumps(
+                {
+                    "item": number,
+                    "index": line.index,
+                    "ruling": ruling,
+                    "ruled_on": ruled_on.isoformat(),
+                    "open": open_remaining,
+                }
+            )
+        )
+        return
+    print(f"RULED #{number} line {line.index} {ruling}; {open_remaining} line(s) still open")
+
+
+def _cmd_rule(parsed: argparse.Namespace, session: _WriteSession) -> int:
+    client = session.forge
+    _require_update_item_body(client, command="rule")
+    _load_board_config(client, _resolve_toplevel())
+    number = int(parsed.item)
+    body = _item_body_or_refuse(client, number, command="rule")
+    _located_block_or_refuse(number, body, command="rule")
+    ruled_on = datetime.now(UTC).date()
+    new_body = board.rule_expectation(body, parsed.line, parsed.ruling, ruled_on, note=parsed.note)
+    client.update_item_body(number, new_body)
+    ruled_line = board.expectation_lines(new_body)[parsed.line - 1]
+    _print_rule_result(number, ruled_line, _rule_remaining_open(new_body), as_json=parsed.json)
+    return 0
+
+
+def _print_ask_result(number: int, index: int, text: str, default: str, *, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps({"item": number, "index": index, "text": text, "default": default}))
+        return
+    print(f"ASKED #{number} line {index}: {text}")
+
+
+def _cmd_ask(parsed: argparse.Namespace, session: _WriteSession) -> int:
+    client = session.forge
+    _require_update_item_body(client, command="ask")
+    _load_board_config(client, _resolve_toplevel())
+    number = int(parsed.item)
+    body = _item_body_or_refuse(client, number, command="ask")
+    _located_block_or_refuse(number, body, command="ask")
+    new_body = board.append_expectation(body, parsed.text, parsed.default)
+    index = len(board.expectation_lines(new_body))
+    client.update_item_body(number, new_body)
+    _print_ask_result(number, index, parsed.text, parsed.default, as_json=parsed.json)
+    return 0
+
+
 _READ_HANDLERS: dict[str, Callable[[argparse.Namespace, _ReadSession], int | None]] = {
     "check": _cmd_check,
     "board": _cmd_board,
@@ -2522,6 +2671,8 @@ _WRITE_HANDLERS: dict[str, Callable[[argparse.Namespace, _WriteSession], int | N
     "claim": _cmd_claim,
     "release": _cmd_release,
     "cut": _cmd_cut,
+    "ask": _cmd_ask,
+    "rule": _cmd_rule,
 }
 
 
