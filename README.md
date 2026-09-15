@@ -256,8 +256,9 @@ is a pure read (prints the ref's commit id, writes nothing); an absent ref
 (proven by `git ls-remote --exit-code`, never inferred from a fetch failure)
 gets one commit holding an empty state tree (`schema.toml`, `version = 1`)
 pushed as a plain fast-forward; an unreachable remote (auth or transport
-failure) fails loud instead of either printing or writing. It refuses when
-the forge target does not match the canonical remote's own repository.
+failure) fails loud instead of either printing or writing. It is forge-free
+(see "Scope and boundaries" below), so `--repo` and the canonical remote's
+own repository never enter into it.
 
 ## Checking one number
 
@@ -747,3 +748,17 @@ own git directory: no provider configuration, and never `~/.claude`, `~/.codex`,
 `~/.grok`. Workspace registration is the one exception: it writes its local
 project-to-session mapping under the XDG configuration path described above;
 it does not change provider configuration.
+
+`status`, `protect`, `bootstrap`, and a lane `claim`/`rescope`/`release`
+(the issueless `docs/`/`fix/` kind) are forge-free: they read and write only
+`refs/aco/state` on the checkout's `canonical_remote`, never resolving a
+repository or invoking `gh`, so a canonical remote on any host -- GitHub,
+another forge, or a bare `file://` path with no forge at all -- is no error
+for them. `board`, `rulings`, `next`, `check`, `cut`, `rule`, `ask`, an issue
+`claim`, and a `release --merged` are forge commands: the first time one of
+them actually needs its forge, it resolves a target (`--repo`, or the git
+remote GitHub's own adapter reads) and refuses by name rather than reading or
+writing anything -- `no forge adapter for host <host>` when the canonical
+remote's own URL names a host with no adapter yet, or `forge target ... does
+not match canonical remote ...` when it names a different repository on a
+host this adapter does serve (Erwartung 6, issue #176).

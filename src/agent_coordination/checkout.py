@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import re
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -51,9 +53,64 @@ def remote_url(remote: str) -> str:
 
 
 def origin_remote_url() -> str:
-    """The checkout's `origin` remote, for the GitHub-remote fallback in
-    `github.discover_repository` when `gh` cannot itself resolve a repository."""
+    """The checkout's `origin` remote: `github.discover_repository`'s first,
+    cheap read, before it ever falls back to asking `gh`."""
     return remote_url("origin")
+
+
+@dataclass(frozen=True)
+class RemoteLocation:
+    """A git remote URL's host and repository path, independent of any forge
+    adapter's own URL syntax (issue #245).
+
+    The one owner comparing a forge target against the checkout's canonical
+    remote (Erwartung 6, issue #176 §2): a GitHub adapter target and a
+    `RemoteLocation` agree exactly when their `host` and `path` do, whether
+    the canonical remote is GitHub, another forge host entirely, or a local
+    `file://` path.
+    """
+
+    host: str
+    path: str
+
+
+_GIT_SUFFIX = ".git"
+# A scheme-form remote: `ssh://[user@]host[:port]/path`, `https://host/path`,
+# `file:///path` -- the one shape every non-scp remote URL shares.
+_SCHEME_REMOTE_PATTERN = re.compile(
+    r"^(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*)://(?:[^@/]*@)?(?P<rest>.+)$"
+)
+# The scp-like shorthand `ssh` alone accepts: `[user@]host:path`, no scheme.
+_SCP_REMOTE_PATTERN = re.compile(r"^(?:[^@/]+@)?(?P<host>[^:/]+):(?P<path>.+)$")
+
+
+def _without_git_suffix(path: str) -> str:
+    # Trailing only: a `file://` path's leading `/` is significant (it is
+    # what makes the path absolute), while a trailing one is never part of a
+    # repository's name.
+    return path.rstrip("/").removesuffix(_GIT_SUFFIX)
+
+
+def parse_remote_location(url: str) -> RemoteLocation:
+    """`url`'s host and repository path (issue #245): every remote shape
+    `aco` accepts -- SSH scp-like (`git@host:o/r.git`), SSH URL
+    (`ssh://git@host/o/r`), HTTPS (`https://host/o/r(.git)`), and
+    `file:///...` (host `"file"`, its filesystem path) -- normalizes to one
+    shape here, so no caller keeps its own copy of this parsing.
+    """
+    scheme_match = _SCHEME_REMOTE_PATTERN.match(url)
+    if scheme_match is not None:
+        scheme = scheme_match.group("scheme").lower()
+        rest = scheme_match.group("rest")
+        if scheme == "file":
+            return RemoteLocation("file", _without_git_suffix(rest))
+        host, _, path = rest.partition("/")
+        host = host.partition(":")[0]  # drop an explicit port, e.g. `host:2222`
+        return RemoteLocation(host, _without_git_suffix(path))
+    scp_match = _SCP_REMOTE_PATTERN.match(url)
+    if scp_match is not None:
+        return RemoteLocation(scp_match.group("host"), _without_git_suffix(scp_match.group("path")))
+    raise ClaimError(f"remote url {url!r} names no recognized host")
 
 
 def versioned_paths() -> tuple[str, ...]:

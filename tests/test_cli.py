@@ -6508,8 +6508,12 @@ def test_bounded_command_sets_github_quiet_environment() -> None:
     assert observed.splitlines() == ["1", "1"]
 
 
-def _unreachable_remote_url() -> str:
-    pytest.fail("gh answered; the git remote fallback must not run")
+def _non_github_remote_url() -> str:
+    """A remote URL `discover_repository` reads first (issue #245) and finds
+    no repository in, so it falls through to asking `gh` -- every test using
+    this in place of a matching GitHub remote is exercising that fallback,
+    never the cheap local-URL read."""
+    return "https://example.com/owner/repo"
 
 
 def test_repository_resolution_uses_github_quiet_environment(
@@ -6524,7 +6528,7 @@ def test_repository_resolution_uses_github_quiet_environment(
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    resolved = github.discover_repository(None, remote_url=_unreachable_remote_url)
+    resolved = github.discover_repository(None, remote_url=_non_github_remote_url)
 
     assert resolved == forge.RepositoryId(github.GITHUB_HOST, ("owner",), "repository")
     command = observed["command"]
@@ -6564,46 +6568,80 @@ def test_remote_url_reads_any_named_remote(monkeypatch: pytest.MonkeyPatch) -> N
     assert calls == [["config", "--get", "remote.upstream.url"]]
 
 
-def test_canonical_remote_repository_parses_the_configured_remote_url(
+def test_canonical_remote_location_parses_the_configured_remote_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(checkout, "remote_url", lambda remote: "git@github.com:owner/repo.git")
 
-    repository = issue_claim._canonical_remote_repository("origin")
+    location = issue_claim._canonical_remote_location("origin")
 
-    assert repository.path == "owner/repo"
-
-
-def test_canonical_remote_repository_refuses_a_non_github_url(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(checkout, "remote_url", lambda remote: "https://example.com/owner/repo")
-
-    with pytest.raises(ClaimError, match="does not name a GitHub repository"):
-        issue_claim._canonical_remote_repository("origin")
+    assert location == checkout.RemoteLocation(github.GITHUB_HOST, "owner/repo")
 
 
-def test_refuse_canonical_remote_mismatch_allows_a_matching_target(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(checkout, "remote_url", lambda remote: "git@github.com:owner/repo.git")
-
-    issue_claim._refuse_canonical_remote_mismatch(
-        forge.RepositoryId(github.GITHUB_HOST, ("owner",), "repo"), "origin"
+def test_refuse_unsupported_forge_host_allows_github() -> None:
+    issue_claim._refuse_unsupported_forge_host(
+        checkout.RemoteLocation(github.GITHUB_HOST, "owner/repo")
     )
 
 
-def test_refuse_canonical_remote_mismatch_names_both_repositories(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(checkout, "remote_url", lambda remote: "git@github.com:owner/repo.git")
+def test_refuse_unsupported_forge_host_refuses_another_host() -> None:
+    """No forge adapter but GitHub's exists yet (#230 slice 2) -- a forge
+    command against any other host refuses by its own name (issue #245),
+    never with GitHub's "does not name a GitHub repository" text."""
+    location = checkout.RemoteLocation("gitlab.com", "o/r")
+
+    with pytest.raises(ClaimUnavailableError, match=r"no forge adapter for host gitlab\.com"):
+        issue_claim._refuse_unsupported_forge_host(location)
+
+
+def test_refuse_canonical_remote_mismatch_allows_a_matching_target() -> None:
+    issue_claim._refuse_canonical_remote_mismatch(
+        forge.RepositoryId(github.GITHUB_HOST, ("owner",), "repo"),
+        checkout.RemoteLocation(github.GITHUB_HOST, "owner/repo"),
+    )
+
+
+def test_refuse_canonical_remote_mismatch_names_both_repositories() -> None:
     mismatched = forge.RepositoryId(github.GITHUB_HOST, ("other",), "repo")
+    canonical_remote = checkout.RemoteLocation(github.GITHUB_HOST, "owner/repo")
 
     with pytest.raises(
         ClaimUnavailableError,
         match="forge target other/repo does not match canonical remote owner/repo",
     ):
-        issue_claim._refuse_canonical_remote_mismatch(mismatched, "origin")
+        issue_claim._refuse_canonical_remote_mismatch(mismatched, canonical_remote)
+
+
+def test_resolved_forge_target_refuses_before_asking_gh_on_a_non_github_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_resolved_forge_target` gates on the canonical remote's own host
+    before it ever calls `discover_repository` (issue #245): a `gh` call
+    here would fail the test outright."""
+    monkeypatch.setattr(checkout, "remote_url", lambda remote: "file:///srv/git/repo.git")
+
+    def unused(*_args: object, **_kwargs: object) -> forge.RepositoryId:
+        pytest.fail("a non-GitHub canonical remote must refuse before discover_repository runs")
+
+    monkeypatch.setattr(github, "discover_repository", unused)
+
+    with pytest.raises(ClaimUnavailableError, match="no forge adapter for host file"):
+        issue_claim._resolved_forge_target(None, "origin")
+
+
+def test_resolved_forge_target_checks_erwartung_6_against_a_github_remote(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(checkout, "remote_url", lambda remote: "git@github.com:owner/repo.git")
+    monkeypatch.setattr(
+        github,
+        "discover_repository",
+        lambda repo, remote_url: forge.RepositoryId(github.GITHUB_HOST, ("owner",), "repo"),
+    )
+
+    target = issue_claim._resolved_forge_target(None, "origin")
+
+    assert target == forge.RepositoryId(github.GITHUB_HOST, ("owner",), "repo")
 
 
 def test_merged_pull_request_history_warns_when_it_reaches_the_result_cap(
@@ -6738,7 +6776,7 @@ def test_missing_gh_repository_resolution_is_a_controlled_error(
     monkeypatch.setattr(subprocess, "run", missing)
 
     with pytest.raises(ClaimError, match="gh is required"):
-        github.discover_repository(None, remote_url=_unreachable_remote_url)
+        github.discover_repository(None, remote_url=_non_github_remote_url)
 
 
 def test_repository_resolution_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -6748,7 +6786,7 @@ def test_repository_resolution_times_out(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr(subprocess, "run", timed_out)
 
     with pytest.raises(ClaimError, match="gh timed out while resolving the repository"):
-        github.discover_repository(None, remote_url=_unreachable_remote_url)
+        github.discover_repository(None, remote_url=_non_github_remote_url)
 
 
 def test_repository_resolution_refuses_when_no_remote_matches(
@@ -6785,22 +6823,21 @@ def test_cli_version_exits_before_requiring_a_command(
         "git@github.com:owner/repository.git",
     ],
 )
-def test_repository_falls_back_to_standard_github_remote(
+def test_repository_resolves_from_a_standard_github_remote_without_asking_gh(
     monkeypatch: pytest.MonkeyPatch, remote: str
 ) -> None:
-    calls: list[list[str]] = []
+    """The git remote is `discover_repository`'s first read (issue #245): a
+    remote that already names a GitHub repository resolves from it alone,
+    with `gh` never invoked at all."""
 
-    def failed_gh(*arguments, **kwargs):
-        command = arguments[0]
-        calls.append(command)
-        return subprocess.CompletedProcess(command, 1, b"", b"not a gh repo")
+    def unused(*args, **kwargs):
+        pytest.fail("a matching GitHub remote must resolve without ever asking gh")
 
-    monkeypatch.setattr(subprocess, "run", failed_gh)
+    monkeypatch.setattr(subprocess, "run", unused)
 
     resolved = github.discover_repository(None, remote_url=lambda: remote)
 
     assert resolved == forge.RepositoryId(github.GITHUB_HOST, ("owner",), "repository")
-    assert calls == [["gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]]
 
 
 def test_bounded_command_stops_before_unbounded_output(
@@ -12673,19 +12710,21 @@ def test_protect_claim_error_from_write_path_denies_json_without_error_prefix(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """A `ClaimError` raised before the store is ever reached (here, resolving
-    the forge target) denies with its own bare text -- only a failure inside
-    `store.fetch_state` itself gets the 'cannot reach refs/aco/state' wrapping
-    (see the dedicated store-refusal tests below)."""
+    """A `ClaimError` raised before the store is ever reached (here, reading
+    the repository's board configuration -- `protect` is forge-free, issue
+    #245, so it never resolves a forge target at all) denies with its own
+    bare text -- only a failure inside `store.fetch_state` itself gets the
+    'cannot reach refs/aco/state' wrapping (see the dedicated store-refusal
+    tests below)."""
     _isolate_protect_home(monkeypatch, tmp_path)
     work = tmp_path / "work"
     _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
     _patch_protect_git(monkeypatch, work)
 
-    def failed(*_args: object, **_kwargs: object) -> forge.RepositoryId:
+    def failed(*_args: object, **_kwargs: object) -> board.BoardConfig:
         raise ClaimError("adapter failed")
 
-    monkeypatch.setattr(github, "discover_repository", failed)
+    monkeypatch.setattr(board, "load_config", failed)
 
     assert (
         _protect_main(
@@ -12710,10 +12749,10 @@ def test_protect_non_claim_error_from_write_path_denies_json_without_traceback(
     _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
     _patch_protect_git(monkeypatch, work)
 
-    def crashed(*_args: object, **_kwargs: object) -> forge.RepositoryId:
+    def crashed(*_args: object, **_kwargs: object) -> board.BoardConfig:
         raise RuntimeError("write path crashed")
 
-    monkeypatch.setattr(github, "discover_repository", crashed)
+    monkeypatch.setattr(board, "load_config", crashed)
 
     assert (
         _protect_main(
@@ -15036,7 +15075,32 @@ def test_cli_bootstrap_takes_no_ledger_argument() -> None:
         parser.parse_args(["bootstrap", "--ledger", "5"])
 
 
-def test_cli_bootstrap_refuses_canonical_remote_mismatch(
+def test_cli_bootstrap_ignores_repo_and_a_non_github_remote(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`bootstrap` is forge-free (issue #245): it never resolves a forge
+    target, so `--repo` and a canonical remote naming a different, even a
+    non-GitHub, repository are no error for it -- only `status`, `protect`,
+    and a lane `claim`/`rescope`/`release` share that guarantee too; an
+    issue `claim` or `board` still checks Erwartung 6."""
+    monkeypatch.setattr(checkout, "_git_output", lambda _arguments: "/repo")
+    monkeypatch.setattr(checkout, "remote_url", lambda remote: "git@gitlab.com:other/repo.git")
+    monkeypatch.setattr(store, "bootstrap", lambda *, worktree, remote: BASE)
+
+    def unused(*_args: object, **_kwargs: object) -> forge.RepositoryId:
+        pytest.fail("bootstrap must never resolve a forge target")
+
+    monkeypatch.setattr(github, "discover_repository", unused)
+
+    status = issue_claim.main(["--repo", "example/agent-claim", "bootstrap"])
+
+    captured = capsys.readouterr()
+    assert status == 0
+    assert captured.err == ""
+    assert captured.out == f"{BASE}\n"
+
+
+def test_cli_bootstrap_surfaces_a_store_failure_without_inventing_json(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """`bootstrap`'s parsed namespace has no `json` attribute at all (issue
@@ -15044,19 +15108,18 @@ def test_cli_bootstrap_refuses_canonical_remote_mismatch(
     than inventing a default that would make `bootstrap` emit JSON it never
     offered -- stdout stays empty, exactly as before this command grew a
     `--json`-aware sink."""
-    monkeypatch.setattr(github, "GitHubForge", lambda repository: FakeForge())
     monkeypatch.setattr(checkout, "_git_output", lambda _arguments: "/repo")
-    _patch_store_write(monkeypatch)
-    monkeypatch.setattr(checkout, "remote_url", lambda remote: "git@github.com:other/repo.git")
 
-    status = issue_claim.main(["--repo", "example/agent-claim", "bootstrap"])
+    def failing_bootstrap(*, worktree: Path, remote: str) -> str:
+        raise ClaimError("cannot reach refs/aco/state: auth or transport failure")
+
+    monkeypatch.setattr(store, "bootstrap", failing_bootstrap)
+
+    status = issue_claim.main(["bootstrap"])
 
     captured = capsys.readouterr()
     assert status == 2
-    assert (
-        "forge target example/agent-claim does not match canonical remote other/repo; "
-        "run aco from that repository's checkout"
-    ) in captured.err
+    assert "cannot reach refs/aco/state: auth or transport failure" in captured.err
     assert "--ledger" not in captured.err
     assert captured.out == ""
 
@@ -15118,3 +15181,207 @@ def test_protect_missing_state_ref_denies_cannot_reach(
         "decision": "deny",
         "reason": f"cannot reach {store.STATE_REF}: {protocol.MISSING_STATE_REF}",
     }
+
+
+# Lazy forge (issue #245): a forge-free command never resolves a repository,
+# reads a remote's own URL, or calls `gh` -- proven here against a bare
+# `file://` canonical remote (the shape a repository with no forge adapter at
+# all still uses for its state ref) with `discover_repository`/`GitHubForge`
+# and `checkout.remote_url` all forbidden outright, never merely absent.
+
+
+def _forbid_remote_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    def unused(remote: str) -> str:
+        pytest.fail("a forge-free command must never read a remote's own URL")
+
+    monkeypatch.setattr(checkout, "remote_url", unused)
+
+
+def _forbid_forge_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
+    _forbid_github_construction(monkeypatch)
+    _forbid_remote_url(monkeypatch)
+
+
+def test_cli_status_is_forge_free_against_a_non_github_remote(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _patch_status_store(monkeypatch)
+    _forbid_forge_resolution(monkeypatch)
+
+    assert issue_claim.main(["status"]) == 0
+    assert capsys.readouterr().out == "UNCLAIMED repository\n"
+
+
+def test_protect_allow_is_forge_free_against_a_non_github_remote(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _, work = _isolate_protect_home(monkeypatch, tmp_path)
+    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    _patch_protect_git(monkeypatch, work)
+    _patch_protect_claim(monkeypatch)
+    _forbid_forge_resolution(monkeypatch)
+
+    assert (
+        _protect_main(
+            monkeypatch,
+            {"toolName": "write", "toolInput": {"path": "src/widget.py"}},
+        )
+        == 0
+    )
+    _assert_protect_decision(capsys, decision="allow")
+
+
+def test_protect_deny_is_forge_free_against_a_non_github_remote(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _, work = _isolate_protect_home(monkeypatch, tmp_path)
+    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    _patch_protect_git(monkeypatch, work)
+    _patch_protect_claim(monkeypatch, agent="Codex Sol")
+    _forbid_forge_resolution(monkeypatch)
+
+    assert (
+        _protect_main(
+            monkeypatch,
+            {"toolName": "write", "toolInput": {"path": "src/widget.py"}},
+        )
+        == 2
+    )
+    _assert_protect_decision(capsys, decision="deny", reason="claim first")
+
+
+def test_cli_lane_claim_rescope_and_release_are_forge_free_against_a_non_github_remote(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A lane `claim`/`rescope`/`release` never resolves a forge target
+    (issue #245): the round trip below runs entirely against a `file://`
+    canonical remote with the forge and the remote's own URL both forbidden,
+    and still claims, rescopes, and releases."""
+    _set_agent_identity_env(monkeypatch, {"ACO_AGENT": "Codex Sol"})
+    monkeypatch.setattr(
+        checkout,
+        "versioned_paths",
+        lambda: ("LICENSE", "README.md", "pyproject.toml", "src/agent_coordination/__init__.py"),
+    )
+    monkeypatch.setattr(issue_claim, "datetime", FixedDateTime)
+    monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
+    monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+    git_values = {
+        ("branch", "--show-current"): "docs/lane-cleanup",
+        ("rev-parse", "--show-toplevel"): "/repo",
+        ("rev-parse", "HEAD"): BASE,
+        ("rev-parse", "--git-dir"): "/repo/.git/worktrees/lane-cleanup",
+        ("rev-parse", "--git-common-dir"): "/repo/.git",
+        ("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"): "refs/remotes/origin/main",
+    }
+    monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
+    _forbid_forge_resolution(monkeypatch)
+
+    claimed = issue_claim.main(
+        [
+            "claim",
+            "--role",
+            "builder",
+            "--base",
+            BASE,
+            "--branch",
+            "docs/lane-cleanup",
+            "--scope",
+            "docs",
+            "--claim-id",
+            "cli-lane-claim",
+        ]
+    )
+    assert claimed == 0
+    capsys.readouterr()
+
+    rescoped = issue_claim.main(["rescope", "--add", "README.md"])
+    assert rescoped == 0
+    lane_key = protocol.claim_key(protocol.LaneIdentity(), "docs/lane-cleanup")
+    assert store.fetch_state(worktree=Path("."), remote="origin").claims[lane_key].scope == (
+        "docs",
+        "README.md",
+    )
+    capsys.readouterr()
+
+    released = issue_claim.main(["release", "--abandoned", "stopped"])
+    assert released == 0
+    assert store.fetch_state(worktree=Path("."), remote="origin").claims == {}
+
+
+def test_cli_board_refuses_a_non_github_canonical_remote_by_host(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`board` is a forge command (issue #245): a canonical remote on any
+    host but GitHub refuses by that host's own name, before ever calling
+    `discover_repository`/`gh` -- never the store-blind path a forge-free
+    command like `status` takes for the same remote, and never GitHub's own
+    "does not name a GitHub repository" text."""
+    monkeypatch.setattr(checkout, "remote_url", lambda remote: "file:///srv/git/agent-claim.git")
+
+    def unused(*_args: object, **_kwargs: object) -> forge.RepositoryId:
+        pytest.fail("board must refuse the host before ever calling discover_repository")
+
+    monkeypatch.setattr(github, "discover_repository", unused)
+
+    status = issue_claim.main(["board"])
+
+    captured = capsys.readouterr()
+    assert status == 2
+    assert captured.err == "ERROR: no forge adapter for host file\n"
+
+
+@pytest.mark.parametrize(
+    ("url", "location"),
+    [
+        pytest.param(
+            "git@github.com:owner/repo.git",
+            checkout.RemoteLocation("github.com", "owner/repo"),
+            id="ssh-scp",
+        ),
+        pytest.param(
+            "ssh://git@github.com/owner/repo.git",
+            checkout.RemoteLocation("github.com", "owner/repo"),
+            id="ssh-url",
+        ),
+        pytest.param(
+            "ssh://git@github.com:2222/owner/repo",
+            checkout.RemoteLocation("github.com", "owner/repo"),
+            id="ssh-url-with-port",
+        ),
+        pytest.param(
+            "https://github.com/owner/repo.git",
+            checkout.RemoteLocation("github.com", "owner/repo"),
+            id="https",
+        ),
+        pytest.param(
+            "https://github.com/owner/repo",
+            checkout.RemoteLocation("github.com", "owner/repo"),
+            id="https-no-suffix",
+        ),
+        pytest.param(
+            "file:///srv/git/repo.git",
+            checkout.RemoteLocation("file", "/srv/git/repo"),
+            id="file",
+        ),
+        pytest.param(
+            "file:///srv/git/repo",
+            checkout.RemoteLocation("file", "/srv/git/repo"),
+            id="file-no-suffix",
+        ),
+    ],
+)
+def test_parse_remote_location_normalizes_every_remote_shape(
+    url: str, location: checkout.RemoteLocation
+) -> None:
+    assert checkout.parse_remote_location(url) == location
+
+
+def test_parse_remote_location_refuses_an_unrecognized_shape() -> None:
+    with pytest.raises(ClaimError, match="names no recognized host"):
+        checkout.parse_remote_location("not-a-remote-url")
