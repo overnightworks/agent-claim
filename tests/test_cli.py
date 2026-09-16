@@ -1528,6 +1528,39 @@ def test_claim_parser_description_names_what_refuses_first() -> None:
     assert "repository-relative" in issue_claim.CLAIM_DESCRIPTION
 
 
+def _all_parser_help_texts(parser: argparse.ArgumentParser) -> tuple[str, ...]:
+    texts = [parser.format_help()]
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            for sub_parser in action.choices.values():
+                texts.extend(_all_parser_help_texts(sub_parser))
+    return tuple(texts)
+
+
+def test_readme_and_help_texts_carry_no_stale_state_ref_read_only_sentence() -> None:
+    """Issue #292 proof 5: state-ref's write commands (`cut`/`rule`/`ask`/
+    `item new`/`item edit`/`item close`, issues #283/#285/#287/#289/#291)
+    are real; no README line and no `--help` text still calls the storage
+    read-only, or names `item new`/`item edit`/`item close` as "not yet"
+    built or "slice 4" future work. `state-ref`'s own still-true residual --
+    a merged release's landing verification (#230 slice 6) -- keeps its own
+    "not yet" sentence; this proof is about the write path itself, not that
+    named residual."""
+    readme = (Path(__file__).parent.parent / "README.md").read_text(encoding="utf-8")
+    texts = (readme, *_all_parser_help_texts(issue_claim._parser()))
+    for text in texts:
+        for line in text.splitlines():
+            lowered = line.lower()
+            if "state-ref" not in lowered and "storage" not in lowered:
+                continue
+            assert "read-only" not in lowered
+            assert "slice 4" not in lowered
+            if "not yet" in lowered:
+                assert "item new" not in lowered
+                assert "item edit" not in lowered
+                assert "item close" not in lowered
+
+
 def test_claim_help_names_the_out_of_order_refusal(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -3387,7 +3420,7 @@ def test_next_prints_a_cut_command_that_cut_accepts_for_every_qualifying_contain
         action = board.next_action(isolated)
         assert isinstance(action, board.CutSliceAction)
 
-        command_line = issue_claim._next_action_lines(action)[1]
+        command_line = issue_claim._next_action_lines(action, board.Storage.GITHUB)[1]
         cut_arguments = shlex.split(command_line.removeprefix("Next: aco "))
         client = _configured_board_client(
             monkeypatch, tmp_path, open_issues=(containers_by_number[item.number],)
@@ -4024,9 +4057,9 @@ def test_status_scope_index_never_rescans_scope_pairs(
 
     monkeypatch.setattr(protocol, "claims_conflict", scope_pair_scan)
 
-    assert _status(claims, None, ages) == 0
+    assert _status(claims, None, ages, board.Storage.GITHUB) == 0
     assert capsys.readouterr().out.count("CLAIMED") == 50
-    assert _status(claims, 100, ages) == 0
+    assert _status(claims, 100, ages, board.Storage.GITHUB) == 0
     assert capsys.readouterr().out.count("CLAIMED") == 1
 
 
@@ -4038,7 +4071,7 @@ def test_status_reports_repository_scope_overlaps_as_notes(
     opened_at = datetime(2026, 8, 21, tzinfo=UTC)
     ages: dict[str, datetime] = {first.claim_id: opened_at, second.claim_id: opened_at}
 
-    exit_code = _status((first, second), None, ages)
+    exit_code = _status((first, second), None, ages, board.Storage.GITHUB)
 
     assert exit_code == 0
     rendered = capsys.readouterr().out
@@ -4046,7 +4079,7 @@ def test_status_reports_repository_scope_overlaps_as_notes(
     assert "CONFLICT" not in rendered
     assert "overlaps issue #73 (claim-b)" in rendered
     assert "overlaps issue #72 (cli-claim)" in rendered
-    assert _status((first, second), 72, ages) == 0
+    assert _status((first, second), 72, ages, board.Storage.GITHUB) == 0
     issue_rendered = capsys.readouterr().out
     assert issue_rendered.count("CLAIMED") == 2
     assert "overlaps issue #73 (claim-b)" in issue_rendered
@@ -4060,7 +4093,7 @@ def test_status_notes_a_scope_that_is_claimed_after_its_descendant(
     opened_at = datetime(2026, 8, 21, tzinfo=UTC)
     ages: dict[str, datetime] = {descendant.claim_id: opened_at, parent.claim_id: opened_at}
 
-    assert _status((descendant, parent), None, ages) == 0
+    assert _status((descendant, parent), None, ages, board.Storage.GITHUB) == 0
     rendered = capsys.readouterr().out
     assert rendered.count("CLAIMED") == 2
     assert "CONFLICT" not in rendered
@@ -5544,7 +5577,7 @@ def test_cli_rescope_requires_a_non_empty_current_branch(
 def test_status_direct_empty_claims_prints_unclaimed_repository_without_ledger(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    assert _status((), None, {}) == 0
+    assert _status((), None, {}, board.Storage.GITHUB) == 0
     assert capsys.readouterr().out == "UNCLAIMED repository\n"
 
 
@@ -8382,7 +8415,7 @@ def test_identity_conflict_still_marks_status_conflict(
     opened_at = datetime(2026, 8, 21, tzinfo=UTC)
     ages: dict[str, datetime] = {first.claim_id: opened_at, second.claim_id: opened_at}
 
-    assert _status((first, second), None, ages) == 2
+    assert _status((first, second), None, ages, board.Storage.GITHUB) == 2
     rendered = capsys.readouterr().out
     assert rendered.count("CONFLICT") == 2
 

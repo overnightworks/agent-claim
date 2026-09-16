@@ -725,7 +725,7 @@ def _rulings_lines(
 ) -> tuple[str, ...]:
     bodies = {issue.number: issue.body for issue in client.list_open_board_issues()}
     rows = issue_claim._rulings_rows(built, bodies, storage=storage)
-    return tuple(issue_claim._rulings_row_text(row) for row in rows)
+    return tuple(issue_claim._rulings_row_text(row, storage) for row in rows)
 
 
 _EXPECTED_BOARD = _projected(_github_fake(), storage=board.Storage.GITHUB)
@@ -734,6 +734,17 @@ EXPECTED_NEXT_ACTION = board.next_action(_EXPECTED_BOARD)
 EXPECTED_RULINGS_LINES = _rulings_lines(
     _github_fake(), _EXPECTED_BOARD, storage=board.Storage.GITHUB
 )
+# `rulings`' own header line names the item under the pin (issue #292):
+# `aco-xxxxxx` under state-ref, `#n` unchanged under github -- the same
+# shared scenario re-rendered under each storage, so the only sanctioned
+# difference is that one id-shaped prefix, never a second hand-built
+# expectation.
+EXPECTED_RULINGS_LINES_BY_STORAGE = {
+    board.Storage.GITHUB: EXPECTED_RULINGS_LINES,
+    board.Storage.STATE_REF: _rulings_lines(
+        _github_fake(), _EXPECTED_BOARD, storage=board.Storage.STATE_REF
+    ),
+}
 # `state-ref` renders the identical board plus one honest line (issue #248,
 # Sonnet review blocking 3): the same content as `_EXPECTED_BOARD`, only
 # `landings_derivable` differs, so `replace` -- never a second hand-built
@@ -809,7 +820,10 @@ class TestTwoAdapterParity:
 
         assert board.render(built) == EXPECTED_BOARD_TEXT_BY_STORAGE[storage]
         assert board.next_action(built) == EXPECTED_NEXT_ACTION
-        assert _rulings_lines(client, built, storage=storage) == EXPECTED_RULINGS_LINES
+        assert (
+            _rulings_lines(client, built, storage=storage)
+            == EXPECTED_RULINGS_LINES_BY_STORAGE[storage]
+        )
 
     @pytest.mark.parametrize(
         ("client_kind", "storage"),
@@ -1166,6 +1180,67 @@ class TestCliStateRefForge:
         record = _decoded_record(stored, RULABLE_ID)
         assert record.title == "Rulable"
         assert record.updated_at.startswith(datetime.now(UTC).date().isoformat())
+
+    def test_next_status_and_rulings_print_state_ref_ids_where_github_prints_hash_n(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+    ) -> None:
+        """Issue #292 proofs 1-2: `next`'s own pick, `rulings`' row header,
+        and `status`'s claimed-issue line print `aco-xxxxxx` under `storage
+        = "state-ref"` -- the same id `_parse_item_ref` already accepts
+        right back -- never `#n`. `board`'s own plain-text table
+        (`board.render`, owned by `board.py`) is not a file this lane
+        touches; it still prints `#n` under every storage (named gap,
+        issue #292 review)."""
+        self._live_state_ref_checkout(
+            monkeypatch, tmp_path, bare_remote, worktree, _rulable_item_files()
+        )
+
+        next_status = issue_claim.main(["next"])
+        assert next_status == 0
+        next_out = capsys.readouterr().out
+        assert RULABLE_ID in next_out
+        assert f"#{RULABLE_NUMBER}" not in next_out
+
+        rulings_status = issue_claim.main(["rulings"])
+        assert rulings_status == 0
+        rulings_out = capsys.readouterr().out
+        assert rulings_out.splitlines()[0].startswith(f"{RULABLE_ID} ")
+        assert f"#{RULABLE_NUMBER}" not in rulings_out
+
+        monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
+        monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+        monkeypatch.setattr(checkout, "versioned_paths", lambda: ("README",))
+        claimed = issue_claim.main(
+            [
+                "claim",
+                str(RULABLE_NUMBER),
+                "--agent",
+                "Codex Sol",
+                "--role",
+                "builder",
+                "--base",
+                "a" * 40,
+                "--branch",
+                f"codex/issue-{RULABLE_NUMBER}-rulable",
+                "--scope",
+                "README",
+                "--claim-id",
+                "state-ref-claim",
+            ]
+        )
+        assert claimed == 0
+        capsys.readouterr()
+
+        status = issue_claim.main(["status", str(RULABLE_NUMBER)])
+        assert status == 0
+        status_out = capsys.readouterr().out
+        assert f"CLAIMED issue {RULABLE_ID}" in status_out
+        assert f"issue #{RULABLE_NUMBER}" not in status_out
 
     def test_ask_appends_a_state_ref_item_and_a_fresh_process_reads_it_open(
         self,
@@ -2024,7 +2099,10 @@ class TestCliStateRefForge:
 
         assert issue_claim.main(["next"]) == 0
         blocked_out = capsys.readouterr().out
-        assert f"#{EDIT_TARGET_NUMBER}: blocked by #{EDIT_BLOCKER_NUMBER}" in blocked_out
+        # The item's own prefix is the state-ref id (issue #292); the
+        # blocker it names inside the reason stays board.py's own `#n`
+        # (`open_blocker_label`, out of this lane's scope).
+        assert f"{EDIT_TARGET_ID}: blocked by #{EDIT_BLOCKER_NUMBER}" in blocked_out
 
         freed_body = _state_ref_body(
             _EDIT_TARGET_PROJECTION, _record(title="Target", state="open", kind="task")
@@ -2035,7 +2113,7 @@ class TestCliStateRefForge:
 
         assert issue_claim.main(["next"]) == 0
         freed_out = capsys.readouterr().out
-        assert f"#{EDIT_TARGET_NUMBER}: blocked by" not in freed_out
+        assert f"{EDIT_TARGET_ID}: blocked by" not in freed_out
 
     def test_item_edit_two_processes_from_the_same_snapshot_the_second_refuses(
         self,
@@ -2126,7 +2204,7 @@ class TestCliStateRefForge:
         assert status == 0
         assert capsys.readouterr().out.splitlines() == [
             f"CLOSED {CLOSE_BLOCKER_ID}",
-            f"freed: #{CLOSE_TARGET_NUMBER}",
+            f"freed: {CLOSE_TARGET_ID}",
         ]
 
         shown = issue_claim.main(["item", "show", str(CLOSE_BLOCKER_NUMBER), "--json"])
@@ -2148,7 +2226,8 @@ class TestCliStateRefForge:
         next_status = issue_claim.main(["next"])
         assert next_status == 0
         next_out = capsys.readouterr().out
-        assert f"#{CLOSE_TARGET_NUMBER}" in next_out
+        assert CLOSE_TARGET_ID in next_out
+        assert f"#{CLOSE_TARGET_NUMBER}" not in next_out
         assert "blocked by" not in next_out
 
     def test_item_close_refuses_a_second_close_with_the_closed_date_and_leaves_the_oid_unchanged(

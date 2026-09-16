@@ -20,12 +20,12 @@ from board_fixtures import (
     proposed_expectation,
 )
 
-from agent_coordination import board, board_html
+from agent_coordination import board, board_html, items
 
 GOLDEN_PATH = Path(__file__).parent / "board_html_golden.html"
 
 
-def _fixture_page() -> board_html.BoardPage:
+def _fixture_page(*, storage: board.Storage = board.Storage.GITHUB) -> board_html.BoardPage:
     """A container (#100) with two children -- one closed, one open and
     blocked (#101, blocked by #50) -- one open `[[expectation]]` line on
     #101, one active claim on a standalone item (#102), one landing #103
@@ -105,7 +105,7 @@ def _fixture_page() -> board_html.BoardPage:
         claimants={102: board_html.LaneClaimant("Codex Sol", "builder", "codex/issue-102-claims")},
         recent_merged_pull_requests=recent_merged_pull_requests,
         state_tip="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-        storage=board.Storage.GITHUB,
+        storage=storage,
     )
     return board_html.build_page(projected, sources)
 
@@ -125,6 +125,24 @@ def _empty_page(*, landings_derivable: bool = True) -> board_html.BoardPage:
 def test_render_matches_the_golden_page_byte_for_byte() -> None:
     rendered = board_html.render(_fixture_page())
     assert rendered == GOLDEN_PATH.read_text(encoding="utf-8")
+
+
+def test_render_labels_cards_topics_and_lanes_with_state_ref_ids() -> None:
+    """Issue #292 proof 3: under `storage = "state-ref"`, `board --html`
+    shows `aco-xxxxxx` -- never `#n` -- in every card, topic, and lane
+    heading; the `github` golden page above stays byte-identical, so only
+    this storage's own rendering differs."""
+    rendered = board_html.render(_fixture_page(storage=board.Storage.STATE_REF))
+    open_child_id = items.format_item_id(101)  # the card and its topic part
+    container_id = items.format_item_id(100)  # the container topic
+    claimed_item_id = items.format_item_id(102)  # the lane
+
+    assert f"<h3>{open_child_id} Zugang klären</h3>" in rendered
+    assert f"<strong>{container_id} Sammelitem</strong>" in rendered
+    assert f"<span>{open_child_id} Zugang klären (blocked by #50)</span>" in rendered
+    assert f"<h3>{claimed_item_id} Laufende Lane</h3>" in rendered
+    for number in (100, 101, 102):
+        assert f">#{number} " not in rendered
 
 
 def test_an_empty_board_renders_all_four_headings_with_nichts() -> None:

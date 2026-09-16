@@ -88,11 +88,13 @@ def _resolved_identity(issue: int | None, branch: str) -> protocol.ClaimIdentity
     return protocol.LaneIdentity()
 
 
-def _claim_subject(claim: protocol.ScopedClaim) -> str:
+def _claim_subject(
+    claim: protocol.ScopedClaim, storage: board.Storage = board.Storage.GITHUB
+) -> str:
     return (
         f"lane {claim.branch}"
         if isinstance(claim.identity, protocol.LaneIdentity)
-        else f"issue #{claim.identity.issue}"
+        else f"issue {_item_label(claim.identity.issue, storage)}"
     )
 
 
@@ -295,6 +297,20 @@ def _parse_item_ref(value: str) -> int:
     raise protocol.ClaimUnavailableError(
         f"{value!r} is not an item reference; use aco-xxxxxx, #n, or the bare number n"
     )
+
+
+def _item_label(number: int, storage: board.Storage) -> str:
+    """The one display form of `number` a narrative-output command prints
+    (issue #292): `items.format_item_id`'s `aco-xxxxxx` under `storage =
+    "state-ref"` -- an id `_parse_item_ref` already accepts right back, so
+    what a command prints is what the next command takes -- unchanged `#n`
+    under `storage = "github"`. `board`, `next`, `status`, `brief`,
+    `rulings`, `release`'s `freed:`/`next:` lines, and `item close`'s
+    `freed:` line are this chooser's only callers; a refusal sentence keeps
+    naming `#n` regardless of storage (named residual, issue #292)."""
+    if storage is board.Storage.STATE_REF:
+        return items.format_item_id(number)
+    return f"#{number}"
 
 
 def _add_bootstrap_parser(commands: argparse._SubParsersAction) -> None:
@@ -769,24 +785,37 @@ def _overlap_subjects(
 
 
 def _overlap_note(
-    claims_by_id: Mapping[str, protocol.ActiveClaim], peer_ids: set[str]
+    claims_by_id: Mapping[str, protocol.ActiveClaim], peer_ids: set[str], storage: board.Storage
 ) -> str | None:
     peers = [claims_by_id[claim_id] for claim_id in sorted(peer_ids) if claim_id in claims_by_id]
     if not peers:
         return None
-    return "overlaps " + ", ".join(f"{_claim_subject(claim)} ({claim.claim_id})" for claim in peers)
+    return "overlaps " + ", ".join(
+        f"{_claim_subject(claim, storage)} ({claim.claim_id})" for claim in peers
+    )
+
+
+@dataclass(frozen=True)
+class _ClaimReportContext:
+    """`index` and `storage` together (issue #292): the two facts every
+    claim in one `status` read shares -- bundled so adding `storage`
+    beside the pre-existing `index` never pushes a caller past PLR0913's
+    five-argument ceiling."""
+
+    index: protocol.ClaimConflictIndex
+    storage: board.Storage
 
 
 def _print_claim_status_lines(
     claim: protocol.ActiveClaim,
     claims_by_id: Mapping[str, protocol.ActiveClaim],
-    index: protocol.ClaimConflictIndex,
+    context: _ClaimReportContext,
     opened_at: datetime,
     observed_at: datetime,
 ) -> None:
-    state = "CONFLICT" if claim.claim_id in index.conflict_ids else "CLAIMED"
+    state = "CONFLICT" if claim.claim_id in context.index.conflict_ids else "CLAIMED"
     print(
-        f"{state} {_claim_subject(claim)}: {claim.agent} ({claim.role}) "
+        f"{state} {_claim_subject(claim, context.storage)}: {claim.agent} ({claim.role}) "
         f"base={claim.base} branch={claim.branch} claim={claim.claim_id}"
         f"{_claim_age_suffix(opened_at, observed_at)}"
     )
@@ -796,7 +825,9 @@ def _print_claim_status_lines(
         print(f"  resource {claim.resource.name}={claim.resource.value}")
     if claim.whole_reason is not None:
         print(f"  whole: {claim.whole_reason}")
-    note = _overlap_note(claims_by_id, protocol._overlap_peer_ids(index, claim))
+    note = _overlap_note(
+        claims_by_id, protocol._overlap_peer_ids(context.index, claim), context.storage
+    )
     if note is not None:
         print(f"  {note}")
 
@@ -804,27 +835,29 @@ def _print_claim_status_lines(
 def _print_related_claims(
     claims: tuple[protocol.ActiveClaim, ...],
     related: tuple[protocol.ActiveClaim, ...],
-    index: protocol.ClaimConflictIndex,
+    context: _ClaimReportContext,
     ages: Mapping[str, datetime],
     observed_at: datetime,
 ) -> int:
     claims_by_id: dict[str, protocol.ActiveClaim] = {claim.claim_id: claim for claim in claims}
     for claim in related:
-        _print_claim_status_lines(claim, claims_by_id, index, ages[claim.claim_id], observed_at)
-    return 2 if any(claim.claim_id in index.conflict_ids for claim in related) else 0
+        _print_claim_status_lines(claim, claims_by_id, context, ages[claim.claim_id], observed_at)
+    return 2 if any(claim.claim_id in context.index.conflict_ids for claim in related) else 0
 
 
 def _status(
     claims: tuple[protocol.ActiveClaim, ...],
     issue: int | None,
     ages: Mapping[str, datetime],
+    storage: board.Storage,
     now: datetime | None = None,
 ) -> int:
     observed_at = (now or datetime.now(UTC)).astimezone(UTC)
     related, index = _status_claims(claims, issue)
     if related:
-        return _print_related_claims(claims, related, index, ages, observed_at)
-    subject = "repository" if issue is None else f"issue #{issue}"
+        context = _ClaimReportContext(index, storage)
+        return _print_related_claims(claims, related, context, ages, observed_at)
+    subject = "repository" if issue is None else f"issue {_item_label(issue, storage)}"
     print(f"UNCLAIMED {subject}")
     return 0
 
@@ -874,14 +907,16 @@ def _status_json(
     return 2 if state == "CONFLICT" else 0
 
 
-def _status_path(claims: tuple[protocol.ActiveClaim, ...], path: str) -> None:
+def _status_path(
+    claims: tuple[protocol.ActiveClaim, ...], path: str, storage: board.Storage
+) -> None:
     holders = protocol.claims_holding_path(claims, path)
     if not holders:
         print(f"UNCLAIMED {path}")
         return
     for claim in holders:
         print(
-            f"CLAIMED {path} {_claim_subject(claim)}: {claim.agent} ({claim.role}) "
+            f"CLAIMED {path} {_claim_subject(claim, storage)}: {claim.agent} ({claim.role}) "
             f"claim={claim.claim_id}"
         )
         if claim.whole_reason is not None:
@@ -889,7 +924,7 @@ def _status_path(claims: tuple[protocol.ActiveClaim, ...], path: str) -> None:
     if len(holders) > 1:
         print(
             "overlap: "
-            + ", ".join(f"{_claim_subject(claim)} ({claim.claim_id})" for claim in holders)
+            + ", ".join(f"{_claim_subject(claim, storage)} ({claim.claim_id})" for claim in holders)
         )
 
 
@@ -1066,14 +1101,16 @@ def _release_landing(
     return ReleaseLanding(freed, None if action is None else _next_action_item(action))
 
 
-def _release_freed_line(freed: tuple[int, ...]) -> str:
-    return "freed: " + (", ".join(f"#{number}" for number in freed) if freed else "none")
+def _release_freed_line(freed: tuple[int, ...], storage: board.Storage) -> str:
+    return "freed: " + (
+        ", ".join(_item_label(number, storage) for number in freed) if freed else "none"
+    )
 
 
-def _release_next_line(item: board.BoardItem | None) -> str:
+def _release_next_line(item: board.BoardItem | None, storage: board.Storage) -> str:
     if item is None:
         return "next: none"
-    return f"next: #{item.number} score {item.score}: {item.title}"
+    return f"next: {_item_label(item.number, storage)} score {item.score}: {item.title}"
 
 
 def _merged_pull_request_floor(issues: tuple[board.Issue, ...], now: datetime) -> datetime:
@@ -1328,8 +1365,9 @@ def _rulings_line_text(line: board.ExpectationLine) -> str:
     return f"  {line.index} {state}: {board.expectation_line_summary(line)}"
 
 
-def _rulings_row_text(row: _RulingsRow) -> str:
-    header = f"#{row.item.number} {row.progress.open}/{row.progress.total}: {row.item.title}"
+def _rulings_row_text(row: _RulingsRow, storage: board.Storage) -> str:
+    label = _item_label(row.item.number, storage)
+    header = f"{label} {row.progress.open}/{row.progress.total}: {row.item.title}"
     return "\n".join((header, *(_rulings_line_text(line) for line in row.lines)))
 
 
@@ -1356,7 +1394,7 @@ def _rulings(
     if not rows:
         print("No open expectation lines.")
         return
-    print("\n".join(_rulings_row_text(row) for row in rows))
+    print("\n".join(_rulings_row_text(row, storage) for row in rows))
 
 
 def _ruling_pull_hint(item: board.BoardItem) -> str | None:
@@ -1439,12 +1477,12 @@ def _next_json(
     return 0
 
 
-def _next_action_lines(action: board.NextAction) -> list[str]:
+def _next_action_lines(action: board.NextAction, storage: board.Storage) -> list[str]:
     """The action-specific lines `_next` prints before `SKIPPED`."""
     if isinstance(action, board.WorkItemAction):
         item = action.item
         lines = [
-            f"#{item.number} score {item.score}: {item.title}",
+            f"{_item_label(item.number, storage)} score {item.score}: {item.title}",
             f"Next: {item.next_step}",
             f"Run: {_next_action_command(action)}",
             "<paths> cannot be derived; take the files to claim from the item body.",
@@ -1453,16 +1491,17 @@ def _next_action_lines(action: board.NextAction) -> list[str]:
         if hint is not None:
             lines.append(hint)
         return lines
+    container_label = _item_label(action.container.number, storage)
     if isinstance(action, board.CutSliceAction):
         return [
-            f"cut_slice #{action.container.number}: {action.next_step}",
+            f"cut_slice {container_label}: {action.next_step}",
             f"Next: {_next_action_command(action)}",
         ]
     if action.next_step is not None:
-        return [f"close_container #{action.container.number}: {action.next_step}"]
+        return [f"close_container {container_label}: {action.next_step}"]
     progress = action.container_progress
     return [
-        f"close_container #{action.container.number}: "
+        f"close_container {container_label}: "
         f"{progress.closed}/{progress.total} children closed, no Next work"
     ]
 
@@ -1471,19 +1510,24 @@ def _next(
     action: board.NextAction | None,
     skipped: tuple[board.BoardItem, ...],
     recovery: tuple[board.BoardItem, ...],
+    storage: board.Storage,
 ) -> int:
     """A landed-but-open item is named before anything new is pulled."""
     lines: list[str] = []
     if recovery:
         lines.append("RECOVERY")
         lines.extend(
-            f"#{recovery_item.number}: {board.RECOVERY_STEP}" for recovery_item in recovery
+            f"{_item_label(recovery_item.number, storage)}: {board.RECOVERY_STEP}"
+            for recovery_item in recovery
         )
         lines.append("")
-    lines.extend(_next_action_lines(action) if action is not None else ["No actionable item."])
+    lines.extend(
+        _next_action_lines(action, storage) if action is not None else ["No actionable item."]
+    )
     if skipped:
         skipped_lines = (
-            f"#{skipped_item.number}: {skipped_item.actionable_reason}" for skipped_item in skipped
+            f"{_item_label(skipped_item.number, storage)}: {skipped_item.actionable_reason}"
+            for skipped_item in skipped
         )
         lines.extend(("", "SKIPPED", *skipped_lines))
     print("\n".join(lines))
@@ -2467,7 +2511,10 @@ def _print_item_close_result(
         print(json.dumps({"item": item_id, "number": number, "closed_at": closed_at}))
         return
     print(f"CLOSED {item_id}")
-    print(_release_freed_line(freed))
+    # `item close` only ever runs under `storage = "state-ref"`
+    # (`_cmd_item_close`'s own refusal otherwise), so `freed:`'s own id
+    # chooser is fixed here rather than threaded as a sixth argument.
+    print(_release_freed_line(freed, board.Storage.STATE_REF))
 
 
 def _item_state_text(state: forge.ItemState) -> str:
@@ -3175,14 +3222,16 @@ def _cmd_status(parsed: argparse.Namespace) -> int:
         # (README "status --path").
         if parsed.json:
             return _status_path_json(claims, parsed.path)
-        _status_path(claims, parsed.path)
+        storage = board.load_config(_resolve_toplevel() / board.CONFIG_PATH).storage
+        _status_path(claims, parsed.path, storage)
         return 0
     ages = _claim_ages(worktree, state)
     issue = _optional_issue_number(parsed.issue)
     now = datetime.now(UTC)
     if parsed.json:
         return _status_json(claims, issue, ages, state.tip, now=now)
-    return _status(claims, issue, ages, now=now)
+    storage = board.load_config(_resolve_toplevel() / board.CONFIG_PATH).storage
+    return _status(claims, issue, ages, storage, now=now)
 
 
 def _observed_board(
@@ -3283,15 +3332,16 @@ def _cmd_next(parsed: argparse.Namespace, session: _ReadSession) -> int:
     chosen_container = _next_action_container_number(action)
     skipped = tuple(item for item in _unworkable(projected) if item.number != chosen_container)
     recovery = projected.recovery
-    if action is None:
-        if parsed.json:
-            _next_json(None, skipped, recovery)
-        else:
-            _next(None, skipped, recovery)
-        return 3
     if parsed.json:
+        if action is None:
+            _next_json(None, skipped, recovery)
+            return 3
         return _next_json(action, skipped, recovery)
-    return _next(action, skipped, recovery)
+    storage = board.load_config(_resolve_toplevel() / board.CONFIG_PATH).storage
+    if action is None:
+        _next(None, skipped, recovery, storage)
+        return 3
+    return _next(action, skipped, recovery, storage)
 
 
 def _cmd_rescope(parsed: argparse.Namespace, _session: _WriteSession) -> None:
@@ -3450,8 +3500,11 @@ def _cmd_release(parsed: argparse.Namespace, session: _WriteSession) -> None:
     landing, hint = (
         (None, None) if client is None else _landing_report(client, identity, worktree, new_state)
     )
+    storage = board.load_config(_resolve_toplevel() / board.CONFIG_PATH).storage
     _print_release_result(
-        ReleaseReport(selected, parsed.agent, resolved_role, outcome, client, landing, hint),
+        ReleaseReport(
+            selected, parsed.agent, resolved_role, outcome, client, landing, hint, storage
+        ),
         as_json=parsed.json,
     )
 
@@ -3499,6 +3552,7 @@ class ReleaseReport:
     client: forge.ForgeReader | None
     landing: ReleaseLanding | None
     hint: str | None
+    storage: board.Storage
 
 
 def _print_release_result(report: ReleaseReport, *, as_json: bool) -> None:
@@ -3514,8 +3568,8 @@ def _print_release_result(report: ReleaseReport, *, as_json: bool) -> None:
             print(hint)
         else:
             assert landing is not None
-            print(_release_freed_line(landing.freed))
-            print(_release_next_line(landing.next_item))
+            print(_release_freed_line(landing.freed, report.storage))
+            print(_release_next_line(landing.next_item, report.storage))
 
 
 def _cut_target(client: forge.ForgeWriter, number: int) -> board.Issue:

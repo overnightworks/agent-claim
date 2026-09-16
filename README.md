@@ -665,6 +665,25 @@ in. The check does not limit body size or inspect references in `next`, and
 `release` stays available even when the body's contract has since become
 invalid.
 
+### What is still different under `state-ref`
+
+Under `storage = "state-ref"`, `next`, `status`, `rulings`, `release`'s
+`freed:`/`next:` lines, `item close`'s `freed:` line, and `board --html`'s
+cards/topics/lanes print an item as `aco-xxxxxx` (`items.format_item_id`)
+instead of GitHub's `#n` — the same id `item new` mints and every item-taking
+command already accepts back (`aco-xxxxxx`, `#n`, or the bare number).
+`board`'s own plain-text table still prints `#n` under every storage
+(`board.render`, not yet converted). What stays `#n` even where that chooser
+applies (named residuals, issue #292): the number in a refusal sentence
+(`protocol`/`cli`) — it names the number the caller typed, not a display
+choice; the branch and worktree naming scheme (`issue-<n>-<slug>`), which the
+coordination contract itself keys by number — renaming it is a rule change
+under the Rule-Gate; `next`'s own tie-break on the numeric id, stable but
+arbitrary, judged again only after a week of real use; and a merged
+release's own board read, which `state-ref` cannot perform yet (#230 slice
+6) — land offline with `item close` plus `release --abandoned "landed as
+<sha>"` until then.
+
 ## The work-item body contract
 
 `board`, `next`, issue-mode `claim`, `cut`, `rulings`, and the parent-body
