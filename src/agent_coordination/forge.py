@@ -52,7 +52,8 @@ class ForgePartialChildCreationError(ForgeError):
     Not atomic across `create_child`'s own two writes (the issue and its
     sub-issue relation), nor across `create_child` and the later block
     rewrite -- but a repeat is safe (#260): re-run the same cut and it
-    adopts `child`, already open under `parent`, instead of risking a
+    adopts `child` -- an orphan open issue with no recorded parent, exactly
+    what a failed relation write leaves behind -- instead of risking a
     second one, finishing whichever `step` failed. Raised by the GitHub
     adapter when its own relation write fails, and reused by
     `cli._cmd_cut` when the later block rewrite fails -- one type, so both
@@ -139,7 +140,6 @@ class ForgeOperation(StrEnum):
     LIST_BOARD_DEPENDENCIES = "list_board_dependencies"
     LIST_OPEN_BOARD_PULL_REQUESTS = "list_open_board_pull_requests"
     LIST_RECENT_MERGED_BOARD_PULL_REQUESTS = "list_recent_merged_board_pull_requests"
-    CREATE_ISSUE = "create_issue"
     LINK_CHILD = "link_child"
     CREATE_CHILD = "create_child"
     UPDATE_ITEM_BODY = "update_item_body"
@@ -212,8 +212,6 @@ class ForgeReader(Protocol):
 
 class ForgeWriter(ForgeReader, Protocol):
     """`ForgeReader` plus every operation that mutates forge state."""
-
-    def create_issue(self, *, title: str, body: str, kind: board.ItemKind) -> int: ...
 
     def link_child(self, parent: int, child: int) -> None: ...
 

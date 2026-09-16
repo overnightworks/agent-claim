@@ -217,15 +217,16 @@ class FakeForge:
     def capability(self, operation: forge.ForgeOperation) -> forge.Capability:
         return self.capability_overrides.get(operation, github.GITHUB_CAPABILITIES[operation])
 
-    def create_issue(self, *, title: str, body: str, kind: board.ItemKind) -> int:
-        """This fake's mirror of `GitHubForge.create_issue`: a fresh issue
+    def _create_issue(self, *, title: str, body: str, kind: board.ItemKind) -> int:
+        """This fake's mirror of `GitHubForge._create_issue`: a fresh issue
         with no recorded parent, immediately visible to
         `list_open_board_issues` -- the orphan shape a failed `link_child`
-        leaves behind (#260)."""
+        leaves behind (#260). Carries `kind` (#260 Sonnet finding), since a
+        repeat `cut`'s orphan scan refuses to adopt anything but a `TASK`."""
         number = self.next_created_child_number
         self.next_created_child_number += 1
         self.created_issues.append((title, body, kind))
-        self.board_issues = (*self.board_issues, board_issue(number, title, body))
+        self.board_issues = (*self.board_issues, board_issue(number, title, body, kind=kind))
         return number
 
     def link_child(self, parent: int, child: int) -> None:
@@ -252,7 +253,7 @@ class FakeForge:
         (#260), so a relation failure leaves the same real orphan behind
         for a repeat `cut` to find."""
         self.created_children.append((parent, title, body, kind))
-        number = self.create_issue(title=title, body=body, kind=kind)
+        number = self._create_issue(title=title, body=body, kind=kind)
         try:
             self.link_child(parent, number)
         except ClaimError as error:
@@ -324,7 +325,7 @@ class ReaderOnlyForge(FakeForge):
     independent of the `ForgeReader`/`ForgeWriter` annotations (documentation
     only; nothing type-checks in CI)."""
 
-    def create_issue(self, *, title: str, body: str, kind: board.ItemKind) -> int:
+    def _create_issue(self, *, title: str, body: str, kind: board.ItemKind) -> int:
         pytest.fail("a read-only command must never create an issue")
 
     def link_child(self, parent: int, child: int) -> None:
@@ -381,7 +382,7 @@ def test_forge_operation_exhaustiveness_matches_the_declared_reader_and_writer_m
         if not name.startswith("_") and name not in {"repository", "capability", "requests"}
     }
     assert {operation.value for operation in forge.ForgeOperation} == declared_methods
-    assert len(forge.ForgeOperation) == 13
+    assert len(forge.ForgeOperation) == 12
     assert set(github.GITHUB_CAPABILITIES) == set(forge.ForgeOperation)
     assert forge.Capability.UNSUPPORTED not in github.GITHUB_CAPABILITIES.values()
 
@@ -672,7 +673,7 @@ def test_github_adapter_creates_a_child_and_links_it_as_a_sub_issue() -> None:
 def test_github_adapter_fails_loud_on_a_malformed_created_child(payload: str) -> None:
     client = GitHubForge(github._repository_id(REPOSITORY), run=lambda *_a, **_k: payload)
 
-    with pytest.raises(ClaimError, match=r"created.child"):
+    with pytest.raises(ClaimError, match=r"created.issue"):
         client.create_child(parent=79, title="Scheibe 4", body="", kind=board.ItemKind.TASK)
 
 
@@ -696,9 +697,11 @@ def test_github_adapter_names_the_created_child_when_the_relation_post_fails() -
 
 
 def test_github_adapter_creates_an_issue_without_linking_it_as_a_child() -> None:
-    """`create_issue` is `create_child`'s first write on its own (#260): one
+    """`_create_issue` is `create_child`'s first write on its own (#260): one
     POST, no sub-issue relation -- `link_child` is the caller's to run,
-    later, against a number it may not have yet."""
+    later, against a number it may not have yet. Private (no other caller,
+    #260 Sonnet finding): exercised directly here rather than through the
+    port."""
     observed: list[tuple[list[str], bytes | None]] = []
 
     def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
@@ -707,7 +710,7 @@ def test_github_adapter_creates_an_issue_without_linking_it_as_a_child() -> None
 
     client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
 
-    number = client.create_issue(
+    number = client._create_issue(
         title="Scheibe 4", body=board.BLOCK_CHILD_SKELETON, kind=board.ItemKind.TASK
     )
 
@@ -1322,6 +1325,7 @@ def board_issue(
     *,
     labels: tuple[str, ...] = (),
     blocked_by_count: int = 0,
+    kind: board.ItemKind | None = None,
 ) -> board.Issue:
     return board.Issue(
         number,
@@ -1330,6 +1334,7 @@ def board_issue(
         body,
         "2026-08-20T00:00:00Z",
         "2026-08-20T00:00:00Z",
+        kind=kind,
         blocked_by_count=blocked_by_count,
     )
 
@@ -2628,7 +2633,12 @@ def test_cut_names_the_created_child_when_the_relation_post_fails(
     assert exit_code == 2
     child = client.next_created_child_number - 1
     assert client.created_children == [
-        (CUT_CONTAINER, "Scheibe 1", board.BLOCK_CHILD_SKELETON, board.ItemKind.TASK)
+        (
+            CUT_CONTAINER,
+            "Scheibe 1",
+            issue_claim._cut_child_body(CUT_CONTAINER),
+            board.ItemKind.TASK,
+        )
     ]
     assert client.item_bodies == {}
     err = capsys.readouterr().err
@@ -2713,7 +2723,12 @@ def test_cut_creates_a_child_and_removes_the_first_cuttable_slice(
     assert exit_code == 0
     child = client.next_created_child_number - 1
     assert client.created_children == [
-        (CUT_CONTAINER, "Scheibe 1", board.BLOCK_CHILD_SKELETON, board.ItemKind.TASK)
+        (
+            CUT_CONTAINER,
+            "Scheibe 1",
+            issue_claim._cut_child_body(CUT_CONTAINER),
+            board.ItemKind.TASK,
+        )
     ]
     new_data = board.locate_agent_claim_block(client.item_bodies[CUT_CONTAINER]).data
     assert new_data["slice"] == [{"index": 2, "title": "Scheibe 2"}]
@@ -2929,7 +2944,12 @@ def test_cut_names_the_created_child_when_linking_fails(
     assert exit_code == 2
     child = client.next_created_child_number - 1
     assert client.created_children == [
-        (CUT_CONTAINER, "Scheibe 1", board.BLOCK_CHILD_SKELETON, board.ItemKind.TASK)
+        (
+            CUT_CONTAINER,
+            "Scheibe 1",
+            issue_claim._cut_child_body(CUT_CONTAINER),
+            board.ItemKind.TASK,
+        )
     ]
     err = capsys.readouterr().err
     assert (
@@ -3021,7 +3041,12 @@ def test_cut_refuses_to_adopt_when_two_open_issues_match_the_row_title(
     client = _forge_with_existing_child(
         monkeypatch, tmp_path, child_number=950, child_state=board.ChildState.OPEN
     )
-    orphan = board_issue(951, "Scheibe 1", "")
+    orphan = board_issue(
+        951,
+        "Scheibe 1",
+        issue_claim._cut_child_body(CUT_CONTAINER),
+        kind=board.ItemKind.TASK,
+    )
     monkeypatch.setattr(client, "list_open_board_issues", lambda: (_one_slice_container(), orphan))
 
     exit_code = issue_claim.main(
@@ -3036,6 +3061,87 @@ def test_cut_refuses_to_adopt_when_two_open_issues_match_the_row_title(
         f"ERROR: #{CUT_CONTAINER}'s row 'Scheibe 1' matches more than one open issue "
         "(#950, #951); adopt the right one by hand and remove the row" in capsys.readouterr().err
     )
+
+
+@pytest.mark.parametrize(
+    ("orphan", "idea_label"),
+    [
+        pytest.param(
+            board_issue(
+                951,
+                "Scheibe 1",
+                "Just an idea, someone should look into this.",
+                kind=board.ItemKind.TASK,
+            ),
+            None,
+            id="human_filed_issue_with_a_free_text_body",
+        ),
+        pytest.param(
+            board_issue(
+                951,
+                "Scheibe 1",
+                issue_claim._cut_child_body(CUT_CONTAINER),
+                labels=("idea",),
+                kind=board.ItemKind.TASK,
+            ),
+            "idea",
+            id="idea_labelled_issue",
+        ),
+        pytest.param(
+            board_issue(
+                CUT_CONTAINER,
+                "Scheibe 1",
+                issue_claim._cut_child_body(CUT_CONTAINER),
+                kind=board.ItemKind.TASK,
+            ),
+            None,
+            id="the_container_itself",
+        ),
+        pytest.param(
+            board_issue(
+                951, "Scheibe 1", issue_claim._cut_child_body(80), kind=board.ItemKind.TASK
+            ),
+            None,
+            id="orphan_names_a_different_container_as_parent",
+        ),
+    ],
+)
+def test_cut_never_adopts_an_orphan_that_is_not_this_containers_recovery_shape(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    orphan: board.Issue,
+    idea_label: str | None,
+) -> None:
+    """A title match alone is too weak to adopt an orphan (#260): a
+    human-filed issue, an idea, the container's own issue, or another
+    container's own failed-cut orphan can all share the row's exact title
+    without being this container's recovery shape, so `cut` creates a fresh
+    child instead of silently re-parenting any of them."""
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(_one_slice_container(),))
+    _write_block_pin(tmp_path)
+    if idea_label is not None:
+        (tmp_path / ".agent-claim" / "board.toml").write_text(
+            f'body_contract = "block"\nidea_label = "{idea_label}"\n'
+        )
+    monkeypatch.setattr(client, "list_open_board_issues", lambda: (_one_slice_container(), orphan))
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
+    )
+
+    assert exit_code == 0
+    child = client.next_created_child_number - 1
+    assert client.linked_children == [(CUT_CONTAINER, child)]
+    assert client.created_children == [
+        (
+            CUT_CONTAINER,
+            "Scheibe 1",
+            issue_claim._cut_child_body(CUT_CONTAINER),
+            board.ItemKind.TASK,
+        )
+    ]
+    assert capsys.readouterr().out == f"CUT #{CUT_CONTAINER} row 1 -> #{child}\n"
 
 
 def test_cut_adopts_the_orphan_after_a_relation_partial_failure(
@@ -3059,7 +3165,8 @@ def test_cut_adopts_the_orphan_after_a_relation_partial_failure(
 
     assert first_exit_code == 2
     child = client.next_created_child_number - 1
-    assert client.created_issues == [("Scheibe 1", board.BLOCK_CHILD_SKELETON, board.ItemKind.TASK)]
+    expected_body = issue_claim._cut_child_body(CUT_CONTAINER)
+    assert client.created_issues == [("Scheibe 1", expected_body, board.ItemKind.TASK)]
     assert client.linked_children == [(CUT_CONTAINER, child)]
     capsys.readouterr()
     client.fail_create_child_relation = False
@@ -3069,7 +3176,7 @@ def test_cut_adopts_the_orphan_after_a_relation_partial_failure(
     )
 
     assert second_exit_code == 0
-    assert client.created_issues == [("Scheibe 1", board.BLOCK_CHILD_SKELETON, board.ItemKind.TASK)]
+    assert client.created_issues == [("Scheibe 1", expected_body, board.ItemKind.TASK)]
     assert client.linked_children == [(CUT_CONTAINER, child), (CUT_CONTAINER, child)]
     remaining = board.locate_agent_claim_block(client.item_bodies[CUT_CONTAINER]).data
     assert remaining["slice"] == []
@@ -4854,7 +4961,7 @@ def test_next_prints_a_cut_command_that_cut_accepts(
         (
             case.container_number,
             case.expected_created_title,
-            board.BLOCK_CHILD_SKELETON,
+            issue_claim._cut_child_body(case.container_number),
             board.ItemKind.TASK,
         )
     ]

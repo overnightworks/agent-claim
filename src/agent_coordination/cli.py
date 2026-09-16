@@ -2941,8 +2941,27 @@ def _print_cut_result(
     print(f"{verb} #{number}{suffix} -> #{child}")
 
 
+def _cut_child_body(container: int) -> str:
+    """The body `cut` writes for a fresh child: one `Parent: #<container>`
+    line -- the same wording issue bodies already use for this fact -- ahead
+    of `board.BLOCK_CHILD_SKELETON`. A repeat `cut` after a partial failure
+    reads this line back (`_orphan_names_container`) to tell `container`'s
+    own orphan apart from an unrelated open issue that merely shares the
+    row's title (#260)."""
+    return f"Parent: #{container}\n\n{board.BLOCK_CHILD_SKELETON}"
+
+
+def _orphan_names_container(body: str, container: int) -> bool:
+    """Whether `body`'s first line is the `Parent: #<container>` line
+    `_cut_child_body` writes -- the one signal that tells `container`'s own
+    orphan apart from another open issue, another container's own failed
+    cut, or a human-filed issue that happens to share the row's title."""
+    first_line, _, _ = body.partition("\n")
+    return first_line == f"Parent: #{container}"
+
+
 def _adoptable_child(
-    client: forge.ForgeWriter, container: int, title: str
+    client: forge.ForgeWriter, container: int, title: str, idea_label: str | None
 ) -> board.ChildItem | None:
     """`container`'s already-open child titled exactly `title`, so a repeat
     `cut` after a partial failure (`forge.ForgePartialChildCreationError`)
@@ -2950,14 +2969,20 @@ def _adoptable_child(
     (#260). Two sources can carry that child: already linked under
     `container` (`list_children`), or an orphan -- an open issue with no
     recorded parent at all, exactly the shape a failed `link_child` POST
-    leaves behind. An orphan match is linked under `container` right here
-    before it is returned, so the caller's remaining steps treat it exactly
-    like an already-linked child; `create_issue` is never called for it.
-    More than one open match refuses by name rather than guess which one
-    the failed cut actually created. A closed linked child with that title
-    refuses too -- adoption finishes an interrupted cut, it does not reopen
-    a closed one. `None` when nothing matches, so the caller falls through
-    to `create_child`.
+    leaves behind. A title match alone is too weak to adopt an orphan: any
+    unrelated open issue anywhere in the repository -- including one a
+    human filed -- could share it. An orphan is adoptable only when it is
+    also a `TASK` (never the container itself, never an idea-labelled item)
+    and its body still names `container` as the parent `_cut_child_body`
+    wrote for it; a recovery orphan is always exactly that shape, and
+    nothing else can fake it. An orphan match is linked under `container`
+    right here before it is returned, so the caller's remaining steps treat
+    it exactly like an already-linked child; the container's own issue is
+    never created twice for it. More than one open match refuses by name
+    rather than guess which one the failed cut actually created. A closed
+    linked child with that title refuses too -- adoption finishes an
+    interrupted cut, it does not reopen a closed one. `None` when nothing
+    matches, so the caller falls through to `create_child`.
     """
     linked = [
         child
@@ -2968,7 +2993,12 @@ def _adoptable_child(
     orphans = [
         issue.number
         for issue in client.list_open_board_issues()
-        if issue.title == title and client.parent_issue(issue.number) is None
+        if issue.title == title
+        and issue.number != container
+        and issue.kind is board.ItemKind.TASK
+        and not board._has_label(issue.labels, idea_label)
+        and _orphan_names_container(issue.body, container)
+        and client.parent_issue(issue.number) is None
     ]
     open_matches = open_linked + orphans
     if len(open_matches) > 1:
@@ -3052,13 +3082,18 @@ def _located_block_or_refuse(number: int, body: str, *, command: str) -> board.L
     return board.locate_agent_claim_block(body)
 
 
-def _cut_slice(client: forge.ForgeWriter, target: board.Issue, parsed: argparse.Namespace) -> int:
+def _cut_slice(
+    client: forge.ForgeWriter,
+    target: board.Issue,
+    parsed: argparse.Namespace,
+    idea_label: str | None,
+) -> int:
     number = target.number
     located = _located_block_or_refuse(number, target.body, command="cut")
     link = _cut_link(number, located.data, parsed.row)
     if link is not None:
         _require_matching_title(number, link, parsed.title)
-    adopted = _adoptable_child(client, number, parsed.title)
+    adopted = _adoptable_child(client, number, parsed.title, idea_label)
     try:
         child = (
             adopted.number
@@ -3066,7 +3101,7 @@ def _cut_slice(client: forge.ForgeWriter, target: board.Issue, parsed: argparse.
             else client.create_child(
                 parent=number,
                 title=parsed.title,
-                body=board.BLOCK_CHILD_SKELETON,
+                body=_cut_child_body(number),
                 kind=board.ItemKind.TASK,
             )
         )
@@ -3107,8 +3142,8 @@ def _cmd_cut(parsed: argparse.Namespace, session: _WriteSession) -> int:
             raise protocol.ClaimUnavailableError(
                 f"this forge cannot {operation.value}; cut the slice by hand"
             )
-    _load_board_config(client, _resolve_toplevel())
-    return _cut_slice(client, _cut_target(client, number), parsed)
+    config = _load_board_config(client, _resolve_toplevel())
+    return _cut_slice(client, _cut_target(client, number), parsed, config.idea_label)
 
 
 def _item_body_or_refuse(client: forge.ForgeReader, number: int, *, command: str) -> str:

@@ -226,7 +226,6 @@ _READ_ONLY_OPERATIONS = (
     forge.ForgeOperation.LIST_RECENT_MERGED_BOARD_PULL_REQUESTS,
 )
 _READ_WRITE_OPERATIONS = (
-    forge.ForgeOperation.CREATE_ISSUE,
     forge.ForgeOperation.LINK_CHILD,
     forge.ForgeOperation.CREATE_CHILD,
     forge.ForgeOperation.UPDATE_ITEM_BODY,
@@ -792,8 +791,12 @@ class GitHubForge:
                 recent.append(pull_request)
         return tuple(recent)
 
-    def create_issue(self, *, title: str, body: str, kind: board.ItemKind) -> int:
+    def _create_issue(self, *, title: str, body: str, kind: board.ItemKind) -> int:
         """Create a fresh issue of `kind`, linked to no parent.
+
+        Private: `create_child` is the only caller (#260) -- nothing else
+        in the package needs an issue with no parent, so this is not a
+        port operation.
 
         Validates the same response shape `create_child` depends on --
         `id` alongside `number` -- even though only the number is returned
@@ -811,7 +814,7 @@ class GitHubForge:
             created = json.loads(raw)
         except json.JSONDecodeError as error:
             raise forge.ForgeMalformedResponseError(
-                "GitHub returned invalid created-child JSON"
+                "GitHub returned invalid created-issue JSON"
             ) from error
         identifier = created.get("id") if isinstance(created, dict) else None
         number = created.get("number") if isinstance(created, dict) else None
@@ -823,7 +826,7 @@ class GitHubForge:
             or not isinstance(number, int)
             or number < 1
         ):
-            raise forge.ForgeMalformedResponseError("GitHub did not return a created child issue")
+            raise forge.ForgeMalformedResponseError("GitHub did not return a created issue")
         return number
 
     def _issue_identifier(self, number: int) -> int:
@@ -863,14 +866,14 @@ class GitHubForge:
     def create_child(self, *, parent: int, title: str, body: str, kind: board.ItemKind) -> int:
         """Create a fresh issue of `kind` and record it as `parent`'s sub-issue.
 
-        Composed from `create_issue` and `link_child` (#260): not atomic,
+        Composed from `_create_issue` and `link_child` (#260): not atomic,
         since GitHub has no transaction across the two writes. A failure in
         the relation POST raises `forge.ForgePartialChildCreationError`
         naming the child that already exists; safe to retry the same `cut`,
         since it then finds this child orphaned -- open, no recorded parent
         -- and adopts it with `link_child` rather than creating a second one.
         """
-        child = self.create_issue(title=title, body=body, kind=kind)
+        child = self._create_issue(title=title, body=body, kind=kind)
         try:
             self.link_child(parent, child)
         except protocol.ClaimError as error:
