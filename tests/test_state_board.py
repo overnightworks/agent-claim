@@ -1334,10 +1334,21 @@ class TestCliStateRefForge:
         )
         assert after_located.data["slice"] == [{"index": 2, "title": "Slice D"}]
         assert after_located.data["now"] == before_located.data["now"]
+        assert after_located.data["next"] == before_located.data["next"]
+        assert after_located.data["done_when"] == before_located.data["done_when"]
+        before_record = _decoded_record(before_container, CONTAINER_ID)
+        after_record = _decoded_record(after_container, CONTAINER_ID)
+        assert replace(after_record, updated_at=before_record.updated_at) == before_record
+        assert after_record.updated_at != before_record.updated_at
 
         board_status = issue_claim.main(["board"])
         assert board_status == 0
-        assert "Slice C" in capsys.readouterr().out
+        board_out = capsys.readouterr().out
+        assert "Slice C" in board_out
+        container_line = next(
+            line for line in board_out.splitlines() if line.startswith(f"#{CONTAINER_NUMBER} ")
+        )
+        assert f"#{child_number}" in container_line
 
     def test_cut_row_selects_the_named_slice_entry_under_state_ref(
         self,
@@ -1479,6 +1490,7 @@ class TestCliStateRefForge:
             f"from #{CONTAINER_NUMBER}'s agent-claim block" in err
         )
         assert "re-run the same cut -- it adopts the child" in err
+        assert "written since it was read" in err
         raced_container = store.read_item_files(worktree, after_first.tip)[
             f"{CONTAINER_ID}.md"
         ].decode()
@@ -1496,9 +1508,10 @@ class TestCliStateRefForge:
         assert after_second.tip is not None
         assert set(after_second.items) == set(after_first.items)
         assert after_second.items[child_id] == after_first.items[child_id]
-        final_container = store.read_item_files(worktree, after_second.tip)[
-            f"{CONTAINER_ID}.md"
-        ].decode()
+        second_item_files = store.read_item_files(worktree, after_second.tip)
+        first_item_files = store.read_item_files(worktree, after_first.tip)
+        assert len(second_item_files) == len(first_item_files)
+        final_container = second_item_files[f"{CONTAINER_ID}.md"].decode()
         assert board.locate_agent_claim_block(final_container).data["slice"] == []
 
     def test_cut_adopts_a_child_created_by_item_new_with_the_matching_title(
@@ -1544,6 +1557,10 @@ class TestCliStateRefForge:
         }
         container_body = item_files_after[f"{CONTAINER_ID}.md"].decode()
         assert board.locate_agent_claim_block(container_body).data["slice"] == []
+        adopted_body = item_files_after[f"{created_id}.md"].decode()
+        adopted_record = _decoded_record(adopted_body, created_id)
+        assert adopted_record.parent == CONTAINER_ID
+        assert "Parent:" not in adopted_body
 
     def test_cut_refuses_a_container_whose_body_is_malformed_before_any_write(
         self,
