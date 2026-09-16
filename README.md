@@ -478,8 +478,7 @@ state-ref parentage has exactly one owner. An issue-scoped `claim`'s body
 check reads a `state-ref` item the same way `board`/`next` already do.
 `release --merged` still refuses — state-ref cannot yet verify a merged pull
 request (#230 slice 6) — naming the offline path instead: land with
-`item close` plus `release --abandoned "landed as <sha>"`. `item close` as
-its own named command does not exist yet (#230 slice 4e).
+`item close` plus `release --abandoned "landed as <sha>"`.
 
 `aco item new --title TITLE [--kind task|feature|container] [--parent ITEM]`
 creates a fresh item straight in `refs/aco/state` — a task/feature skeleton
@@ -512,6 +511,22 @@ read" sentence `cut`/`rule`/`ask` already use. Prints one line, `EDITED
 aco-xxxxxx` (`--json`: `{"item", "number", "oid"}`). It refuses under `storage =
 "github"` by name ("forge issues are edited on the forge; aco never governs
 them") — a forge issue is edited on the forge, never through aco.
+
+`aco item close ITEM [--json]` closes a state-ref item: `state` moves to
+`"closed"` and `closed_at`/`updated_at` move to now, the item file itself and
+every other byte stay untouched (issue #289) — closing never deletes, exactly
+like `item show`'s own closed-item proof. The compare-and-swap `expected` oid
+is this process's own already-read snapshot, the same discipline `item edit`
+uses; a second worktree writing from that same snapshot refuses with the same
+"written since it was read" sentence. Prints one line, `CLOSED aco-xxxxxx`
+(`--json`: `{"item", "number", "closed_at"}`), then a `freed:` line in
+`release --merged`'s own form naming every open item whose only open local
+blocker was this one. It refuses: a second close on an already-closed item,
+naming the date it closed on; an unknown id; an item still carrying a live
+claim ("release the claim first" — a closed item with a live claim would be
+the `RECOVERY` anomaly the board already guards against); and, under `storage
+= "github"`, by name ("the forge closes its issues; aco never governs
+them") — the forge closes its own issues, never aco.
 
 Every command that takes an item — `claim`, `cut`, `ask`, `rule`, `check`,
 `brief`, `body --parent`, `status`, `rescope`, and `release` — accepts it as

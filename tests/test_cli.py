@@ -10504,6 +10504,16 @@ def test_item_edit_refuses_under_github_storage(capsys: pytest.CaptureFixture[st
     )
 
 
+def test_item_close_refuses_under_github_storage(capsys: pytest.CaptureFixture[str]) -> None:
+    """Issue #289 proof 6: under `storage = "github"` (the default), `item
+    close` refuses by name -- the forge closes its own issues, aco never
+    governs them -- before it ever resolves a forge or reads a claim."""
+    status = issue_claim.main(["item", "close", "42"])
+
+    assert status == 2
+    assert capsys.readouterr().err == "ERROR: the forge closes its issues; aco never governs them\n"
+
+
 def test_item_show_reads_the_fake_forge_body_under_github_storage(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -279,6 +279,33 @@ def _edit_target_item_files() -> dict[str, bytes]:
     }
 
 
+# A flat two-item scenario for `aco item close`'s own freed-item proof
+# (issue #289, proofs 1-2): `TARGET` starts blocked by `BLOCKER` alone and
+# neither is a container's own child, so closing `BLOCKER` frees `TARGET`
+# through `blocked_by` alone, never a container's own cut/close
+# recommendation.
+CLOSE_BLOCKER_ID = "aco-00000c"
+CLOSE_BLOCKER_NUMBER = items.item_number(CLOSE_BLOCKER_ID)
+CLOSE_TARGET_ID = "aco-00000d"
+CLOSE_TARGET_NUMBER = items.item_number(CLOSE_TARGET_ID)
+_CLOSE_BLOCKER_PROJECTION = _Projection("Ship the blocker.", "Land it.", "Blocker is done.")
+_CLOSE_TARGET_PROJECTION = _Projection("Ship the target.", "Land it.", "Target is done.")
+
+
+def _close_scenario_item_files() -> dict[str, bytes]:
+    blocker_body = _state_ref_body(
+        _CLOSE_BLOCKER_PROJECTION, _record(title="Blocker", state="open", kind="task")
+    )
+    target_body = _state_ref_body(
+        _CLOSE_TARGET_PROJECTION,
+        _record(title="Target", state="open", kind="task", blocked_by=(CLOSE_BLOCKER_ID,)),
+    )
+    return {
+        f"{CLOSE_BLOCKER_ID}.md": blocker_body.encode(),
+        f"{CLOSE_TARGET_ID}.md": target_body.encode(),
+    }
+
+
 def _decoded_record(body: str, item_id: str) -> items.ItemRecord:
     """`body`'s `[record]` table, decoded -- the same read `StateRefBoard`
     itself performs, used here to check a write's persisted result straight
@@ -960,6 +987,51 @@ class TestStateRefBoardWrites:
         assert state.tip is not None
         stored = store.read_item_files(worktree, state.tip)[f"{CHILD_A_ID}.md"]
         assert stored.startswith(b"First writer.")
+
+    def test_close_item_sets_state_and_closed_at_keeps_the_rest_and_refuses_a_second_close(
+        self, bare_remote: Path, worktree: Path
+    ) -> None:
+        """Issue #289: `close_item` moves `state` to `CLOSED` and sets
+        `closed_at`/`updated_at` to the timestamp it returns, every other
+        record field and the body untouched; a second `close_item` on the
+        same already-closed instance refuses by name, naming the date,
+        before ever reaching the writer (no second write reaches the
+        remote -- the oid this proof reads back is still the first
+        close's)."""
+        _push_item_tree(bare_remote, worktree, _item_files())
+        adapter = _fetch_state_ref_board(
+            bare_remote, worktree, writer=self._writer(bare_remote, worktree)
+        )
+        before_body = adapter.item_reference(CHILD_A_NUMBER).body
+        assert before_body is not None
+        before_record = _decoded_record(before_body, CHILD_A_ID)
+
+        closed_at = adapter.close_item(CHILD_A_NUMBER)
+
+        after = adapter.item_reference(CHILD_A_NUMBER)
+        assert after.state is forge.ItemState.CLOSED
+        assert after.body is not None
+        after_record = _decoded_record(after.body, CHILD_A_ID)
+        assert after_record.state is items.RecordState.CLOSED
+        assert after_record.closed_at == closed_at
+        assert after_record.updated_at == closed_at
+        assert (
+            replace(
+                after_record,
+                state=before_record.state,
+                closed_at=None,
+                updated_at=before_record.updated_at,
+            )
+            == before_record
+        )
+        remote_oid_after_close = adapter.item_oid(CHILD_A_NUMBER)
+
+        with pytest.raises(
+            ClaimUnavailableError, match=f"already closed \\(closed on {closed_at}\\)"
+        ):
+            adapter.close_item(CHILD_A_NUMBER)
+
+        assert adapter.item_oid(CHILD_A_NUMBER) == remote_oid_after_close
 
     def test_create_child_mints_an_id_sets_the_parent_and_appears_in_list_children(
         self, bare_remote: Path, worktree: Path
@@ -1691,3 +1763,194 @@ class TestCliStateRefForge:
         )
         after = store.fetch_state(worktree=worktree, remote=remote_url)
         assert after.tip == before.tip
+
+    def test_item_close_sets_state_and_closed_at_leaves_board_and_next_and_names_the_freed_item(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+    ) -> None:
+        """Issue #289 proofs 1-2: `aco item close` sets `state = "closed"`
+        and `closed_at` (today) in the record, the item file stays and a
+        fresh `item show` (its own fetch) reads it back closed; the closed
+        item leaves `board` and `next`, and `TARGET`, the item it alone
+        blocked, is freed -- named in `close`'s own `freed:` line and no
+        longer reported blocked by a fresh `next`."""
+        self._live_state_ref_checkout(
+            monkeypatch, tmp_path, bare_remote, worktree, _close_scenario_item_files()
+        )
+
+        status = issue_claim.main(["item", "close", str(CLOSE_BLOCKER_NUMBER)])
+
+        assert status == 0
+        assert capsys.readouterr().out.splitlines() == [
+            f"CLOSED {CLOSE_BLOCKER_ID}",
+            f"freed: #{CLOSE_TARGET_NUMBER}",
+        ]
+
+        shown = issue_claim.main(["item", "show", str(CLOSE_BLOCKER_NUMBER), "--json"])
+        assert shown == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["state"] == "closed"
+        record = _decoded_record(payload["body"], CLOSE_BLOCKER_ID)
+        assert record.state is items.RecordState.CLOSED
+        assert record.closed_at is not None
+        assert record.closed_at.startswith(datetime.now(UTC).date().isoformat())
+        assert record.updated_at == record.closed_at
+
+        board_status = issue_claim.main(["board"])
+        assert board_status == 0
+        board_out = capsys.readouterr().out
+        assert "Blocker" not in board_out
+        assert "Target" in board_out
+
+        next_status = issue_claim.main(["next"])
+        assert next_status == 0
+        next_out = capsys.readouterr().out
+        assert f"#{CLOSE_TARGET_NUMBER}" in next_out
+        assert "blocked by" not in next_out
+
+    def test_item_close_refuses_a_second_close_with_the_closed_date_and_leaves_the_oid_unchanged(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+    ) -> None:
+        """Issue #289 proof 3: a second `item close` on an already-closed
+        item refuses, naming the date it closed on, without writing --
+        the remote's item oid stays exactly what the first close left."""
+        self._live_state_ref_checkout(
+            monkeypatch, tmp_path, bare_remote, worktree, _close_scenario_item_files()
+        )
+        assert issue_claim.main(["item", "close", str(CLOSE_BLOCKER_NUMBER)]) == 0
+        capsys.readouterr()
+        remote_url = f"file://{bare_remote}"
+        state_after_first_close = store.fetch_state(worktree=worktree, remote=remote_url)
+        assert state_after_first_close.tip is not None
+        oid_after_first_close = state_after_first_close.items[CLOSE_BLOCKER_ID]
+
+        status = issue_claim.main(["item", "close", str(CLOSE_BLOCKER_NUMBER)])
+
+        assert status == 2
+        assert "is already closed (closed on" in capsys.readouterr().err
+        state_after_second_close = store.fetch_state(worktree=worktree, remote=remote_url)
+        assert state_after_second_close.tip == state_after_first_close.tip
+        assert state_after_second_close.items[CLOSE_BLOCKER_ID] == oid_after_first_close
+
+    def test_item_close_refuses_a_live_claim_then_succeeds_after_release_abandoned(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+    ) -> None:
+        """Issue #289 proof 4: an item with a live claim refuses `close` --
+        release the claim first -- a closed item with a live claim still on
+        it would be the `RECOVERY` anomaly the board already guards
+        against. `release --abandoned` frees it, and `close` then
+        succeeds."""
+        self._live_state_ref_checkout(
+            monkeypatch, tmp_path, bare_remote, worktree, _close_scenario_item_files()
+        )
+        monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
+        monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+        monkeypatch.setattr(checkout, "versioned_paths", lambda: ("README",))
+        claimed = issue_claim.main(
+            [
+                "claim",
+                str(CLOSE_BLOCKER_NUMBER),
+                "--agent",
+                "Codex Sol",
+                "--role",
+                "builder",
+                "--base",
+                "a" * 40,
+                "--branch",
+                f"codex/issue-{CLOSE_BLOCKER_NUMBER}-close-target",
+                "--scope",
+                "README",
+                "--claim-id",
+                "state-ref-claim",
+            ]
+        )
+        assert claimed == 0
+        capsys.readouterr()
+
+        refused = issue_claim.main(["item", "close", str(CLOSE_BLOCKER_NUMBER)])
+        assert refused == 2
+        assert "release the claim first" in capsys.readouterr().err
+
+        released = issue_claim.main(
+            [
+                "release",
+                str(CLOSE_BLOCKER_NUMBER),
+                "--agent",
+                "Codex Sol",
+                "--claim-id",
+                "state-ref-claim",
+                "--abandoned",
+                "stopped",
+            ]
+        )
+        assert released == 0
+        capsys.readouterr()
+
+        status = issue_claim.main(["item", "close", str(CLOSE_BLOCKER_NUMBER)])
+        assert status == 0
+        assert capsys.readouterr().out.splitlines()[0] == f"CLOSED {CLOSE_BLOCKER_ID}"
+
+    def test_item_close_two_processes_from_the_same_snapshot_the_second_refuses(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+    ) -> None:
+        """Issue #289 proof 5: two worktrees read the same item oid -- the
+        first `aco item close` (this CLI's own write) lands, and a second
+        writer still holding that now-stale oid (`_fetch_state_ref_board`'s
+        own read, the same technique issue #283's own CAS test uses to
+        stand in for an independent process) refuses with issue #279's own
+        sentence; the remote keeps the first close's record."""
+        self._live_state_ref_checkout(
+            monkeypatch, tmp_path, bare_remote, worktree, _close_scenario_item_files()
+        )
+        second = _fetch_state_ref_board(
+            bare_remote, worktree, writer=issue_claim._StoreItemWriter(worktree, str(bare_remote))
+        )
+
+        closed = issue_claim.main(["item", "close", str(CLOSE_BLOCKER_NUMBER)])
+        assert closed == 0
+        capsys.readouterr()
+
+        with pytest.raises(ClaimUnavailableError, match="written since it was read"):
+            second.close_item(CLOSE_BLOCKER_NUMBER)
+
+        remote_url = f"file://{bare_remote}"
+        state = store.fetch_state(worktree=worktree, remote=remote_url)
+        assert state.tip is not None
+        stored = store.read_item_files(worktree, state.tip)[f"{CLOSE_BLOCKER_ID}.md"].decode()
+        assert _decoded_record(stored, CLOSE_BLOCKER_ID).state is items.RecordState.CLOSED
+
+    def test_item_close_refuses_an_unknown_id(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+    ) -> None:
+        self._live_state_ref_checkout(
+            monkeypatch, tmp_path, bare_remote, worktree, _close_scenario_item_files()
+        )
+
+        status = issue_claim.main(["item", "close", "aco-abcdef"])
+
+        assert status == 2
+        assert "does not exist" in capsys.readouterr().err
