@@ -1204,11 +1204,12 @@ def test_commit_transition_rescope_and_release_round_trip(
 def test_commit_transition_preserves_items_across_claim_rescope_and_release(
     bare_remote: Path, worktree: Path
 ) -> None:
-    """`items/` (issue #248) is board data no transition intent ever
-    touches: `_write_incremental_state_tree` must carry its oid forward
-    unchanged on every claim, rescope, and release -- not silently rebuild
-    the top-level tree from `schema.toml` plus the claim-ledger directories
-    alone, which would drop the whole board (Grok final gate, blocking 1).
+    """`items/` (issue #248) is board data that claim, rescope, and release
+    intents reuse unchanged -- only `ItemWriteIntent` rewrites it.
+    `_write_incremental_state_tree` must carry its oid forward unchanged on
+    every claim, rescope, and release -- not silently rebuild the top-level
+    tree from `schema.toml` plus the claim-ledger directories alone, which
+    would drop the whole board (Grok final gate, blocking 1).
     """
     schema_blob = _blob(worktree, protocol.serialize_empty_schema_toml().encode())
     item_blob = _blob(worktree, b"item body\n")
@@ -1495,12 +1496,14 @@ def test_commit_transition_item_create_refuses_a_duplicate_id(
         intent=_hashed_item_intent(worktree, content=b"first\n", operation_id="op-1"),
     )
 
+    duplicate_intent = _hashed_item_intent(worktree, content=b"second\n", operation_id="op-2")
+
     with pytest.raises(protocol.ClaimUnavailableError, match="already exists"):
         store.commit_transition(
             worktree=worktree,
             remote=str(bare_remote),
             subject="create item aco-000001 again",
-            intent=_hashed_item_intent(worktree, content=b"second\n", operation_id="op-2"),
+            intent=duplicate_intent,
         )
 
 
@@ -1516,14 +1519,16 @@ def test_commit_transition_item_edit_refuses_a_stale_expected_oid_without_clobbe
     )
     stale_expected = protocol.ObjectId(_blob(worktree, b"never written\n"))
 
+    stale_intent = _hashed_item_intent(
+        worktree, expected=stale_expected, content=b"second\n", operation_id="op-2"
+    )
+
     with pytest.raises(protocol.ClaimUnavailableError, match="written since it was read"):
         store.commit_transition(
             worktree=worktree,
             remote=str(bare_remote),
             subject="edit item aco-000001",
-            intent=_hashed_item_intent(
-                worktree, expected=stale_expected, content=b"second\n", operation_id="op-2"
-            ),
+            intent=stale_intent,
         )
 
     unchanged = store.fetch_state(worktree=worktree, remote=str(bare_remote))
@@ -2339,8 +2344,10 @@ def test_apply_item_write_intent_creates_a_file_and_leaves_the_claim_ledger_unto
 
 
 def test_apply_item_write_intent_refuses_against_a_missing_state_ref() -> None:
+    intent = _item_intent()
+
     with pytest.raises(protocol.ClaimError, match="does not exist yet"):
-        protocol.apply(protocol.EMPTY_STATE, _item_intent())
+        protocol.apply(protocol.EMPTY_STATE, intent)
 
 
 def test_apply_item_write_intent_edits_when_the_expected_oid_matches() -> None:
@@ -2365,14 +2372,12 @@ def test_apply_item_write_intent_refuses_a_conflicting_expected_oid(
     write_expected: protocol.ObjectId | None, match: str
 ) -> None:
     created = protocol.apply(_STATE_WITH_TIP, _item_intent())
+    conflicting_intent = _item_intent(
+        expected=write_expected, new_oid=protocol.ObjectId("f" * 40), operation_id="op-2"
+    )
 
     with pytest.raises(protocol.ClaimUnavailableError, match=match):
-        protocol.apply(
-            created,
-            _item_intent(
-                expected=write_expected, new_oid=protocol.ObjectId("f" * 40), operation_id="op-2"
-            ),
-        )
+        protocol.apply(created, conflicting_intent)
 
 
 # --- Claim key codec (criterion 10) ----------------------------------------
