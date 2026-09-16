@@ -1,7 +1,8 @@
 """Board and claim domain scenario builders shared by `tests/test_cli.py`
-(CLI wiring behavior), `tests/test_board.py` (pure `board.py` behavior), and
-`tests/test_github.py` (the GitHub adapter's `REPOSITORY`). All three import
-this module directly; pytest's rootless collection puts `tests/` on
+(CLI wiring behavior), `tests/test_board.py` (pure `board.py` behavior),
+`tests/test_github.py` (the GitHub adapter's `REPOSITORY`), and
+`tests/test_protect.py` (`_active_claim`, the hook's live-claim builder). All
+import this module directly; pytest's rootless collection puts `tests/` on
 `sys.path`, so a plain `import board_fixtures` resolves here."""
 
 from __future__ import annotations
@@ -107,6 +108,42 @@ def _store_claim_from_request(
         opened_commit=protocol.ObjectId(opened_commit),
         resource=resource,
         whole_reason=claimed.whole_reason,
+    )
+
+
+def _active_claim(
+    agent: str = "Grok sess-1",
+    *,
+    claim_id: str = "cli-claim",
+    role: str = "builder",
+    scope: tuple[str, ...] = ("src",),
+    branch: str = "codex/issue-72-claims",
+    lane: bool = False,
+    issue: int = 72,
+    base: str = BASE,
+    opened_commit: str = BASE,
+    resource: protocol.ResourceHold | None = None,
+    whole_reason: str | None = None,
+) -> protocol.ActiveClaim:
+    """Build one store-truth `ActiveClaim` directly (issue #176): the store
+    fake's counterpart to `request()`'s ledger-comment `ClaimRequest` --
+    every `protect`/`status` test that needs a live claim on a faked
+    `store.fetch_state` builds it from here instead of round-tripping
+    through a comment marker no store command reads any more."""
+    identity: protocol.ClaimIdentity = (
+        protocol.LaneIdentity() if lane else protocol.IssueIdentity(issue)
+    )
+    return protocol.ActiveClaim(
+        identity=identity,
+        claim_id=protocol.ClaimId(claim_id),
+        agent=agent,
+        role=role,
+        base=protocol.ObjectId(base),
+        branch=branch,
+        scope=scope,
+        opened_commit=protocol.ObjectId(opened_commit),
+        resource=resource,
+        whole_reason=whole_reason,
     )
 
 
