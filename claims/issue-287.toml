@@ -1,0 +1,8 @@
+claim_id = "dfe66eafa9a64110b56b91c34c2fe2ab"
+agent = "Claude head (coordinator)"
+role = "builder"
+base = "dc742199e902a1cd2a073d0dcdef27467d973ff2"
+branch = "claude/issue-287-item-edit"
+scope = ["src/agent_coordination/cli.py", "src/agent_coordination/state_board.py", "src/agent_coordination/board.py", "tests/test_state_board.py", "tests/test_cli.py", "README.md"]
+opened_commit = "db58f905ac10b1f3d4e36326bd80991c2512ccb1"
+whole_reason = "one command (item edit) with its record owner rule across cli, the adapter, the body-check pin in board, their test modules and the README; splitting leaves a command nothing checks"
