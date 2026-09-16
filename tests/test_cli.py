@@ -16100,3 +16100,182 @@ def test_parse_remote_location_normalizes_every_remote_shape(
 def test_parse_remote_location_refuses_an_unrecognized_shape() -> None:
     with pytest.raises(ClaimError, match="names no recognized host"):
         checkout.parse_remote_location("not-a-remote-url")
+
+
+def _scratch_lane_repository(tmp_path: Path) -> tuple[Path, str, str]:
+    """A repository with a base commit on `main` and a lane branch one commit
+    ahead of it -- `brief`'s own real reads (`rev-parse --verify`, `diff
+    --name-only`) run against real git history here, never a hand-typed
+    `_git_output` fake."""
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    _real_git(repository, "init", "-q", "-b", "main")
+    _real_git(repository, "config", "user.name", "Test")
+    _real_git(repository, "config", "user.email", "test@example.com")
+    (repository / "README.md").write_text("hello\n")
+    _real_git(repository, "add", "README.md")
+    _real_git(repository, "commit", "-q", "-m", "initial")
+    base = _real_git(repository, "rev-parse", "HEAD").stdout.strip()
+    _real_git(repository, "checkout", "-q", "-b", "codex/issue-258-brief")
+    (repository / "README.md").write_text("hello\nbrief\n")
+    _real_git(repository, "add", "README.md")
+    _real_git(repository, "commit", "-q", "-m", "lane work")
+    tip = _real_git(repository, "rev-parse", "HEAD").stdout.strip()
+    return repository, base, tip
+
+
+def _brief_claim(
+    base: str, *, branch: str = "codex/issue-258-brief", whole_reason: str | None = None
+) -> protocol.ActiveClaim:
+    return _store_claim_from_request(
+        replace(
+            request(
+                issue=258,
+                claim_id="brief-claim",
+                branch=branch,
+                scope=("README.md",),
+                whole_reason=whole_reason,
+            ),
+            base=base,
+        )
+    )
+
+
+def test_cli_brief_prints_body_claim_lane_tip_and_touched_files(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    repository, base, tip = _scratch_lane_repository(tmp_path)
+    client = FakeForge()
+    client.issue_references[258] = forge.ItemReference(
+        forge.ItemState.OPEN, "Brief", "The item's own body."
+    )
+    monkeypatch.setattr(github, "GitHubForge", lambda _repository: client)
+    claim = _brief_claim(base, whole_reason="lane touches too much to split")
+    _patch_store_write(monkeypatch, claim, ages={claim.claim_id: datetime(2026, 8, 20, tzinfo=UTC)})
+    monkeypatch.chdir(repository)
+
+    status = issue_claim.main(["--repo", "example/agent-claim", "brief", "258"])
+
+    assert status == 0
+    assert capsys.readouterr().out.splitlines() == [
+        "The item's own body.",
+        "",
+        "CLAIM",
+        f"Codex Sol (builder) branch=codex/issue-258-brief base={base} 24h 0m old",
+        "  README.md",
+        "  whole: lane touches too much to split",
+        "",
+        "TIP",
+        tip,
+        "",
+        "TOUCHED",
+        "README.md",
+    ]
+
+
+def test_cli_brief_reports_no_active_claim_with_empty_tip_and_touched_files(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    repository, _base, _tip = _scratch_lane_repository(tmp_path)
+    client = FakeForge()
+    client.issue_references[258] = forge.ItemReference(
+        forge.ItemState.OPEN, "Brief", "No claim yet."
+    )
+    monkeypatch.setattr(github, "GitHubForge", lambda _repository: client)
+    _patch_store_write(monkeypatch)
+    monkeypatch.chdir(repository)
+
+    status = issue_claim.main(["--repo", "example/agent-claim", "brief", "258"])
+
+    assert status == 0
+    assert capsys.readouterr().out.splitlines() == [
+        "No claim yet.",
+        "",
+        "CLAIM",
+        "no active claim",
+        "",
+        "TIP",
+        "",
+        "TOUCHED",
+    ]
+
+
+def test_cli_brief_reports_branch_not_found_when_the_claim_branch_is_gone(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    repository, base, _tip = _scratch_lane_repository(tmp_path)
+    client = FakeForge()
+    client.issue_references[258] = forge.ItemReference(forge.ItemState.OPEN, "Brief", "Gone lane.")
+    monkeypatch.setattr(github, "GitHubForge", lambda _repository: client)
+    claim = _brief_claim(base, branch="codex/issue-258-gone")
+    _patch_store_write(monkeypatch, claim, ages={claim.claim_id: datetime(2026, 8, 20, tzinfo=UTC)})
+    monkeypatch.chdir(repository)
+
+    status = issue_claim.main(["--repo", "example/agent-claim", "brief", "258"])
+
+    assert status == 0
+    assert capsys.readouterr().out.splitlines() == [
+        "Gone lane.",
+        "",
+        "CLAIM",
+        f"Codex Sol (builder) branch=codex/issue-258-gone base={base} 24h 0m old",
+        "  README.md",
+        "",
+        "TIP",
+        "branch not found",
+        "",
+        "TOUCHED",
+    ]
+
+
+def test_cli_brief_json_prints_one_object_with_body_claim_tip_and_touched(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    repository, base, tip = _scratch_lane_repository(tmp_path)
+    client = FakeForge()
+    client.issue_references[258] = forge.ItemReference(
+        forge.ItemState.OPEN, "Brief", "The item's own body."
+    )
+    monkeypatch.setattr(github, "GitHubForge", lambda _repository: client)
+    claim = _brief_claim(base)
+    _patch_store_write(monkeypatch, claim, ages={claim.claim_id: datetime(2026, 8, 20, tzinfo=UTC)})
+    monkeypatch.chdir(repository)
+
+    status = issue_claim.main(["--repo", "example/agent-claim", "brief", "258", "--json"])
+
+    assert status == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "body": "The item's own body.",
+        "claim": {
+            "agent": "Codex Sol",
+            "role": "builder",
+            "branch": "codex/issue-258-brief",
+            "base": base,
+            "scope": ["README.md"],
+            "whole": None,
+            "age": "24h 0m",
+        },
+        "tip": tip,
+        "touched": ["README.md"],
+    }
+
+
+def test_cli_brief_refuses_a_non_github_canonical_remote_by_host(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`brief` is a forge command through the same `_LazyForge` gate `board`
+    uses (issue #245): a canonical remote on any host but GitHub refuses by
+    that host's own name, before ever calling `discover_repository`/`gh` --
+    the same refusal `board` gives for the same remote."""
+    monkeypatch.setattr(checkout, "remote_url", lambda remote: "file:///srv/git/agent-claim.git")
+
+    def unused(*_args: object, **_kwargs: object) -> forge.RepositoryId:
+        pytest.fail("brief must refuse the host before ever calling discover_repository")
+
+    monkeypatch.setattr(github, "discover_repository", unused)
+
+    status = issue_claim.main(["brief", "258"])
+
+    captured = capsys.readouterr()
+    assert status == 2
+    assert captured.err == "ERROR: no forge adapter for host file\n"
