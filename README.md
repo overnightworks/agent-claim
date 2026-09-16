@@ -708,6 +708,16 @@ named exception within that table -- the hook payload carries no file path
 for a shell command, so `protect` cannot gate what it cannot see, and both
 stay allowed.
 
+A mutating tool's path reaches `protect` in one of three shapes (issue #252):
+a `path`/`file_path`/`filePath` key most tools' `tool_input` carries directly;
+`notebook_path`, Claude Code's `NotebookEdit`-specific key for the same single
+path; or Codex's `apply_patch`, whose `tool_input.command` is a whole patch
+text with no path key at all, so `protect` parses every `*** Update File:`,
+`*** Add File:`, `*** Delete File:`, and `*** Move to:` line out of it and
+checks each one against the claim scope, denying on the first path outside
+it. A patch with none of that grammar denies `path required`, the same as any
+other mutating call with no path.
+
 ## Refusals and `--json`
 
 Every command's own refusal ends the same way: a `ClaimError` (a forge

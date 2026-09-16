@@ -25,6 +25,7 @@ from agent_coordination import (
     checkout,
     forge,
     github,
+    hook_input,
     process,
     protocol,
     store,
@@ -12432,6 +12433,12 @@ def test_protect_invalid_hook_payload_denies_without_raising(
         {"tool_name": "Edit", "tool_input": "src/widget.py"},
         {"toolName": "MultiEdit", "toolInput": {"contents": "x"}},
         {"toolName": "write", "toolInput": {"path": "", "file_path": ""}},
+        {
+            "toolName": "apply_patch",
+            "toolInput": {"command": "*** Begin Patch\n*** End Patch"},
+        },
+        {"toolName": "apply_patch", "toolInput": {"command": "not a patch at all"}},
+        {"toolName": "apply_patch", "toolInput": {}},
     ],
 )
 def test_protect_mutating_tool_without_path_denies_path_required(
@@ -12562,11 +12569,30 @@ def test_protect_default_branch_fallback_denies_only_main_and_master(
     _assert_protect_decision(capsys, decision="allow")
 
 
+def _patch_command(*lines: str) -> str:
+    """Wrap Codex's `apply_patch` file-line grammar in its `Begin`/`End Patch`
+    envelope, the way `command` actually arrives in the hook payload."""
+    return "\n".join(("*** Begin Patch", *lines, "*** End Patch"))
+
+
 @pytest.mark.parametrize(
     "payload",
     [
-        {"toolName": "apply_patch", "toolInput": {"path": "src/widget.py"}},
-        {"toolName": "NotebookEdit", "toolInput": {"path": "notebook.ipynb"}},
+        {
+            "toolName": "apply_patch",
+            "toolInput": {
+                "command": _patch_command("*** Update File: src/widget.py", "@@", "-old", "+new")
+            },
+        },
+        {
+            "tool_name": "NotebookEdit",
+            "tool_input": {
+                "notebook_path": "notebook.ipynb",
+                "new_source": "print(1)",
+                "cell_type": "code",
+                "edit_mode": "replace",
+            },
+        },
     ],
 )
 def test_protect_extended_mutating_tools_deny_on_main_without_a_claim(
@@ -12586,6 +12612,180 @@ def test_protect_extended_mutating_tools_deny_on_main_without_a_claim(
 
     assert _protect_main(monkeypatch, payload) == 2
     _assert_protect_decision(capsys, decision="deny", reason="not main")
+
+
+@pytest.mark.parametrize(
+    ("notebook_path", "decision", "reason"),
+    [
+        ("src/widget.ipynb", "allow", None),
+        ("docs/widget.ipynb", "deny", "claim first"),
+    ],
+)
+def test_protect_notebook_edit_reads_notebook_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    notebook_path: str,
+    decision: str,
+    reason: str | None,
+) -> None:
+    """Claude Code's `NotebookEdit` carries its target under `notebook_path`,
+    not `path`/`file_path`/`filePath` (issue #252) -- the real payload shape,
+    checked against the claim scope exactly like any other mutating tool."""
+    _isolate_protect_home(monkeypatch, tmp_path)
+    work = tmp_path / "work"
+    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    _patch_protect_git(monkeypatch, work)
+    _patch_protect_claim(monkeypatch)
+
+    exit_code = _protect_main(
+        monkeypatch,
+        {
+            "tool_name": "NotebookEdit",
+            "tool_input": {
+                "notebook_path": notebook_path,
+                "new_source": "print(1)",
+                "cell_type": "code",
+                "edit_mode": "replace",
+            },
+        },
+    )
+
+    assert exit_code == (0 if decision == "allow" else 2)
+    _assert_protect_decision(capsys, decision=decision, reason=reason)
+
+
+def test_protect_apply_patch_allows_when_every_touched_path_is_in_scope(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Codex's `apply_patch` carries a patch-text `command`, not a path key
+    (issue #252), and can touch several files in one call: every one of them
+    must be in scope, not just the first."""
+    _isolate_protect_home(monkeypatch, tmp_path)
+    work = tmp_path / "work"
+    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    _patch_protect_git(monkeypatch, work)
+    _patch_protect_claim(monkeypatch)
+    command = _patch_command(
+        "*** Update File: src/widget.py",
+        "@@",
+        "-old",
+        "+new",
+        "*** Add File: src/new_module.py",
+        "+content",
+    )
+
+    assert (
+        _protect_main(monkeypatch, {"toolName": "apply_patch", "toolInput": {"command": command}})
+        == 0
+    )
+    _assert_protect_decision(capsys, decision="allow")
+
+
+@pytest.mark.parametrize(
+    ("lines", "outside_path"),
+    [
+        (
+            (
+                "*** Update File: src/widget.py",
+                "@@",
+                "-old",
+                "+new",
+                "*** Add File: docs/widget.md",
+                "+content",
+            ),
+            "docs/widget.md",
+        ),
+        (
+            (
+                "*** Update File: src/widget.py",
+                "*** Move to: docs/widget.py",
+                "@@",
+                "-old",
+                "+new",
+            ),
+            "docs/widget.py",
+        ),
+    ],
+)
+def test_protect_apply_patch_denies_naming_the_first_path_outside_scope(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    lines: tuple[str, ...],
+    outside_path: str,
+) -> None:
+    """A multi-file `apply_patch` call names the specific file outside the
+    claim scope -- unlike a single-path write's generic `claim first` -- since
+    the hook payload doesn't otherwise say which of several files was the
+    problem (issue #252). Covers both a plain outside path and a `Move to:`
+    rename landing outside scope."""
+    _isolate_protect_home(monkeypatch, tmp_path)
+    work = tmp_path / "work"
+    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    _patch_protect_git(monkeypatch, work)
+    _patch_protect_claim(monkeypatch)
+
+    assert (
+        _protect_main(
+            monkeypatch,
+            {"toolName": "apply_patch", "toolInput": {"command": _patch_command(*lines)}},
+        )
+        == 2
+    )
+    _assert_protect_decision(capsys, decision="deny", reason=f"{outside_path} outside claim scope")
+
+
+@pytest.mark.parametrize(
+    ("lines", "paths"),
+    [
+        (("*** Add File: src/new_module.py", "+content"), ("src/new_module.py",)),
+        (("*** Delete File: src/old_module.py",), ("src/old_module.py",)),
+        (
+            ("*** Update File: src/widget.py", "@@", "-old", "+new"),
+            ("src/widget.py",),
+        ),
+        (
+            (
+                "*** Update File: src/widget.py",
+                "*** Move to: src/renamed.py",
+                "@@",
+                "-old",
+                "+new",
+            ),
+            ("src/widget.py", "src/renamed.py"),
+        ),
+        (
+            (
+                "*** Update File: src/widget.py",
+                "@@",
+                "-old",
+                "+new",
+                "*** Add File: src/new_module.py",
+                "+content",
+            ),
+            ("src/widget.py", "src/new_module.py"),
+        ),
+    ],
+)
+def test_hook_patch_paths_extracts_every_file_line(
+    lines: tuple[str, ...], paths: tuple[str, ...]
+) -> None:
+    assert hook_input.hook_patch_paths(_patch_command(*lines)) == paths
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "*** Begin Patch\n*** End Patch",
+        "not a patch at all",
+        "",
+    ],
+)
+def test_hook_patch_paths_returns_empty_for_unrecognized_text(text: str) -> None:
+    assert hook_input.hook_patch_paths(text) == ()
 
 
 def test_protect_unknown_tool_name_denies_with_a_repair_sentence(
@@ -12812,6 +13012,36 @@ def test_protect_maps_every_store_error_to_cannot_reach_the_state_ref(
     assert payload["decision"] == "deny"
     assert payload["reason"].startswith(f"cannot reach {store.STATE_REF}: ")
     assert match in payload["reason"]
+
+
+def test_protect_apply_patch_maps_a_store_error_to_cannot_reach_the_state_ref(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`apply_patch`'s multi-path store check (issue #252) fails closed on a
+    store read error exactly like the single-path check above -- it shares
+    `_protect_fetch_claim_state` rather than re-deciding this on its own."""
+    _isolate_protect_home(monkeypatch, tmp_path)
+    work = tmp_path / "work"
+    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    _patch_protect_git(monkeypatch, work)
+
+    def fake_fetch_state(*, worktree: Path, remote: str) -> protocol.ClaimState:
+        raise ClaimError("cannot fetch")
+
+    monkeypatch.setattr(store, "fetch_state", fake_fetch_state)
+    command = _patch_command("*** Update File: src/widget.py", "@@", "-old", "+new")
+
+    assert (
+        _protect_main(monkeypatch, {"toolName": "apply_patch", "toolInput": {"command": command}})
+        == 2
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {
+        "decision": "deny",
+        "reason": f"cannot reach {store.STATE_REF}: cannot fetch",
+    }
 
 
 def test_cli_claim_resource_prints_the_allocated_value(
