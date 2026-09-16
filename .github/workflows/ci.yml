@@ -35,11 +35,11 @@ jobs:
       - name: Check architecture contracts
         run: uv run --locked lint-imports
       - if: matrix.python != '3.12'
-        run: uv run --locked pytest
+        run: uv run --locked pytest -n auto
       - if: matrix.python == '3.12'
         run: >-
-          uv run --locked pytest --cov=agent_coordination --cov-report=xml:coverage.xml --cov-report=term-missing
-          --cov-fail-under=100
+          uv run --locked pytest -n auto --cov=agent_coordination --cov-report=xml:coverage.xml
+          --cov-report=term-missing --cov-fail-under=100
       - if: matrix.python == '3.12'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:

@@ -343,28 +343,6 @@ _LIVE_TRUNK_LANDING_TIMES = checkout.trunk_landing_times
 _LIVE_FETCH_ISSUE_REFERENCE = issue_claim._fetch_issue_reference
 _LIVE_REMOTE_URL = checkout.remote_url
 
-BASE = "a" * 40
-REPOSITORY = "example/agent-claim"
-LANDED = protocol.MergedRelease(12)
-
-# Exactly `protocol.WIDE_SCOPE_SHARE_FLOOR` versioned files: three named scope
-# paths (LICENSE, README.md, src) cover four of them (src holds two), the
-# minimal fixture that still trips the share condition (issue #163).
-TWELVE_VERSIONED_FILES = (
-    "LICENSE",
-    "README.md",
-    "pyproject.toml",
-    "src/agent_coordination/__init__.py",
-    "src/a.py",
-    "docs/b.md",
-    "docs/c.md",
-    "docs/d.md",
-    "docs/e.md",
-    "docs/f.md",
-    "docs/g.md",
-    "docs/h.md",
-)
-
 
 @pytest.mark.parametrize("bad_issue", [0, -1, True])
 def test_issue_identity_requires_a_positive_integer(bad_issue: int) -> None:

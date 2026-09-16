@@ -142,4 +142,5 @@ dev = [
     "vulture==2.16",
     "import-linter==2.13",
     "pyright==1.1.411",
+    "pytest-xdist>=3.8.0",
 ]
