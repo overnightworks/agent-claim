@@ -18,6 +18,7 @@ from typing import cast
 from . import (
     __version__,
     board,
+    board_html,
     checkout,
     forge,
     github,
@@ -260,6 +261,9 @@ def _request(arguments: argparse.Namespace) -> protocol.ClaimRequest:
 
 LANE_ISSUE_HELP = "omit for lane mode, derived from a docs/ or fix/ checkout branch"
 JSON_HELP = "print the result as JSON instead of the human lines"
+# `--html` with no value: `argparse`'s `nargs="?"` const, distinct from the
+# `None` default (flag absent) -- `_cmd_board_html` treats it as "stdout".
+STDOUT_HTML_PATH = ""
 AGENT_HELP = (
     "the acting agent's name; filled from a non-empty ACO_AGENT, GROK_SESSION_ID or "
     "CLAUDE_SESSION_ID when omitted"
@@ -291,7 +295,16 @@ def _add_status_parser(commands: argparse._SubParsersAction) -> None:
 
 def _add_board_parser(commands: argparse._SubParsersAction) -> None:
     board_command = commands.add_parser("board", help="project the open work board without writes")
-    board_command.add_argument("--json", action="store_true", help=JSON_HELP)
+    output = board_command.add_mutually_exclusive_group()
+    output.add_argument("--json", action="store_true", help=JSON_HELP)
+    output.add_argument(
+        "--html",
+        nargs="?",
+        const=STDOUT_HTML_PATH,
+        default=None,
+        metavar="PATH",
+        help="write a static HTML board page (stdout when PATH is omitted)",
+    )
 
 
 def _add_rulings_parser(commands: argparse._SubParsersAction) -> None:
@@ -967,7 +980,7 @@ def _release_landing(
     freed = () if landed is None else _freed_item_numbers(dependencies, landed)
     projected = _board(
         client, claims, issues=issues, claim_ages=claim_ages, dependencies=dependencies
-    )
+    ).board
     action = board.next_action(projected)
     return ReleaseLanding(freed, None if action is None else _next_action_item(action))
 
@@ -1099,6 +1112,18 @@ def _load_board_config(client: forge.BoardSource, toplevel: Path) -> board.Board
     return config
 
 
+@dataclass(frozen=True)
+class _BoardFetch:
+    """`_board`'s own result, plus the recently-merged pull requests it reads
+    to classify each item's `Stage.CODE_LANDED` (#276) -- carried alongside
+    `board` so `board --html`'s Landungen section can pair a landed item
+    with its pull request without a second `gh` read `board` did not
+    already perform."""
+
+    board: board.Board
+    recent_merged_pull_requests: tuple[board.PullRequest, ...]
+
+
 def _board(
     client: forge.BoardSource,
     claims: tuple[protocol.ActiveClaim, ...],
@@ -1106,7 +1131,7 @@ def _board(
     issues: tuple[board.Issue, ...] | None = None,
     claim_ages: Mapping[str, datetime] | None = None,
     dependencies: dict[int, tuple[board.IssueDependency, ...]] | None = None,
-) -> board.Board:
+) -> _BoardFetch:
     now = datetime.now(UTC)
     config = _load_board_config(client, _resolve_toplevel())
     if issues is None:
@@ -1148,29 +1173,32 @@ def _board(
                 client, tuple(issue.number for issue in issues if issue.blocked_by_count > 0)
             ),
         )
-    return board.build_board(
-        board.BoardBuildInputs(
-            issues=issues,
-            open_pull_requests=pull_requests[0],
-            recent_merged_pull_requests=pull_requests[1],
-            claims=claims,
-            config=config,
-            repository=client.repository.path,
-            now=now,
-            trunk_landings=checkout.trunk_landing_times(),
-            children=children,
-            dependencies=dependencies,
-            requests=client.requests,
-            claim_ages=claim_ages or {},
-            open_pull_requests_supported=(
-                client.capability(forge.ForgeOperation.LIST_OPEN_BOARD_PULL_REQUESTS)
-                is not forge.Capability.UNSUPPORTED
-            ),
-            landings_derivable=(
-                client.capability(forge.ForgeOperation.LIST_RECENT_MERGED_BOARD_PULL_REQUESTS)
-                is not forge.Capability.UNSUPPORTED
-            ),
-        )
+    return _BoardFetch(
+        board.build_board(
+            board.BoardBuildInputs(
+                issues=issues,
+                open_pull_requests=pull_requests[0],
+                recent_merged_pull_requests=pull_requests[1],
+                claims=claims,
+                config=config,
+                repository=client.repository.path,
+                now=now,
+                trunk_landings=checkout.trunk_landing_times(),
+                children=children,
+                dependencies=dependencies,
+                requests=client.requests,
+                claim_ages=claim_ages or {},
+                open_pull_requests_supported=(
+                    client.capability(forge.ForgeOperation.LIST_OPEN_BOARD_PULL_REQUESTS)
+                    is not forge.Capability.UNSUPPORTED
+                ),
+                landings_derivable=(
+                    client.capability(forge.ForgeOperation.LIST_RECENT_MERGED_BOARD_PULL_REQUESTS)
+                    is not forge.Capability.UNSUPPORTED
+                ),
+            )
+        ),
+        pull_requests[1],
     )
 
 
@@ -2825,10 +2853,54 @@ def _observed_board(
         tuple(observed.claims.values()),
         issues=issues,
         claim_ages=_claim_ages(worktree, observed),
+    ).board
+
+
+def _lane_claimants(observed: protocol.ClaimState) -> dict[int, board_html.LaneClaimant]:
+    """Every live claim's agent, role, and branch, keyed by the issue it
+    holds -- the one field (`branch`) `board.BoardItem.active_claim` never
+    carries, since `board.py` joins it into a display string instead."""
+    return {
+        claim.identity.issue: board_html.LaneClaimant(claim.agent, claim.role, claim.branch)
+        for claim in observed.claims.values()
+        if isinstance(claim.identity, protocol.IssueIdentity)
+    }
+
+
+def _cmd_board_html(parsed: argparse.Namespace, session: _ReadSession) -> None:
+    """`board --html` (issue #276): the exact reads `board` already performs
+    -- `_board`'s own merged-pull-request fetch (`_BoardFetch`) serves the
+    Landungen section instead of asking `gh` a second time."""
+    client = session.forge()
+    issues = client.list_open_board_issues()
+    worktree, _remote, observed = _store_observation()
+    fetch = _board(
+        client,
+        tuple(observed.claims.values()),
+        issues=issues,
+        claim_ages=_claim_ages(worktree, observed),
     )
+    bodies = {issue.number: issue.body for issue in issues}
+    storage = board.load_config(_resolve_toplevel() / board.CONFIG_PATH).storage
+    sources = board_html.BoardSources(
+        bodies=bodies,
+        claimants=_lane_claimants(observed),
+        recent_merged_pull_requests=fetch.recent_merged_pull_requests,
+        state_tip="" if observed.tip is None else str(observed.tip),
+        storage=storage,
+    )
+    page = board_html.build_page(fetch.board, sources)
+    rendered = board_html.render(page)
+    if parsed.html:
+        Path(parsed.html).write_text(rendered, encoding="utf-8")
+    else:
+        print(rendered, end="")
 
 
 def _cmd_board(parsed: argparse.Namespace, session: _ReadSession) -> None:
+    if parsed.html is not None:
+        _cmd_board_html(parsed, session)
+        return
     projected = _observed_board(session)
     print(board.board_json(projected) if parsed.json else board.render(projected))
 
@@ -2931,7 +3003,7 @@ def _cmd_claim(parsed: argparse.Namespace, session: _WriteSession) -> int:
                 tuple(observed.claims.values()),
                 issues=open_issues,
                 claim_ages=_claim_ages(worktree, observed),
-            )
+            ).board
             checks = _slice_rule_checks(
                 BoardReferenceLookup(client, client.repository.path, open_by_number),
                 target_issue,

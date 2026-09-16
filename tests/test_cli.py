@@ -512,6 +512,72 @@ def test_board_reports_requests_equal_to_the_adapters_own_invocation_count(
     assert payload["requests"] == len(observed)
 
 
+def _single_item_board_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> FakeForge:
+    client = FakeForge()
+    client.board_issues = (board_issue(10, "Plain item", complete_contract("Ship #10.")),)
+    monkeypatch.setattr(github, "GitHubForge", lambda _repository: client)
+    monkeypatch.setattr(checkout, "_git_output", lambda _arguments: str(tmp_path))
+    monkeypatch.setattr(checkout, "trunk_landing_times", lambda: ())
+    _patch_store_write(monkeypatch)
+    return client
+
+
+def test_board_html_prints_the_rendered_page_to_stdout(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    _single_item_board_environment(monkeypatch, tmp_path)
+
+    assert issue_claim.main(["--repo", "example/agent-claim", "board", "--html"]) == 0
+    rendered = capsys.readouterr().out
+    assert "<title>agent-claim Board</title>" in rendered
+    assert "#10 Plain item" in rendered
+
+
+def test_board_html_path_writes_the_page_to_a_file_instead_of_stdout(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    _single_item_board_environment(monkeypatch, tmp_path)
+    output_path = tmp_path / "board.html"
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "board", "--html", str(output_path)]
+    )
+
+    assert exit_code == 0
+    assert capsys.readouterr().out == ""
+    written = output_path.read_text(encoding="utf-8")
+    assert "#10 Plain item" in written
+
+
+def test_board_html_costs_no_gh_call_beyond_plain_board(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Issue #276: `board --html` reshapes the exact reads `board` already
+    performs -- `_board`'s own merged-pull-request fetch, not a second one --
+    so its request count against the same fixture never exceeds plain
+    `board`'s."""
+    client = _single_item_board_environment(monkeypatch, tmp_path)
+
+    assert issue_claim.main(["--repo", "example/agent-claim", "board"]) == 0
+    capsys.readouterr()
+    plain_requests = client.requests
+
+    client.requests = 0
+    assert issue_claim.main(["--repo", "example/agent-claim", "board", "--html"]) == 0
+    capsys.readouterr()
+
+    assert client.requests == plain_requests
+
+
+def test_board_html_and_json_are_mutually_exclusive(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    _single_item_board_environment(monkeypatch, tmp_path)
+
+    with pytest.raises(SystemExit):
+        issue_claim.main(["--repo", "example/agent-claim", "board", "--html", "--json"])
+
+
 def test_board_skips_the_children_list_for_a_container_with_zero_children(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
@@ -3123,7 +3189,7 @@ def test_board_reads_priority_configuration_from_the_checkout_root(
     monkeypatch.setattr(checkout, "_git_output", git_output)
     monkeypatch.setattr(checkout, "trunk_landing_times", lambda: ())
 
-    projected = issue_claim._board(BoardClient(), ())
+    projected = issue_claim._board(BoardClient(), ()).board
 
     assert [item.number for item in projected.items] == [21, 20]
     assert observed == [["rev-parse", "--show-toplevel"]]
@@ -3566,7 +3632,7 @@ def test_board_fetches_children_only_for_container_kinded_issues(
     monkeypatch.setattr(checkout, "_git_output", lambda _arguments: str(tmp_path))
     monkeypatch.setattr(checkout, "trunk_landing_times", lambda: ())
 
-    projected = issue_claim._board(BoardClient(), ())
+    projected = issue_claim._board(BoardClient(), ()).board
 
     assert observed == [90]
     container_item = next(item for item in projected.items if item.number == 90)
