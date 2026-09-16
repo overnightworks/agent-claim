@@ -30,7 +30,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from types import MappingProxyType
-from typing import Protocol
+from typing import Protocol, cast
 
 from . import board, forge, items
 from .protocol import MalformedStateTreeError, ObjectId
@@ -117,6 +117,38 @@ def _with_record(body: str, record: items.ItemRecord) -> str:
 
 def _item_kind(kind: str | None) -> board.ItemKind | None:
     return board.ItemKind(kind) if kind is not None else None
+
+
+def _delivered_content_fields(
+    body: str, stored: items.ItemRecord
+) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
+    """`update_item_body`'s own owner split for `title`, `labels`,
+    `blocked_by` (issue #287, `aco item edit`'s ruled record merge): taken
+    from `body`'s own `[record]` table when the delivered body carries one
+    valid -- read off the table's raw TOML presence, never
+    `items.parse_item_record`'s own `.get(key, [])` default, which would
+    turn an omitted `labels`/`blocked_by` into an emptied one rather than
+    `stored`'s own value. A body with no `[record]` at all -- every
+    `rule`/`ask`/`cut` write already composes one -- changes nothing here,
+    exactly `update_item_body`'s behaviour before this issue. Every other
+    record field (`parent`, `state`, `origin`, `kind`, the three
+    timestamps) stays `stored`'s own regardless of what a delivered record
+    names for it -- `update_item_body` itself, never this helper, owns
+    that half of the split."""
+    parsed = board.parse_body(body, storage=board.Storage.STATE_REF)
+    delivered = parsed.record
+    if parsed.read_state is not board.BodyReadState.VALID or delivered is None:
+        return stored.title, stored.labels, stored.blocked_by
+    title = cast(str, delivered["title"]).strip() if "title" in delivered else stored.title
+    labels = (
+        tuple(cast("list[str]", delivered["labels"])) if "labels" in delivered else stored.labels
+    )
+    blocked_by = (
+        tuple(cast("list[str]", delivered["blocked_by"]))
+        if "blocked_by" in delivered
+        else stored.blocked_by
+    )
+    return title, labels, blocked_by
 
 
 class StateRefBoard:
@@ -329,13 +361,36 @@ class StateRefBoard:
         return self._items[item_id].record.number
 
     def update_item_body(self, number: int, body: str) -> None:
+        """`body`, written back to `number`'s item file (issues #283, #287):
+        `title`, `labels`, `blocked_by` come from `body`'s own `[record]`
+        table when it carries one (`_delivered_content_fields`'s own owner
+        split -- `aco item edit`'s ruled record merge); every other record
+        field stays this item's own already-read `current.record`, and
+        `updated_at` always moves to now. The CAS write's `expected` is
+        `current.oid`, this instance's own already-read snapshot -- never a
+        re-read -- so a second writer holding the same stale oid refuses
+        with issue #279's own sentence rather than merging or overwriting."""
         item_id = self._by_number[number]
         current = self._items[item_id]
+        title, labels, blocked_by = _delivered_content_fields(body, current.record)
         updated_record = replace(
-            current.record, updated_at=items.format_record_timestamp(datetime.now(UTC))
+            current.record,
+            title=title,
+            labels=labels,
+            blocked_by=blocked_by,
+            updated_at=items.format_record_timestamp(datetime.now(UTC)),
         )
         new_body = _with_record(body, updated_record)
         new_oid = self._writer.write_item(
             item_id, expected=current.oid, content=new_body.encode("utf-8")
         )
         self._items[item_id] = _DecodedItem(record=updated_record, body=new_body, oid=new_oid)
+
+    def item_oid(self, number: int) -> ObjectId:
+        """This item's own current blob oid, straight off this adapter's
+        already-read state (issue #287): `aco item edit --json`'s own
+        output is the one caller that needs it -- never part of the generic
+        `ForgeWriter` port, since no other forge in this repository stores
+        one blob per item."""
+        item_id = self._by_number[number]
+        return self._items[item_id].oid

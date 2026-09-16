@@ -9791,6 +9791,30 @@ def test_body_check_accepts_a_complete_block_with_no_defects(
     assert capsys.readouterr().out == "body ok\n"
 
 
+_RECORD_TOML = (
+    '\n[record]\ntitle = "T"\nstate = "open"\nlabels = []\nblocked_by = []\n'
+    'created_at = "2026-09-10T00:00:00Z"\nupdated_at = "2026-09-15T00:00:00Z"\n'
+)
+
+
+def test_body_check_reads_the_storage_pin_for_the_record_key(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Issue #287 proof 6: `body --check` reads the repository's own
+    storage pin -- `[record]` is a known key under `storage = "state-ref"`
+    and an unknown one under the default `storage = "github"`."""
+    body = agent_claim_body(MINIMAL_BLOCK_TOML + _RECORD_TOML)
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO(body))
+    assert body_check_main() == 1
+    assert "unknown top-level key record" in capsys.readouterr().err
+
+    _write_state_ref_pin(tmp_path)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(body))
+    assert body_check_main() == 0
+    assert capsys.readouterr().out == "body ok\n"
+
+
 def test_body_check_names_a_body_with_no_recognized_block_as_malformed(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -10465,6 +10489,19 @@ def test_item_new_refuses_under_github_storage(capsys: pytest.CaptureFixture[str
 
     assert status == 2
     assert capsys.readouterr().err == "ERROR: items live on the forge; open the issue there\n"
+
+
+def test_item_edit_refuses_under_github_storage(capsys: pytest.CaptureFixture[str]) -> None:
+    """Issue #287 proof 7: under `storage = "github"` (the default), `item
+    edit` refuses by name -- forge issues are edited on the forge, never
+    governed by aco -- before it ever reads stdin (no `sys.stdin` stand-in
+    is installed here, so a stray read would surface as a test failure)."""
+    status = issue_claim.main(["item", "edit", "42"])
+
+    assert status == 2
+    assert capsys.readouterr().err == (
+        "ERROR: forge issues are edited on the forge; aco never governs them\n"
+    )
 
 
 def test_item_show_reads_the_fake_forge_body_under_github_storage(

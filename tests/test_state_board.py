@@ -12,9 +12,11 @@ is proven against a real object database, not an invented one.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import shutil
 import subprocess
+import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -117,6 +119,7 @@ def _record(
     state: str,
     kind: str,
     parent: str | None = None,
+    labels: tuple[str, ...] = (),
     blocked_by: tuple[str, ...] = (),
     closed_at: str | None = None,
 ) -> dict[str, object]:
@@ -124,7 +127,7 @@ def _record(
         "title": title,
         "state": state,
         "kind": kind,
-        "labels": [],
+        "labels": list(labels),
         "blocked_by": list(blocked_by),
         "parent": parent,
         "created_at": "2026-09-10T00:00:00Z",
@@ -249,6 +252,31 @@ _RULABLE_PROJECTION = _Projection(
 def _rulable_item_files() -> dict[str, bytes]:
     body = _state_ref_body(_RULABLE_PROJECTION, _record(title="Rulable", state="open", kind="task"))
     return {f"{RULABLE_ID}.md": body.encode()}
+
+
+# A flat two-item scenario for `aco item edit`'s own `blocked_by` proof
+# (issue #287, proof 3): neither item is a container's own child, so `aco
+# next`'s pick between them turns on `blocked_by` alone, never on a
+# container's own cut/close recommendation.
+EDIT_TARGET_ID = "aco-00000a"
+EDIT_TARGET_NUMBER = items.item_number(EDIT_TARGET_ID)
+EDIT_BLOCKER_ID = "aco-00000b"
+EDIT_BLOCKER_NUMBER = items.item_number(EDIT_BLOCKER_ID)
+_EDIT_TARGET_PROJECTION = _Projection("Ship the target.", "Land it.", "Target is done.")
+_EDIT_BLOCKER_PROJECTION = _Projection("Ship the blocker.", "Land it.", "Blocker is done.")
+
+
+def _edit_target_item_files() -> dict[str, bytes]:
+    target_body = _state_ref_body(
+        _EDIT_TARGET_PROJECTION, _record(title="Target", state="open", kind="task")
+    )
+    blocker_body = _state_ref_body(
+        _EDIT_BLOCKER_PROJECTION, _record(title="Blocker", state="open", kind="task")
+    )
+    return {
+        f"{EDIT_TARGET_ID}.md": target_body.encode(),
+        f"{EDIT_BLOCKER_ID}.md": blocker_body.encode(),
+    }
 
 
 def _decoded_record(body: str, item_id: str) -> items.ItemRecord:
@@ -799,33 +827,102 @@ class TestStateRefBoardWrites:
         assert after_record.updated_at != before_record.updated_at
         assert board.RECORD_TIMESTAMP_PATTERN.fullmatch(after_record.updated_at)
 
-    def test_update_item_body_overwrites_a_hostile_record_with_the_stored_one(
-        self, bare_remote: Path, worktree: Path
+    def _full_delivered_record_body(self) -> str:
+        return _state_ref_body(
+            _CHILD_B_PROJECTION,
+            _record(
+                title="Renamed B",
+                state="closed",
+                kind="task",
+                parent=CHILD_A_ID,
+                labels=("urgent",),
+                blocked_by=(),
+                closed_at="2026-09-16T00:00:00Z",
+            ),
+        )
+
+    def _partial_delivered_record_body(self) -> str:
+        """A delivered body whose `[record]` table genuinely omits
+        `labels`/`blocked_by` -- spliced in as raw TOML rather than routed
+        through `_record`/`render_block`'s own `_render_record`, which
+        always fills both in (defaulting to `[]`) even when the source
+        dict never set them. The one way a test can tell "the key was
+        never delivered" apart from "the key was delivered empty"."""
+        projection_block = board.render_block(_CHILD_B_PROJECTION.block_data())
+        record_lines = (
+            "\n[record]\n"
+            'title = "Renamed B"\n'
+            'state = "open"\n'
+            'created_at = "2026-09-10T00:00:00Z"\n'
+            'updated_at = "2026-09-15T00:00:00Z"\n'
+        )
+        return f"Prose.\n\n```agent-claim\n{projection_block}{record_lines}```\n"
+
+    def _no_delivered_record_body(self) -> str:
+        return _github_body(_CHILD_B_PROJECTION)
+
+    @pytest.mark.parametrize(
+        ("delivered_body_factory", "expected_title", "expected_labels", "expected_blocked_by"),
+        [
+            pytest.param(
+                "_full_delivered_record_body",
+                "Renamed B",
+                ("urgent",),
+                (),
+                id="a-full-delivered-record-overrides-title-labels-and-blocked-by",
+            ),
+            pytest.param(
+                "_partial_delivered_record_body",
+                "Renamed B",
+                (),
+                (CHILD_A_ID,),
+                id="a-delivered-record-omitting-labels-and-blocked-by-keeps-them-stored",
+            ),
+            pytest.param(
+                "_no_delivered_record_body",
+                "Slice B",
+                (),
+                (CHILD_A_ID,),
+                id="no-delivered-record-keeps-everything-stored",
+            ),
+        ],
+    )
+    def test_update_item_body_takes_title_labels_and_blocked_by_from_a_delivered_record(
+        self,
+        bare_remote: Path,
+        worktree: Path,
+        delivered_body_factory: str,
+        expected_title: str,
+        expected_labels: tuple[str, ...],
+        expected_blocked_by: tuple[str, ...],
     ) -> None:
-        """A caller's piped body can carry any `[record]` table it likes --
-        `update_item_body` never trusts it. Only `updated_at` moves; every
-        other field, `parent` and `state` included, comes from the record
-        this adapter already holds for the item, not from the body it was
-        handed."""
+        """Issue #287's owner split for `update_item_body`'s own record
+        merge: `title`, `labels`, `blocked_by` come from a delivered
+        `[record]` table when the key is present -- a hostile `state` or
+        `parent` in that same table never takes, an omitted key (or no
+        `[record]` at all, every `rule`/`ask`/`cut` write) keeps this
+        item's own stored value. `updated_at` always moves regardless."""
         _push_item_tree(bare_remote, worktree, _item_files())
         adapter = _fetch_state_ref_board(
             bare_remote, worktree, writer=self._writer(bare_remote, worktree)
         )
-        before_body = adapter.item_reference(CHILD_A_NUMBER).body
+        before_body = adapter.item_reference(CHILD_B_NUMBER).body
         assert before_body is not None
-        before_record = _decoded_record(before_body, CHILD_A_ID)
-        hostile_record = _record(title="Hostile", state="closed", kind="task", parent=CHILD_B_ID)
-        hostile_body = _state_ref_body(_CHILD_A_PROJECTION, hostile_record)
+        before_record = _decoded_record(before_body, CHILD_B_ID)
+        delivered_body = getattr(self, delivered_body_factory)()
 
-        adapter.update_item_body(CHILD_A_NUMBER, hostile_body)
+        adapter.update_item_body(CHILD_B_NUMBER, delivered_body)
 
-        after = adapter.item_reference(CHILD_A_NUMBER)
+        after = adapter.item_reference(CHILD_B_NUMBER)
         assert after.body is not None
-        after_record = _decoded_record(after.body, CHILD_A_ID)
-        assert replace(after_record, updated_at=before_record.updated_at) == before_record
+        after_record = _decoded_record(after.body, CHILD_B_ID)
+        assert after_record.title == expected_title
+        assert after_record.labels == expected_labels
+        assert after_record.blocked_by == expected_blocked_by
+        assert after_record.state == before_record.state
+        assert after_record.parent == before_record.parent
+        assert after_record.created_at == before_record.created_at
         assert after_record.updated_at != before_record.updated_at
-        assert after_record.parent != hostile_record["parent"]
-        assert after_record.state.value != hostile_record["state"]
 
     def test_a_second_write_from_the_same_read_state_refuses_and_overwrites_nothing(
         self, bare_remote: Path, worktree: Path
@@ -1351,3 +1448,236 @@ class TestCliStateRefForge:
 
         ruled = issue_claim.main(["rule", RULABLE_ID, "--line", "1", "--yes"])
         assert ruled == 0
+
+    def test_item_edit_replaces_the_body_and_a_fresh_process_reads_it_back(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+    ) -> None:
+        """Issue #287 proof 1: `aco item edit` replaces a state-ref item's
+        body from stdin, byte-exact outside `[record]`, and a fresh `aco
+        item show` (its own fetch, standing in for a second process) reads
+        it back; `updated_at` moves to today, `created_at`/`parent`/`state`
+        stay this item's own stored values."""
+        self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, _item_files())
+        shown = issue_claim.main(["item", "show", str(CHILD_A_NUMBER), "--json"])
+        assert shown == 0
+        stored_body = json.loads(capsys.readouterr().out)["body"]
+        before_record = _decoded_record(stored_body, CHILD_A_ID)
+        edited_body = stored_body.replace("Prose.", "Edited prose.", 1)
+        monkeypatch.setattr(sys, "stdin", io.StringIO(edited_body))
+
+        edited = issue_claim.main(["item", "edit", str(CHILD_A_NUMBER)])
+
+        assert edited == 0
+        assert capsys.readouterr().out.strip() == f"EDITED {CHILD_A_ID}"
+        fresh = issue_claim.main(["item", "show", str(CHILD_A_NUMBER), "--json"])
+        assert fresh == 0
+        after_body = json.loads(capsys.readouterr().out)["body"]
+        assert after_body.split("```agent-claim", 1)[0] == edited_body.split("```agent-claim", 1)[0]
+        after_record = _decoded_record(after_body, CHILD_A_ID)
+        assert after_record.created_at == before_record.created_at
+        assert after_record.parent == before_record.parent
+        assert after_record.state == before_record.state
+        assert after_record.updated_at != before_record.updated_at
+        assert after_record.updated_at.startswith(datetime.now(UTC).date().isoformat())
+
+    def test_item_edit_json_prints_the_item_number_and_fresh_oid(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+    ) -> None:
+        """`aco item edit --json` prints `{item, number, oid}` -- the
+        freshly written blob's own oid, straight off `StateRefBoard.item_oid`,
+        never a re-read."""
+        self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, _item_files())
+        shown = issue_claim.main(["item", "show", str(CHILD_A_NUMBER), "--json"])
+        assert shown == 0
+        stored_body = json.loads(capsys.readouterr().out)["body"]
+        monkeypatch.setattr(sys, "stdin", io.StringIO(stored_body.replace("Prose.", "Edited.", 1)))
+
+        edited = issue_claim.main(["item", "edit", str(CHILD_A_NUMBER), "--json"])
+
+        assert edited == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["item"] == CHILD_A_ID
+        assert payload["number"] == CHILD_A_NUMBER
+        remote_url = f"file://{bare_remote}"
+        state = store.fetch_state(worktree=worktree, remote=remote_url)
+        assert state.tip is not None
+        assert payload["oid"] == state.items[CHILD_A_ID]
+
+    def test_item_edit_refuses_an_unknown_id(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+    ) -> None:
+        self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, _item_files())
+        monkeypatch.setattr(sys, "stdin", io.StringIO(_github_body(_CHILD_A_PROJECTION)))
+
+        status = issue_claim.main(["item", "edit", "aco-abcdef"])
+
+        assert status == 2
+        assert "does not exist" in capsys.readouterr().err
+
+    def test_item_edit_takes_title_labels_blocked_by_and_keeps_aco_owned_record_fields(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+    ) -> None:
+        """Issue #287 proof 2: a piped `[record]` naming a foreign `parent`,
+        `state = "closed"`, and a different `created_at` is silently
+        overwritten by this item's own stored values; the piped `title`,
+        `labels`, and `blocked_by` are taken as given."""
+        self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, _item_files())
+        remote_url = f"file://{bare_remote}"
+        before_state = store.fetch_state(worktree=worktree, remote=remote_url)
+        assert before_state.tip is not None
+        before = _decoded_record(
+            store.read_item_files(worktree, before_state.tip)[f"{CHILD_B_ID}.md"].decode(),
+            CHILD_B_ID,
+        )
+        hostile_record = _record(
+            title="Renamed via edit",
+            state="closed",
+            kind="task",
+            parent=CHILD_A_ID,
+            labels=("urgent",),
+            blocked_by=(),
+            closed_at="2020-01-01T00:00:00Z",
+        )
+        hostile_record["created_at"] = "2020-01-01T00:00:00Z"
+        delivered_body = _state_ref_body(_CHILD_B_PROJECTION, hostile_record)
+        monkeypatch.setattr(sys, "stdin", io.StringIO(delivered_body))
+
+        edited = issue_claim.main(["item", "edit", str(CHILD_B_NUMBER)])
+
+        assert edited == 0
+        capsys.readouterr()
+        state = store.fetch_state(worktree=worktree, remote=remote_url)
+        assert state.tip is not None
+        after = _decoded_record(
+            store.read_item_files(worktree, state.tip)[f"{CHILD_B_ID}.md"].decode(), CHILD_B_ID
+        )
+        assert after.title == "Renamed via edit"
+        assert after.labels == ("urgent",)
+        assert after.blocked_by == ()
+        assert after.state == before.state
+        assert after.parent == before.parent
+        assert after.created_at == before.created_at
+
+    def test_item_edit_sets_blocked_by_and_aco_next_skips_then_frees_it(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+    ) -> None:
+        """Issue #287 proof 3: `blocked_by` set through `aco item edit`
+        makes `aco next` skip the item as blocked; removing it again
+        through a second `item edit` frees it."""
+        self._live_state_ref_checkout(
+            monkeypatch, tmp_path, bare_remote, worktree, _edit_target_item_files()
+        )
+        blocked_body = _state_ref_body(
+            _EDIT_TARGET_PROJECTION,
+            _record(title="Target", state="open", kind="task", blocked_by=(EDIT_BLOCKER_ID,)),
+        )
+        monkeypatch.setattr(sys, "stdin", io.StringIO(blocked_body))
+        assert issue_claim.main(["item", "edit", str(EDIT_TARGET_NUMBER)]) == 0
+        capsys.readouterr()
+
+        assert issue_claim.main(["next"]) == 0
+        blocked_out = capsys.readouterr().out
+        assert f"#{EDIT_TARGET_NUMBER}: blocked by #{EDIT_BLOCKER_NUMBER}" in blocked_out
+
+        freed_body = _state_ref_body(
+            _EDIT_TARGET_PROJECTION, _record(title="Target", state="open", kind="task")
+        )
+        monkeypatch.setattr(sys, "stdin", io.StringIO(freed_body))
+        assert issue_claim.main(["item", "edit", str(EDIT_TARGET_NUMBER)]) == 0
+        capsys.readouterr()
+
+        assert issue_claim.main(["next"]) == 0
+        freed_out = capsys.readouterr().out
+        assert f"#{EDIT_TARGET_NUMBER}: blocked by" not in freed_out
+
+    def test_item_edit_two_processes_from_the_same_snapshot_the_second_refuses(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+    ) -> None:
+        """Issue #287 proof 4: two worktrees read the same item oid -- the
+        first `aco item edit` (this CLI's own write) lands, and a second
+        writer still holding that now-stale oid (`_fetch_state_ref_board`'s
+        own read, the same technique issue #283's own CAS test uses to
+        stand in for an independent process) refuses with issue #279's own
+        sentence; the remote keeps the first writer's body."""
+        self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, _item_files())
+        second = _fetch_state_ref_board(
+            bare_remote, worktree, writer=issue_claim._StoreItemWriter(worktree, str(bare_remote))
+        )
+        second_body = second.item_reference(CHILD_A_NUMBER).body
+        assert second_body is not None
+
+        shown = issue_claim.main(["item", "show", str(CHILD_A_NUMBER), "--json"])
+        assert shown == 0
+        stored_body = json.loads(capsys.readouterr().out)["body"]
+        first_body = stored_body.replace("Prose.", "First writer.", 1)
+        monkeypatch.setattr(sys, "stdin", io.StringIO(first_body))
+
+        edited = issue_claim.main(["item", "edit", str(CHILD_A_NUMBER)])
+        assert edited == 0
+        capsys.readouterr()
+
+        with pytest.raises(ClaimUnavailableError, match="written since it was read"):
+            second.update_item_body(
+                CHILD_A_NUMBER, second_body.replace("Prose.", "Second writer.", 1)
+            )
+
+        remote_url = f"file://{bare_remote}"
+        state = store.fetch_state(worktree=worktree, remote=remote_url)
+        assert state.tip is not None
+        stored = store.read_item_files(worktree, state.tip)[f"{CHILD_A_ID}.md"]
+        assert stored.startswith(b"First writer.")
+
+    def test_item_edit_refuses_a_body_with_no_block_before_any_write(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+    ) -> None:
+        """Issue #287 proof 5: a piped body with no recognized `agent-claim`
+        block refuses with `body --check`'s own sentence, before any write
+        -- the remote's tip stays exactly what it was."""
+        self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, _item_files())
+        remote_url = f"file://{bare_remote}"
+        before = store.fetch_state(worktree=worktree, remote=remote_url)
+        monkeypatch.setattr(sys, "stdin", io.StringIO("no block\n"))
+
+        status = issue_claim.main(["item", "edit", str(CHILD_A_NUMBER)])
+
+        assert status == 2
+        assert capsys.readouterr().err == (
+            "ERROR: body malformed: agent-claim: no agent-claim block\n"
+        )
+        after = store.fetch_state(worktree=worktree, remote=remote_url)
+        assert after.tip == before.tip
