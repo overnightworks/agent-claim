@@ -478,9 +478,29 @@ state-ref parentage has exactly one owner. An issue-scoped `claim`'s body
 check reads a `state-ref` item the same way `board`/`next` already do.
 `release --merged` still refuses — state-ref cannot yet verify a merged pull
 request (#230 slice 6) — naming the offline path instead: land with
-`item close` plus `release --abandoned "landed as <sha>"`. `item
-new`/`edit`/`close` as their own named commands do not exist yet (#230
-slice 4c+).
+`item close` plus `release --abandoned "landed as <sha>"`. `item edit`/`close`
+as their own named commands do not exist yet (#230 slice 4d/4e).
+
+`aco item new --title TITLE [--kind task|feature|container] [--parent ITEM]`
+creates a fresh item straight in `refs/aco/state` — a task/feature skeleton
+(`--kind container` writes the container skeleton instead) plus a `[record]`
+naming its kind and, with `--parent`, its parent — through the same one CAS
+write `cut`'s own `create_child` performs, and prints exactly one line, the
+minted id (`--json`: `{"item": "aco-xxxxxx", "number": n}`). It refuses under
+`storage = "github"` by name ("items live on the forge; open the issue
+there") — aco is pulled from the forge, never governs it, so it never opens a
+GitHub issue itself. `aco item show ITEM [--json]` prints one header line —
+`aco-xxxxxx · #n · open|closed · parent aco-…|none` — followed by the stored
+body byte-exact; it reads through the ordinary forge port, so it works under
+both storages (a state-ref item's own file, or a GitHub issue's body), shows
+a closed item exactly like an open one (closing never deletes), and refuses
+an unknown id by name.
+
+Every command that takes an item — `claim`, `cut`, `ask`, `rule`, `check`,
+`brief`, `body --parent`, `status`, `rescope`, and `release` — accepts it as
+`aco-xxxxxx`, `#n`, or the bare number `n`: an id is identity, not only
+display, so the id `item new` prints is something every other command can
+claim right back, on a `state-ref` repository or a `github` one alike.
 Landings are not yet derived from the state ref either (#230 slice 6), so
 every `state-ref` item's stage is either `IN_FLIGHT` (an active claim on an
 open branch) or `TEXT_ONLY`; `CODE_LANDED` and the board's recovery section
