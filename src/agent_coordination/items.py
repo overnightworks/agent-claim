@@ -101,6 +101,16 @@ def item_number(item_id: str) -> int:
     return int(item_id.removeprefix("aco-"), 16)
 
 
+def format_item_id(number: int) -> str:
+    """`number`, encoded the way `item_number` decodes it back (issue
+    #285): the one display id `aco item show`'s header prints under every
+    storage pin, `github` included -- so an id this tool prints is always a
+    valid reference back into `_parse_item_ref`, regardless of which forge
+    actually owns the number (decision D4, #230 cut 16.09.2026: an id is
+    identity, not just display)."""
+    return f"aco-{number:06x}"
+
+
 def item_id_from_filename(filename: str) -> str:
     """The item id `filename` names, or a loud refusal: every file directly
     under `items/` must be `aco-<six hex>.md`, never anything else (issue

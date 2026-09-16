@@ -280,6 +280,14 @@ class TestItemNumber:
             items.item_number("aco-zzzzzz")
 
 
+class TestFormatItemId:
+    @pytest.mark.parametrize(
+        "item_id", ["aco-000000", "aco-ffffff", "aco-8f3a2c"], ids=["zero", "max", "mixed"]
+    )
+    def test_format_item_id_inverts_item_number(self, item_id: str) -> None:
+        assert items.format_item_id(items.item_number(item_id)) == item_id
+
+
 class TestMintItemId:
     def test_mint_item_id_matches_the_item_id_pattern(self) -> None:
         assert items.ITEM_ID_PATTERN.fullmatch(items.mint_item_id(()))

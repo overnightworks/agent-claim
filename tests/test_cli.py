@@ -56,6 +56,7 @@ from agent_coordination import (
     forge,
     github,
     hook_input,
+    items,
     protocol,
     store,
 )
@@ -10420,3 +10421,97 @@ def test_cli_brief_refuses_a_non_github_canonical_remote_by_host(
     captured = capsys.readouterr()
     assert status == 2
     assert captured.err == "ERROR: no forge adapter for host file\n"
+
+
+@pytest.mark.parametrize(
+    ("value", "number"),
+    [("aco-3f9a2c", 0x3F9A2C), ("#42", 42), ("42", 42)],
+)
+def test_parse_item_ref_accepts_every_reference_syntax(value: str, number: int) -> None:
+    """Issue #285 proof 5: `aco-xxxxxx` (hex-decoded), `#n`, and the bare
+    number `n` are all one item reference."""
+    assert issue_claim._parse_item_ref(value) == number
+
+
+@pytest.mark.parametrize("value", ["foo", "aco-xyz", "#"])
+def test_parse_item_ref_refuses_anything_else(value: str) -> None:
+    """Issue #285 proof 5: anything that is none of the three forms refuses
+    by name rather than guessing."""
+    with pytest.raises(ClaimUnavailableError, match="is not an item reference"):
+        issue_claim._parse_item_ref(value)
+
+
+def test_main_refuses_a_malformed_item_reference_before_ever_dispatching(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`_parse_item_ref` runs as an argparse `type=` inside `parse_args`, so
+    its refusal must reach `main`'s own error rendering rather than an
+    argparse usage error or an unhandled exception (issue #285)."""
+    status = issue_claim.main(["claim", "not-an-item", "--scope", "README"])
+
+    assert status == 2
+    assert "is not an item reference" in capsys.readouterr().err
+
+
+def test_item_new_refuses_under_github_storage(capsys: pytest.CaptureFixture[str]) -> None:
+    """Issue #285 proof 6: under `storage = "github"` (the default, and
+    what an unconfigured toplevel reads), `item new` refuses by name rather
+    than opening a GitHub issue on the repository's behalf."""
+    status = issue_claim.main(["item", "new", "--title", "X"])
+
+    assert status == 2
+    assert capsys.readouterr().err == "ERROR: items live on the forge; open the issue there\n"
+
+
+def test_item_show_reads_the_fake_forge_body_under_github_storage(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #285 proof 6: under `storage = "github"`, `item show` reads
+    the issue body through the ordinary forge reader -- the same output
+    shape `state-ref` prints, an id encoded from the plain issue number."""
+    client = FakeForge()
+    client.issue_references[42] = forge.ItemReference(
+        forge.ItemState.OPEN, "Title", "Body text.\n", False
+    )
+    monkeypatch.setattr(github, "GitHubForge", lambda _repository: client)
+
+    status = issue_claim.main(["--repo", REPOSITORY, "item", "show", "42"])
+
+    assert status == 0
+    expected_id = items.format_item_id(42)
+    assert capsys.readouterr().out == f"{expected_id} · #42 · open · parent none\nBody text.\n"
+
+
+def test_item_show_as_json_reads_the_fake_forge_body_under_github_storage(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    client = FakeForge()
+    client.issue_references[42] = forge.ItemReference(
+        forge.ItemState.OPEN, "Title", "Body text.\n", False
+    )
+    monkeypatch.setattr(github, "GitHubForge", lambda _repository: client)
+
+    status = issue_claim.main(["--repo", REPOSITORY, "item", "show", "42", "--json"])
+
+    assert status == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {
+        "item": items.format_item_id(42),
+        "number": 42,
+        "state": "open",
+        "parent": None,
+        "body": "Body text.\n",
+    }
+
+
+def test_item_show_refuses_an_unknown_id(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    client = FakeForge()
+    client.issue_references[42] = forge.ItemReference(forge.ItemState.MISSING)
+    monkeypatch.setattr(github, "GitHubForge", lambda _repository: client)
+
+    status = issue_claim.main(["--repo", REPOSITORY, "item", "show", "42"])
+
+    assert status == 2
+    assert capsys.readouterr().err == f"ERROR: #42 does not exist in {REPOSITORY}\n"

@@ -7,8 +7,9 @@ IO of its own -- the Layers contract puts `store` above this module, so
 `cli._state_ref_forge` reads `items/`'s raw bytes and blob oids through
 `store.read_item_files`/`ClaimState.items` and hands them to the
 constructor; every read method below is a pure projection over that
-already-fetched data. Every write (`create_child`, `update_item_body`,
-`link_child`) instead calls the injected `ItemWriter` port: one
+already-fetched data. Every write (`create_item`, `create_child`,
+`update_item_body`, `link_child`) instead calls the injected `ItemWriter`
+port: one
 compare-and-swap write to `items/<id>.md`, implemented in `cli.py` over
 `store` (hash-object once, then one `commit_transition` with an
 `ItemWriteIntent`, issue #279) -- so this module still never imports
@@ -282,8 +283,14 @@ class StateRefBoard:
         to link."""
         del parent, child
 
-    def create_child(self, *, parent: int, title: str, body: str, kind: board.ItemKind) -> int:
-        parent_id = self._by_number[parent]
+    def _write_new_item(
+        self, *, parent_id: str | None, title: str, body: str, kind: board.ItemKind
+    ) -> str:
+        """The one write every fresh state-ref item goes through (issues
+        #283, #285): mint an id, compose its `[record]`, one CAS write, then
+        fold the result into this instance's own view -- shared by
+        `create_item` (`aco item new`, an optional parent) and `create_child`
+        (`cut`, always one)."""
         new_id = items.mint_item_id(self._items.keys())
         now = items.format_record_timestamp(datetime.now(UTC))
         record = items.ItemRecord(
@@ -303,7 +310,23 @@ class StateRefBoard:
         new_oid = self._writer.write_item(new_id, expected=None, content=new_body.encode("utf-8"))
         self._items[new_id] = _DecodedItem(record=record, body=new_body, oid=new_oid)
         self._by_number[record.number] = new_id
-        return record.number
+        return new_id
+
+    def create_item(
+        self, *, title: str, body: str, kind: board.ItemKind, parent: int | None
+    ) -> str:
+        """`aco item new`'s own write path (issue #285): the same one write
+        `create_child` performs, generalized to an optional parent -- so
+        `cli.py` never grows a second way to create a state-ref item.
+        Returns the freshly minted item id rather than `create_child`'s
+        `.number`: called only from `cli.py`'s own state-ref-only `item new`
+        path, which prints the id itself."""
+        parent_id = None if parent is None else self._by_number[parent]
+        return self._write_new_item(parent_id=parent_id, title=title, body=body, kind=kind)
+
+    def create_child(self, *, parent: int, title: str, body: str, kind: board.ItemKind) -> int:
+        item_id = self.create_item(title=title, body=body, kind=kind, parent=parent)
+        return self._items[item_id].record.number
 
     def update_item_body(self, number: int, body: str) -> None:
         item_id = self._by_number[number]

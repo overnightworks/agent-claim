@@ -12,6 +12,7 @@ is proven against a real object database, not an invented one.
 from __future__ import annotations
 
 import hashlib
+import json
 import shutil
 import subprocess
 from collections.abc import Callable, Mapping
@@ -117,8 +118,9 @@ def _record(
     kind: str,
     parent: str | None = None,
     blocked_by: tuple[str, ...] = (),
+    closed_at: str | None = None,
 ) -> dict[str, object]:
-    return {
+    record: dict[str, object] = {
         "title": title,
         "state": state,
         "kind": kind,
@@ -128,6 +130,9 @@ def _record(
         "created_at": "2026-09-10T00:00:00Z",
         "updated_at": "2026-09-15T00:00:00Z",
     }
+    if closed_at is not None:
+        record["closed_at"] = closed_at
+    return record
 
 
 # The one logical scenario every test below reads (issue #248's proof): a
@@ -1120,3 +1125,229 @@ class TestCliStateRefForge:
             "ERROR: cannot resolve the default branch; "
             "run aco from a checkout with origin/HEAD set\n"
         )
+
+    def test_item_new_creates_a_task_and_a_fresh_board_shows_it_open(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+    ) -> None:
+        """Issue #285 proof 1: `aco item new --title X` writes a fresh task
+        skeleton plus `[record]` straight into `items/<id>.md` and prints
+        exactly the minted id; a second `aco board` invocation (its own
+        fresh fetch, standing in for a second process) shows the new item
+        open."""
+        self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, _item_files())
+
+        status = issue_claim.main(["item", "new", "--title", "Fresh Item"])
+
+        assert status == 0
+        printed = capsys.readouterr().out.strip()
+        assert items.ITEM_ID_PATTERN.fullmatch(printed)
+
+        remote_url = f"file://{bare_remote}"
+        state = store.fetch_state(worktree=worktree, remote=remote_url)
+        assert state.tip is not None
+        stored = store.read_item_files(worktree, state.tip)[f"{printed}.md"].decode()
+        record = _decoded_record(stored, printed)
+        assert record.title == "Fresh Item"
+        assert record.kind == "task"
+        assert record.parent is None
+        assert record.state is items.RecordState.OPEN
+
+        board_status = issue_claim.main(["board"])
+        assert board_status == 0
+        assert "Fresh Item" in capsys.readouterr().out
+
+    def test_item_new_kind_container_writes_the_container_skeleton(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+    ) -> None:
+        """Issue #285 proof 2 (kind): `--kind container` writes the
+        container skeleton (a `Blocked by:` line ahead of the block) and
+        `kind = "container"` in the record."""
+        self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, _item_files())
+
+        status = issue_claim.main(
+            ["item", "new", "--title", "Fresh Epic", "--kind", "container", "--json"]
+        )
+
+        assert status == 0
+        payload = json.loads(capsys.readouterr().out)
+        printed = payload["item"]
+        assert payload["number"] == items.item_number(printed)
+
+        remote_url = f"file://{bare_remote}"
+        state = store.fetch_state(worktree=worktree, remote=remote_url)
+        assert state.tip is not None
+        stored = store.read_item_files(worktree, state.tip)[f"{printed}.md"].decode()
+        assert stored.startswith("Blocked by: nichts")
+        record = _decoded_record(stored, printed)
+        assert record.kind == "container"
+
+    def test_item_new_with_parent_sets_the_record_and_a_fresh_board_shows_the_child(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+    ) -> None:
+        """Issue #285 proof 2 (parent): `--parent aco-…` sets `record.parent`,
+        and a fresh `aco board` shows the new child under the container."""
+        self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, _item_files())
+
+        status = issue_claim.main(
+            ["item", "new", "--title", "Fresh Child", "--parent", CONTAINER_ID]
+        )
+
+        assert status == 0
+        printed = capsys.readouterr().out.strip()
+
+        remote_url = f"file://{bare_remote}"
+        state = store.fetch_state(worktree=worktree, remote=remote_url)
+        assert state.tip is not None
+        stored = store.read_item_files(worktree, state.tip)[f"{printed}.md"].decode()
+        record = _decoded_record(stored, printed)
+        assert record.parent == CONTAINER_ID
+
+        board_status = issue_claim.main(["board"])
+        assert board_status == 0
+        assert "Fresh Child" in capsys.readouterr().out
+
+    def test_item_new_refuses_an_unknown_parent(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+    ) -> None:
+        self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, _item_files())
+
+        status = issue_claim.main(["item", "new", "--title", "Orphan", "--parent", "aco-abcdef"])
+
+        assert status == 2
+        parent_number = items.item_number("aco-abcdef")
+        assert capsys.readouterr().err == f"ERROR: #{parent_number} does not exist\n"
+
+    def test_item_new_refuses_after_three_minting_collisions_and_writes_nothing(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+    ) -> None:
+        """Issue #285 proof 3: an injected minting collision against every
+        already-known id refuses by name after three attempts, and nothing
+        reaches the remote."""
+        self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, _item_files())
+        monkeypatch.setattr(items.secrets, "token_hex", lambda _size: "000001")
+        remote_url = f"file://{bare_remote}"
+        before = store.fetch_state(worktree=worktree, remote=remote_url)
+
+        status = issue_claim.main(["item", "new", "--title", "Collides"])
+
+        assert status == 2
+        assert "could not mint a fresh item id" in capsys.readouterr().err
+        after = store.fetch_state(worktree=worktree, remote=remote_url)
+        assert after.tip == before.tip
+
+    def test_item_show_prints_the_header_and_body_byte_exact_for_a_closed_child(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+    ) -> None:
+        """Issue #285 proof 4: the header names id, number, state, and
+        parent; a closed item is shown exactly like an open one (closing
+        never deletes it); the body is printed byte-exact."""
+        closed_id = "aco-000005"
+        closed_number = items.item_number(closed_id)
+        closed_record = _record(
+            title="Shipped",
+            state="closed",
+            kind="task",
+            parent=CONTAINER_ID,
+            closed_at="2026-09-15T00:00:00Z",
+        )
+        closed_body = _state_ref_body(_Projection("Done.", "keiner", "Shipped."), closed_record)
+        item_files = {**_item_files(), f"{closed_id}.md": closed_body.encode()}
+        self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, item_files)
+
+        status = issue_claim.main(["item", "show", closed_id])
+
+        assert status == 0
+        out = capsys.readouterr().out
+        header_line = f"{closed_id} · #{closed_number} · closed · parent {CONTAINER_ID}"
+        assert out == f"{header_line}\n{closed_body}"
+
+    def test_item_show_refuses_an_unknown_id(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+    ) -> None:
+        self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, _item_files())
+
+        status = issue_claim.main(["item", "show", "aco-abcdef"])
+
+        assert status == 2
+        assert "does not exist" in capsys.readouterr().err
+
+    def test_claim_rule_and_check_accept_the_aco_id_form_under_the_pin(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+    ) -> None:
+        """Issue #285 proof 5: `claim`, `rule`, and `check` all run straight
+        through to the same state-ref item when given the `aco-xxxxxx`
+        reference form, not only the bare number `#n`/`n` every other test
+        in this class already exercises."""
+        item_files = {**_item_files(), **_rulable_item_files()}
+        self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, item_files)
+        monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
+        monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+        monkeypatch.setattr(checkout, "versioned_paths", lambda: ("README",))
+
+        claimed = issue_claim.main(
+            [
+                "claim",
+                CHILD_A_ID,
+                "--agent",
+                "Codex Sol",
+                "--role",
+                "builder",
+                "--base",
+                "a" * 40,
+                "--branch",
+                f"codex/issue-{CHILD_A_NUMBER}-slice-a",
+                "--scope",
+                "README",
+                "--claim-id",
+                "state-ref-claim",
+            ]
+        )
+        assert claimed == 0
+        capsys.readouterr()
+
+        checked = issue_claim.main(["check", CHILD_A_ID])
+        assert checked == 0
+        assert "body ok" in capsys.readouterr().out
+
+        ruled = issue_claim.main(["rule", RULABLE_ID, "--line", "1", "--yes"])
+        assert ruled == 0

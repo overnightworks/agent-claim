@@ -24,6 +24,7 @@ from . import (
     forge,
     github,
     hook_input,
+    items,
     protocol,
     providers,
     state_board,
@@ -271,6 +272,29 @@ ROLE_ON_LIVE_CLAIM_HELP = (
     "the acting role; the selected claim's own role when omitted, and required to be "
     "coordinator with --coordinator-override"
 )
+ITEM_REF_HELP = "an item, as aco-xxxxxx, #n, or the bare number n"
+
+
+def _parse_item_ref(value: str) -> int:
+    """One item reference -- `aco-xxxxxx` (`items.item_number`'s own hex
+    decode), `#n`, or the bare integer `n` -- parsed to the number every
+    forge port keys by (issue #285, decision D4: an id is identity, not
+    just display, so a fresh id `item new` prints is something every other
+    command can claim right back). The one owner for every argparse slot
+    that means an item: `claim`, `cut`, `ask`, `rule`, `check`, `brief`,
+    `body --parent`, `status`, and `release`. Refuses by name for anything
+    else; used as an argparse `type=`, so this refusal must reach `main`'s
+    own `protocol.ClaimError` handling around `parse_args` rather than
+    argparse's own usage-error path, which only catches `ValueError`.
+    """
+    if items.ITEM_ID_PATTERN.fullmatch(value) is not None:
+        return items.item_number(value)
+    digits = value.removeprefix("#")
+    if digits.isdigit():
+        return int(digits)
+    raise protocol.ClaimUnavailableError(
+        f"{value!r} is not an item reference; use aco-xxxxxx, #n, or the bare number n"
+    )
 
 
 def _add_bootstrap_parser(commands: argparse._SubParsersAction) -> None:
@@ -280,7 +304,10 @@ def _add_bootstrap_parser(commands: argparse._SubParsersAction) -> None:
 def _add_status_parser(commands: argparse._SubParsersAction) -> None:
     status = commands.add_parser("status", help="show repository-wide build claims")
     status.add_argument(
-        "issue", type=int, nargs="?", help="show only this issue's claims and the ones they overlap"
+        "issue",
+        type=_parse_item_ref,
+        nargs="?",
+        help="show only this issue's claims and the ones they overlap",
     )
     status.add_argument(
         "--path", metavar="PATH", help="list holders of this path instead of by issue"
@@ -343,7 +370,7 @@ def _add_claim_parser(commands: argparse._SubParsersAction) -> None:
     )
     claim.add_argument(
         "issue",
-        type=int,
+        type=_parse_item_ref,
         nargs="?",
         help=LANE_ISSUE_HELP,
     )
@@ -398,7 +425,7 @@ def _add_release_parser(commands: argparse._SubParsersAction) -> None:
     release = commands.add_parser("release", help="release a landed or abandoned claim")
     release.add_argument(
         "issue",
-        type=int,
+        type=_parse_item_ref,
         nargs="?",
         help=LANE_ISSUE_HELP,
     )
@@ -465,7 +492,7 @@ def _add_rescope_parser(commands: argparse._SubParsersAction) -> None:
 
 def _add_cut_parser(commands: argparse._SubParsersAction) -> None:
     cut = commands.add_parser("cut", help="create a container's next slice as a fresh child issue")
-    cut.add_argument("issue", type=int, help="the container to cut")
+    cut.add_argument("issue", type=_parse_item_ref, help="the container to cut")
     cut.add_argument("--title", required=True, help="the fresh child issue's title")
     cut.add_argument(
         "--row",
@@ -478,7 +505,9 @@ def _add_cut_parser(commands: argparse._SubParsersAction) -> None:
 
 def _add_ask_parser(commands: argparse._SubParsersAction) -> None:
     ask = commands.add_parser("ask", help="append one proposed expectation line to an item's block")
-    ask.add_argument("item", type=int, help="the item to append the expectation line to")
+    ask.add_argument(
+        "item", type=_parse_item_ref, help="the item to append the expectation line to"
+    )
     ask.add_argument("--text", required=True, help="the expectation line's prose")
     ask.add_argument(
         "--default",
@@ -493,7 +522,7 @@ def _add_rule_parser(commands: argparse._SubParsersAction) -> None:
     rule = commands.add_parser(
         "rule", help="rule one proposed expectation line, transcribing the operator's word"
     )
-    rule.add_argument("item", type=int, help="the item whose expectation line is ruled")
+    rule.add_argument("item", type=_parse_item_ref, help="the item whose expectation line is ruled")
     rule.add_argument(
         "--line",
         type=int,
@@ -519,7 +548,7 @@ def _add_check_parser(commands: argparse._SubParsersAction) -> None:
     )
     check.add_argument(
         "number",
-        type=int,
+        type=_parse_item_ref,
         help="the pull request or issue to read; the forge says which one it is",
     )
     check.add_argument("--json", action="store_true", help=JSON_HELP)
@@ -544,8 +573,8 @@ def _add_body_parser(commands: argparse._SubParsersAction) -> None:
     )
     body.add_argument(
         "--parent",
-        type=int,
-        metavar="N",
+        type=_parse_item_ref,
+        metavar="ITEM",
         help="prepend a Parent: #N line to --template's skeleton",
     )
     body.add_argument("--json", action="store_true", help=JSON_HELP)
@@ -556,8 +585,37 @@ def _add_brief_parser(commands: argparse._SubParsersAction) -> None:
         "brief",
         help="print one item's body, live claim, lane tip and touched files for a dispatch",
     )
-    brief.add_argument("item", type=int, help="the work item to brief")
+    brief.add_argument("item", type=_parse_item_ref, help="the work item to brief")
     brief.add_argument("--json", action="store_true", help=JSON_HELP)
+
+
+def _add_item_parser(commands: argparse._SubParsersAction) -> None:
+    item = commands.add_parser(
+        "item", help="create or show one work item straight in refs/aco/state"
+    )
+    item_commands = item.add_subparsers(dest="item_command", required=True)
+    new = item_commands.add_parser(
+        "new", help="create a fresh item in refs/aco/state and print its id"
+    )
+    new.add_argument("--title", required=True, help="the fresh item's title")
+    new.add_argument(
+        "--kind",
+        choices=BODY_TEMPLATE_KINDS,
+        default=DEFAULT_BODY_TEMPLATE_KIND,
+        help=f"the fresh item's kind; default {DEFAULT_BODY_TEMPLATE_KIND}",
+    )
+    new.add_argument(
+        "--parent",
+        type=_parse_item_ref,
+        metavar="ITEM",
+        help=f"the fresh item's parent, {ITEM_REF_HELP}",
+    )
+    new.add_argument("--json", action="store_true", help=JSON_HELP)
+    show = item_commands.add_parser(
+        "show", help="print one item's header and its stored body byte-exact"
+    )
+    show.add_argument("item", type=_parse_item_ref, help=f"the item to show, {ITEM_REF_HELP}")
+    show.add_argument("--json", action="store_true", help=JSON_HELP)
 
 
 def _add_protect_parser(commands: argparse._SubParsersAction) -> None:
@@ -629,6 +687,7 @@ _SUBPARSER_BUILDERS: tuple[Callable[[argparse._SubParsersAction], None], ...] = 
     _add_check_parser,
     _add_body_parser,
     _add_brief_parser,
+    _add_item_parser,
     _add_protect_parser,
     _add_register_parser,
     _add_run_parser,
@@ -2232,6 +2291,102 @@ def _state_ref_forge(repo: str | None, canonical_remote: str) -> state_board.Sta
     )
 
 
+ITEM_NEW_GITHUB_REFUSAL = "items live on the forge; open the issue there"
+
+
+def _cmd_item_new(parsed: argparse.Namespace) -> int:
+    """`aco item new` (issue #285): the one write path for a fresh
+    state-ref item -- `StateRefBoard.create_item`, the same CAS write
+    `cut`'s own `create_child` performs, generalized to an optional
+    parent -- so this module never grows a second way to create one.
+    Refuses under `storage = "github"`: the forge is pulled, never
+    governed, so aco never opens a GitHub issue on a repository's behalf.
+    Never resolves the generic `_LazyForge` (issue #248) -- it calls
+    `_state_ref_forge` directly, since `create_item` is not part of the
+    generic `ForgeWriter` port every other write command narrows to."""
+    toplevel = _resolve_toplevel()
+    config = board.load_config(toplevel / board.CONFIG_PATH)
+    if config.storage is not board.Storage.STATE_REF:
+        raise protocol.ClaimUnavailableError(ITEM_NEW_GITHUB_REFUSAL)
+    client = _state_ref_forge(parsed.repo, config.canonical_remote)
+    parent_missing = (
+        parsed.parent is not None
+        and client.item_reference(parsed.parent).state is forge.ItemState.MISSING
+    )
+    if parent_missing:
+        raise protocol.ClaimUnavailableError(f"#{parsed.parent} does not exist")
+    kind = board.ItemKind(parsed.kind)
+    skeleton = (
+        board.BLOCK_CONTAINER_SKELETON
+        if kind is board.ItemKind.CONTAINER
+        else board.BLOCK_CHILD_SKELETON
+    )
+    item_id = client.create_item(title=parsed.title, body=skeleton, kind=kind, parent=parsed.parent)
+    _print_item_new_result(item_id, items.item_number(item_id), as_json=parsed.json)
+    return 0
+
+
+def _print_item_new_result(item_id: str, number: int, *, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps({"item": item_id, "number": number}))
+    else:
+        print(item_id)
+
+
+def _item_state_text(state: forge.ItemState) -> str:
+    return "open" if state is forge.ItemState.OPEN else "closed"
+
+
+def _item_parent_id(parent: board.ParentIssue | None) -> str | None:
+    return None if parent is None else items.format_item_id(parent.reference.number)
+
+
+def _item_header(
+    number: int, reference: forge.ItemReference, parent: board.ParentIssue | None
+) -> str:
+    """`item show`'s one header line: id, number, state, and parent -- the
+    same shape regardless of which forge answered the reads, since an id
+    (`items.format_item_id`) is a pure encoding of `number`, never a
+    per-adapter fact."""
+    return (
+        f"{items.format_item_id(number)} · #{number} · "
+        f"{_item_state_text(reference.state)} · parent {_item_parent_id(parent) or 'none'}"
+    )
+
+
+def _cmd_item_show(parsed: argparse.Namespace, session: _ReadSession) -> int:
+    """`aco item show` (issue #285): the stored body, byte-exact, behind
+    one header line -- read through the ordinary forge port, so it works
+    identically under `storage = "github"` (the forge's own issue body) and
+    `storage = "state-ref"` (the item file's own body); closing an item
+    never deletes it, so a closed item is shown exactly like an open one."""
+    client = session.forge()
+    number = parsed.item
+    reference = client.item_reference(number)
+    if reference.state is forge.ItemState.MISSING:
+        raise protocol.ClaimUnavailableError(
+            f"#{number} does not exist in {client.repository.path}"
+        )
+    parent = client.parent_issue(number)
+    body = reference.body or ""
+    if parsed.json:
+        print(
+            json.dumps(
+                {
+                    "item": items.format_item_id(number),
+                    "number": number,
+                    "state": _item_state_text(reference.state),
+                    "parent": _item_parent_id(parent),
+                    "body": body,
+                }
+            )
+        )
+        return 0
+    print(_item_header(number, reference, parent))
+    print(body, end="")
+    return 0
+
+
 def _claim_ages(worktree: Path, state: protocol.ClaimState) -> dict[str, datetime]:
     """Each live claim's age in an already-fetched state -- one batched read
     of `state.tip`'s history (`store.claim_ages`, issue #242), never a git
@@ -3692,6 +3847,10 @@ def _dispatch(parsed: argparse.Namespace) -> int:
         parsed.agent = checkout._resolved_agent(parsed.agent)
     if parsed.command == "bootstrap":
         return _bootstrap_state()
+    if parsed.command == "item":
+        if parsed.item_command == "new":
+            return _cmd_item_new(parsed)
+        return _cmd_item_show(parsed, _ReadSession(forge=_LazyForge(parsed.repo)))
     release_branch = _release_branch_for(parsed) if parsed.command == "release" else None
     forge_accessor = _LazyForge(parsed.repo)
     if parsed.command == "board" and parsed.serve:
@@ -3830,7 +3989,15 @@ def _read_status_body_or_dispatch(parsed: argparse.Namespace) -> int:
 
 
 def main(arguments: list[str] | None = None) -> int:
-    parsed = _parser().parse_args(arguments)
+    try:
+        # `_parse_item_ref` is an argparse `type=`; its own refusal is
+        # `protocol.ClaimError`, not the `ValueError` argparse's own
+        # conversion-error handling catches, so it needs this same try here
+        # rather than reaching the parser unguarded.
+        parsed = _parser().parse_args(arguments)
+    except protocol.ClaimError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return 2
     if parsed.command in {"_run-at-login", "register", "run", "login"}:
         try:
             return _local_operation(parsed)
