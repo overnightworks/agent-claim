@@ -1,8 +1,0 @@
-claim_id = "f50892f400914098865c66a53ef46c81"
-agent = "Claude head (coordinator)"
-role = "builder"
-base = "a10302084267cdf342bc1f310742de289f89453c"
-branch = "claude/issue-283-state-ref-writer"
-scope = ["src/agent_coordination/state_board.py", "src/agent_coordination/items.py", "src/agent_coordination/cli.py", "tests/test_state_board.py", "tests/test_cli.py"]
-opened_commit = "b33522b5972319540fb76f5f6e7f3405e606517a"
-whole_reason = "one writer port across the adapter, the id mint, the cli wiring and their two test modules; splitting leaves an adapter nothing calls"
