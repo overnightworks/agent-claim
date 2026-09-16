@@ -876,8 +876,7 @@ def _next_action_item(action: board.NextAction) -> board.BoardItem:
 
 
 def _freed_item_numbers(
-    client: forge.ForgeReader,
-    issues: tuple[board.Issue, ...],
+    dependencies: Mapping[int, tuple[board.IssueDependency, ...]],
     landed: board.IssueReference,
 ) -> tuple[int, ...]:
     """Open items whose last open blocker was `landed` (issue #256): every
@@ -888,14 +887,14 @@ def _freed_item_numbers(
     reads, rather than re-deriving them from `Board`'s aggregate fields:
     those only ever describe the *currently* open issues, so a landed
     item's own `blocked_by` reference disappears from them the moment it
-    closes -- exactly the fact this needs to name who it freed.
+    closes -- exactly the fact this needs to name who it freed. `dependencies`
+    is `_release_landing`'s one fetch, shared with `_board` (issue #256
+    review), rather than a second `list_board_dependencies` round trip over
+    the same candidates.
     """
-    candidates = tuple(issue.number for issue in issues if issue.blocked_by_count > 0)
-    dependencies = _fetch_dependencies(client, candidates)
     repository = landed.repository
     freed: list[int] = []
-    for number in candidates:
-        local = dependencies.get(number, ())
+    for number, local in dependencies.items():
         if board._dependency_freed_on(local, repository) is None:
             continue
         if board.open_dependency_blockers(local, repository):
@@ -914,10 +913,17 @@ def _release_landing(
     """A merged release's own board read (issue #256): fetched once, lazily,
     only after the release transition already committed -- the caller wraps
     this in one broad `forge.ForgeError` catch, so a forge hiccup here can
-    never undo or fail a release that already stood."""
+    never undo or fail a release that already stood. The dependency fetch
+    below is the one round trip both `_freed_item_numbers` and `_board` need
+    for this same candidate set; passing it into `_board` keeps this a
+    single fetch rather than two (issue #256 review)."""
     issues = client.list_open_board_issues()
-    freed = () if landed is None else _freed_item_numbers(client, issues, landed)
-    projected = _board(client, claims, issues=issues, claim_ages=claim_ages)
+    candidates = tuple(issue.number for issue in issues if issue.blocked_by_count > 0)
+    dependencies = _validated_dependencies(issues, _fetch_dependencies(client, candidates))
+    freed = () if landed is None else _freed_item_numbers(dependencies, landed)
+    projected = _board(
+        client, claims, issues=issues, claim_ages=claim_ages, dependencies=dependencies
+    )
     action = board.next_action(projected)
     return ReleaseLanding(freed, None if action is None else _next_action_item(action))
 
@@ -1055,6 +1061,7 @@ def _board(
     *,
     issues: tuple[board.Issue, ...] | None = None,
     claim_ages: Mapping[str, datetime] | None = None,
+    dependencies: dict[int, tuple[board.IssueDependency, ...]] | None = None,
 ) -> board.Board:
     now = datetime.now(UTC)
     config = _load_board_config(client, _resolve_toplevel())
@@ -1086,12 +1093,17 @@ def _board(
         merged_pull_requests = pool.submit(client.list_recent_merged_board_pull_requests, since)
         children = _fetch_children(client, container_numbers)
         pull_requests = (open_pull_requests.result(), merged_pull_requests.result())
-    dependencies = _validated_dependencies(
-        issues,
-        _fetch_dependencies(
-            client, tuple(issue.number for issue in issues if issue.blocked_by_count > 0)
-        ),
-    )
+    if dependencies is None:
+        # A caller that already fetched and validated this exact candidate
+        # set -- `_release_landing`'s own `list_board_dependencies` wave,
+        # issue #256 review -- passes it in above instead of paying for a
+        # second round trip here.
+        dependencies = _validated_dependencies(
+            issues,
+            _fetch_dependencies(
+                client, tuple(issue.number for issue in issues if issue.blocked_by_count > 0)
+            ),
+        )
     return board.build_board(
         board.BoardBuildInputs(
             issues=issues,
@@ -2647,33 +2659,69 @@ def _cmd_release(parsed: argparse.Namespace, session: _WriteSession) -> None:
         subject=_transition_subject("release", selected.identity, selected.branch),
         intent=intent,
     )
-    landing: ReleaseLanding | None = None
-    hint: str | None = None
-    if client is not None:
-        landed = (
-            board.IssueReference(client.repository.path, identity.issue)
-            if isinstance(identity, protocol.IssueIdentity)
-            else None
+    landing, hint = (
+        (None, None) if client is None else _landing_report(client, identity, worktree, new_state)
+    )
+    _print_release_result(
+        ReleaseReport(selected, parsed.agent, resolved_role, outcome, client, landing, hint),
+        as_json=parsed.json,
+    )
+
+
+def _landing_report(
+    client: forge.ForgeReader,
+    identity: protocol.ClaimIdentity,
+    worktree: Path,
+    new_state: store.ClaimState,
+) -> tuple[ReleaseLanding | None, str | None]:
+    """The `(landing, hint)` pair `_cmd_release` prints once its release
+    transition already committed (issue #256): a forge hiccup here can only
+    ever downgrade the report to `hint`, never undo or fail that release."""
+    landed = (
+        board.IssueReference(client.repository.path, identity.issue)
+        if isinstance(identity, protocol.IssueIdentity)
+        else None
+    )
+    try:
+        landing = _release_landing(
+            client, tuple(new_state.claims.values()), _claim_ages(worktree, new_state), landed
         )
-        try:
-            landing = _release_landing(
-                client,
-                tuple(new_state.claims.values()),
-                _claim_ages(worktree, new_state),
-                landed,
-            )
-        except forge.ForgeError as error:
-            hint = (
-                f"hint: could not read the board to report what this landing freed ({error}); "
-                "run `aco board` once the forge is reachable"
-            )
-    if parsed.json:
-        _release_json(selected, parsed.agent, resolved_role, outcome, landing)
+    except forge.ForgeError as error:
+        hint = (
+            f"hint: could not read the board to report what this landing freed ({error}); "
+            "run `aco board` once the forge is reachable"
+        )
+        return None, hint
+    return landing, None
+
+
+@dataclass(frozen=True)
+class ReleaseReport:
+    """Everything `_print_release_result` needs to render one `release`
+    outcome (issue #256), bundled so the printer itself takes one argument
+    instead of PLR0913's five-scalar ceiling: the just-released claim, the
+    caller identity that performed it, the outcome it recorded, and the
+    merged-landing board read (`None` for an abandoned or issueless release)
+    alongside its `hint` fallback."""
+
+    selected: protocol.ActiveClaim
+    agent: str
+    role: str | None
+    outcome: protocol.ReleaseOutcome
+    client: forge.ForgeReader | None
+    landing: ReleaseLanding | None
+    hint: str | None
+
+
+def _print_release_result(report: ReleaseReport, *, as_json: bool) -> None:
+    selected, landing, hint = report.selected, report.landing, report.hint
+    if as_json:
+        _release_json(selected, report.agent, report.role, report.outcome, landing)
         if hint is not None:
             print(hint, file=sys.stderr)
         return
     print(f"RELEASED {_claim_subject(selected)}: {selected.claim_id}")
-    if client is not None:
+    if report.client is not None:
         if hint is not None:
             print(hint)
         else:

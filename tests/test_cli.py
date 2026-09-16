@@ -14619,6 +14619,33 @@ def test_release_merged_prints_the_freed_and_next_lines(
     assert "Higher priority freed item" in out
 
 
+def test_release_merged_fetches_each_candidates_dependencies_only_once(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The `freed` report and the projected `next` pick share one dependency
+    fetch (issue #256 review): `_board`'s own board build must not re-list
+    the same blocked-by candidates `_freed_item_numbers` already read."""
+    client = merged_release_client(monkeypatch, body="Work-Item: #72\n\nCloses #72")
+    client.closed_issues.add(WORK_ITEM_ISSUE)
+    monkeypatch.setattr(issue_claim, "_fetch_issue_reference", _LIVE_FETCH_ISSUE_REFERENCE)
+    client.board_issues, client.board_dependencies = _two_dependants_freed_by_the_landing()
+    observed_dependency_calls: list[int] = []
+    original_list_board_dependencies = client.list_board_dependencies
+
+    def spy_list_board_dependencies(number: int) -> tuple[board.IssueDependency, ...]:
+        observed_dependency_calls.append(number)
+        return original_list_board_dependencies(number)
+
+    monkeypatch.setattr(client, "list_board_dependencies", spy_list_board_dependencies)
+
+    exit_code = issue_claim.main(
+        ["--repo", REPOSITORY, "release", str(WORK_ITEM_ISSUE), "--merged", "12"]
+    )
+
+    assert exit_code == 0
+    assert sorted(observed_dependency_calls) == [80, 81, 82, 83]
+
+
 def test_release_merged_prints_a_hint_instead_of_failing_when_the_board_is_unreachable(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
