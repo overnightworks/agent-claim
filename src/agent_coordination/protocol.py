@@ -15,7 +15,8 @@ from typing import Protocol, TypeVar
 # `refs/aco/state` as a side effect (issue #176 done-when 1). One owner so
 # `apply`, `store.commit_transition`, and `protect` cannot drift.
 MISSING_STATE_REF = (
-    "the claim state ref does not exist yet; run bootstrap before claim, rescope, or release"
+    "the claim state ref does not exist yet; run bootstrap before claim, rescope, "
+    "release, or item write"
 )
 # Coordination-contract convention: the only branch prefixes an issueless lane claim
 # may use, so a builder that forgot its issue number never gets a silent, unlabeled,
@@ -741,13 +742,17 @@ class ClaimState:
     not exist yet. `claims`, `consumed_ids`, and `resources` are C2's
     addition alongside `apply`: immutable collections (`MappingProxyType`,
     `frozenset`) inside this frozen state, never mutated in place -- every
-    transition builds and returns a whole new `ClaimState`.
+    transition builds and returns a whole new `ClaimState`. `items` (issue
+    #248/#279) maps an item id to its blob oid alone, never its content --
+    content stays a lazy, separate read (`store.read_item_files`), which is
+    what keeps this state cheap to fetch regardless of item count.
     """
 
     tip: ObjectId | None
     claims: Mapping[str, ActiveClaim] = field(default_factory=lambda: MappingProxyType({}))
     consumed_ids: frozenset[ClaimId] = field(default_factory=frozenset)
     resources: Mapping[str, ResourceRecord] = field(default_factory=lambda: MappingProxyType({}))
+    items: Mapping[str, ObjectId] = field(default_factory=lambda: MappingProxyType({}))
 
 
 EMPTY_STATE = ClaimState(tip=None)
@@ -791,14 +796,16 @@ def parse_schema_toml(content: str, *, tip: ObjectId) -> ClaimState:
     return ClaimState(tip=tip)
 
 
-# --- Claim transitions: intents and `apply` (issue #176, slice C2) ---------
+# --- Claim transitions: intents and `apply` (issue #176, slice C2; item
+# writes, issue #279) ---------------------------------------------------
 #
-# `apply` is the sole writer of `ClaimState.claims`/`consumed_ids`/`resources`.
-# It is pure: no git, no clock, no randomness. `store.py`'s commit loop is its
-# one production caller, and refuses every write-path command before this
-# ever runs against `EMPTY_STATE` -- only `bootstrap` may create the ref
-# itself (done-when: a missing ref is never created as a side effect of a
-# claim/rescope/release/override/takeover/resource/protect call).
+# `apply` is the sole writer of `ClaimState.claims`/`consumed_ids`/
+# `resources`/`items`. It is pure: no git, no clock, no randomness.
+# `store.py`'s commit loop is its one production caller, and refuses every
+# write-path command before this ever runs against `EMPTY_STATE` -- only
+# `bootstrap` may create the ref itself (done-when: a missing ref is never
+# created as a side effect of a claim/rescope/release/override/takeover/
+# resource/protect/item-write call).
 
 
 @dataclass(frozen=True)
@@ -855,7 +862,27 @@ class ReleaseIntent:
     coordinator_override: bool = False
 
 
-ClaimTransitionIntent = ClaimIntent | RescopeIntent | ReleaseIntent
+@dataclass(frozen=True)
+class ItemWriteIntent:
+    """Replaces `items/<item_id>.md`'s stored blob oid via oid-based CAS
+    (issue #279). Create, edit, and close are all "replace this blob" and
+    differ only in how the caller computed `new_oid`'s bytes -- never in a
+    separate intent shape, so there is one `ItemWriteIntent`, not three.
+
+    `expected=None` means "this item must not exist yet"; any other value
+    must equal the item's current oid or the write refuses loud, never
+    overwriting. Needs no claim: an item write is plumbing straight to
+    `refs/aco/state`, never a worktree path, so the `protect` boundary is
+    unaffected.
+    """
+
+    item_id: str
+    expected: ObjectId | None
+    new_oid: ObjectId
+    operation_id: str
+
+
+ClaimTransitionIntent = ClaimIntent | RescopeIntent | ReleaseIntent | ItemWriteIntent
 
 
 def _same_identity(left: ClaimIdentity, right: ClaimIdentity) -> bool:
@@ -1052,15 +1079,33 @@ def _apply_release_intent(state: ClaimState, intent: ReleaseIntent) -> ClaimStat
     return replace(state, claims=MappingProxyType(new_claims))
 
 
+def _apply_item_write_intent(state: ClaimState, intent: ItemWriteIntent) -> ClaimState:
+    if state.tip is None:
+        raise ClaimError(MISSING_STATE_REF)
+    current = state.items.get(intent.item_id)
+    if current != intent.expected:
+        if intent.expected is None:
+            raise ClaimUnavailableError(f"item {intent.item_id!r} already exists")
+        raise ClaimUnavailableError(
+            f"item {intent.item_id!r} was written since it was read "
+            f"(expected {intent.expected}, found {current!r}); re-read and retry"
+        )
+    new_items = {**state.items, intent.item_id: intent.new_oid}
+    return replace(state, items=MappingProxyType(new_items))
+
+
 def apply(state: ClaimState, intent: ClaimTransitionIntent) -> ClaimState:
-    """The pure claim-state transition (issue #176, §1): the sole writer of
-    `ClaimState.claims`/`consumed_ids`/`resources`. Assumes `state.tip` is
-    already real -- `store.py` never calls this against `EMPTY_STATE`."""
+    """The pure claim-state transition (issue #176 §1; item writes, issue
+    #279): the sole writer of `ClaimState.claims`/`consumed_ids`/
+    `resources`/`items`. Assumes `state.tip` is already real -- `store.py`
+    never calls this against `EMPTY_STATE`."""
     if isinstance(intent, ClaimIntent):
         return _apply_claim_intent(state, intent)
     if isinstance(intent, RescopeIntent):
         return _apply_rescope_intent(state, intent)
-    return _apply_release_intent(state, intent)
+    if isinstance(intent, ReleaseIntent):
+        return _apply_release_intent(state, intent)
+    return _apply_item_write_intent(state, intent)
 
 
 # --- `claims/<key>.toml` and `resources/<name>.toml` codecs -----------------

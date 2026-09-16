@@ -561,6 +561,26 @@ def test_read_item_files_rejects_a_non_blob_entry(bare_remote: Path, worktree: P
         store.read_item_files(worktree, tip)
 
 
+def test_fetch_state_rejects_a_non_blob_entry_in_items(bare_remote: Path, worktree: Path) -> None:
+    """`ClaimState.items` (issue #279) enforces the same "every entry is a
+    blob" structural shape `read_item_files` already enforces -- proven here
+    through the state-parsing side rather than the lazy content read."""
+    schema_blob = _blob(worktree, protocol.serialize_empty_schema_toml().encode())
+    inner_tree = _raw_tree(worktree, [])
+    items_tree = _raw_tree(worktree, [("040000", "tree", inner_tree, "aco-000001.md")])
+    _push_raw_state_tree(
+        bare_remote,
+        worktree,
+        [
+            ("100644", "blob", schema_blob, "schema.toml"),
+            ("040000", "tree", items_tree, store.ITEMS_DIRECTORY),
+        ],
+    )
+
+    with pytest.raises(protocol.MalformedStateTreeError, match="is not a file"):
+        store.fetch_state(worktree=worktree, remote=str(bare_remote))
+
+
 def test_read_state_archive_short_circuits_on_an_empty_paths_list(worktree: Path) -> None:
     """An empty `paths` sequence means "nothing to fetch" (issue #248): `git
     archive -- ` with zero path arguments would otherwise archive the whole
@@ -1405,6 +1425,166 @@ def test_commit_transition_ten_thread_contention_lands_every_distinct_key(
     assert merge_count.stdout.strip() == "0"
 
 
+# --- Item write transitions: `ItemWriteIntent`'s oid CAS through the real --
+# --- git transport (issue #279) ---------------------------------------------
+
+
+def _hashed_item_intent(
+    worktree: Path,
+    *,
+    item_id: str = "aco-000001",
+    expected: protocol.ObjectId | None = None,
+    content: bytes = b"item body\n",
+    operation_id: str = "op-1",
+) -> protocol.ItemWriteIntent:
+    """An `ItemWriteIntent` whose `new_oid` is a real blob hashed once, up
+    front -- the same shape a production caller must use: `commit_transition`
+    never hashes content itself, so every retry attempt re-applies the exact
+    same `new_oid` (issue #279's "hashed once before the retry loop")."""
+    return protocol.ItemWriteIntent(
+        item_id=item_id,
+        expected=expected,
+        new_oid=protocol.ObjectId(_blob(worktree, content)),
+        operation_id=operation_id,
+    )
+
+
+def test_commit_transition_item_create_adds_a_file_and_preserves_the_claim_ledger(
+    bare_remote: Path, worktree: Path
+) -> None:
+    """A create lands `items/<id>.md` while `claims/`, `ids/`, and
+    `resources/` stay byte-identical -- the same subtree-reuse seam
+    `_write_incremental_state_tree` already gives claim/rescope/release
+    (issue #241), now proven from the item-write side."""
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    store.commit_transition(
+        worktree=worktree,
+        remote=str(bare_remote),
+        subject="claim issue 42",
+        intent=_issue_claim_intent(42, resource_name="display"),
+    )
+    before_tip = store.fetch_state(worktree=worktree, remote=str(bare_remote)).tip
+    assert before_tip is not None
+    before_entries = store._list_tree(worktree, before_tip, tip=before_tip, context="state")
+
+    intent = _hashed_item_intent(worktree, content=b"item body\n")
+    result = store.commit_transition(
+        worktree=worktree,
+        remote=str(bare_remote),
+        subject="create item aco-000001",
+        intent=intent,
+    )
+
+    assert result.items == {"aco-000001": intent.new_oid}
+    assert result.tip is not None
+    assert store.read_item_files(worktree, result.tip)["aco-000001.md"] == b"item body\n"
+    after_entries = store._list_tree(worktree, result.tip, tip=result.tip, context="state")
+    assert after_entries[store.CLAIMS_DIRECTORY] == before_entries[store.CLAIMS_DIRECTORY]
+    assert after_entries[store.IDS_DIRECTORY] == before_entries[store.IDS_DIRECTORY]
+    assert after_entries[store.RESOURCES_DIRECTORY] == before_entries[store.RESOURCES_DIRECTORY]
+
+
+def test_commit_transition_item_create_refuses_a_duplicate_id(
+    bare_remote: Path, worktree: Path
+) -> None:
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    store.commit_transition(
+        worktree=worktree,
+        remote=str(bare_remote),
+        subject="create item aco-000001",
+        intent=_hashed_item_intent(worktree, content=b"first\n", operation_id="op-1"),
+    )
+
+    with pytest.raises(protocol.ClaimUnavailableError, match="already exists"):
+        store.commit_transition(
+            worktree=worktree,
+            remote=str(bare_remote),
+            subject="create item aco-000001 again",
+            intent=_hashed_item_intent(worktree, content=b"second\n", operation_id="op-2"),
+        )
+
+
+def test_commit_transition_item_edit_refuses_a_stale_expected_oid_without_clobbering(
+    bare_remote: Path, worktree: Path
+) -> None:
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    created = store.commit_transition(
+        worktree=worktree,
+        remote=str(bare_remote),
+        subject="create item aco-000001",
+        intent=_hashed_item_intent(worktree, content=b"first\n", operation_id="op-1"),
+    )
+    stale_expected = protocol.ObjectId(_blob(worktree, b"never written\n"))
+
+    with pytest.raises(protocol.ClaimUnavailableError, match="written since it was read"):
+        store.commit_transition(
+            worktree=worktree,
+            remote=str(bare_remote),
+            subject="edit item aco-000001",
+            intent=_hashed_item_intent(
+                worktree, expected=stale_expected, content=b"second\n", operation_id="op-2"
+            ),
+        )
+
+    unchanged = store.fetch_state(worktree=worktree, remote=str(bare_remote))
+    assert unchanged.items == created.items
+    assert unchanged.tip is not None
+    assert store.read_item_files(worktree, unchanged.tip)["aco-000001.md"] == b"first\n"
+
+
+def test_commit_transition_two_writers_different_item_ids_both_land(
+    bare_remote: Path, worktree: Path
+) -> None:
+    """Same shape as the two-racer claim test on different keys (issue
+    #176): two item creates on distinct ids both land, because a retry
+    rebuilds `items/` from the full id -> oid map, never a copy of the
+    parent tree's `items/` oid (issue #279)."""
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    store.commit_transition(
+        worktree=worktree,
+        remote=str(bare_remote),
+        subject="create item aco-000001",
+        intent=_hashed_item_intent(worktree, item_id="aco-000001", operation_id="op-1"),
+    )
+    store.commit_transition(
+        worktree=worktree,
+        remote=str(bare_remote),
+        subject="create item aco-000002",
+        intent=_hashed_item_intent(worktree, item_id="aco-000002", operation_id="op-2"),
+    )
+
+    state = store.fetch_state(worktree=worktree, remote=str(bare_remote))
+    assert set(state.items) == {"aco-000001", "aco-000002"}
+
+
+def test_commit_transition_item_write_lost_response_does_not_apply_twice(
+    bare_remote: Path, worktree: Path
+) -> None:
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    transport = _AcceptThenRaiseTransport()
+    intent = _hashed_item_intent(worktree, content=b"item body\n")
+
+    result = store.commit_transition(
+        worktree=worktree,
+        remote=str(bare_remote),
+        subject="create item aco-000001",
+        intent=intent,
+        transport=transport,
+    )
+
+    assert transport.calls == 1
+    assert result.items == {"aco-000001": intent.new_oid}
+    log = subprocess.run(
+        ["git", "--git-dir", str(bare_remote), "rev-list", "--count", store.STATE_REF],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    # The bootstrap commit, plus this one item-write commit -- never a
+    # duplicate second commit for the same operation_id.
+    assert log.stdout.strip() == "2"
+
+
 # --- Incremental write/bulk read: git-invocation count is independent of ---
 # --- how many claims the state tree holds (issue #241) ---------------------
 
@@ -1503,6 +1683,40 @@ def test_fetch_state_git_call_count_is_independent_of_claim_count(
     state = store.fetch_state(worktree=reader, remote=str(bare_remote))
 
     assert len(state.claims) == claim_count
+    assert dict(git_call_spy) == {
+        "ls-remote": 1,
+        "fetch": 1,
+        "rev-parse": 4,
+        "ls-tree": 1,
+        "archive": 1,
+    }
+
+
+def test_fetch_state_populates_items_from_the_one_existing_ls_tree_call(
+    bare_remote: Path, worktree: Path, tmp_path: Path, git_call_spy: Counter[str]
+) -> None:
+    """`ClaimState.items` (issue #279) comes free from the same recursive
+    `ls-tree` `_parse_state_tree` already pays for its structure -- no
+    second `ls-tree` and no `archive` call for `items/`'s own oids."""
+    schema_blob = _blob(worktree, protocol.serialize_empty_schema_toml().encode())
+    item_blob = _blob(worktree, b"item body\n")
+    items_tree = _raw_tree(worktree, [("100644", "blob", item_blob, "aco-000001.md")])
+    _push_raw_state_tree(
+        bare_remote,
+        worktree,
+        [
+            ("100644", "blob", schema_blob, "schema.toml"),
+            ("040000", "tree", items_tree, store.ITEMS_DIRECTORY),
+        ],
+    )
+    reader = tmp_path / "reader"
+    reader.mkdir()
+    _git("init", "-b", "main", cwd=reader)
+    git_call_spy.clear()
+
+    state = store.fetch_state(worktree=reader, remote=str(bare_remote))
+
+    assert state.items == {"aco-000001": protocol.ObjectId(item_blob)}
     assert dict(git_call_spy) == {
         "ls-remote": 1,
         "fetch": 1,
@@ -2094,6 +2308,71 @@ def test_apply_resource_value_must_be_a_positive_integer() -> None:
     intent = _claim_intent(resource_name="display", resource_value=0)
     with pytest.raises(protocol.ClaimError, match="positive integer"):
         protocol.apply(_STATE_WITH_TIP, intent)
+
+
+# --- `ItemWriteIntent`'s oid CAS (issue #279) -------------------------------
+
+_ITEM_OID = protocol.ObjectId("d" * 40)
+
+
+def _item_intent(
+    *,
+    item_id: str = "aco-000001",
+    expected: protocol.ObjectId | None = None,
+    new_oid: protocol.ObjectId = _ITEM_OID,
+    operation_id: str = "op-1",
+) -> protocol.ItemWriteIntent:
+    return protocol.ItemWriteIntent(
+        item_id=item_id, expected=expected, new_oid=new_oid, operation_id=operation_id
+    )
+
+
+def test_apply_item_write_intent_creates_a_file_and_leaves_the_claim_ledger_untouched() -> None:
+    claimed = protocol.apply(_STATE_WITH_TIP, _claim_intent())
+
+    created = protocol.apply(claimed, _item_intent())
+
+    assert created.items == {"aco-000001": _ITEM_OID}
+    assert created.claims == claimed.claims
+    assert created.consumed_ids == claimed.consumed_ids
+    assert created.resources == claimed.resources
+
+
+def test_apply_item_write_intent_refuses_against_a_missing_state_ref() -> None:
+    with pytest.raises(protocol.ClaimError, match="does not exist yet"):
+        protocol.apply(protocol.EMPTY_STATE, _item_intent())
+
+
+def test_apply_item_write_intent_edits_when_the_expected_oid_matches() -> None:
+    created = protocol.apply(_STATE_WITH_TIP, _item_intent())
+    new_oid = protocol.ObjectId("e" * 40)
+
+    edited = protocol.apply(
+        created, _item_intent(expected=_ITEM_OID, new_oid=new_oid, operation_id="op-2")
+    )
+
+    assert edited.items == {"aco-000001": new_oid}
+
+
+@pytest.mark.parametrize(
+    ("write_expected", "match"),
+    [
+        pytest.param(None, "already exists", id="duplicate-create"),
+        pytest.param(protocol.ObjectId("e" * 40), "written since it was read", id="stale-edit"),
+    ],
+)
+def test_apply_item_write_intent_refuses_a_conflicting_expected_oid(
+    write_expected: protocol.ObjectId | None, match: str
+) -> None:
+    created = protocol.apply(_STATE_WITH_TIP, _item_intent())
+
+    with pytest.raises(protocol.ClaimUnavailableError, match=match):
+        protocol.apply(
+            created,
+            _item_intent(
+                expected=write_expected, new_oid=protocol.ObjectId("f" * 40), operation_id="op-2"
+            ),
+        )
 
 
 # --- Claim key codec (criterion 10) ----------------------------------------
