@@ -15,10 +15,12 @@ no production reader yet -- it only matters once a second forge host exists.
 None of this is speculative: it is the port surface issue #131 declares today,
 each with a named future caller.
 
-`_BoardRequestHandler.do_GET`/`do_POST` (issue #280) are `http.server`'s own
-dispatch surface: `BaseHTTPRequestHandler.handle_one_request` calls them by
-`getattr(self, "do_" + self.command)`, never by a literal call this package
-writes, so vulture never sees a caller either.
+`_BoardRequestHandler.do_GET`/`do_POST`/`log_message` (issue #280) are
+`http.server`'s own dispatch and logging surface: `handle_one_request` calls
+`do_GET`/`do_POST` by `getattr(self, "do_" + self.command)`, and every stdlib
+logging call reaches the override through `BaseHTTPRequestHandler`'s own
+`self.log_message(...)` -- never by a literal call this package writes, so
+vulture never sees a caller for any of the three.
 """
 
 from agent_coordination.board import NoItemKind
@@ -33,4 +35,5 @@ _referenced_only_for_vulture = (
     RepositoryId("host", (), "name").host,
     _BoardRequestHandler.do_GET,
     _BoardRequestHandler.do_POST,
+    _BoardRequestHandler.log_message,
 )

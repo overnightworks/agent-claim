@@ -10,6 +10,7 @@ argument is untouched by this module (proof 8)."""
 from __future__ import annotations
 
 import http.client
+import socket
 import threading
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
@@ -161,6 +162,26 @@ def test_get_with_the_valid_token_serves_a_form_per_outcome_with_a_note_field(
     token_field = f'<input type="hidden" name="t" value="{served_board.server.token}">'
     assert page.count(token_field) == FORM_COUNT_PER_CARD
     assert page.count('<textarea name="note"') == FORM_COUNT_PER_CARD
+    # `proposed_expectation`'s own `default="later"` (this module's fixture)
+    # is the one outcome `board_html._render_served_form` marks `rec`/`Vorgabe`.
+    assert page.count('class="rule-form rec"') == 1
+    assert page.count('<span class="tag">Vorgabe</span>') == 1
+
+
+def test_a_get_and_a_post_leave_stderr_silent(
+    served_board: ServedBoard, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`_BoardRequestHandler.log_message`'s override (issue #280) must
+    swallow the stdlib's default per-request logging -- otherwise the ruled
+    form's own `?t=<token>` query string would land on stderr with every
+    `GET`, and `board --serve`'s only deliberate output would no longer be
+    the one stdout URL line."""
+    served_board.get(token=served_board.server.token)
+    served_board.post_rule(
+        {"t": served_board.server.token, "item": str(SERVED_ITEM), "line": "1", "outcome": "yes"}
+    )
+
+    assert capsys.readouterr().err == ""
 
 
 def test_post_rule_with_a_valid_token_writes_exactly_one_ruling_and_redirects(
@@ -246,6 +267,43 @@ def test_post_rule_with_a_malformed_body_is_a_bad_request(
     assert served_board.client.item_bodies == {}
 
 
+def _raw_post_status(server: board_serve.BoardServer, content_length: str | None) -> int:
+    """A `POST /rule` whose `Content-Length` header is exactly the caller's
+    raw string (or omitted when `None`), sent over a bare socket --
+    `http.client` computes its own correct header and refuses to be told
+    otherwise, so a hostile or malformed value can only be produced this
+    way."""
+    host, port = str(server.httpd.server_address[0]), int(server.httpd.server_address[1])
+    body = urlencode(
+        {"t": server.token, "item": str(SERVED_ITEM), "line": "1", "outcome": "yes"}
+    ).encode("ascii")
+    length_header = f"Content-Length: {content_length}\r\n" if content_length is not None else ""
+    request = (
+        f"POST /rule HTTP/1.1\r\n"
+        f"Host: {host}:{port}\r\n"
+        f"Content-Type: application/x-www-form-urlencoded\r\n"
+        f"{length_header}"
+        f"Connection: close\r\n\r\n"
+    ).encode("ascii") + body
+    with socket.create_connection((host, port), timeout=5) as connection:
+        connection.sendall(request)
+        response = connection.recv(65536)
+    return int(response.split(b" ", 2)[1])
+
+
+@pytest.mark.parametrize(
+    "content_length",
+    [None, "not-a-number", "-1", str(board_serve._MAX_CONTENT_LENGTH + 1)],
+)
+def test_post_rule_with_a_missing_invalid_or_oversized_content_length_is_a_bad_request(
+    served_board: ServedBoard, content_length: str | None
+) -> None:
+    status = _raw_post_status(served_board.server, content_length)
+
+    assert status == 400
+    assert served_board.client.item_bodies == {}
+
+
 @pytest.mark.parametrize("conflicting_flag", ["--html", "--json"])
 def test_serve_refuses_together_with_html_or_json(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, conflicting_flag: str
@@ -274,6 +332,29 @@ def test_board_serve_dispatches_through_the_write_session_and_prints_the_url(
     printed = capsys.readouterr().out.strip()
     assert printed.startswith("http://127.0.0.1:")
     assert f"{board_serve.TOKEN_FIELD}=" in printed
+
+
+def _raise_keyboard_interrupt(self: board_serve._BoardHTTPServer) -> None:
+    raise KeyboardInterrupt
+
+
+def test_board_serve_exits_cleanly_on_keyboard_interrupt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Ctrl-C during `serve_forever` is how an operator stops `board --serve`
+    (issue #280): `_cmd_board_serve`'s `except KeyboardInterrupt: pass` must
+    exit `0` with only the one URL line already printed, never a
+    traceback."""
+    _served_board_environment(monkeypatch, tmp_path)
+    monkeypatch.setattr(board_serve._BoardHTTPServer, "serve_forever", _raise_keyboard_interrupt)
+
+    exit_code = issue_claim.main(["--repo", "example/agent-claim", "board", "--serve"])
+
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert captured.out.count("\n") == 1
+    assert captured.out.strip().startswith("http://127.0.0.1:")
 
 
 def test_rule_item_refuses_an_already_ruled_line_by_name(

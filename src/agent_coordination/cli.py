@@ -295,7 +295,9 @@ def _add_status_parser(commands: argparse._SubParsersAction) -> None:
 
 
 def _add_board_parser(commands: argparse._SubParsersAction) -> None:
-    board_command = commands.add_parser("board", help="project the open work board without writes")
+    board_command = commands.add_parser(
+        "board", help="project the open work board; only --serve writes"
+    )
     output = board_command.add_mutually_exclusive_group()
     output.add_argument("--json", action="store_true", help=JSON_HELP)
     output.add_argument(

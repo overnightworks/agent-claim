@@ -32,6 +32,11 @@ _PLAIN_CONTENT_TYPE = "text/plain; charset=utf-8"
 _FORBIDDEN_BODY = b"forbidden: missing or wrong token"
 _NOT_FOUND_BODY = b"not found"
 _BAD_REQUEST_BODY = b"bad request: item, line, and outcome are required"
+_BAD_CONTENT_LENGTH_BODY = b"bad request: missing, invalid, or oversized Content-Length"
+_MAX_CONTENT_LENGTH = 64 * 1024
+"""64 KiB: generously covers the ruled form's few short hidden fields plus an
+operator's note -- any larger claimed length is refused before ever reading
+`rfile`, the same defensive posture as the non-digit and negative cases."""
 
 
 @dataclass(frozen=True)
@@ -66,6 +71,18 @@ class _RuleRequest:
     line: int
     outcome: str
     note: str | None
+
+
+def _content_length(raw: str | None) -> int | None:
+    """The request's `Content-Length` when it is a plain digit string within
+    `_MAX_CONTENT_LENGTH` -- `None` for missing, non-digit, negative, or
+    oversized values, which `do_POST` refuses `400` before `rfile.read` ever
+    runs, instead of trusting a hostile or malformed header into `int()` and
+    an unbounded read."""
+    if raw is None or not raw.isdigit():
+        return None
+    length = int(raw)
+    return length if length <= _MAX_CONTENT_LENGTH else None
 
 
 def _parsed_rule_request(fields: Mapping[str, list[str]]) -> _RuleRequest | None:
@@ -150,7 +167,10 @@ class _BoardRequestHandler(BaseHTTPRequestHandler):
         if urlsplit(self.path).path != _RULE_PATH:
             self._respond(HTTPStatus.NOT_FOUND, _NOT_FOUND_BODY)
             return
-        length = int(self.headers.get("Content-Length") or "0")
+        length = _content_length(self.headers.get("Content-Length"))
+        if length is None:
+            self._respond(HTTPStatus.BAD_REQUEST, _BAD_CONTENT_LENGTH_BODY)
+            return
         fields = parse_qs(self.rfile.read(length).decode("utf-8"))
         if not self._authorized(server, _field(fields, TOKEN_FIELD)):
             self._respond(HTTPStatus.FORBIDDEN, _FORBIDDEN_BODY)
@@ -164,6 +184,14 @@ class _BoardRequestHandler(BaseHTTPRequestHandler):
         if outcome.refusal is not None:
             location = f"{location}&{REFUSED_FIELD}={quote(outcome.refusal)}"
         self._respond(HTTPStatus.SEE_OTHER, b"", location=location)
+
+    def log_message(self, format: str, *_args: object) -> None:
+        # The stdlib default writes every request line -- including this
+        # form's `?t=<token>` query string -- to stderr; `board --serve`'s
+        # only deliberate output is the one stdout URL line `_cmd_board_serve`
+        # prints, so per-request logging is silenced rather than leaking the
+        # token into a shared terminal or log file.
+        return
 
 
 @dataclass(frozen=True)
