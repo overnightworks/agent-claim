@@ -1,0 +1,8 @@
+claim_id = "f7a6e455f85c48858b3e132094513802"
+agent = "Claude head (coordinator)"
+role = "builder"
+base = "9c9e77826db6c8ed6128fa1933a478f4646582dc"
+branch = "claude/issue-285-item-new-show"
+scope = ["src/agent_coordination/cli.py", "src/agent_coordination/state_board.py", "tests/test_state_board.py", "tests/test_cli.py", "README.md"]
+opened_commit = "7e32362079427733e95abb54fc164f667198caad"
+whole_reason = "two commands and one item-reference parser across cli, the adapter, their test modules and the README; splitting leaves a command nothing parses"
