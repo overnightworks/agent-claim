@@ -474,7 +474,13 @@ second writer starting from the same already-read item refuses by name
 child gets a minted id (`aco-` plus six lowercase hex characters, refused
 after three collisions rather than silently widened) with its
 `record.parent` set in that same write; `link_child` is a no-op, since
-state-ref parentage has exactly one owner. An issue-scoped `claim`'s body
+state-ref parentage has exactly one owner. The container's own cut
+`[[slice]]` row is then removed byte-exact through that same
+`update_item_body` CAS (issue #291): a container changed since it was read
+refuses with the same "written since it was read" sentence, the just-created
+child stays, and an identical re-run adopts it — matched by `record.parent`,
+never the `Parent:` prose line GitHub's own orphan recovery reads — instead
+of minting a second one. An issue-scoped `claim`'s body
 check reads a `state-ref` item the same way `board`/`next` already do.
 `release --merged` still refuses — state-ref cannot yet verify a merged pull
 request (#230 slice 6) — naming the offline path instead: land with

@@ -17,6 +17,7 @@ import json
 import shutil
 import subprocess
 import sys
+import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -229,6 +230,27 @@ def _item_files() -> dict[str, bytes]:
         f"{CHILD_A_ID}.md": child_a_body.encode(),
         f"{CHILD_B_ID}.md": child_b_body.encode(),
     }
+
+
+def _container_body_with_slices(slice_rows: tuple[tuple[int, str], ...]) -> str:
+    """`CONTAINER_ID`'s own body, its `[[slice]]` table set to `slice_rows`
+    -- the one shape issue #291's `cut` proofs need and the flat
+    `_CONTAINER_PROJECTION`/`_record` pair above cannot express (neither
+    carries a `slice` array)."""
+    data = {
+        **_CONTAINER_PROJECTION.block_data(),
+        "slice": [{"index": index, "title": title} for index, title in slice_rows],
+        "record": _record(title="Epic", state="open", kind="container"),
+    }
+    return f"Prose.\n\n```agent-claim\n{board.render_block(data)}```\n"
+
+
+def _item_files_with_container_slices(slice_rows: tuple[tuple[int, str], ...]) -> dict[str, bytes]:
+    """`_item_files`'s own three-item scenario, `CONTAINER_ID`'s body
+    replaced by one carrying `slice_rows` -- `CHILD_A`/`CHILD_B` stay
+    untouched so a slice-table proof still exercises a container that
+    already has real children, not an invented empty one."""
+    return {**_item_files(), f"{CONTAINER_ID}.md": _container_body_with_slices(slice_rows).encode()}
 
 
 # A second open expectation line beside `EXPECTATION_TEXT` (issue #283): one
@@ -1232,8 +1254,11 @@ class TestCliStateRefForge:
         """Issue #283 proof 6: `aco cut` on a state-ref container runs
         through to a freshly minted child -- `create_child`'s single CAS
         write -- with no `KeyError` from a missing `LINK_CHILD` capability
-        and no refusal; the byte-exact `[[slice]]` row removal stays #230
-        slice 4f (this container's own `[record]` carries no `slice` rows)."""
+        and no refusal; this container's own `[record]` carries no `slice`
+        rows, so it creates an untied child exactly like GitHub does for the
+        same shape (`test_cut_creates_an_untied_child_with_no_slice_table`).
+        The byte-exact `[[slice]]` row removal itself is issue #291's own
+        proof, below."""
         self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, _item_files())
 
         status = issue_claim.main(["cut", str(CONTAINER_NUMBER), "--title", "Slice C"])
@@ -1256,6 +1281,303 @@ class TestCliStateRefForge:
         ]
         assert child_record.title == "Slice C"
         assert child_record.parent == CONTAINER_ID
+
+    def test_cut_removes_the_slice_row_byte_exact_and_a_fresh_board_shows_the_child(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+    ) -> None:
+        """Issue #291 proof 1: `aco cut` on a state-ref container with a
+        `[[slice]]` table creates the child under `record.parent` and
+        removes the cut row from the container's own body byte-exact --
+        every byte outside the removed `[[slice]]` entry, `now`/`next`/
+        `done_when` and the fence lines included, stays identical -- and a
+        fresh `aco board` shows the new child."""
+        item_files = _item_files_with_container_slices(((1, "Slice C"), (2, "Slice D")))
+        self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, item_files)
+        remote_url = f"file://{bare_remote}"
+        before_state = store.fetch_state(worktree=worktree, remote=remote_url)
+        assert before_state.tip is not None
+        before_container = store.read_item_files(worktree, before_state.tip)[
+            f"{CONTAINER_ID}.md"
+        ].decode()
+        before_located = board.locate_agent_claim_block(before_container)
+
+        status = issue_claim.main(["cut", str(CONTAINER_NUMBER), "--title", "Slice C"])
+
+        assert status == 0
+        out = capsys.readouterr().out.strip()
+        assert out.startswith(f"CUT #{CONTAINER_NUMBER} row 1 -> #")
+        child_number = int(out.rsplit("#", 1)[1])
+        state = store.fetch_state(worktree=worktree, remote=remote_url)
+        assert state.tip is not None
+        item_files_after = store.read_item_files(worktree, state.tip)
+        [child_id] = [
+            items.item_id_from_filename(name)
+            for name in item_files_after
+            if items.item_number(items.item_id_from_filename(name)) == child_number
+        ]
+        child_record = _decoded_record(item_files_after[f"{child_id}.md"].decode(), child_id)
+        assert child_record.parent == CONTAINER_ID
+        after_container = item_files_after[f"{CONTAINER_ID}.md"].decode()
+        after_located = board.locate_agent_claim_block(after_container)
+        assert (
+            before_container[: before_located.content_start]
+            == (after_container[: after_located.content_start])
+        )
+        assert (
+            before_container[before_located.content_end :]
+            == (after_container[after_located.content_end :])
+        )
+        assert after_located.data["slice"] == [{"index": 2, "title": "Slice D"}]
+        assert after_located.data["now"] == before_located.data["now"]
+
+        board_status = issue_claim.main(["board"])
+        assert board_status == 0
+        assert "Slice C" in capsys.readouterr().out
+
+    def test_cut_row_selects_the_named_slice_entry_under_state_ref(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+    ) -> None:
+        """Issue #291 proof 2 (selection): `--row 2` cuts the container's
+        second `[[slice]]` entry, leaving the first untouched -- the same
+        `[[slice]]` table `aco board` already renders, no second parser."""
+        item_files = _item_files_with_container_slices(((1, "Slice C"), (2, "Slice D")))
+        self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, item_files)
+
+        status = issue_claim.main(
+            ["cut", str(CONTAINER_NUMBER), "--title", "Slice D", "--row", "2", "--json"]
+        )
+
+        assert status == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["row"] == 2
+        remote_url = f"file://{bare_remote}"
+        state = store.fetch_state(worktree=worktree, remote=remote_url)
+        assert state.tip is not None
+        container_body = store.read_item_files(worktree, state.tip)[f"{CONTAINER_ID}.md"].decode()
+        remaining = board.locate_agent_claim_block(container_body).data
+        assert remaining["slice"] == [{"index": 1, "title": "Slice C"}]
+
+    def test_cut_row_refuses_a_missing_row_under_state_ref(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+    ) -> None:
+        """Issue #291 proof 2 (refusal): `--row 9` names no entry while row 1
+        is still cuttable -- the same by-name refusal GitHub's own
+        `test_cut_refuses_a_row_with_no_cuttable_row` proves, and nothing
+        reaches the remote."""
+        item_files = _item_files_with_container_slices(((1, "Slice C"),))
+        self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, item_files)
+        remote_url = f"file://{bare_remote}"
+        before = store.fetch_state(worktree=worktree, remote=remote_url)
+
+        status = issue_claim.main(["cut", str(CONTAINER_NUMBER), "--title", "X", "--row", "9"])
+
+        assert status == 2
+        assert capsys.readouterr().err == (
+            f"ERROR: #{CONTAINER_NUMBER} has no row 9; cuttable rows: 1\n"
+        )
+        after = store.fetch_state(worktree=worktree, remote=remote_url)
+        assert after.tip == before.tip
+
+    def test_cut_adopts_the_child_after_a_partial_failure_from_a_competing_write(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+    ) -> None:
+        """Issue #291 proof 3: a state-ref `cut` can never leave an orphan
+        the way GitHub's two-write `create_child` can (`link_child` is a
+        no-op, #283) -- but the row-removal write that follows it is a
+        second, separate CAS write, and that one can still lose a race. This
+        drives the real race directly: a competing write lands on the
+        container between `create_child`'s own commit and the row-removal
+        commit, so the row removal refuses with issue #279's own CAS
+        sentence (via `forge.ForgePartialChildCreationError`) while the
+        child stays created and already carries `record.parent`. An
+        identical re-run finds that child through `list_children` (typed
+        `record.parent`, never the `Parent:` prose line `_cut_child_body`
+        would write for GitHub) and adopts it instead of minting a second
+        one, then finishes the row removal against the now-current state."""
+        item_files = _item_files_with_container_slices(((1, "Slice C"),))
+        self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, item_files)
+        remote_url = f"file://{bare_remote}"
+        before_state = store.fetch_state(worktree=worktree, remote=remote_url)
+        assert before_state.tip is not None
+        container_oid_before = before_state.items[CONTAINER_ID]
+        before_ids = set(before_state.items)
+
+        competing_write_done = {"done": False}
+        original_write_item = issue_claim._StoreItemWriter.write_item
+
+        def _write_item_then_race_the_container(
+            self: issue_claim._StoreItemWriter,
+            item_id: str,
+            *,
+            expected: protocol.ObjectId | None,
+            content: bytes,
+        ) -> protocol.ObjectId:
+            result = original_write_item(self, item_id, expected=expected, content=content)
+            if not competing_write_done["done"]:
+                competing_write_done["done"] = True
+                competing_data = {
+                    **_CONTAINER_PROJECTION.block_data(),
+                    "now": "Competing edit landed mid-cut.",
+                    "slice": [{"index": 1, "title": "Slice C"}],
+                    "record": _record(title="Epic", state="open", kind="container"),
+                }
+                competing_body = (
+                    f"Prose.\n\n```agent-claim\n{board.render_block(competing_data)}```\n"
+                ).encode()
+                competing_intent = protocol.ItemWriteIntent(
+                    item_id=CONTAINER_ID,
+                    expected=container_oid_before,
+                    new_oid=store.hash_blob(worktree, competing_body),
+                    operation_id=uuid.uuid4().hex,
+                )
+                store.commit_transition(
+                    worktree=worktree,
+                    remote=remote_url,
+                    subject="competing container write",
+                    intent=competing_intent,
+                )
+            return result
+
+        monkeypatch.setattr(
+            issue_claim._StoreItemWriter, "write_item", _write_item_then_race_the_container
+        )
+
+        first_status = issue_claim.main(["cut", str(CONTAINER_NUMBER), "--title", "Slice C"])
+
+        assert first_status == 2
+        after_first = store.fetch_state(worktree=worktree, remote=remote_url)
+        assert after_first.tip is not None
+        [child_id] = set(after_first.items) - before_ids
+        child_number = items.item_number(child_id)
+        child_record = _decoded_record(
+            store.read_item_files(worktree, after_first.tip)[f"{child_id}.md"].decode(), child_id
+        )
+        assert child_record.parent == CONTAINER_ID
+        err = capsys.readouterr().err
+        assert (
+            f"created #{child_number} but failed to remove row 1 "
+            f"from #{CONTAINER_NUMBER}'s agent-claim block" in err
+        )
+        assert "re-run the same cut -- it adopts the child" in err
+        raced_container = store.read_item_files(worktree, after_first.tip)[
+            f"{CONTAINER_ID}.md"
+        ].decode()
+        raced_data = board.locate_agent_claim_block(raced_container).data
+        assert raced_data["now"] == "Competing edit landed mid-cut."
+        assert raced_data["slice"] == [{"index": 1, "title": "Slice C"}]
+
+        second_status = issue_claim.main(["cut", str(CONTAINER_NUMBER), "--title", "Slice C"])
+
+        assert second_status == 0
+        assert capsys.readouterr().out.strip() == (
+            f"ADOPTED #{CONTAINER_NUMBER} row 1 -> #{child_number}"
+        )
+        after_second = store.fetch_state(worktree=worktree, remote=remote_url)
+        assert after_second.tip is not None
+        assert set(after_second.items) == set(after_first.items)
+        assert after_second.items[child_id] == after_first.items[child_id]
+        final_container = store.read_item_files(worktree, after_second.tip)[
+            f"{CONTAINER_ID}.md"
+        ].decode()
+        assert board.locate_agent_claim_block(final_container).data["slice"] == []
+
+    def test_cut_adopts_a_child_created_by_item_new_with_the_matching_title(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+    ) -> None:
+        """Issue #291 proof 4: `aco item new --parent` writes `record.parent`
+        straight into the fresh child's `[record]` table and no `Parent:`
+        prose line at all (issue #285) -- unlike `_cut_child_body`'s own
+        skeleton. `cut`'s adoption key is `record.parent` alone
+        (`list_children`, never `_orphan_names_container`'s prose-line
+        match), so it still adopts this child instead of minting a second
+        one for the same slice row."""
+        item_files = _item_files_with_container_slices(((1, "Slice C"),))
+        self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, item_files)
+
+        new_status = issue_claim.main(
+            ["item", "new", "--title", "Slice C", "--parent", CONTAINER_ID]
+        )
+        assert new_status == 0
+        created_id = capsys.readouterr().out.strip()
+        created_number = items.item_number(created_id)
+
+        status = issue_claim.main(["cut", str(CONTAINER_NUMBER), "--title", "Slice C"])
+
+        assert status == 0
+        assert capsys.readouterr().out.strip() == (
+            f"ADOPTED #{CONTAINER_NUMBER} row 1 -> #{created_number}"
+        )
+        remote_url = f"file://{bare_remote}"
+        state = store.fetch_state(worktree=worktree, remote=remote_url)
+        assert state.tip is not None
+        item_files_after = store.read_item_files(worktree, state.tip)
+        assert {items.item_id_from_filename(name) for name in item_files_after} == {
+            CONTAINER_ID,
+            CHILD_A_ID,
+            CHILD_B_ID,
+            created_id,
+        }
+        container_body = item_files_after[f"{CONTAINER_ID}.md"].decode()
+        assert board.locate_agent_claim_block(container_body).data["slice"] == []
+
+    def test_cut_refuses_a_container_whose_body_is_malformed_before_any_write(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+    ) -> None:
+        """Issue #291 proof 5: GitHub's own equivalent
+        (`test_cut_refuses_a_blockless_container_before_any_write`) hits
+        `_located_block_or_refuse`'s refusal only because a fetched GitHub
+        issue can carry any body at all. A state-ref item cannot: every
+        item's `[record]` table is validated once, at read time, by
+        `StateRefBoard`'s own decode (issue #283) -- so a container without
+        a working `[[slice]]` table (no agent-claim block to hold one) is
+        refused earlier and louder, before `cut` -- before any command --
+        ever reaches it, with the decode's own existing sentence rather than
+        a second, cut-specific one. `next` never recommends `cut` on such a
+        container for the same reason: it cannot exist on a live board.
+        Nothing reaches the remote."""
+        item_files = {**_item_files(), f"{CONTAINER_ID}.md": b"Just prose, no block at all.\n"}
+        self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, item_files)
+        remote_url = f"file://{bare_remote}"
+        before = store.fetch_state(worktree=worktree, remote=remote_url)
+
+        status = issue_claim.main(["cut", str(CONTAINER_NUMBER), "--title", "X"])
+
+        assert status == 2
+        assert capsys.readouterr().err == (
+            f"ERROR: item {CONTAINER_ID} has a malformed agent-claim block\n"
+        )
+        after = store.fetch_state(worktree=worktree, remote=remote_url)
+        assert after.tip == before.tip
 
     def test_board_reads_a_real_state_ref_without_gh(
         self,
