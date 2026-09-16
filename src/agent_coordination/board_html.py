@@ -373,8 +373,10 @@ def _fact_row(label: str, value: str | None) -> str:
 def _render_lane(lane: LaneCard) -> str:
     facts = "".join(
         (
-            f"<div><dt>Agent</dt><dd>{html.escape(lane.agent)} "
-            f"({html.escape(lane.role)})</dd></div>",
+            (
+                f"<div><dt>Agent</dt><dd>{html.escape(lane.agent)} "
+                f"({html.escape(lane.role)})</dd></div>"
+            ),
             f"<div><dt>Branch</dt><dd><code>{html.escape(lane.branch)}</code></dd></div>",
             f"<div><dt>Alter</dt><dd>{html.escape(lane.age)}</dd></div>",
             _fact_row("Now", lane.now),
@@ -445,8 +447,10 @@ def render(page: BoardPage) -> str:
     facts = "".join(
         (
             f"<div><dt>repository</dt><dd><code>{html.escape(page.repository)}</code></dd></div>",
-            f"<div><dt>state tip</dt><dd>"
-            f"<code>{html.escape(page.state_tip or '-')}</code></dd></div>",
+            (
+                f"<div><dt>state tip</dt><dd>"
+                f"<code>{html.escape(page.state_tip or '-')}</code></dd></div>"
+            ),
         )
     )
     return PAGE.format(
