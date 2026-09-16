@@ -1,14 +1,19 @@
 """Render a static HTML board page from an already-projected `board.Board`.
 
 Pure: no clock, no randomness, no `gh`/`git` call of its own. `cli.py`'s
-`board --html` (issue #276) is the one caller -- it already holds every read
-this module needs from `board.build_board`'s own inputs, `board.expectation_lines`
-(#240), and the store's live claims, so building `BoardPage` and rendering it
-costs nothing `board` was not already paying for.
+`board --html` (issue #276) and `board --serve` (issue #280) are its only two
+callers -- both already hold every read this module needs from
+`board.build_board`'s own inputs, `board.expectation_lines` (#240), and the
+store's live claims, so building `BoardPage` and rendering it costs nothing
+`board` was not already paying for. `render` stays the one state-to-page
+function for both: `served=None` writes `--html`'s static page,
+`ServedRuleForm` switches a card's affordance to a live form (#280) without a
+second renderer.
 
 The four sections follow the ruled picture (#234, #276), in fixed order:
-"Wartet auf dich" (open `[[expectation]]` lines as cards, each with the
-copyable `aco rule` command per outcome), "Lanes" (active claims with the
+"Wartet auf dich" (open `[[expectation]]` lines as cards -- the copyable
+`aco rule` command per outcome when static, a `POST /rule` form per outcome
+carrying the loopback token when served), "Lanes" (active claims with the
 item's own Now/Next/Blocked by/Done when, verbatim from the body), "Themen"
 (containers with their open children, then standalone items), and
 "Landungen" (items `board` already classified `Stage.CODE_LANDED`, paired
@@ -31,6 +36,20 @@ from typing import cast
 from . import board
 
 RULE_OUTCOMES: tuple[str, ...] = ("yes", "no", "later")
+
+
+@dataclass(frozen=True)
+class ServedRuleForm:
+    """The two transport-owned facts `render` needs only when `board --serve`
+    (#280) is the caller, never when `board --html` writes a static page:
+    the loopback token every POST form must carry, and the refusal sentence
+    from the click that led back here, when the last one was refused. State
+    stays `render`'s only input otherwise -- this is not a second renderer,
+    just the one extra parameter that switches a card's affordance from a
+    copyable command to a live form."""
+
+    token: str
+    refused: str | None = None
 
 
 @dataclass(frozen=True)
@@ -354,13 +373,36 @@ def _render_rule_line(card: ExpectationCard, outcome: str) -> str:
     )
 
 
-def _render_card(card: ExpectationCard) -> str:
-    lines = "".join(_render_rule_line(card, outcome) for outcome in RULE_OUTCOMES)
+def _render_served_form(card: ExpectationCard, outcome: str, token: str) -> str:
+    is_default = outcome == card.default
     return f"""
+      <form method="post" action="/rule" class="rule-form{" rec" if is_default else ""}">
+        <input type="hidden" name="t" value="{html.escape(token)}">
+        <input type="hidden" name="item" value="{card.item}">
+        <input type="hidden" name="line" value="{card.index}">
+        <input type="hidden" name="outcome" value="{outcome}">
+        <textarea name="note" placeholder="Notiz (optional)" rows="2"></textarea>
+        <div class="rule-actions">
+          <button type="submit">{outcome}</button>{_DEFAULT_TAG if is_default else ""}
+        </div>
+      </form>"""
+
+
+def _render_card(card: ExpectationCard, served: ServedRuleForm | None) -> str:
+    if served is None:
+        lines = "".join(_render_rule_line(card, outcome) for outcome in RULE_OUTCOMES)
+        return f"""
     <article class="card">
       <h3>#{card.item} {html.escape(card.item_title)}</h3>
       <p>{_inline(card.text)}</p>
       <ul class="rule-lines">{lines}</ul>
+    </article>"""
+    forms = "".join(_render_served_form(card, outcome, served.token) for outcome in RULE_OUTCOMES)
+    return f"""
+    <article class="card">
+      <h3>#{card.item} {html.escape(card.item_title)}</h3>
+      <p>{_inline(card.text)}</p>
+      <div class="rule-forms">{forms}</div>
     </article>"""
 
 
@@ -443,7 +485,12 @@ def _render_landed_section(page: BoardPage) -> str:
     return f'<ul class="landed">{"".join(_render_landed(entry) for entry in page.landed)}</ul>'
 
 
-def render(page: BoardPage) -> str:
+def render(page: BoardPage, *, served: ServedRuleForm | None = None) -> str:
+    """`page` alone renders `board --html`'s static page; passing `served`
+    (issue #280) switches every card to its live `POST /rule` forms and, when
+    `served.refused` is set, shows that sentence -- never a stack trace --
+    from the click that redirected back here. `served=None`'s output is
+    byte-identical to the page before #280, checked by the golden test."""
     facts = "".join(
         (
             f"<div><dt>repository</dt><dd><code>{html.escape(page.repository)}</code></dd></div>",
@@ -453,10 +500,16 @@ def render(page: BoardPage) -> str:
             ),
         )
     )
+    notice = (
+        f'<p class="refused">{html.escape(served.refused)}</p>'
+        if served is not None and served.refused is not None
+        else ""
+    )
     return PAGE.format(
         facts=facts,
+        notice=notice,
         card_count=len(page.cards),
-        cards="".join(_render_card(card) for card in page.cards) or _EMPTY_PARAGRAPH,
+        cards="".join(_render_card(card, served) for card in page.cards) or _EMPTY_PARAGRAPH,
         lane_count=len(page.lanes),
         lanes="".join(_render_lane(lane) for lane in page.lanes) or _EMPTY_PARAGRAPH,
         topics="".join(_render_topic(topic) for topic in page.topics) or _EMPTY_TOPICS,
@@ -567,6 +620,25 @@ summary:focus-visible {{
 .copy:hover {{ background: var(--you); color: var(--surface); }}
 .copy:focus-visible {{ outline: 2px solid var(--accent); outline-offset: 2px; }}
 .copy.copied {{ background: var(--done); border-color: var(--done); color: var(--surface); }}
+.rule-forms {{ display: grid; gap: 8px; }}
+.rule-form {{
+  display: grid; gap: 6px; padding: 10px 12px; border-radius: 8px; background: var(--sunk);
+}}
+.rule-form.rec {{ background: var(--you-soft); outline: 1.5px solid var(--you); }}
+.rule-form textarea {{
+  font: inherit; resize: vertical; min-height: 2.4em; padding: 6px 8px; border-radius: 6px;
+  border: 1px solid var(--rule); background: var(--surface); color: inherit;
+}}
+.rule-actions {{ display: flex; align-items: center; gap: 8px; }}
+.rule-form button {{
+  font: 600 0.82rem var(--body); color: var(--surface); background: var(--accent); border: none;
+  border-radius: 999px; padding: 5px 16px; cursor: pointer;
+}}
+.rule-form.rec button {{ background: var(--you); }}
+.refused {{
+  margin: 0; padding: 10px 14px; border-radius: 8px; background: var(--work-soft);
+  color: var(--work); font-weight: 600;
+}}
 
 .topics {{ list-style: none; margin: 0; padding: 0; display: grid; }}
 .topics > li {{ border-top: 1px solid var(--rule); }}
@@ -636,7 +708,7 @@ summary:focus-visible {{
 <main class="wrap">
   <header class="mast">
     <p class="eyebrow">agent-claim &middot; the aco coordination tool</p>
-    <h1>Board</h1>
+    <h1>Board</h1>{notice}
     <dl class="mast-facts">{facts}</dl>
   </header>
 
