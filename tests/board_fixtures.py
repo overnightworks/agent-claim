@@ -1,7 +1,8 @@
 """Board and claim domain scenario builders shared by `tests/test_cli.py`
-(CLI wiring behavior) and `tests/test_board.py` (pure `board.py` behavior).
-Both import this module directly; pytest's rootless collection puts
-`tests/` on `sys.path`, so a plain `import board_fixtures` resolves here."""
+(CLI wiring behavior), `tests/test_board.py` (pure `board.py` behavior), and
+`tests/test_github.py` (the GitHub adapter's `REPOSITORY`). All three import
+this module directly; pytest's rootless collection puts `tests/` on
+`sys.path`, so a plain `import board_fixtures` resolves here."""
 
 from __future__ import annotations
 

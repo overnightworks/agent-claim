@@ -1,6 +1,16 @@
+"""Behavior of `agent_coordination.process`: native `/proc` inspection and
+the bounded subprocess boundary (`run_bounded`) it also owns. The GitHub
+adapter's own thin wrapper over that boundary (`github._bounded_command`) is
+covered in `tests/test_github.py`."""
+
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 from agent_coordination import process
 
@@ -195,3 +205,133 @@ def _write_process(
     owner = process.current_user_id() if uid is None else uid
     (process_directory / "status").write_text(f"Uid:\t{owner}\t0\t0\t0\n")
     (process_directory / "cmdline").write_bytes(command)
+
+
+class _FakeBoundedProcess:
+    """A deterministic `subprocess.Popen`-shaped double: a real closed pipe for
+    `stdout` (so the selector has a real, immediately-EOF file descriptor to
+    register) plus scripted `poll`/`terminate`/`kill`/`wait`, so
+    `process.run_bounded`'s stop-and-reap behavior is proven without spawning a
+    child or depending on real OS scheduling.
+    """
+
+    def __init__(self, *, already_exited: bool = False, ignores_terminate: bool = False) -> None:
+        read_fd, write_fd = os.pipe()
+        os.close(write_fd)
+        self.stdout = os.fdopen(read_fd, "rb")
+        self.stdin = None
+        self.stderr = None
+        self._ignores_terminate = ignores_terminate
+        self.events: list[str] = []
+        self._exited = already_exited
+
+    def poll(self) -> int | None:
+        return 0 if self._exited else None
+
+    def terminate(self) -> None:
+        self.events.append("terminate")
+        if not self._ignores_terminate:
+            self._exited = True
+
+    def kill(self) -> None:
+        self.events.append("kill")
+        self._exited = True
+
+    def wait(self, timeout: float = 0.0) -> int:
+        if not self._exited:
+            raise subprocess.TimeoutExpired(cmd="fake", timeout=timeout)
+        return 0
+
+
+def test_run_bounded_times_out_even_when_the_child_already_exited(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A deadline already passed by the time I/O is awaited must fail loud even
+    when the child happened to finish first -- stopping an already-exited
+    process is then a safe no-op, never a second signal or a raised error."""
+    fake_process = _FakeBoundedProcess(already_exited=True)
+    calls = {"n": 0}
+
+    def already_past_deadline() -> float:
+        calls["n"] += 1
+        return 0.0 if calls["n"] == 1 else 1_000_000.0
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: fake_process)
+    monkeypatch.setattr(process.time, "monotonic", already_past_deadline)
+
+    with pytest.raises(process.ProcessTimedOutError):
+        process.run_bounded(["fake"], timeout=5.0)
+
+    assert fake_process.events == []
+    assert fake_process.stdout.closed is True
+    assert fake_process.poll() is not None
+
+
+def test_run_bounded_kills_a_child_that_ignores_termination(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A child that survives `terminate()` (ignoring the request to stop) must
+    be `kill()`ed -- proven with a deterministic process fake controlling
+    `poll`/`terminate`/`kill`/`wait`, not a real child ignoring a real SIGTERM."""
+    fake_process = _FakeBoundedProcess(ignores_terminate=True)
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: fake_process)
+    monkeypatch.setattr(process.time, "monotonic", lambda: 0.0)
+
+    with pytest.raises(process.ProcessTimedOutError):
+        process.run_bounded(["fake"], timeout=-1.0)
+
+    assert fake_process.events == ["terminate", "kill"]
+    assert fake_process.stdout.closed is True
+    assert fake_process.poll() is not None
+
+
+def test_run_bounded_treats_a_broken_input_pipe_as_fully_sent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stdin write that raises `BrokenPipeError` -- the child closed its read
+    end without consuming the input -- must not fail the whole exchange: the
+    write is treated as fully sent and output collection continues."""
+
+    def broken_write(_file_descriptor: int, data: bytes) -> int:
+        raise BrokenPipeError(32, "Broken pipe")
+
+    monkeypatch.setattr(process.os, "write", broken_write)
+
+    observed = process.run_bounded(
+        [sys.executable, "-c", "print('done')"],
+        input_data=b"unread input",
+    )
+    assert observed.output == b"done\n"
+
+
+def test_run_bounded_reaps_the_child_when_the_selector_fails_to_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A selector that cannot close itself on the way out must not mask the
+    command's own result -- reaping swallows that failure."""
+    real_selector_class = process.selectors.DefaultSelector
+
+    class CloseFailingSelector:
+        def __init__(self) -> None:
+            self._inner = real_selector_class()
+
+        def register(self, fileobj, events, data=None):
+            return self._inner.register(fileobj, events, data)
+
+        def unregister(self, fileobj):
+            return self._inner.unregister(fileobj)
+
+        def get_map(self):
+            return self._inner.get_map()
+
+        def select(self, timeout=None):
+            return self._inner.select(timeout)
+
+        def close(self) -> None:
+            raise OSError(5, "close failed")
+
+    monkeypatch.setattr(process.selectors, "DefaultSelector", CloseFailingSelector)
+
+    observed = process.run_bounded([sys.executable, "-c", "print('ok')"])
+    assert observed.output == b"ok\n"
