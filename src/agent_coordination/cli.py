@@ -371,6 +371,14 @@ def _add_release_parser(commands: argparse._SubParsersAction) -> None:
     )
     release.add_argument("--agent", help=AGENT_HELP)
     release.add_argument("--role", help=ROLE_ON_LIVE_CLAIM_HELP)
+    release.add_argument(
+        "--branch",
+        help=(
+            "the claim's lane branch; selects it without checking out that branch, unlike "
+            "claim's --branch, and defaults to the current checkout branch when omitted "
+            "together with --claim-id"
+        ),
+    )
     outcome = release.add_mutually_exclusive_group(required=True)
     outcome.add_argument(
         "--merged",
@@ -2434,6 +2442,15 @@ def _cmd_release(parsed: argparse.Namespace, session: _WriteSession) -> None:
     worktree, canonical_remote, observed = _store_observation()
     _require_state_ref(observed)
     selected = _selected_store_claim(observed, identity, session.release_branch, parsed.claim_id)
+    if (
+        parsed.branch is not None
+        and parsed.claim_id is not None
+        and selected.branch != parsed.branch
+    ):
+        raise protocol.ClaimUnavailableError(
+            f"--branch {parsed.branch!r} and --claim-id {parsed.claim_id!r} disagree: the "
+            f"claim's own branch is {selected.branch!r}; drop --branch or pass its own value"
+        )
     role = parsed.role
     if not parsed.coordinator_override:
         if role is None:
@@ -2718,6 +2735,12 @@ _WRITE_HANDLERS: dict[str, Callable[[argparse.Namespace, _WriteSession], int | N
 def _release_branch_for(parsed: argparse.Namespace) -> str | None:
     if parsed.coordinator_override:
         protocol._require_coordinator_override(parsed.role)
+    if parsed.branch is not None:
+        # An explicit --branch selects the lane identity by name, exactly
+        # like claim's own --branch, but never requires the checkout to be
+        # on it (issue #250): a lane's worktree may be gone, or the release
+        # may run from the coordinator's primary checkout.
+        return parsed.branch
     if parsed.issue is not None and parsed.claim_id is not None:
         return None
     release_branch = checkout._git_output(["branch", "--show-current"])

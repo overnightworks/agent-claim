@@ -14187,6 +14187,67 @@ def test_release_abandoned_records_why_the_lane_stopped(
 
 
 @pytest.mark.parametrize(
+    "outcome_flags",
+    [
+        pytest.param(("--abandoned", "stopped"), id="abandoned"),
+        pytest.param(("--merged", "12"), id="merged"),
+    ],
+)
+def test_release_branch_selects_a_lane_claim_without_checking_out_that_branch(
+    monkeypatch: pytest.MonkeyPatch, outcome_flags: tuple[str, str]
+) -> None:
+    """`--branch` selects the same lane claim `claim --branch` would (issue
+    #250), but -- unlike `claim`'s own `--branch` -- never inspects the
+    checkout branch at all: `forbid_git` fails the test the moment anything
+    but `rev-parse --show-toplevel` reaches git, so a deleted or foreign
+    worktree can never block this release."""
+    standing = request("mine", "Ada", issue=None, branch=LANE_BRANCH, scope=("docs",))
+    client = FakeForge()
+    if outcome_flags[0] == "--merged":
+        client.landings[12] = landing_pull_request(
+            body="No-Item: docs", merged=True, base_ref_name="main", head_ref_name=LANE_BRANCH
+        )
+    _patch_release_session(monkeypatch, client, standing, forbid_git=True)
+
+    released = issue_claim.main(
+        ["--repo", REPOSITORY, "release", "--branch", LANE_BRANCH, *outcome_flags]
+    )
+
+    assert released == 0
+    assert store.fetch_state(worktree=Path("."), remote="origin").claims == {}
+
+
+def test_release_refuses_a_branch_and_claim_id_naming_different_claims(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    standing = request("mine", "Ada", issue=72, branch="codex/issue-72-x", scope=("src",))
+    client = FakeForge()
+    _patch_release_session(monkeypatch, client, standing, forbid_git=True)
+
+    released = issue_claim.main(
+        [
+            "--repo",
+            REPOSITORY,
+            "release",
+            "72",
+            "--branch",
+            "codex/issue-99-other",
+            "--claim-id",
+            "mine",
+            "--abandoned",
+            "stopped",
+        ]
+    )
+
+    assert released == 2
+    assert capsys.readouterr().err == (
+        "ERROR: --branch 'codex/issue-99-other' and --claim-id 'mine' disagree: the claim's "
+        "own branch is 'codex/issue-72-x'; drop --branch or pass its own value\n"
+    )
+    assert store.fetch_state(worktree=Path("."), remote="origin").claims
+
+
+@pytest.mark.parametrize(
     "arguments",
     [
         ["release", "42"],
