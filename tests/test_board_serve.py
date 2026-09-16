@@ -256,6 +256,8 @@ def test_post_to_an_unknown_path_is_not_found(served_board: ServedBoard) -> None
         {"t": "will-be-replaced", "item": "10", "line": "1"},
         {"t": "will-be-replaced", "item": "not-a-number", "line": "1", "outcome": "yes"},
         {"t": "will-be-replaced", "item": "10", "line": "not-a-number", "outcome": "yes"},
+        {"t": "will-be-replaced", "item": "²", "line": "1", "outcome": "yes"},
+        {"t": "will-be-replaced", "item": "10", "line": "²", "outcome": "yes"},
     ],
 )
 def test_post_rule_with_a_malformed_body_is_a_bad_request(

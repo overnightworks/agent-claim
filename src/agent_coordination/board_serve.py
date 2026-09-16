@@ -73,13 +73,21 @@ class _RuleRequest:
     note: str | None
 
 
+def _is_plain_digit_string(raw: str) -> bool:
+    """`True` only for ASCII decimal digits -- `str.isdigit()` alone also
+    accepts non-ASCII digit characters (e.g. `"²"`) that `int()` then
+    refuses, so every caller that feeds a header or form field into `int()`
+    guards it through here first."""
+    return raw.isascii() and raw.isdigit()
+
+
 def _content_length(raw: str | None) -> int | None:
     """The request's `Content-Length` when it is a plain digit string within
     `_MAX_CONTENT_LENGTH` -- `None` for missing, non-digit, negative, or
     oversized values, which `do_POST` refuses `400` before `rfile.read` ever
     runs, instead of trusting a hostile or malformed header into `int()` and
     an unbounded read."""
-    if raw is None or not (raw.isascii() and raw.isdigit()):
+    if raw is None or not _is_plain_digit_string(raw):
         return None
     length = int(raw)
     return length if length <= _MAX_CONTENT_LENGTH else None
@@ -93,7 +101,7 @@ def _parsed_rule_request(fields: Mapping[str, list[str]]) -> _RuleRequest | None
     item, line, outcome = _field(fields, "item"), _field(fields, "line"), _field(fields, "outcome")
     if item is None or line is None or outcome is None:
         return None
-    if not item.isdigit() or not line.isdigit():
+    if not _is_plain_digit_string(item) or not _is_plain_digit_string(line):
         return None
     return _RuleRequest(int(item), int(line), outcome, _field(fields, "note"))
 
