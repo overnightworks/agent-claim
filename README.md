@@ -166,7 +166,10 @@ classes. An interrupted run remains visibly unfinished; a failed project does no
 hide later configured projects. The record contains no provider UUID, workspace
 path, agent, model, configuration, environment, command line, or raw error.
 
-Omitted `--base`/`--branch` bind the current checkout; explicit values must match it.
+Omitted `--base`/`--branch` on `claim` bind the current checkout; explicit
+values must match it. `release --branch` is the one exception: it selects the
+claim by that branch name without requiring the checkout to be on it (see
+"Issueless lane claims" below).
 Omitted `--agent` on `claim` and `release` is filled from non-empty
 `ACO_AGENT`, else non-empty `GROK_SESSION_ID` as `Grok {session}`, else
 non-empty `CLAUDE_SESSION_ID` as `Claude {session}`. `GROK_AGENT` is not a name.
@@ -177,8 +180,10 @@ with the same claim id, returns that active claim instead of writing a second
 one. A different live claim still fails; a released claim id remains terminal.
 
 Omitted `--claim-id` on `release` selects the unique active claim on that issue
-or lane whose agent is this session and whose branch is the current checkout;
-otherwise it fails closed.
+or lane whose agent is this session and whose branch is the current checkout,
+or the branch named by an explicit `--branch`; otherwise it fails closed.
+`--branch` and `--claim-id` naming different claims are refused, naming both
+values, rather than silently preferring one.
 Omitted `--role` on `release` uses that selected claim's role; an explicit
 `--role` must still match unless `--coordinator-override`, which still requires
 `--role coordinator`. `release` takes exactly one outcome, never a free-form
@@ -654,15 +659,20 @@ overlapping scope with another lane or issue is a visible note, not a refusal.
 `status` and `protect` show and authorize it the same way. A lane owns no
 GitHub issue, so it never appears on `board`, `rulings`, or `next`.
 
-There is no flag to name a lane explicitly on `release`: a lane's only name is
-the checkout branch it was claimed from, so releasing it — including a
-coordinator override — always runs from a checkout of that same lane branch.
-If the original worktree is gone or held by another session, re-create a
-worktree on that branch (`git worktree add <path> <lane-branch>`) and run
-`aco release --claim-id <id> --coordinator-override --role coordinator
---abandoned "..."` from inside it, where `<id>` comes from `aco status`
-(omitting `--claim-id` still filters by the releasing agent, coordinator
-override or not, so a foreign stuck claim needs the id).
+A lane's only name is its branch. `release --branch <lane-branch>` names one
+explicitly, exactly like `claim --branch`, but never requires the checkout to
+be on it (issue #250): a worktree that was deleted, or is held by another
+session, no longer has to be rebuilt just to release, so `aco release
+--branch <lane-branch> --claim-id <id> --coordinator-override --role
+coordinator --abandoned "..."` runs from any checkout of the repository.
+`--branch` together with `--claim-id` for a different claim is refused,
+naming both values. Without `--branch`, releasing a lane — including a
+coordinator override — still runs from a checkout of that same lane branch,
+as before: re-create a worktree on it if needed (`git worktree add <path>
+<lane-branch>`) and run `aco release --claim-id <id> --coordinator-override
+--role coordinator --abandoned "..."` from inside it, where `<id>` comes from
+`aco status` (omitting `--claim-id` still filters by the releasing agent,
+coordinator override or not, so a foreign stuck claim needs the id).
 
 ## PreToolUse write gate
 
