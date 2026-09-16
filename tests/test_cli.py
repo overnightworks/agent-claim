@@ -10514,6 +10514,32 @@ def test_item_close_refuses_under_github_storage(capsys: pytest.CaptureFixture[s
     assert capsys.readouterr().err == "ERROR: the forge closes its issues; aco never governs them\n"
 
 
+def test_item_close_prints_json_under_the_state_ref_pin(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Issue #289: `item close ITEM --json` under `storage = "state-ref"`
+    prints `{"item", "number", "closed_at"}` -- the same shape `item show
+    --json` prints -- and returns before the plain-text `CLOSED`/`freed:`
+    lines, the branch `test_item_close_refuses_under_github_storage`'s
+    refusal never reaches."""
+    _write_state_ref_pin(tmp_path)
+    client = FakeForge(repository=forge.RepositoryId("file", (), str(tmp_path)))
+    client.issue_references[42] = forge.ItemReference(
+        forge.ItemState.OPEN, "Title", "Body text.\n", False
+    )
+    monkeypatch.setattr(client, "close_item", lambda _number: "2026-09-16T12:00:00Z", raising=False)
+    monkeypatch.setattr(issue_claim, "_state_ref_forge", lambda _repo, _remote: client)
+
+    status = issue_claim.main(["item", "close", "42", "--json"])
+
+    assert status == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "item": items.format_item_id(42),
+        "number": 42,
+        "closed_at": "2026-09-16T12:00:00Z",
+    }
+
+
 def test_item_show_reads_the_fake_forge_body_under_github_storage(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

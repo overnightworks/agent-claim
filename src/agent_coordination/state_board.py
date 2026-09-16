@@ -108,8 +108,8 @@ def _with_record(body: str, record: items.ItemRecord) -> str:
     """`body`'s `agent-claim` block, its `[record]` table replaced by
     `record`'s own fields, every other byte untouched -- the one place a
     write composes a fresh `[record]` table, shared by `create_child` (a
-    brand new one) and `update_item_body` (an existing one with `updated_at`
-    refreshed)."""
+    brand new one), `update_item_body` (an existing one with `updated_at`
+    refreshed), and `close_item` (an existing one moved to `CLOSED`)."""
     located = board.locate_agent_claim_block(body)
     new_data = {**located.data, board.RECORD_KEY: items.record_table(record)}
     return board.replace_agent_claim_block(body, located, new_data)
