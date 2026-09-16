@@ -478,8 +478,8 @@ state-ref parentage has exactly one owner. An issue-scoped `claim`'s body
 check reads a `state-ref` item the same way `board`/`next` already do.
 `release --merged` still refuses — state-ref cannot yet verify a merged pull
 request (#230 slice 6) — naming the offline path instead: land with
-`item close` plus `release --abandoned "landed as <sha>"`. `item edit`/`close`
-as their own named commands do not exist yet (#230 slice 4d/4e).
+`item close` plus `release --abandoned "landed as <sha>"`. `item close` as
+its own named command does not exist yet (#230 slice 4e).
 
 `aco item new --title TITLE [--kind task|feature|container] [--parent ITEM]`
 creates a fresh item straight in `refs/aco/state` — a task/feature skeleton
@@ -495,6 +495,23 @@ body byte-exact; it reads through the ordinary forge port, so it works under
 both storages (a state-ref item's own file, or a GitHub issue's body), shows
 a closed item exactly like an open one (closing never deletes), and refuses
 an unknown id by name.
+
+`aco item edit ITEM` reads the whole new body from stdin only (`aco item edit
+ITEM < body.md`; no `--file`, no editor) and refuses before any write when it
+carries no valid `agent-claim` block — the same sentences `aco body --check`
+reports (issue #287). The stored body is replaced with the piped one; only
+`[record]` is composed by aco itself: `parent`, `state`, `origin`,
+`created_at`, and `closed_at` come from the item's own already-stored record —
+a value the piped body's `[record]` names for one of them is silently
+overwritten, never refused — `updated_at` always moves to now, while `title`,
+`labels`, and `blocked_by` come from the piped record when it carries one (an
+omitted key keeps the stored value). The compare-and-swap `expected` oid is
+this process's own already-read snapshot, never a re-read; a second worktree
+writing from that same snapshot refuses with the same "written since it was
+read" sentence `cut`/`rule`/`ask` already use. Prints one line, `EDITED
+aco-xxxxxx` (`--json`: `{"item", "number", "oid"}`). It refuses under `storage =
+"github"` by name ("forge issues are edited on the forge; aco never governs
+them") — a forge issue is edited on the forge, never through aco.
 
 Every command that takes an item — `claim`, `cut`, `ask`, `rule`, `check`,
 `brief`, `body --parent`, `status`, `rescope`, and `release` — accepts it as
@@ -753,7 +770,10 @@ Validate a hand-written body before it ever reaches the forge with
   first since there is no live item to refuse a single verdict about; exit 1
   with a defect, 0 without one. `--json` prints `{"ok": …, "defects": […]}`.
   It takes no file path, reads no dependency, since a body carries no
-  dependency key at all, and touches no forge, store, or `gh` call.
+  dependency key at all, and touches no forge, store, or `gh` call. It still
+  reads the repository's own [storage pin](#storage-pin): `[record]` is a
+  known key, and validated, only under `storage = "state-ref"` — an unknown
+  top-level key under the default `storage = "github"`.
 
 ## Cutting a container's next slice
 

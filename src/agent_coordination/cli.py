@@ -616,6 +616,11 @@ def _add_item_parser(commands: argparse._SubParsersAction) -> None:
     )
     show.add_argument("item", type=_parse_item_ref, help=f"the item to show, {ITEM_REF_HELP}")
     show.add_argument("--json", action="store_true", help=JSON_HELP)
+    edit = item_commands.add_parser(
+        "edit", help="replace one item's body from stdin, aco keeping its own record fields"
+    )
+    edit.add_argument("item", type=_parse_item_ref, help=f"the item to edit, {ITEM_REF_HELP}")
+    edit.add_argument("--json", action="store_true", help=JSON_HELP)
 
 
 def _add_protect_parser(commands: argparse._SubParsersAction) -> None:
@@ -2071,14 +2076,18 @@ def _cmd_body(parsed: argparse.Namespace) -> int:
     repository's own skeleton owners, and a check reads stdin only --
     never an issue, a live claim, a filesystem path, or the forge's own
     `blocked_by` relation, so it never resolves a `_LazyForge` at all
-    (`main` dispatches it outside `_dispatch`, exactly like `status`)."""
+    (`main` dispatches it outside `_dispatch`, exactly like `status`).
+    `--check` still reads the repository's own storage pin (issue #287):
+    `[record]` is a known key under `storage = "state-ref"` and an unknown
+    one under `storage = "github"`, the same gate `_state_ref_forge`'s own
+    items already read through `_decode_item`."""
     if parsed.check:
         if parsed.kind is not None or parsed.parent is not None:
             raise protocol.ClaimUnavailableError(
                 "--kind and --parent apply only to --template, not --check"
             )
-        board.load_config(_resolve_toplevel() / board.CONFIG_PATH)
-        defects = _body_shape_defects(_read_body_check_input())
+        config = board.load_config(_resolve_toplevel() / board.CONFIG_PATH)
+        defects = _body_shape_defects(_read_body_check_input(), storage=config.storage)
         return _body_check_report(defects, as_json=parsed.json)
     if parsed.json:
         raise protocol.ClaimUnavailableError("--json applies only to --check, not --template")
@@ -2331,6 +2340,57 @@ def _print_item_new_result(item_id: str, number: int, *, as_json: bool) -> None:
         print(json.dumps({"item": item_id, "number": number}))
     else:
         print(item_id)
+
+
+ITEM_EDIT_GITHUB_REFUSAL = "forge issues are edited on the forge; aco never governs them"
+
+
+def _cmd_item_edit(parsed: argparse.Namespace) -> int:
+    """`aco item edit ITEM` (issue #287): the state-ref item's own body,
+    replaced from stdin only -- refused before any write when the piped
+    body carries no valid `agent-claim` block (`body --check`'s own
+    sentences, `_body_shape_defects`). The CAS `expected` oid is this
+    process's own already-read snapshot (`StateRefBoard.update_item_body`'s
+    `current.oid`, set once at `_state_ref_forge` construction): a second
+    process writing from that same snapshot refuses with issue #279's own
+    sentence, never merged, never silently overwritten. `parent`, `state`,
+    `origin`, `created_at`, and `closed_at` stay this item's own stored
+    values regardless of what the piped body's `[record]` names for them --
+    `update_item_body`'s own owner rule; `updated_at` always moves to now;
+    `title`, `labels`, `blocked_by` come from the piped record when it
+    carries one. Refuses under `storage = "github"`: forge issues are edited
+    on the forge, never governed by aco -- mirrors `item new`'s own refusal,
+    and calls `_state_ref_forge` directly for the same reason (`create_item`/
+    `update_item_body` are not part of the generic `ForgeWriter` port every
+    other write command narrows to)."""
+    toplevel = _resolve_toplevel()
+    config = board.load_config(toplevel / board.CONFIG_PATH)
+    if config.storage is not board.Storage.STATE_REF:
+        raise protocol.ClaimUnavailableError(ITEM_EDIT_GITHUB_REFUSAL)
+    body = _read_body_check_input()
+    defects = _body_shape_defects(body, storage=board.Storage.STATE_REF)
+    if defects:
+        raise protocol.ClaimUnavailableError(defects[0])
+    client = _state_ref_forge(parsed.repo, config.canonical_remote)
+    number = parsed.item
+    if client.item_reference(number).state is forge.ItemState.MISSING:
+        raise protocol.ClaimUnavailableError(
+            f"#{number} does not exist in {client.repository.path}"
+        )
+    client.update_item_body(number, body)
+    _print_item_edit_result(
+        items.format_item_id(number), number, client.item_oid(number), as_json=parsed.json
+    )
+    return 0
+
+
+def _print_item_edit_result(
+    item_id: str, number: int, oid: protocol.ObjectId, *, as_json: bool
+) -> None:
+    if as_json:
+        print(json.dumps({"item": item_id, "number": number, "oid": oid}))
+    else:
+        print(f"EDITED {item_id}")
 
 
 def _item_state_text(state: forge.ItemState) -> str:
@@ -3850,6 +3910,8 @@ def _dispatch(parsed: argparse.Namespace) -> int:
     if parsed.command == "item":
         if parsed.item_command == "new":
             return _cmd_item_new(parsed)
+        if parsed.item_command == "edit":
+            return _cmd_item_edit(parsed)
         return _cmd_item_show(parsed, _ReadSession(forge=_LazyForge(parsed.repo)))
     release_branch = _release_branch_for(parsed) if parsed.command == "release" else None
     forge_accessor = _LazyForge(parsed.repo)
