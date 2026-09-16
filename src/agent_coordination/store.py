@@ -714,10 +714,20 @@ def push_tree(
     raise ClaimUnavailableError(f"{STATE_REF} moved {_MAX_PUSH_ATTEMPTS} times; retry the command")
 
 
-def _write_blob(worktree: Path, content: str) -> ObjectId:
+def hash_blob(worktree: Path, content: bytes) -> ObjectId:
+    """One blob's oid, hashed and written to the object store (issue #283):
+    the public seam `cli.py`'s item-write adapter uses to compute
+    `ItemWriteIntent.new_oid` once, before `commit_transition`'s own retry
+    loop -- an item write already carries finished bytes, unlike
+    `claims/`/`resources/`, whose own entries are serialized from a record
+    (`_write_blob` below) inside the loop itself."""
     return ObjectId(
-        _run_git_with_input(worktree, ["hash-object", "-w", "--stdin"], input_data=content.encode())
+        _run_git_with_input(worktree, ["hash-object", "-w", "--stdin"], input_data=content)
     )
+
+
+def _write_blob(worktree: Path, content: str) -> ObjectId:
+    return hash_blob(worktree, content.encode())
 
 
 def _empty_blob_oid(worktree: Path) -> ObjectId:
