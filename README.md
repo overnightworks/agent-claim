@@ -403,6 +403,27 @@ legal value, `"block"` (below): an absent key means the same thing, and
 `"prose"` is refused by name — `board configuration <path> pins body_contract
 'prose': prose bodies are no longer supported`.
 
+### HTML board page
+
+`aco board --html [PATH]` (issue #276, parent #234) writes a static HTML
+page from exactly the reads `board` already performs — no second `gh` call,
+no clock, no randomness — to `PATH`, or to stdout when `PATH` is omitted.
+`--json` and `--html` are mutually exclusive. Four sections in fixed order:
+"Wartet auf dich" (every still-open `[[expectation]]` line as a card —
+text, default, and a copyable `aco rule <item> --line N --yes` /
+`--no` / `--later` command per outcome, with a copy button, the page's only
+JavaScript), "Lanes" (active claims — agent, role, branch, age — with the
+item's own Now/Next/Blocked by/Done when verbatim from the body), "Themen"
+(containers with their open children and closed/total progress, then
+standalone items), and "Landungen" (items `board` already classified
+`Stage.CODE_LANDED`, paired with the merged pull request that closes or
+declares them when `board.closing_references`/`declared_work_items`
+resolves one — or the one "nicht ableitbar" line when `landings_derivable`
+is false). An empty section still renders its heading and "nichts". The
+page carries the mockup's design tokens for light and dark and stays
+narrow-width safe; the same board state renders the identical page
+byte-for-byte regardless of which head writes it.
+
 ### Storage pin
 
 `storage = "github" | "state-ref"` (default `github`) names which adapter
