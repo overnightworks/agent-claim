@@ -1,8 +1,0 @@
-claim_id = "caa4d4df8f7e41db873067ed292d578a"
-agent = "Claude head (coordinator)"
-role = "builder"
-base = "b286d2a53f2630cb26871cf31872bac74997e763"
-branch = "claude/issue-280-board-serve"
-scope = ["src/agent_coordination/board_serve.py", "src/agent_coordination/board_html.py", "src/agent_coordination/cli.py", "tests/test_board_serve.py", "README.md"]
-opened_commit = "0d0a39733933898ee9f6cc37da6b306ed9c95819"
-whole_reason = "one transport (new board_serve module) wired through cli and the card renderer, its test module and the README section; splitting leaves a server nothing routes to"
