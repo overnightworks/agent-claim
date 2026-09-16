@@ -1,0 +1,8 @@
+claim_id = "cd9a679cf95845b8beda8a7acc412cef"
+agent = "Claude head (coordinator)"
+role = "builder"
+base = "b286d2a53f2630cb26871cf31872bac74997e763"
+branch = "claude/issue-279-item-write-store"
+scope = ["src/agent_coordination/protocol.py", "src/agent_coordination/store.py", "tests/test_protocol.py", "tests/test_store.py"]
+opened_commit = "da38ab3a5d0404e15994f86d3b9f7a82787e6253"
+whole_reason = "one intent across protocol.apply and store.commit_transition plus their two test modules; splitting leaves an intent nothing writes"
