@@ -2956,8 +2956,7 @@ def _orphan_names_container(body: str, container: int) -> bool:
     `_cut_child_body` writes -- the one signal that tells `container`'s own
     orphan apart from another open issue, another container's own failed
     cut, or a human-filed issue that happens to share the row's title."""
-    first_line, _, _ = body.partition("\n")
-    return first_line == f"Parent: #{container}"
+    return board.first_line(body) == f"Parent: #{container}"
 
 
 def _adoptable_child(

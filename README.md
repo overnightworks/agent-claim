@@ -540,11 +540,16 @@ invalid.
 part of `check` read a work item's `Now`/`Next`/`Done when`, freeze,
 expectations, and undispatched slices from one typed `agent-claim` fenced TOML
 block. That block is the whole grammar: the human prose around it — including
-another tool's own section headings in the same body — is never parsed.
+another tool's own section headings in the same body — carries no board
+contract and is never read by `board`, `next`, `claim`, or `rulings`. The one
+exception is `cut`'s own `Parent: #<n>` line (below): a recovery marker only
+`cut`'s orphan adoption reads back, so a failed relation write can be
+finished by re-running the same `cut`.
 
-A fresh, unfilled item looks like this — the same four lines `cut` writes
-automatically for a dispatched child, and what a human pastes by hand into a
-`gh issue create` / operator-opened item:
+A fresh, unfilled item looks like this — the same four skeleton lines `cut`
+writes inside the fence for a dispatched child (ahead of which `cut` also
+writes that `Parent: #<n>` line, never part of this grammar), and what a
+human pastes by hand into a `gh issue create` / operator-opened item:
 
 ````
 ```agent-claim
@@ -616,8 +621,10 @@ owner/repo#n` mixed with a local one). A same-repository *closed* dependency
 does not block and lets `board`'s `FREED` column and `claim` proceed; a closed
 *foreign* dependency does not free an item on its own (foreign relations can
 only block, never free). A pull-request dependency blocks and frees exactly
-like any other dependency. **Parentage stays on sub-issues**; it never passes
-through the body.
+like any other dependency. **Parentage stays on sub-issues**: no reader ever
+derives a parent from the body. `cut` writes a `Parent: #<n>` line as a
+recovery marker (below) that everything but `cut`'s own orphan adoption
+ignores.
 
 **`cut`** reads and rewrites the block: without `--row` it links the first
 `[[slice]]` entry when one exists and otherwise creates an untied child;

@@ -2969,12 +2969,26 @@ def _forge_with_existing_child(
 ) -> FakeForge:
     """`_one_slice_container`'s forge, already carrying one child titled
     `child_title` under `CUT_CONTAINER` -- the fixture every adopt-instead-of-
-    duplicate test (#260) starts from."""
-    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(_one_slice_container(),))
+    duplicate test (#260) starts from. The child also carries a recorded
+    parent and, when open, sits on the board with a body that would itself
+    pass `_orphan_names_container`, exactly like a real linked issue: a
+    broken `parent_issue` filter in `_adoptable_child` would then double-count
+    it as its own orphan, and the surrounding test would fail."""
+    child_body = issue_claim._cut_child_body(CUT_CONTAINER)
+    open_issues = (_one_slice_container(),)
+    if child_state is board.ChildState.OPEN:
+        open_issues = (
+            *open_issues,
+            board_issue(child_number, child_title, child_body, kind=board.ItemKind.TASK),
+        )
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=open_issues)
     _write_block_pin(tmp_path)
     client.children[CUT_CONTAINER] = (board.ChildItem(child_number, child_state),)
     client.issue_references[child_number] = forge.ItemReference(
-        forge.ItemState(child_state.value), child_title, "", False
+        forge.ItemState(child_state.value), child_title, child_body, False
+    )
+    client.parents[child_number] = board.ParentIssue(
+        board.IssueReference(client.repository.path, CUT_CONTAINER), ""
     )
     return client
 
@@ -3144,15 +3158,22 @@ def test_cut_never_adopts_an_orphan_that_is_not_this_containers_recovery_shape(
     assert capsys.readouterr().out == f"CUT #{CUT_CONTAINER} row 1 -> #{child}\n"
 
 
+@pytest.mark.parametrize("line_ending", ["\n", "\r\n"], ids=["orphan_body_lf", "orphan_body_crlf"])
 def test_cut_adopts_the_orphan_after_a_relation_partial_failure(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    line_ending: str,
 ) -> None:
     """The real partial failure (#260): `create_issue` succeeds, `link_child`
     raises, so `create_child` names a child that exists but carries no
     recorded parent -- an orphan `list_open_board_issues`/`parent_issue`
     can find. An identical retry adopts it: the relation is written exactly
     once by the retry, the row is removed, and no second issue is ever
-    created."""
+    created. Parametrized over the orphan's line ending because a real
+    GitHub GET normalizes every body to CRLF (`board._line_ending`)
+    regardless of what was written, and the retry's orphan scan must match
+    both forms."""
     client = _configured_board_client(monkeypatch, tmp_path, open_issues=(_one_slice_container(),))
     _write_block_pin(tmp_path)
     client.board_issues = (_one_slice_container(),)
@@ -3170,6 +3191,12 @@ def test_cut_adopts_the_orphan_after_a_relation_partial_failure(
     assert client.linked_children == [(CUT_CONTAINER, child)]
     capsys.readouterr()
     client.fail_create_child_relation = False
+    client.board_issues = tuple(
+        replace(issue, body=issue.body.replace("\n", line_ending))
+        if issue.number == child
+        else issue
+        for issue in client.board_issues
+    )
 
     second_exit_code = issue_claim.main(
         ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]

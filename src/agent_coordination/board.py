@@ -610,6 +610,15 @@ def _line_without_ending(raw_line: str) -> str:
     return raw_line[: len(raw_line) - len(ending)] if ending else raw_line
 
 
+def first_line(body: str) -> str:
+    """`body`'s first line with its ending stripped, whether the body uses
+    LF or CRLF -- a GitHub GET returns CRLF (`_line_ending` above), so a
+    caller comparing against a fixed marker line must not split on a bare
+    `"\\n"`."""
+    lines = body.splitlines(keepends=True)
+    return _line_without_ending(lines[0]) if lines else ""
+
+
 def _agent_claim_fence_matches(body: str) -> list[tuple[int, int | None, str]]:
     """Every fence in `body` whose info string is exactly `agent-claim`
     (issue #150 §4): `(opening line index, closing line index or None when
