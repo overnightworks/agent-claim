@@ -10,7 +10,9 @@ argument is untouched by this module (proof 8)."""
 from __future__ import annotations
 
 import http.client
+import io
 import socket
+import sys
 import threading
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
@@ -332,6 +334,31 @@ def test_board_serve_dispatches_through_the_write_session_and_prints_the_url(
     printed = capsys.readouterr().out.strip()
     assert printed.startswith("http://127.0.0.1:")
     assert f"{board_serve.TOKEN_FIELD}=" in printed
+
+
+def test_board_serve_flushes_the_url_line_before_blocking(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A log reader only ever sees bytes already flushed (issue #280):
+    `capsys`'s capture stream is unbuffered and cannot show this bug, so
+    this drives stdout through a real `TextIOWrapper` over a `BytesIO` with
+    `write_through=False` -- `print(..., flush=True)` reaches the
+    underlying buffer immediately, an unflushed `print` would not."""
+    _served_board_environment(monkeypatch, tmp_path)
+    raw = io.BytesIO()
+    monkeypatch.setattr(sys, "stdout", io.TextIOWrapper(raw, write_through=False))
+    written_before_serve = b""
+
+    def record_before_blocking(self: board_serve._BoardHTTPServer) -> None:
+        nonlocal written_before_serve
+        written_before_serve = raw.getvalue()
+
+    monkeypatch.setattr(board_serve._BoardHTTPServer, "serve_forever", record_before_blocking)
+
+    exit_code = issue_claim.main(["--repo", "example/agent-claim", "board", "--serve"])
+
+    assert exit_code == 0
+    assert written_before_serve.decode().strip().startswith("http://127.0.0.1:")
 
 
 def _raise_keyboard_interrupt(self: board_serve._BoardHTTPServer) -> None:

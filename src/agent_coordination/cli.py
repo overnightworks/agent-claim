@@ -3561,7 +3561,7 @@ def _board_server(parsed: argparse.Namespace, session: _WriteSession) -> board_s
 
 def _cmd_board_serve(parsed: argparse.Namespace, session: _WriteSession) -> None:
     server = _board_server(parsed, session)
-    print(server.url)
+    print(server.url, flush=True)
     try:
         server.httpd.serve_forever()
     except KeyboardInterrupt:
