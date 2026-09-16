@@ -3559,7 +3559,7 @@ def _board_server(parsed: argparse.Namespace, session: _WriteSession) -> board_s
     return server
 
 
-def _cmd_board_serve(parsed: argparse.Namespace, session: _WriteSession) -> None:
+def _cmd_board_serve(parsed: argparse.Namespace, session: _WriteSession) -> int:
     server = _board_server(parsed, session)
     print(server.url, flush=True)
     try:
@@ -3568,6 +3568,7 @@ def _cmd_board_serve(parsed: argparse.Namespace, session: _WriteSession) -> None
         pass
     finally:
         server.httpd.server_close()
+    return 0
 
 
 def _print_ask_result(number: int, index: int, text: str, default: str, *, as_json: bool) -> None:

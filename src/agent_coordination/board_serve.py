@@ -79,7 +79,7 @@ def _content_length(raw: str | None) -> int | None:
     oversized values, which `do_POST` refuses `400` before `rfile.read` ever
     runs, instead of trusting a hostile or malformed header into `int()` and
     an unbounded read."""
-    if raw is None or not raw.isdigit():
+    if raw is None or not (raw.isascii() and raw.isdigit()):
         return None
     length = int(raw)
     return length if length <= _MAX_CONTENT_LENGTH else None

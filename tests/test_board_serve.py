@@ -286,7 +286,7 @@ def _raw_post_status(server: board_serve.BoardServer, content_length: str | None
         f"Content-Type: application/x-www-form-urlencoded\r\n"
         f"{length_header}"
         f"Connection: close\r\n\r\n"
-    ).encode("ascii") + body
+    ).encode("latin-1") + body
     with socket.create_connection((host, port), timeout=5) as connection:
         connection.sendall(request)
         response = connection.recv(65536)
@@ -295,7 +295,7 @@ def _raw_post_status(server: board_serve.BoardServer, content_length: str | None
 
 @pytest.mark.parametrize(
     "content_length",
-    [None, "not-a-number", "-1", str(board_serve._MAX_CONTENT_LENGTH + 1)],
+    [None, "not-a-number", "-1", "²", str(board_serve._MAX_CONTENT_LENGTH + 1)],
 )
 def test_post_rule_with_a_missing_invalid_or_oversized_content_length_is_a_bad_request(
     served_board: ServedBoard, content_length: str | None
