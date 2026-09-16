@@ -1,0 +1,8 @@
+claim_id = "291872cf542e4b17b0f120882317d2ef"
+agent = "Claude head (coordinator)"
+role = "builder"
+base = "9c2b70b719982801cdbc166141734e94a50471ac"
+branch = "claude/issue-292-ids-visible"
+scope = ["src/agent_coordination/cli.py", "src/agent_coordination/board_html.py", "src/agent_coordination/items.py", "tests/test_state_board.py", "tests/test_cli.py", "tests/test_board_html.py", "README.md"]
+opened_commit = "c0261458646f181400044ccdbe9bdb1110bd539b"
+whole_reason = "one id formatter across every output (cli, board_html), the README week as one test and its test modules; splitting leaves outputs that disagree"
