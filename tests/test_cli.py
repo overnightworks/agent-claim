@@ -14217,6 +14217,41 @@ def test_release_branch_selects_a_lane_claim_without_checking_out_that_branch(
     assert store.fetch_state(worktree=Path("."), remote="origin").claims == {}
 
 
+def test_release_branch_selects_a_coordinator_override_from_another_checkout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The headline scenario (issue #250): naming the lane's own `--branch`
+    alongside `--claim-id` for a coordinator-override abandon works from any
+    checkout, not only one on the lane branch -- `forbid_git` fails the test
+    the moment anything but `rev-parse --show-toplevel` reaches git, so a
+    checkout left on another branch entirely can never block this release."""
+    standing = request(
+        "mine", "Ada", issue=None, branch=LANE_BRANCH, role="reviewer", scope=("docs",)
+    )
+    client = FakeForge()
+    _patch_release_session(monkeypatch, client, standing, forbid_git=True)
+
+    released = issue_claim.main(
+        [
+            "--repo",
+            REPOSITORY,
+            "release",
+            "--branch",
+            LANE_BRANCH,
+            "--claim-id",
+            "mine",
+            "--coordinator-override",
+            "--role",
+            "coordinator",
+            "--abandoned",
+            "stopped",
+        ]
+    )
+
+    assert released == 0
+    assert store.fetch_state(worktree=Path("."), remote="origin").claims == {}
+
+
 def test_release_refuses_a_branch_and_claim_id_naming_different_claims(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -662,14 +662,17 @@ GitHub issue, so it never appears on `board`, `rulings`, or `next`.
 A lane's only name is its branch. `release --branch <lane-branch>` names one
 explicitly, exactly like `claim --branch`, but never requires the checkout to
 be on it (issue #250): a worktree that was deleted, or is held by another
-session, no longer has to be rebuilt just to release. `--branch` together
-with `--claim-id` for a different claim is refused, naming both values.
-Without `--branch`, releasing a lane — including a coordinator override —
-still runs from a checkout of that same lane branch, as before:
-`aco release --branch <lane-branch> --claim-id <id> --coordinator-override
---role coordinator --abandoned "..."`, where `<id>` comes from `aco status`
-(omitting `--claim-id` still filters by the releasing agent, coordinator
-override or not, so a foreign stuck claim needs the id).
+session, no longer has to be rebuilt just to release, so `aco release
+--branch <lane-branch> --claim-id <id> --coordinator-override --role
+coordinator --abandoned "..."` runs from any checkout of the repository.
+`--branch` together with `--claim-id` for a different claim is refused,
+naming both values. Without `--branch`, releasing a lane — including a
+coordinator override — still runs from a checkout of that same lane branch,
+as before: re-create a worktree on it if needed (`git worktree add <path>
+<lane-branch>`) and run `aco release --claim-id <id> --coordinator-override
+--role coordinator --abandoned "..."` from inside it, where `<id>` comes from
+`aco status` (omitting `--claim-id` still filters by the releasing agent,
+coordinator override or not, so a foreign stuck claim needs the id).
 
 ## PreToolUse write gate
 
