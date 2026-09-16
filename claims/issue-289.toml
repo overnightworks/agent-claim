@@ -1,8 +1,0 @@
-claim_id = "0366f669f738475b816abf64021f55ce"
-agent = "Claude head (coordinator)"
-role = "builder"
-base = "09a90466aa505a99131545e064002404931ad400"
-branch = "claude/issue-289-item-close"
-scope = ["src/agent_coordination/cli.py", "src/agent_coordination/state_board.py", "tests/test_state_board.py", "tests/test_cli.py", "README.md"]
-opened_commit = "5f4dab1de29924dc39dc93809e957a10e3272755"
-whole_reason = "one command (item close) across cli, the adapter, their test modules and the README; splitting leaves a command nothing writes"
