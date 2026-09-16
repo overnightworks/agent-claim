@@ -64,8 +64,7 @@ layers = [
     "github",
     "forge",
     "board",
-    "protocol",
-    "process",
+    "protocol | process | hook_input",
 ]
 
 [[tool.importlinter.contracts]]

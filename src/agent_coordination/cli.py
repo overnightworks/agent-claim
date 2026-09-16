@@ -21,6 +21,7 @@ from . import (
     checkout,
     forge,
     github,
+    hook_input,
     protocol,
     providers,
     store,
@@ -2060,8 +2061,11 @@ def _hook_field(payload: dict[str, object], *keys: str) -> object:
     return None
 
 
-def _hook_path(tool_input: dict[str, object]) -> str | None:
-    for key in ("path", "file_path", "filePath"):
+_GENERIC_PATH_KEYS = ("path", "file_path", "filePath")
+
+
+def _hook_path(tool_input: dict[str, object], *, keys: tuple[str, ...]) -> str | None:
+    for key in keys:
         value = tool_input.get(key)
         if isinstance(value, str) and value:
             return value
@@ -2082,11 +2086,49 @@ def _protect_relative_path(raw_path: str, *, toplevel: Path) -> str | None:
 PATH_REQUIRED = "path required"
 
 
-def _protect_hook_path(payload: dict[str, object]) -> str | None:
+APPLY_PATCH_TOOL_NAME = "apply_patch"
+NOTEBOOK_EDIT_TOOL_NAME = "NotebookEdit"
+
+
+class _HookPathSource(StrEnum):
+    """Where a mutating tool's path lives in its `tool_input` -- one owner
+    per tool name (issue #252) so a tool can only be read from a key it
+    actually sends; a decoy value under a key it does not send (an in-scope
+    `path` next to `NotebookEdit`'s real, out-of-scope `notebook_path`) is
+    never looked at."""
+
+    GENERIC_KEYS = "generic_keys"
+    NOTEBOOK_PATH = "notebook_path"
+    PATCH_TEXT = "patch_text"
+
+
+_HOOK_PATH_SOURCES: dict[str, _HookPathSource] = {
+    APPLY_PATCH_TOOL_NAME: _HookPathSource.PATCH_TEXT,
+    NOTEBOOK_EDIT_TOOL_NAME: _HookPathSource.NOTEBOOK_PATH,
+}
+
+
+def _protect_hook_paths(tool_name: str, payload: dict[str, object]) -> tuple[str, ...]:
+    """Every path this hook call's `tool_input` names, read only from the
+    key(s) this specific tool sends.
+
+    `apply_patch` (Codex) carries no path key at all -- its patch text sits
+    under `command` and can touch several files in one call, so it is parsed
+    by the dedicated patch grammar instead. `NotebookEdit` (Claude Code)
+    carries only `notebook_path`. Every other tool still yields at most one
+    path, from the shared `path`/`file_path`/`filePath` keys."""
     tool_input = _hook_field(payload, "toolInput", "tool_input")
     if not isinstance(tool_input, dict):
-        return None
-    return _hook_path(tool_input)
+        return ()
+    source = _HOOK_PATH_SOURCES.get(tool_name, _HookPathSource.GENERIC_KEYS)
+    if source is _HookPathSource.PATCH_TEXT:
+        command = tool_input.get("command")
+        if not isinstance(command, str):
+            return ()
+        return hook_input.hook_patch_paths(command)
+    keys = ("notebook_path",) if source is _HookPathSource.NOTEBOOK_PATH else _GENERIC_PATH_KEYS
+    single = _hook_path(tool_input, keys=keys)
+    return (single,) if single is not None else ()
 
 
 def _protect_checkout_refusal(branch: str) -> str | None:
@@ -2099,37 +2141,82 @@ def _protect_checkout_refusal(branch: str) -> str | None:
     return None
 
 
-def _protect_store_verdict(agent: str, branch: str, relative: str, canonical_remote: str) -> int:
-    """`protect`'s live snapshot (issue #176, §1): one fetch, no positive cache
-    (D2) -- allow only when this session's agent and branch hold a scope
-    overlapping the tool path. Every store read failure (unreachable, auth,
-    malformed tree, lineage break) denies with the same named text (Erwartung
-    8) instead of the generic 'claim first', which would send the agent
-    toward a command that cannot fix a transient fetch failure.
+def _protect_fetch_claim_state(canonical_remote: str) -> protocol.ClaimState | None:
+    """`protect`'s live snapshot (issue #176, §1): one fetch, no positive
+    cache (D2). Returns `None` after already printing a deny (exit code 2 in
+    every case) when the store read itself fails -- unreachable, auth,
+    malformed tree, lineage break -- with the same named text (Erwartung 8)
+    instead of the generic 'claim first', which would send the agent toward a
+    command that cannot fix a transient fetch failure.
     """
     try:
         state = store.fetch_state(worktree=Path.cwd(), remote=canonical_remote)
     except protocol.ClaimError as error:
-        return _hook_deny(f"cannot reach {store.STATE_REF}: {error}")
+        _hook_deny(f"cannot reach {store.STATE_REF}: {error}")
+        return None
     if state.tip is None:
-        return _hook_deny(f"cannot reach {store.STATE_REF}: {protocol.MISSING_STATE_REF}")
-    for claim in state.claims.values():
-        if (
-            claim.agent == agent
-            and claim.branch == branch
-            and protocol._scopes_overlap(claim.scope, (relative,))
-        ):
-            return _hook_allow()
+        _hook_deny(f"cannot reach {store.STATE_REF}: {protocol.MISSING_STATE_REF}")
+        return None
+    return state
+
+
+def _protect_overlapping_claim_exists(
+    state: protocol.ClaimState, *, agent: str, branch: str, relative: str
+) -> bool:
+    return any(
+        claim.agent == agent
+        and claim.branch == branch
+        and protocol._scopes_overlap(claim.scope, (relative,))
+        for claim in state.claims.values()
+    )
+
+
+def _protect_store_verdict(agent: str, branch: str, relative: str, canonical_remote: str) -> int:
+    """Allow only when this session's agent and branch hold a scope
+    overlapping the tool's one path."""
+    state = _protect_fetch_claim_state(canonical_remote)
+    if state is None:
+        return 2
+    if _protect_overlapping_claim_exists(state, agent=agent, branch=branch, relative=relative):
+        return _hook_allow()
     return _hook_deny("claim first")
 
 
-def _protect_write(payload: dict[str, object]) -> int:
+def _protect_session_claim_exists(state: protocol.ClaimState, *, agent: str, branch: str) -> bool:
+    return any(claim.agent == agent and claim.branch == branch for claim in state.claims.values())
+
+
+def _protect_patch_store_verdict(
+    agent: str, branch: str, relatives: tuple[str, ...], canonical_remote: str
+) -> int:
+    """`apply_patch` can touch several files in one call (issue #252): allow
+    only when every one of them overlaps the live claim, and deny naming the
+    first one that does not -- unlike the single-path `claim first` above,
+    the hook payload here never told the agent which of several files was the
+    problem, so the repair sentence has to. With no live claim for this
+    session at all, though, the repair sentence is the same as the
+    single-path case: naming a path as 'outside claim scope' would be false
+    when there is no claim to be outside of."""
+    state = _protect_fetch_claim_state(canonical_remote)
+    if state is None:
+        return 2
+    if not _protect_session_claim_exists(state, agent=agent, branch=branch):
+        return _hook_deny("claim first")
+    for relative in relatives:
+        if not _protect_overlapping_claim_exists(
+            state, agent=agent, branch=branch, relative=relative
+        ):
+            return _hook_deny(f"{relative} outside claim scope")
+    return _hook_allow()
+
+
+def _protect_write(tool_name: str, payload: dict[str, object]) -> int:
     """`protect` is forge-free (issue #245): it authorizes a write from the
     live store state alone, never a forge target, so it never resolves a
     repository or calls `gh` -- `--repo` is meaningless here and simply
     unused."""
-    raw_path = _protect_hook_path(payload)
-    if raw_path is None:
+    raw_paths = _protect_hook_paths(tool_name, payload)
+    if not raw_paths:
         return _hook_deny(PATH_REQUIRED)
     agent = checkout._resolved_agent(None)
     branch = checkout._git_output(["branch", "--show-current"])
@@ -2137,11 +2224,16 @@ def _protect_write(payload: dict[str, object]) -> int:
     if refusal is not None:
         return _hook_deny(refusal)
     toplevel = _resolve_toplevel().resolve()
-    relative = _protect_relative_path(raw_path, toplevel=toplevel)
-    if relative is None:
-        return _hook_deny(PATH_REQUIRED)
+    relatives: list[str] = []
+    for raw_path in raw_paths:
+        relative = _protect_relative_path(raw_path, toplevel=toplevel)
+        if relative is None:
+            return _hook_deny(PATH_REQUIRED)
+        relatives.append(relative)
     canonical_remote = _canonical_remote_name(toplevel)
-    return _protect_store_verdict(agent, branch, relative, canonical_remote)
+    if tool_name == APPLY_PATCH_TOOL_NAME:
+        return _protect_patch_store_verdict(agent, branch, tuple(relatives), canonical_remote)
+    return _protect_store_verdict(agent, branch, relatives[0], canonical_remote)
 
 
 def _protect() -> int:
@@ -2158,7 +2250,7 @@ def _protect() -> int:
             return _hook_deny(_unknown_hook_tool_reason(tool_name))
         if effect is HookToolEffect.READ:
             return _hook_allow()
-        return _protect_write(payload)
+        return _protect_write(tool_name, payload)
     except Exception as error:
         return _hook_deny(str(error))
 
