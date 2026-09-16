@@ -282,7 +282,7 @@ def _parse_item_ref(value: str) -> int:
     just display, so a fresh id `item new` prints is something every other
     command can claim right back). The one owner for every argparse slot
     that means an item: `claim`, `cut`, `ask`, `rule`, `check`, `brief`,
-    `body --parent`, `status`, and `release`. Refuses by name for anything
+    `body --parent`, `status`, `rescope`, and `release`. Refuses by name for anything
     else; used as an argparse `type=`, so this refusal must reach `main`'s
     own `protocol.ClaimError` handling around `parse_args` rather than
     argparse's own usage-error path, which only catches `ValueError`.
@@ -466,7 +466,7 @@ def _add_rescope_parser(commands: argparse._SubParsersAction) -> None:
     )
     rescope.add_argument(
         "issue",
-        type=int,
+        type=_parse_item_ref,
         nargs="?",
         help=LANE_ISSUE_HELP,
     )

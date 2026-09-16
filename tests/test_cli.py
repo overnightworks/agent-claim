@@ -10432,6 +10432,10 @@ def test_parse_item_ref_accepts_every_reference_syntax(value: str, number: int) 
     number `n` are all one item reference."""
     assert issue_claim._parse_item_ref(value) == number
 
+    rescoped = issue_claim._parser().parse_args(["rescope", value, "--add", "src"])
+
+    assert rescoped.issue == number
+
 
 @pytest.mark.parametrize("value", ["foo", "aco-xyz", "#"])
 def test_parse_item_ref_refuses_anything_else(value: str) -> None:

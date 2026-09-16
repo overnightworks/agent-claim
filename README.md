@@ -497,7 +497,7 @@ a closed item exactly like an open one (closing never deletes), and refuses
 an unknown id by name.
 
 Every command that takes an item — `claim`, `cut`, `ask`, `rule`, `check`,
-`brief`, `body --parent`, `status`, and `release` — accepts it as
+`brief`, `body --parent`, `status`, `rescope`, and `release` — accepts it as
 `aco-xxxxxx`, `#n`, or the bare number `n`: an id is identity, not only
 display, so the id `item new` prints is something every other command can
 claim right back, on a `state-ref` repository or a `github` one alike.
