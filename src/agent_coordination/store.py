@@ -44,6 +44,7 @@ from .protocol import (
     ClaimState,
     ClaimTransitionIntent,
     ClaimUnavailableError,
+    ItemWriteIntent,
     MalformedStateTreeError,
     ObjectId,
     OperationAlreadyApplied,
@@ -69,20 +70,29 @@ RESOURCES_DIRECTORY = "resources"
 # Item files (issue #248): board/item data, never claim-ledger data, so it
 # is a recognized top-level entry but deliberately excluded from
 # `_parse_state_tree`'s own archive read (`read_item_files` below) -- a
-# command that never touches items pays nothing to fetch them.
+# command that never touches items pays nothing to fetch them. Its id -> oid
+# structure is folded into `ClaimState.items` for free from the same
+# recursive `ls-tree` (issue #279); only the byte content stays excluded.
 ITEMS_DIRECTORY = "items"
 SCHEMA_TOML_FILENAME = "schema.toml"
 TOML_SUFFIX = ".toml"
+# The store's own copy of the item-file suffix (issue #279): `store.py` may
+# not import `agent_coordination.items` (the "claim-state store is git
+# transport only" Layers contract), yet still writes and reads back
+# `items/<id>.md` tree entries -- an adapter-boundary detail duplicated
+# once, not a second owner of item id grammar, which stays `items.py`'s.
+ITEM_FILENAME_SUFFIX = ".md"
 _STATE_TOP_LEVEL_NAMES = frozenset(
     {SCHEMA_TOML_FILENAME, CLAIMS_DIRECTORY, IDS_DIRECTORY, RESOURCES_DIRECTORY, ITEMS_DIRECTORY}
 )
 
 # The transition each intent type carries, for the commit message trailer
-# (§1 "Commit message"): `intent: claim` / `rescope` / `release`.
+# (§1 "Commit message"): `intent: claim` / `rescope` / `release` / `item_write`.
 _INTENT_LABELS: dict[type[ClaimTransitionIntent], str] = {
     ClaimIntent: "claim",
     RescopeIntent: "rescope",
     ReleaseIntent: "release",
+    ItemWriteIntent: "item_write",
 }
 
 # `git ls-remote --exit-code` (git(1)): 2 is "no matching refs" -- the only
@@ -485,17 +495,39 @@ def _parse_resources_subtree(
     return MappingProxyType(resources)
 
 
+def _parse_items_subtree(
+    entries: dict[str, tuple[str, str]], *, present: bool, tip: ObjectId
+) -> Mapping[str, ObjectId]:
+    """`items/`'s id -> blob oid mapping (issue #279), structural shape only:
+    every entry must be a blob, the same doctrine `claims/`/`ids/`/
+    `resources/` already enforce. Filename and content grammar -- the
+    `aco-` id pattern, the `[record]` table -- stay `items.py`'s, this
+    function's caller never inspects them.
+    """
+    if not present:
+        return MappingProxyType({})
+    items: dict[str, ObjectId] = {}
+    for name, (kind, oid) in _direct_children(entries, ITEMS_DIRECTORY).items():
+        if kind != "blob":
+            raise MalformedStateTreeError(f"{ITEMS_DIRECTORY}/{name} at {tip} is not a file")
+        items[name.removesuffix(ITEM_FILENAME_SUFFIX)] = ObjectId(oid)
+    return MappingProxyType(items)
+
+
 def _parse_state_tree(worktree: Path, tip: ObjectId) -> ClaimState:
     """Parse the full state tree at `tip`: `schema.toml` plus whichever of
-    `claims/`, `ids/`, `resources/` are present (issue #176, slice C2).
+    `claims/`, `ids/`, `resources/`, `items/` are present (issue #176, slice
+    C2; item oids, issue #279).
 
     One recursive `ls-tree` for structure and one `git archive` for every
     blob's bytes (issue #241) replace what used to be one `ls-tree` and one
     `cat-file -p` per entry -- the process count this function pays is fixed
     regardless of how many claims, ids, or resources the tree holds. `items/`
-    (issue #248) is recognized here but excluded from that one archive: item
-    content is board data, read lazily and separately by `read_item_files`,
-    never folded into `ClaimState`.
+    (issue #248) is recognized here and its id -> blob oid structure is
+    folded into `ClaimState.items` for free from this same `ls-tree`; its
+    *content* stays excluded from that one archive read -- board data, read
+    lazily and separately by `read_item_files`, never folded into
+    `ClaimState`.
 
     A defect anywhere fails the whole read loud (ruling 9c): a commit is the
     unit a writer writes, so a broken tree is corrupt state, never a single
@@ -530,6 +562,11 @@ def _parse_state_tree(worktree: Path, tip: ObjectId) -> ClaimState:
             present=_subtree_oid(top_level, RESOURCES_DIRECTORY, tip=tip) is not None,
             tip=tip,
         ),
+        items=_parse_items_subtree(
+            entries,
+            present=_subtree_oid(top_level, ITEMS_DIRECTORY, tip=tip) is not None,
+            tip=tip,
+        ),
     )
 
 
@@ -537,8 +574,9 @@ def read_item_files(worktree: Path, tip: ObjectId) -> Mapping[str, bytes]:
     """Every `items/<id>.md` blob's raw bytes at `tip`, fetched only when a
     caller actually asks for it (issue #248): one `ls-tree` plus one `git
     archive` scoped to the `items/` subtree alone, decoupled from
-    `ClaimState` and from every other store read (`_parse_state_tree`'s own
-    archive explicitly excludes this directory). Empty when `items/` does
+    `ClaimState.items`' oid-only mapping and from every other store read
+    (`_parse_state_tree`'s own archive explicitly excludes this directory).
+    Empty when `items/` does
     not exist -- the proven-empty-board case a fresh or GitHub-pinned
     repository is in.
 
@@ -785,6 +823,31 @@ def _reuse_or_write_ids_subtree(
     return _mktree(worktree, entries)
 
 
+def _reuse_or_write_items_subtree(
+    worktree: Path,
+    *,
+    existing: _ExistingSubtree,
+    old_items: Mapping[str, ObjectId],
+    new_items: Mapping[str, ObjectId],
+) -> ObjectId:
+    """`items/`'s new subtree oid (issue #279), rebuilt from `new_state.items`'
+    full id -> oid mapping on every write -- never a copy of the parent
+    tree's `items/` oid: a retry that lost a race over one id must still
+    place every other writer's already-landed id, which a bare copy could
+    never pick up. Unlike `claims/`/`resources/`, an item write already
+    carries its blob's finished oid (hashed once by the caller, before the
+    retry loop), so there is never a blob to write here, only the entry to
+    place or reuse.
+    """
+    if old_items == new_items and existing.oid is not None:
+        return ObjectId(existing.oid)
+    entries: list[_TreeEntry] = [
+        ("100644", "blob", oid, f"{item_id}{ITEM_FILENAME_SUFFIX}")
+        for item_id, oid in new_items.items()
+    ]
+    return _mktree(worktree, entries)
+
+
 def _write_incremental_state_tree(
     worktree: Path, *, observed: ClaimState, new_state: ClaimState
 ) -> ObjectId:
@@ -796,24 +859,30 @@ def _write_incremental_state_tree(
     adapter detail.
 
     `schema.toml` never changes after bootstrap, so its oid is always
-    reused; each of `claims/`/`ids/`/`resources/` costs `mktree` only when
-    it actually differs from `observed`, plus one `mktree` for the top --
-    the process count below is fixed regardless of the tree's size. Unlike
-    `_write_bootstrap_tree`, which has no prior commit to diff against on a
-    ref's very first write.
+    reused; each of `claims/`/`ids/`/`resources/`/`items/` costs `mktree`
+    only when it actually differs from `observed`, plus one `mktree` for the
+    top -- the process count below is fixed regardless of the tree's size.
+    Unlike `_write_bootstrap_tree`, which has no prior commit to diff
+    against on a ref's very first write.
     """
     assert observed.tip is not None  # commit_transition already refused a missing ref
     existing = _list_tree(worktree, observed.tip, tip=observed.tip, context="state")
     top_entries: list[_TreeEntry] = [
         ("100644", "blob", ObjectId(existing[SCHEMA_TOML_FILENAME][1]), SCHEMA_TOML_FILENAME)
     ]
-    if ITEMS_DIRECTORY in existing:
-        # No transition intent ever touches `items/` (issue #248): the board's
-        # own writer owns that subtree, so a claim/rescope/release transition
-        # always carries the parent tree's `items/` oid forward unchanged --
-        # the same reuse-by-copy the schema blob above already relies on.
+    if new_state.items:
         top_entries.append(
-            ("040000", "tree", ObjectId(existing[ITEMS_DIRECTORY][1]), ITEMS_DIRECTORY)
+            (
+                "040000",
+                "tree",
+                _reuse_or_write_items_subtree(
+                    worktree,
+                    existing=_existing_subtree(existing, ITEMS_DIRECTORY),
+                    old_items=observed.items,
+                    new_items=new_state.items,
+                ),
+                ITEMS_DIRECTORY,
+            )
         )
     if new_state.claims:
         top_entries.append(
@@ -863,10 +932,22 @@ def _write_incremental_state_tree(
 
 
 def _transition_message(subject: str, intent: ClaimTransitionIntent) -> str:
+    """The commit message trailer for one transition (§1 "Commit message";
+    widened for item writes, issue #279): every intent carries
+    `operation_id`, the one field `_find_operation_id`'s replay search reads
+    back; a claim-shaped intent also names its `claim_id`, an item write its
+    `item_id` instead -- the two are mutually exclusive identifiers, never a
+    shared field.
+    """
+    subject_field = (
+        f"item_id: {intent.item_id}"
+        if isinstance(intent, ItemWriteIntent)
+        else f"claim_id: {intent.claim_id}"
+    )
     return (
         f"{subject}\n\n"
         f"operation_id: {intent.operation_id}\n"
-        f"claim_id: {intent.claim_id}\n"
+        f"{subject_field}\n"
         f"intent: {_INTENT_LABELS[type(intent)]}\n"
     )
 
@@ -879,8 +960,9 @@ def commit_transition(
     remote: str = DEFAULT_CANONICAL_REMOTE,
     transport: PushTransport | None = None,
 ) -> ClaimState:
-    """Fetch, apply, and push one claim/rescope/release transition (issue
-    #176, slice C2): the production caller of `protocol.apply`.
+    """Fetch, apply, and push one claim/rescope/release/item-write transition
+    (issue #176, slice C2; item writes, issue #279): the production caller
+    of `protocol.apply`.
 
     Unlike `push_tree`'s fixed bootstrap tree, a transition's result depends
     on the state it is applied to, so every retry attempt re-fetches and
@@ -921,6 +1003,7 @@ def commit_transition(
             claims=new_state.claims,
             consumed_ids=new_state.consumed_ids,
             resources=new_state.resources,
+            items=new_state.items,
         )
     raise ClaimUnavailableError(
         f"{STATE_REF} moved {_MAX_TRANSITION_ATTEMPTS} times; retry the command"
