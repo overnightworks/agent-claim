@@ -432,7 +432,7 @@ def test_board_renders_fixture_as_text_without_github_writes(
     assert "ACTIONABLE" in rendered
     assert "#10" in rendered
     assert "no: claimed" in rendered
-    assert "no: body legacy" in rendered
+    assert "no: body malformed: agent-claim: no agent-claim block" in rendered
     assert all("--method" not in arguments for arguments in observed)
     assert all("--jq" in arguments for arguments in observed)
     merged_days = {
@@ -484,7 +484,7 @@ def test_board_projects_fixture_json_without_github_writes(
     # 14-day floor (2026-08-07) would have admitted it — the oldest-open-
     # issue floor (2026-08-01) correctly still counts it.
     assert fourteen["stage"] == "code-landed"
-    assert fourteen["actionable_reason"] == "body legacy"
+    assert fourteen["actionable_reason"] == "body malformed: agent-claim: no agent-claim block"
     assert [item["number"] for item in payload["ready_now"]] == [10, 13]
     assert [item["number"] for item in payload["stale"]] == [12]
     assert next(item for item in payload["items"] if item["number"] == 12)["stage"] == "text-only"
@@ -912,13 +912,14 @@ _BLOCKED_BY_ELEVEN = {12: (block_dependency(11),)}
             id="names_an_incomplete_body_as_the_reason_nothing_is_pullable",
         ),
         pytest.param(
-            (board_issue(10, "Legacy", "## Now\nInvestigate."),),
+            (board_issue(10, "Blockless", "## Now\nInvestigate."),),
             {},
             (),
             ("next",),
             3,
-            "No actionable item.\n\nSKIPPED\n#10: body legacy\n",
-            id="names_a_body_with_no_block_as_legacy",
+            "No actionable item.\n\nSKIPPED\n"
+            "#10: body malformed: agent-claim: no agent-claim block\n",
+            id="names_a_body_with_no_block_as_malformed",
         ),
         pytest.param(
             (board_issue(10, "Claimed", complete_contract("Claim #10.")),),
@@ -2208,7 +2209,7 @@ def test_cut_refuses_a_title_mismatch_before_any_write(
     assert client.item_bodies == {}
 
 
-def test_cut_refuses_a_legacy_container_before_any_write(
+def test_cut_refuses_a_blockless_container_before_any_write(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
     container = board.Issue(
@@ -2230,7 +2231,7 @@ def test_cut_refuses_a_legacy_container_before_any_write(
     )
 
     assert exit_code == 2
-    assert "body legacy" in capsys.readouterr().err
+    assert "body malformed: agent-claim: no agent-claim block" in capsys.readouterr().err
     assert client.created_children == []
 
 
@@ -2769,7 +2770,7 @@ def test_ask_json_reports_item_index_text_and_default(
     }
 
 
-def test_ask_refuses_a_legacy_item_before_any_write(
+def test_ask_refuses_a_blockless_item_before_any_write(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
     client = _client_with_item(monkeypatch, tmp_path, RULE_ITEM, "## Now\nOld prose.\n")
@@ -2779,7 +2780,10 @@ def test_ask_refuses_a_legacy_item_before_any_write(
     )
 
     assert exit_code == 2
-    assert "body legacy; ask needs a valid agent-claim block" in capsys.readouterr().err
+    assert (
+        "body malformed: agent-claim: no agent-claim block; ask needs a valid agent-claim block"
+        in capsys.readouterr().err
+    )
     assert client.item_bodies == {}
 
 
@@ -3585,16 +3589,16 @@ def test_the_body_fence_and_config_path_keep_their_agent_claim_names() -> None:
     assert board.CONFIG_PATH.as_posix() == ".agent-claim/board.toml"
 
 
-def test_body_contract_checks_names_a_legacy_container_by_the_body_legacy_check() -> None:
+def test_body_contract_checks_names_a_blockless_container_by_its_no_block_defect() -> None:
     body = "## Now\nOld prose.\n\n## Next\nDo the thing.\n"
-    legacy = replace(
-        board_issue(201, "Legacy container", body),
+    blockless = replace(
+        board_issue(201, "Blockless container", body),
         kind=board.ItemKind.CONTAINER,
         children_closed=0,
         children_total=0,
     )
     projected = projected_board(
-        (legacy,),
+        (blockless,),
         (),
         (),
         (),
@@ -3605,7 +3609,11 @@ def test_body_contract_checks_names_a_legacy_container_by_the_body_legacy_check(
 
     checks = issue_claim._body_contract_checks(item)
 
-    assert checks == (issue_claim.SliceCheck("error", "body-legacy", "body legacy", issue=201),)
+    assert checks == (
+        issue_claim.SliceCheck(
+            "error", "body-contract", "body malformed: agent-claim: no agent-claim block"
+        ),
+    )
 
 
 def test_body_contract_checks_names_a_malformed_body_by_its_first_defect() -> None:
@@ -9187,7 +9195,7 @@ def test_check_reads_the_parents_next_from_the_block_not_stale_prose(
     )
 
 
-def test_check_refuses_a_legacy_parent_before_the_next_check(
+def test_check_refuses_a_blockless_parent_before_the_next_check(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
     monkeypatch.setattr(checkout, "_git_output", lambda _arguments: str(tmp_path))
@@ -9201,7 +9209,8 @@ def test_check_refuses_a_legacy_parent_before_the_next_check(
 
     assert run_check() == 1
     assert capsys.readouterr().err == (
-        f"REFUSED: pull request #12 has parent {REPOSITORY}#{PARENT_ISSUE} with a legacy body\n"
+        f"REFUSED: pull request #12 has parent {REPOSITORY}#{PARENT_ISSUE} with a body "
+        "malformed: agent-claim: no agent-claim block\n"
     )
 
 
@@ -9464,11 +9473,11 @@ def test_check_json_names_a_missing_number_as_its_own_kind(
     }
 
 
-def test_check_names_a_body_with_no_recognized_block_as_legacy(
+def test_check_names_a_body_with_no_recognized_block_as_malformed(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
-    """`body legacy` keeps its meaning: no recognized block was found, never
-    "recognized prose" (#204)."""
+    """`no agent-claim block` keeps its meaning: no recognized block was
+    found, never "recognized prose" (#204)."""
     issue_check_client(
         monkeypatch,
         tmp_path,
@@ -9476,7 +9485,9 @@ def test_check_names_a_body_with_no_recognized_block_as_legacy(
     )
 
     assert run_check(CHECKED_ISSUE) == 1
-    assert capsys.readouterr().err == f"ISSUE #{CHECKED_ISSUE} body legacy\n"
+    assert capsys.readouterr().err == (
+        f"ISSUE #{CHECKED_ISSUE} body malformed: agent-claim: no agent-claim block\n"
+    )
 
 
 @pytest.mark.parametrize(
@@ -9702,7 +9713,7 @@ def test_body_template_round_trips_through_body_check_for_every_kind(
     """The printed skeleton is a recognized, valid block for every kind --
     read back exactly as `check <item>` reads `cut`'s own fresh child
     (`test_check_names_the_sections_an_incomplete_body_leaves_empty`'s
-    `a-fresh-skeleton` case): incomplete, never legacy or malformed."""
+    `a-fresh-skeleton` case): incomplete, never malformed."""
     assert issue_claim.main(["body", "--template", "--kind", kind]) == 0
     printed = capsys.readouterr().out
 
@@ -9721,12 +9732,12 @@ def test_body_check_accepts_a_complete_block_with_no_defects(
     assert capsys.readouterr().out == "body ok\n"
 
 
-def test_body_check_names_a_body_with_no_recognized_block_as_legacy(
+def test_body_check_names_a_body_with_no_recognized_block_as_malformed(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setattr(sys, "stdin", io.StringIO("no block\n"))
     assert body_check_main() == 1
-    assert capsys.readouterr().err == "body legacy\n"
+    assert capsys.readouterr().err == "body malformed: agent-claim: no agent-claim block\n"
 
 
 @pytest.mark.parametrize(
@@ -9793,7 +9804,10 @@ def test_body_check_json_carries_the_defect_list(
 ) -> None:
     monkeypatch.setattr(sys, "stdin", io.StringIO("no block\n"))
     assert body_check_main(extra=("--json",)) == 1
-    assert json.loads(capsys.readouterr().out) == {"ok": False, "defects": ["body legacy"]}
+    assert json.loads(capsys.readouterr().out) == {
+        "ok": False,
+        "defects": ["body malformed: agent-claim: no agent-claim block"],
+    }
 
 
 def test_body_check_json_reports_ok_with_an_empty_defect_list(

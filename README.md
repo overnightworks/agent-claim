@@ -27,27 +27,10 @@ Claim state is a git tree, `claims/<key>.toml` / `ids/<claim_id>` /
 `resources/<name>.toml` / `items/<id>.md` under a `schema.toml` `version`,
 read and written whole: an unknown key or a malformed record fails the whole
 read loud, never a single quarantinable claim -- a commit is the unit a
-writer writes, so a broken tree is corrupt state. `version = 2` is the
-compatibility contract this release actually makes (`items/`, issue #248,
-raised it from `1`); a later tree version is a new cut, not a silent patch.
-Every repository migrated off the old GitHub-issue ledger carries this
-tombstone, posted once on that now-closed issue and never edited afterward:
-
-```
-<!-- agent-claim:v2 {"action":"state_cut","claim_id":"state-cut","agent":"coordinator","role":"coordinator"} -->
-
-This ledger is closed. Claim state now lives in this repository's state ref; upgrade the tool and re-read its README. Do not post further claim comments.
-Agent: coordinator (coordinator)
-```
-
-It names no version number and no new command name -- old clients are
-"0.12.x and older" in the text, never "the 0.13 client" -- so it never needs
-editing to stay accurate; a 0.12.x or older client that still tries to read a
-ledger hits its unknown `state_cut` action and fails loud, telling the
-operator to upgrade. The one-time import ran on 07.09.2026 and its code has
-been deleted: this release reads and writes the state ref only. A repository
-that never migrated still runs its old ledger under an installation pinned to
-0.12.x or earlier, and has no upgrade path through this release.
+writer writes, so a broken tree is corrupt state. `schema.toml` carries the
+one supported version; a tree written under any other version is refused,
+never silently patched (operator ruling 16.09.2026: no backwards
+compatibility).
 
 ## Five-command quick start
 
@@ -295,19 +278,19 @@ one `REFUSED: pull request #<n> ...` line and exits 1. Run it as a required
 check on every pull request that targets the default branch.
 
 For an **issue** it answers: can a builder start from this body? It prints one
-`ISSUE #<n> ...` line — `body ok` and exit 0, or one of `body legacy`,
+`ISSUE #<n> ...` line — `body ok` and exit 0, or one of
 `body malformed: <reason>`, `body incomplete: <sections>`, or
-`blocked by #<a>, #<b>` and exit 1. The blockers are GitHub's own `blocked_by`
-dependencies, so a foreign one renders as `owner/repo#n`. A body carries no
-dependency key at all, so a body-incomplete line never asks for one. The issue
-mode reads nothing else: it repeats none of `claim`'s working-tree, identity,
-or ordering checks.
+`blocked by #<a>, #<b>` and exit 1. A body with no recognized `agent-claim`
+block renders as `body malformed: agent-claim: no agent-claim block`. The
+blockers are GitHub's own `blocked_by` dependencies, so a foreign one renders
+as `owner/repo#n`. A body carries no dependency key at all, so a
+body-incomplete line never asks for one. The issue mode reads nothing else: it
+repeats none of `claim`'s working-tree, identity, or ordering checks.
 
-`body legacy`, `body malformed`, and `body incomplete` are the same sentences
-a body can already earn before it ever becomes an issue: run `aco body
---check` ("The work-item body contract" below) as the forge-free pre-flight,
-so a draft fails here instead of after `gh issue create` has already written
-it.
+`body malformed` and `body incomplete` are the same sentences a body can
+already earn before it ever becomes an issue: run `aco body --check` ("The
+work-item body contract" below) as the forge-free pre-flight, so a draft fails
+here instead of after `gh issue create` has already written it.
 
 A number that is in **neither** number space prints `REFUSED: #<n> does not
 exist in <owner>/<repo>` and exits 1. It names no kind: GitHub gives issues
@@ -638,14 +621,15 @@ parsed. `next`'s own non-parsed vocabulary
 (`keiner | keine | nichts | none | -` for "no further work", plus `tbd | todo
 | unknown` for "not yet concrete") still applies to a block's `next` value.
 
-An item with no recognized `agent-claim` fence at all is **body legacy** —
-"no block was found", never "some other grammar was found instead"; one
-with a recognized fence that is unclosed, duplicated, invalid TOML, or a
-schema violation is **body malformed: `<path>: <reason>`** (e.g. `body
-malformed: version: version must be exactly 1`). Both fail loud, by name, on
-`board`, `next` (`SKIPPED`), and `claim` (`body-legacy` / `body-contract`
-checks) — never a guess through the missing or broken block, and a container
-in either state is never proposed as `cut_slice` or `close_container`.
+An item with no recognized `agent-claim` fence at all is **body malformed:
+agent-claim: no agent-claim block** — "no block was found", never "some other
+grammar was found instead"; one with a recognized fence that is unclosed,
+duplicated, invalid TOML, or a schema violation is **body malformed:
+`<path>: <reason>`** (e.g. `body malformed: version: version must be exactly
+1`). Both fail loud, by name, on `board`, `next` (`SKIPPED`), and `claim`
+(`body-contract` checks) — never a guess through the missing or broken block,
+and a malformed container is never proposed as `cut_slice` or
+`close_container`.
 
 **Blockers** come from GitHub's own issue-dependency relations, never a body
 line — `Blocked by:` prose beside the block is documentation only and changes
@@ -673,8 +657,9 @@ from the block the moment it is cut, so every entry still in `[[slice]]` is
 cuttable, and the refusal lists them all.
 
 Every hand-created issue (`gh issue create`, an operator-opened item) must
-carry a valid block — the four-line skeleton above — or it is `body legacy`;
-only `cut` writes that skeleton automatically.
+carry a valid block — the four-line skeleton above — or it is `body
+malformed: agent-claim: no agent-claim block`; only `cut` writes that
+skeleton automatically.
 
 Validate a hand-written body before it ever reaches the forge with
 `aco body`, forge-free like `status`:
@@ -687,8 +672,8 @@ Validate a hand-written body before it ever reaches the forge with
   --body-file -`) and fill in `now`/`next`/`done_when` before dispatch.
 - `aco body --check` reads a body from stdin (`aco body --check < body.md`,
   or piped from `--template`) and parses it exactly as `check <item>` reads
-  a live body — legacy, malformed (one sentence per schema defect), or
-  incomplete — and prints every defect it finds, never truncated to the
+  a live body — malformed (one sentence per schema defect) or incomplete —
+  and prints every defect it finds, never truncated to the
   first since there is no live item to refuse a single verdict about; exit 1
   with a defect, 0 without one. `--json` prints `{"ok": …, "defects": […]}`.
   It takes no file path, reads no dependency, since a body carries no
@@ -722,7 +707,7 @@ create a child issue, link one as a sub-issue, or update an item body
 (`capability()` answers anything but `read_write` for any of the three);
 when the target is not an open container, or is itself a child of another
 issue (nested containers are not supported); when the target's own body is
-legacy or malformed; and, for `--row N`, when the block names no such entry.
+malformed; and, for `--row N`, when the block names no such entry.
 None of the three writes are atomic with each other — nor is the child
 issue's own creation atomic with its sub-issue relation write, since
 `create_child` is composed from GitHub's own issue-creation POST and the
