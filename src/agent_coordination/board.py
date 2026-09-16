@@ -86,6 +86,13 @@ CLAIM_OLD_AFTER = timedelta(hours=1)
 # block schema would refuse. No `source_slice` -- title, sub-issue relation,
 # and GitHub history own provenance instead.
 BLOCK_CHILD_SKELETON = '```agent-claim\nversion = 1\nnow = ""\nnext = ""\ndone_when = ""\n```\n'
+# A fresh container carries no automatic parent-provenance the way `cut`
+# gives a fresh child one, so its own skeleton states the prose the global
+# contract requires when nothing blocks it (README "`Blocked by:` prose
+# beside the block is documentation only") ahead of the same block schema
+# `BLOCK_CHILD_SKELETON` already owns -- one owner for the projection keys,
+# never a second schema for a container's own skeleton.
+BLOCK_CONTAINER_SKELETON = f"Blocked by: nichts\n\n{BLOCK_CHILD_SKELETON}"
 # The three slice-title forms seen in atelier-2 (`#79`): a parenthetical
 # after the real title (`(#962 Scheibe 4)`, `(#962 slice 4)`) or a leading
 # German phrase (`Scheibe 4 von #962`).

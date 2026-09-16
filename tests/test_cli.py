@@ -16052,6 +16052,216 @@ def test_check_json_discriminates_an_issue(
     assert json.loads(capsys.readouterr().out) == expected
 
 
+def body_check_main(*, extra: tuple[str, ...] = ()) -> int:
+    return issue_claim.main(["body", "--check", *extra])
+
+
+def _body_template_skeleton(kind: str) -> str:
+    """The one skeleton `body --template --kind KIND` must print, read from
+    its own owner rather than recomputed here (Value Ownership)."""
+    return board.BLOCK_CONTAINER_SKELETON if kind == "container" else board.BLOCK_CHILD_SKELETON
+
+
+@pytest.mark.parametrize("kind", issue_claim.BODY_TEMPLATE_KINDS)
+def test_body_template_prints_the_one_skeleton_owner_for_its_kind(
+    capsys: pytest.CaptureFixture[str], kind: str
+) -> None:
+    assert issue_claim.main(["body", "--template", "--kind", kind]) == 0
+    assert capsys.readouterr().out == _body_template_skeleton(kind)
+
+
+def test_body_template_defaults_to_the_task_skeleton(capsys: pytest.CaptureFixture[str]) -> None:
+    assert issue_claim.main(["body", "--template"]) == 0
+    assert capsys.readouterr().out == board.BLOCK_CHILD_SKELETON
+
+
+@pytest.mark.parametrize("kind", issue_claim.BODY_TEMPLATE_KINDS)
+def test_body_template_prepends_the_parent_line_cut_writes_for_a_fresh_child(
+    capsys: pytest.CaptureFixture[str], kind: str
+) -> None:
+    assert issue_claim.main(["body", "--template", "--kind", kind, "--parent", "79"]) == 0
+    assert capsys.readouterr().out == f"Parent: #79\n\n{_body_template_skeleton(kind)}"
+
+
+@pytest.mark.parametrize("kind", issue_claim.BODY_TEMPLATE_KINDS)
+def test_body_template_round_trips_through_body_check_for_every_kind(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], kind: str
+) -> None:
+    """The printed skeleton is a recognized, valid block for every kind --
+    read back exactly as `check <item>` reads `cut`'s own fresh child
+    (`test_check_names_the_sections_an_incomplete_body_leaves_empty`'s
+    `a-fresh-skeleton` case): incomplete, never legacy or malformed."""
+    assert issue_claim.main(["body", "--template", "--kind", kind]) == 0
+    printed = capsys.readouterr().out
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO(printed))
+    assert body_check_main() == 1
+    assert capsys.readouterr().err == "body incomplete: Now, Next, Done when\n"
+
+
+def test_body_check_accepts_a_complete_block_with_no_defects(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    body_file = io.StringIO(agent_claim_body(MINIMAL_BLOCK_TOML))
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(sys, "stdin", body_file)
+        assert body_check_main() == 0
+    assert capsys.readouterr().out == "body ok\n"
+
+
+def test_body_check_names_a_body_with_no_recognized_block_as_legacy(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(sys, "stdin", io.StringIO("no block\n"))
+    assert body_check_main() == 1
+    assert capsys.readouterr().err == "body legacy\n"
+
+
+@pytest.mark.parametrize(
+    ("toml_text", "reason"),
+    [
+        pytest.param(
+            'version = 1\nnow = "N"\nnext = "X"\n',
+            "done_when: done_when is required",
+            id="missing-done-when",
+        ),
+        pytest.param(
+            f'{MINIMAL_BLOCK_TOML}owner = "x"\n',
+            "owner: unknown top-level key owner",
+            id="unknown-key",
+        ),
+        pytest.param(
+            f'{MINIMAL_BLOCK_TOML}\n[[expectation]]\ntext = "x"\ndefault = "yes"\nruling = "yes"\n',
+            "expectation[0].default: expectation[0] must be proposed (default) or ruled "
+            "(ruling, ruled_on), not both",
+            id="default-and-ruling",
+        ),
+    ],
+)
+def test_body_check_names_defects_with_checks_own_sentences(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    toml_text: str,
+    reason: str,
+) -> None:
+    monkeypatch.setattr(sys, "stdin", io.StringIO(agent_claim_body(toml_text)))
+    assert body_check_main() == 1
+    assert capsys.readouterr().err == f"body malformed: {reason}\n"
+
+
+def test_body_check_prints_every_simultaneous_defect_not_just_the_first(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The one behavior that sets `body --check` apart from `check <item>`,
+    which truncates to the first malformed defect
+    (`_body_contract_checks`): with two simultaneous defects, both surface,
+    in order, in plain text and in `--json`'s `defects` list (Sonnet review,
+    issue #262)."""
+    toml_text = 'version = 1\nnext = "X"\n'  # missing both now and done_when
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO(agent_claim_body(toml_text)))
+    assert body_check_main() == 1
+    assert capsys.readouterr().err == (
+        "body malformed: now: now is required\nbody malformed: done_when: done_when is required\n"
+    )
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO(agent_claim_body(toml_text)))
+    assert body_check_main(extra=("--json",)) == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "ok": False,
+        "defects": [
+            "body malformed: now: now is required",
+            "body malformed: done_when: done_when is required",
+        ],
+    }
+
+
+def test_body_check_json_carries_the_defect_list(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(sys, "stdin", io.StringIO("no block\n"))
+    assert body_check_main(extra=("--json",)) == 1
+    assert json.loads(capsys.readouterr().out) == {"ok": False, "defects": ["body legacy"]}
+
+
+def test_body_check_json_reports_ok_with_an_empty_defect_list(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(sys, "stdin", io.StringIO(agent_claim_body(MINIMAL_BLOCK_TOML)))
+    assert body_check_main(extra=("--json",)) == 0
+    assert json.loads(capsys.readouterr().out) == {"ok": True, "defects": []}
+
+
+class _NotUtf8Stdin:
+    """A stdin stand-in for the one input `body --check` cannot decode --
+    `sys.stdin.read()` raises `UnicodeDecodeError` on invalid bytes exactly
+    like this (issue #262 Sonar S8707 follow-up)."""
+
+    def read(self) -> str:
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+
+def test_body_check_refuses_stdin_that_is_not_valid_utf8(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(sys, "stdin", _NotUtf8Stdin())
+
+    assert body_check_main() == 2
+    assert "stdin is not valid UTF-8" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        pytest.param(("--kind", "task"), id="kind"),
+        pytest.param(("--parent", "1"), id="parent"),
+    ],
+)
+def test_body_refuses_kind_or_parent_together_with_check(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], extra: tuple[str, ...]
+) -> None:
+    monkeypatch.setattr(sys, "stdin", io.StringIO(agent_claim_body(MINIMAL_BLOCK_TOML)))
+    assert body_check_main(extra=extra) == 2
+    assert "--kind and --parent apply only to --template, not --check" in capsys.readouterr().err
+
+
+def test_body_refuses_json_together_with_template(capsys: pytest.CaptureFixture[str]) -> None:
+    assert issue_claim.main(["body", "--template", "--json"]) == 2
+    assert "--json applies only to --check, not --template" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        pytest.param(["body"], id="neither-mode"),
+        pytest.param(["body", "--template", "--check"], id="both-modes"),
+    ],
+)
+def test_body_requires_exactly_one_mode(argv: list[str]) -> None:
+    with pytest.raises(SystemExit) as refused:
+        issue_claim.main(argv)
+
+    assert refused.value.code == 2
+
+
+def test_body_check_never_touches_a_forge_the_store_or_gh(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`body --check` is forge-free like `status` (issue #245): it never
+    resolves a `_LazyForge`, reads the state ref, or shells out to `gh`."""
+
+    def unused(*args: object, **kwargs: object) -> None:
+        pytest.fail("body --check must not touch a forge, the store, or gh")
+
+    monkeypatch.setattr(github, "GitHubForge", unused)
+    monkeypatch.setattr(github, "discover_repository", unused)
+    monkeypatch.setattr(store, "fetch_state", unused)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(agent_claim_body(MINIMAL_BLOCK_TOML)))
+
+    assert body_check_main() == 0
+    assert capsys.readouterr().out == "body ok\n"
+
+
 @pytest.mark.parametrize(
     "argv",
     [
