@@ -133,3 +133,29 @@ def _forbid_remote_url(monkeypatch: pytest.MonkeyPatch) -> None:
 def _forbid_forge_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
     _forbid_github_construction(monkeypatch)
     _forbid_remote_url(monkeypatch)
+
+
+def arrange_scope_width(
+    monkeypatch: pytest.MonkeyPatch,
+    client: object,
+    *,
+    directories: frozenset[str] = frozenset(),
+    versioned: tuple[str, ...] | None = None,
+    validate_checkout: bool = True,
+) -> None:
+    """The monkeypatch quadruple every scope-width `claim`/`rescope` case in
+    `test_cli.py`'s wide-scope tables shares: a GitHub forge, a directory
+    classifier, an optional versioned-file listing, and -- for a fresh
+    `claim` -- a no-op checkout validator (`rescope` patches the store and
+    git output for its own standing claim instead, so it passes
+    `validate_checkout=False`)."""
+    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
+    monkeypatch.setattr(
+        checkout,
+        "_scope_directories",
+        lambda paths: tuple(path for path in paths if path in directories),
+    )
+    if versioned is not None:
+        monkeypatch.setattr(checkout, "versioned_paths", lambda: versioned)
+    if validate_checkout:
+        monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
