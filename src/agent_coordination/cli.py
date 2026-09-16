@@ -2061,8 +2061,11 @@ def _hook_field(payload: dict[str, object], *keys: str) -> object:
     return None
 
 
-def _hook_path(tool_input: dict[str, object]) -> str | None:
-    for key in ("path", "file_path", "filePath", "notebook_path"):
+_GENERIC_PATH_KEYS = ("path", "file_path", "filePath")
+
+
+def _hook_path(tool_input: dict[str, object], *, keys: tuple[str, ...]) -> str | None:
+    for key in keys:
         value = tool_input.get(key)
         if isinstance(value, str) and value:
             return value
@@ -2084,24 +2087,47 @@ PATH_REQUIRED = "path required"
 
 
 APPLY_PATCH_TOOL_NAME = "apply_patch"
+NOTEBOOK_EDIT_TOOL_NAME = "NotebookEdit"
+
+
+class _HookPathSource(StrEnum):
+    """Where a mutating tool's path lives in its `tool_input` -- one owner
+    per tool name (issue #252) so a tool can only be read from a key it
+    actually sends; a decoy value under a key it does not send (an in-scope
+    `path` next to `NotebookEdit`'s real, out-of-scope `notebook_path`) is
+    never looked at."""
+
+    GENERIC_KEYS = "generic_keys"
+    NOTEBOOK_PATH = "notebook_path"
+    PATCH_TEXT = "patch_text"
+
+
+_HOOK_PATH_SOURCES: dict[str, _HookPathSource] = {
+    APPLY_PATCH_TOOL_NAME: _HookPathSource.PATCH_TEXT,
+    NOTEBOOK_EDIT_TOOL_NAME: _HookPathSource.NOTEBOOK_PATH,
+}
 
 
 def _protect_hook_paths(tool_name: str, payload: dict[str, object]) -> tuple[str, ...]:
-    """Every path this hook call's `tool_input` names.
+    """Every path this hook call's `tool_input` names, read only from the
+    key(s) this specific tool sends.
 
     `apply_patch` (Codex) carries no path key at all -- its patch text sits
     under `command` and can touch several files in one call, so it is parsed
-    by the dedicated patch grammar (issue #252) instead of `_hook_path`'s
-    single-key lookup. Every other tool still yields at most one path."""
+    by the dedicated patch grammar instead. `NotebookEdit` (Claude Code)
+    carries only `notebook_path`. Every other tool still yields at most one
+    path, from the shared `path`/`file_path`/`filePath` keys."""
     tool_input = _hook_field(payload, "toolInput", "tool_input")
     if not isinstance(tool_input, dict):
         return ()
-    if tool_name == APPLY_PATCH_TOOL_NAME:
+    source = _HOOK_PATH_SOURCES.get(tool_name, _HookPathSource.GENERIC_KEYS)
+    if source is _HookPathSource.PATCH_TEXT:
         command = tool_input.get("command")
         if not isinstance(command, str):
             return ()
         return hook_input.hook_patch_paths(command)
-    single = _hook_path(tool_input)
+    keys = ("notebook_path",) if source is _HookPathSource.NOTEBOOK_PATH else _GENERIC_PATH_KEYS
+    single = _hook_path(tool_input, keys=keys)
     return (single,) if single is not None else ()
 
 
@@ -2156,6 +2182,10 @@ def _protect_store_verdict(agent: str, branch: str, relative: str, canonical_rem
     return _hook_deny("claim first")
 
 
+def _protect_session_claim_exists(state: protocol.ClaimState, *, agent: str, branch: str) -> bool:
+    return any(claim.agent == agent and claim.branch == branch for claim in state.claims.values())
+
+
 def _protect_patch_store_verdict(
     agent: str, branch: str, relatives: tuple[str, ...], canonical_remote: str
 ) -> int:
@@ -2163,10 +2193,15 @@ def _protect_patch_store_verdict(
     only when every one of them overlaps the live claim, and deny naming the
     first one that does not -- unlike the single-path `claim first` above,
     the hook payload here never told the agent which of several files was the
-    problem, so the repair sentence has to."""
+    problem, so the repair sentence has to. With no live claim for this
+    session at all, though, the repair sentence is the same as the
+    single-path case: naming a path as 'outside claim scope' would be false
+    when there is no claim to be outside of."""
     state = _protect_fetch_claim_state(canonical_remote)
     if state is None:
         return 2
+    if not _protect_session_claim_exists(state, agent=agent, branch=branch):
+        return _hook_deny("claim first")
     for relative in relatives:
         if not _protect_overlapping_claim_exists(
             state, agent=agent, branch=branch, relative=relative

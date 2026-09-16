@@ -57,7 +57,6 @@ containers = ["agent_coordination"]
 exhaustive = true
 layers = [
     "cli",
-    "hook_input",
     "workspace",
     "terminal",
     "providers",
@@ -65,8 +64,7 @@ layers = [
     "github",
     "forge",
     "board",
-    "protocol",
-    "process",
+    "protocol | process | hook_input",
 ]
 
 [[tool.importlinter.contracts]]

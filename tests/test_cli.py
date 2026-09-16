@@ -12655,6 +12655,39 @@ def test_protect_notebook_edit_reads_notebook_path(
     _assert_protect_decision(capsys, decision=decision, reason=reason)
 
 
+def test_protect_notebook_edit_ignores_a_decoy_path_key_it_never_sends(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`NotebookEdit` reads only `notebook_path` (issue #252): an in-scope
+    `path` sitting next to an out-of-scope `notebook_path` -- a key this tool
+    never actually sends -- must not smuggle the real target past the claim
+    check the way a first-wins generic key list would."""
+    _isolate_protect_home(monkeypatch, tmp_path)
+    work = tmp_path / "work"
+    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    _patch_protect_git(monkeypatch, work)
+    _patch_protect_claim(monkeypatch)
+
+    exit_code = _protect_main(
+        monkeypatch,
+        {
+            "tool_name": "NotebookEdit",
+            "tool_input": {
+                "path": "src/widget.py",
+                "notebook_path": "docs/widget.ipynb",
+                "new_source": "print(1)",
+                "cell_type": "code",
+                "edit_mode": "replace",
+            },
+        },
+    )
+
+    assert exit_code == 2
+    _assert_protect_decision(capsys, decision="deny", reason="claim first")
+
+
 def test_protect_apply_patch_allows_when_every_touched_path_is_in_scope(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -12738,6 +12771,62 @@ def test_protect_apply_patch_denies_naming_the_first_path_outside_scope(
     _assert_protect_decision(capsys, decision="deny", reason=f"{outside_path} outside claim scope")
 
 
+def test_protect_apply_patch_denies_an_indented_header_smuggled_after_add_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Outside an Update hunk, Codex recognises a header after trimming both
+    ends of the line (issue #252's Grok finding): an indented
+    `*** Update File:` line right after an in-scope `Add File` block still
+    names a real file Codex will write, so the naive `startswith` scan that
+    missed it -- letting it slip past the claim check -- is the vulnerability
+    this pins shut."""
+    _isolate_protect_home(monkeypatch, tmp_path)
+    work = tmp_path / "work"
+    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    _patch_protect_git(monkeypatch, work)
+    _patch_protect_claim(monkeypatch, scope=("README.md",))
+    command = _patch_command(
+        "*** Add File: README.md",
+        "+content",
+        "  *** Update File: docs/evil.md",
+        "@@",
+        "-old",
+        "+new",
+    )
+
+    assert (
+        _protect_main(monkeypatch, {"toolName": "apply_patch", "toolInput": {"command": command}})
+        == 2
+    )
+    _assert_protect_decision(capsys, decision="deny", reason="docs/evil.md outside claim scope")
+
+
+def test_protect_apply_patch_denies_with_claim_first_when_no_session_claim_exists(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """With no live claim for this session at all -- as opposed to a live
+    claim whose scope simply misses one of the patch's paths -- the repair
+    sentence is the same `claim first` a single-path write gets (issue #252):
+    naming a path as 'outside claim scope' would be false when there is no
+    claim to be outside of."""
+    _isolate_protect_home(monkeypatch, tmp_path)
+    work = tmp_path / "work"
+    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    _patch_protect_git(monkeypatch, work)
+    _patch_protect_claim(monkeypatch, agent="Codex Sol")
+    command = _patch_command("*** Update File: src/widget.py", "@@", "-old", "+new")
+
+    assert (
+        _protect_main(monkeypatch, {"toolName": "apply_patch", "toolInput": {"command": command}})
+        == 2
+    )
+    _assert_protect_decision(capsys, decision="deny", reason="claim first")
+
+
 @pytest.mark.parametrize(
     ("lines", "paths"),
     [
@@ -12768,6 +12857,66 @@ def test_protect_apply_patch_denies_naming_the_first_path_outside_scope(
             ),
             ("src/widget.py", "src/new_module.py"),
         ),
+        pytest.param(
+            (
+                "*** Add File: src/ok.py",
+                "+x",
+                "  *** Update File: docs/evil.md",
+                "@@",
+                "-a",
+                "+b",
+            ),
+            ("src/ok.py", "docs/evil.md"),
+            id="indented-header-after-add-is-a-real-header",
+        ),
+        pytest.param(
+            (
+                "*** Add File: src/ok.py",
+                "+x",
+                "\t*** Update File: docs/evil.md",
+                "@@",
+                "-a",
+                "+b",
+            ),
+            ("src/ok.py", "docs/evil.md"),
+            id="tab-indented-header-is-a-real-header",
+        ),
+        pytest.param(
+            ("  *** Add File: src/ok.py", "+x"),
+            ("src/ok.py",),
+            id="indented-first-header-is-a-real-header",
+        ),
+        pytest.param(
+            (
+                "*** Update File: src/widget.py",
+                "@@",
+                "-old",
+                "+new",
+                " *** Update File: docs/evil.md",
+            ),
+            ("src/widget.py",),
+            id="leading-space-header-inside-an-update-hunk-is-context-not-a-file",
+        ),
+        pytest.param(
+            ('*** Add File: "src/ok.py"', "+x"),
+            ('"src/ok.py"',),
+            id="a-quoted-path-is-extracted-literally",
+        ),
+        pytest.param(
+            ("*** Add File: ../outside.md", "+x"),
+            ("../outside.md",),
+            id="a-traversal-path-is-extracted-literally",
+        ),
+        pytest.param(
+            ("*** Add File: /etc/passwd", "+x"),
+            ("/etc/passwd",),
+            id="an-absolute-path-is-extracted-literally",
+        ),
+        pytest.param(
+            ("*** Add File: src/ok.py  ", "+x"),
+            ("src/ok.py",),
+            id="trailing-spaces-outside-an-update-hunk-are-trimmed-like-codex",
+        ),
     ],
 )
 def test_hook_patch_paths_extracts_every_file_line(
@@ -12776,12 +12925,38 @@ def test_hook_patch_paths_extracts_every_file_line(
     assert hook_input.hook_patch_paths(_patch_command(*lines)) == paths
 
 
+def test_hook_patch_paths_ignores_a_trailing_carriage_return_like_codex() -> None:
+    text = (
+        "*** Begin Patch\r\n"
+        "*** Update File: src/widget.py\r\n"
+        "@@\r\n"
+        "-old\r\n"
+        "+new\r\n"
+        "*** End Patch\r\n"
+    )
+    assert hook_input.hook_patch_paths(text) == ("src/widget.py",)
+
+
 @pytest.mark.parametrize(
     "text",
     [
         "*** Begin Patch\n*** End Patch",
         "not a patch at all",
         "",
+        pytest.param(
+            _patch_command("*** Add File: a.py", "+x")
+            + "\n"
+            + _patch_command("*** Add File: b.py", "+y"),
+            id="two-begin-patch-blocks",
+        ),
+        pytest.param(
+            _patch_command("*** Add File: a.py", "+x") + "\n*** Add File: b.py",
+            id="a-file-line-after-end-patch",
+        ),
+        pytest.param(
+            "*** Begin Patch\nbad\n*** End Patch",
+            id="a-line-the-grammar-does-not-admit-outside-any-header",
+        ),
     ],
 )
 def test_hook_patch_paths_returns_empty_for_unrecognized_text(text: str) -> None:
