@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import UTC, datetime
 
 import pytest
 
 from agent_coordination import board, items
-from agent_coordination.protocol import MalformedStateTreeError
+from agent_coordination.protocol import ClaimUnavailableError, MalformedStateTreeError
 
 ITEM_ID = "aco-8f3a2c"
 
@@ -277,3 +278,69 @@ class TestItemNumber:
     def test_item_number_refuses_a_malformed_id(self) -> None:
         with pytest.raises(MalformedStateTreeError, match="is not a valid item id"):
             items.item_number("aco-zzzzzz")
+
+
+class TestMintItemId:
+    def test_mint_item_id_matches_the_item_id_pattern(self) -> None:
+        assert items.ITEM_ID_PATTERN.fullmatch(items.mint_item_id(()))
+
+    def test_mint_item_id_skips_a_known_id_before_settling_on_a_fresh_one(self) -> None:
+        candidates = iter(("aaaaaa", "aaaaaa", "bbbbbb"))
+
+        minted = items.mint_item_id({"aco-aaaaaa"}, random_hex=lambda: next(candidates))
+
+        assert minted == "aco-bbbbbb"
+
+    def test_mint_item_id_refuses_after_three_collisions(self) -> None:
+        with pytest.raises(ClaimUnavailableError, match="could not mint a fresh item id in 3"):
+            items.mint_item_id({"aco-aaaaaa"}, random_hex=lambda: "aaaaaa")
+
+
+class TestFormatRecordTimestamp:
+    def test_format_record_timestamp_matches_the_record_pattern(self) -> None:
+        formatted = items.format_record_timestamp(datetime(2026, 9, 16, 12, 30, 45, tzinfo=UTC))
+
+        assert formatted == "2026-09-16T12:30:45Z"
+        assert board.RECORD_TIMESTAMP_PATTERN.fullmatch(formatted)
+
+
+class TestRecordTable:
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            pytest.param({"closed_at": None}, id="open"),
+            pytest.param({"state": "closed", "closed_at": "2026-09-16T12:00:00Z"}, id="closed"),
+        ],
+    )
+    def test_record_table_round_trips_through_render_and_parse(
+        self, overrides: dict[str, object]
+    ) -> None:
+        body = _item_body(_record(**overrides))
+        parsed = board.parse_body(body, storage=board.Storage.STATE_REF)
+        assert parsed.record is not None
+        original = items.parse_item_record(ITEM_ID, parsed.record)
+
+        rendered = _item_body(items.record_table(original))
+        reparsed = board.parse_body(rendered, storage=board.Storage.STATE_REF)
+
+        assert reparsed.record is not None
+        assert items.parse_item_record(ITEM_ID, reparsed.record) == original
+
+    def test_record_table_omits_every_unset_optional_field(self) -> None:
+        minimal = items.ItemRecord(
+            number=items.item_number(ITEM_ID),
+            title="Minimal",
+            state=items.RecordState.OPEN,
+            kind=None,
+            labels=(),
+            blocked_by=(),
+            parent=None,
+            origin=None,
+            created_at="2026-09-15T00:00:00Z",
+            updated_at="2026-09-15T00:00:00Z",
+            closed_at=None,
+        )
+
+        table = items.record_table(minimal)
+
+        assert set(table) == {"title", "state", "labels", "blocked_by", "created_at", "updated_at"}

@@ -4169,6 +4169,15 @@ def test_lazy_forge_builds_a_state_ref_board_under_the_state_ref_pin(
     assert issue_claim.main(["board"]) == 0
 
 
+def test_the_state_ref_read_only_stub_no_longer_exists() -> None:
+    """Issue #283 proof 7: the placeholder `cut`/`rule`/`ask`/`claim` all
+    refused with until #230 slice 4 wrote is gone, name and refusal
+    function alike -- a state-ref pin now reaches its own write path
+    instead."""
+    assert not hasattr(issue_claim, "NOT_YET_STATE_REF_WRITE")
+    assert not hasattr(issue_claim, "_refuse_state_ref_write")
+
+
 def test_repo_is_refused_under_the_state_ref_pin(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
@@ -4183,45 +4192,28 @@ def test_repo_is_refused_under_the_state_ref_pin(
     assert capsys.readouterr().err == "ERROR: --repo is meaningless under storage = state-ref\n"
 
 
-@pytest.mark.parametrize(
-    "arguments",
-    [
-        pytest.param(["cut", "10", "--title", "Scheibe 1"], id="cut"),
-        pytest.param(["rule", "10", "--line", "1", "--yes"], id="rule"),
-        pytest.param(["ask", "10", "--text", "New question?"], id="ask"),
-        pytest.param(["claim", "10", "--scope", "src/work.py", "--agent", "Codex Sol"], id="claim"),
-        pytest.param(
-            ["release", "10", "--merged", "12", "--agent", "Codex Sol", "--claim-id", "claim-1"],
-            id="release-merged",
-        ),
-    ],
-)
-def test_writing_forge_commands_refuse_under_the_state_ref_pin(
+def test_release_merged_refuses_under_the_state_ref_pin(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
-    arguments: list[str],
 ) -> None:
-    """`cut`, `rule`, `ask`, an issue-scoped `claim`'s body check, and
-    `release --merged` all refuse under `storage = "state-ref"` (issue
-    #248) before ever resolving a forge: `state_board.StateRefBoard` stays
-    read-only until #230 slice 4. `_request` is replaced the same way
-    every other `claim` test replaces it (its own worktree-cleanliness
-    precondition is unrelated to this one, and this checkout is not the
-    isolated one that precondition demands). `release --merged` also passes
-    `--claim-id` so its branch precondition never reads this process's real
-    current branch, which is empty under CI's detached-HEAD checkout."""
+    """`release --merged` refuses under `storage = "state-ref"` (issue
+    #283) before ever resolving a forge: `state_board.StateRefBoard` has no
+    data for `landing` at all, unlike `cut`/`rule`/`ask`/`claim`, which now
+    write and read state-ref items (issue #283's own proofs, `test_cut`,
+    `test_rule_and_ask_write_a_state_ref_item`, `test_claim`). `--claim-id`
+    keeps this test from reading this process's real current branch, which
+    is empty under CI's detached-HEAD checkout."""
     _write_state_ref_pin(tmp_path)
-    monkeypatch.setattr(
-        issue_claim, "_request", lambda _arguments: request(issue=10, scope=("src/work.py",))
+
+    status = issue_claim.main(
+        ["release", "10", "--merged", "12", "--agent", "Codex Sol", "--claim-id", "claim-1"]
     )
 
-    status = issue_claim.main(arguments)
-
     assert status == 2
-    assert (
-        capsys.readouterr().err
-        == "ERROR: not yet: items in the state ref are read-only until #230 slice 4\n"
+    assert capsys.readouterr().err == (
+        "ERROR: state-ref cannot verify a merged pull request yet (#230 slice 6); land "
+        'offline with `item close` and `release --abandoned "landed as <sha>"` until then\n'
     )
 
 

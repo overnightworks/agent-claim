@@ -467,10 +467,20 @@ any GitHub remote at all, and `default_branch` is read from the checkout's
 own `origin/HEAD` rather than an API call. `--repo` is meaningless under
 `state-ref` and is refused by name.
 
-`state-ref` is read-only today: `cut`, `rule`, `ask`, an issue-scoped
-`claim`'s body check, and `release --merged` all refuse with "not yet: items
-in the state ref are read-only until #230 slice 4" — #230's slice 4 adds the
-item-writing intents (`item new`/`edit`/`close`) this pin is waiting for.
+`cut`, `rule`, and `ask` write straight into `items/<id>.md` (issue #283):
+one compare-and-swap `commit_transition` per write, no `gh`, no forge — a
+second writer starting from the same already-read item refuses by name
+("written since it was read") rather than overwriting it. `cut`'s fresh
+child gets a minted id (`aco-` plus six lowercase hex characters, refused
+after three collisions rather than silently widened) with its
+`record.parent` set in that same write; `link_child` is a no-op, since
+state-ref parentage has exactly one owner. An issue-scoped `claim`'s body
+check reads a `state-ref` item the same way `board`/`next` already do.
+`release --merged` still refuses — state-ref cannot yet verify a merged pull
+request (#230 slice 6) — naming the offline path instead: land with
+`item close` plus `release --abandoned "landed as <sha>"`. `item
+new`/`edit`/`close` as their own named commands do not exist yet (#230
+slice 4c+).
 Landings are not yet derived from the state ref either (#230 slice 6), so
 every `state-ref` item's stage is either `IN_FLIGHT` (an active claim on an
 open branch) or `TEXT_ONLY`; `CODE_LANDED` and the board's recovery section

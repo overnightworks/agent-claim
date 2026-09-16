@@ -1,16 +1,21 @@
-"""Read-only forge adapter over `refs/aco/state`'s `items/` tree (issue #248).
+"""Forge adapter over `refs/aco/state`'s `items/` tree (issues #248, #283).
 
 `StateRefBoard` sits beside `github.GitHubForge` behind the same `forge`
 port: both talk to a different backend for the same board data, and
 neither imports the other. Unlike `GitHubForge`, this adapter performs no
 IO of its own -- the Layers contract puts `store` above this module, so
-`cli._state_ref_forge` reads `items/`'s raw bytes through
-`store.read_item_files` and hands them to the constructor; every method
-below is a pure projection over that already-fetched data.
+`cli._state_ref_forge` reads `items/`'s raw bytes and blob oids through
+`store.read_item_files`/`ClaimState.items` and hands them to the
+constructor; every read method below is a pure projection over that
+already-fetched data. Every write (`create_child`, `update_item_body`,
+`link_child`) instead calls the injected `ItemWriter` port: one
+compare-and-swap write to `items/<id>.md`, implemented in `cli.py` over
+`store` (hash-object once, then one `commit_transition` with an
+`ItemWriteIntent`, issue #279) -- so this module still never imports
+`store` itself.
 
-Every writing operation (`CREATE_CHILD`, `UPDATE_ITEM_BODY`) and every
-operation this adapter has no data for (`LANDING`, the two pull-request
-listings) answers `Capability.UNSUPPORTED`. The two pull-request listings
+`LANDING` and the two pull-request listings answer `Capability.UNSUPPORTED`:
+this adapter has no data for any of them. The two pull-request listings
 still return an empty tuple rather than raising: `cli._board` calls them
 unconditionally for every board read, and "no pull requests exist here" is
 this adapter's honest answer, not a refusal. `Stage.CODE_LANDED` and
@@ -21,12 +26,13 @@ this adapter's honest answer, not a refusal. `Stage.CODE_LANDED` and
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from types import MappingProxyType
+from typing import Protocol
 
 from . import board, forge, items
-from .protocol import MalformedStateTreeError
+from .protocol import MalformedStateTreeError, ObjectId
 
 STATE_REF_CAPABILITIES: Mapping[forge.ForgeOperation, forge.Capability] = MappingProxyType(
     {
@@ -39,10 +45,30 @@ STATE_REF_CAPABILITIES: Mapping[forge.ForgeOperation, forge.Capability] = Mappin
         forge.ForgeOperation.LANDING: forge.Capability.UNSUPPORTED,
         forge.ForgeOperation.LIST_OPEN_BOARD_PULL_REQUESTS: forge.Capability.UNSUPPORTED,
         forge.ForgeOperation.LIST_RECENT_MERGED_BOARD_PULL_REQUESTS: forge.Capability.UNSUPPORTED,
-        forge.ForgeOperation.CREATE_CHILD: forge.Capability.UNSUPPORTED,
-        forge.ForgeOperation.UPDATE_ITEM_BODY: forge.Capability.UNSUPPORTED,
+        forge.ForgeOperation.LINK_CHILD: forge.Capability.READ_WRITE,
+        forge.ForgeOperation.CREATE_CHILD: forge.Capability.READ_WRITE,
+        forge.ForgeOperation.UPDATE_ITEM_BODY: forge.Capability.READ_WRITE,
     }
 )
+
+
+class ItemWriter(Protocol):
+    """The write port every mutating `StateRefBoard` operation composes onto
+    (issue #283): one CAS write to `items/<item_id>.md` -- `expected` the
+    oid the caller's own already-read snapshot carries (`None` for "must not
+    exist yet"), `content` the item's finished new bytes -- returning the
+    freshly written blob's oid, so the caller can update its own in-memory
+    state without a re-fetch. Implemented in `cli.py`, over `store`
+    (hash-object once, then one `commit_transition` with an
+    `ItemWriteIntent`, issue #279): this module may not import `store`
+    itself (Layers contract), so every actual git call for an item write
+    stays behind this one method.
+    """
+
+    def write_item(
+        self, item_id: str, *, expected: ObjectId | None, content: bytes
+    ) -> ObjectId: ...
+
 
 NO_LANDINGS_YET = (
     "landings are not yet derived from the state ref; "
@@ -54,6 +80,7 @@ NO_LANDINGS_YET = (
 class _DecodedItem:
     record: items.ItemRecord
     body: str
+    oid: ObjectId
 
 
 def _decoded_text(item_id: str, content: bytes) -> str:
@@ -63,7 +90,7 @@ def _decoded_text(item_id: str, content: bytes) -> str:
         raise MalformedStateTreeError(f"item {item_id} is not valid UTF-8") from error
 
 
-def _decode_item(item_id: str, content: bytes) -> _DecodedItem:
+def _decode_item(item_id: str, content: bytes, oid: ObjectId) -> _DecodedItem:
     """`content` turned into a `_DecodedItem`, or a loud refusal (ruling "a
     broken tree is corrupt state"): every item file must parse as a VALID
     `agent-claim` block carrying a `[record]` table, the same block grammar
@@ -73,7 +100,18 @@ def _decode_item(item_id: str, content: bytes) -> _DecodedItem:
     parsed = board.parse_body(text, storage=board.Storage.STATE_REF)
     if parsed.read_state is not board.BodyReadState.VALID or parsed.record is None:
         raise MalformedStateTreeError(f"item {item_id} has a malformed agent-claim block")
-    return _DecodedItem(record=items.parse_item_record(item_id, parsed.record), body=text)
+    return _DecodedItem(record=items.parse_item_record(item_id, parsed.record), body=text, oid=oid)
+
+
+def _with_record(body: str, record: items.ItemRecord) -> str:
+    """`body`'s `agent-claim` block, its `[record]` table replaced by
+    `record`'s own fields, every other byte untouched -- the one place a
+    write composes a fresh `[record]` table, shared by `create_child` (a
+    brand new one) and `update_item_body` (an existing one with `updated_at`
+    refreshed)."""
+    located = board.locate_agent_claim_block(body)
+    new_data = {**located.data, board.RECORD_KEY: items.record_table(record)}
+    return board.replace_agent_claim_block(body, located, new_data)
 
 
 def _item_kind(kind: str | None) -> board.ItemKind | None:
@@ -81,7 +119,8 @@ def _item_kind(kind: str | None) -> board.ItemKind | None:
 
 
 class StateRefBoard:
-    """The `state-ref` storage pin's `BoardSource`/`ForgeReader` adapter."""
+    """The `state-ref` storage pin's `BoardSource`/`ForgeReader`/`ForgeWriter`
+    adapter."""
 
     def __init__(
         self,
@@ -89,11 +128,16 @@ class StateRefBoard:
         repository: forge.RepositoryId,
         default_branch: str,
         item_files: Mapping[str, bytes],
+        item_oids: Mapping[str, ObjectId],
+        writer: ItemWriter,
     ) -> None:
         self.repository = repository
         self._default_branch = default_branch
+        self._writer = writer
         self._items: dict[str, _DecodedItem] = {
-            (item_id := items.item_id_from_filename(filename)): _decode_item(item_id, content)
+            (item_id := items.item_id_from_filename(filename)): _decode_item(
+                item_id, content, item_oids[item_id]
+            )
             for filename, content in item_files.items()
         }
         self._by_number = {
@@ -227,3 +271,48 @@ class StateRefBoard:
         # tuple as "not derivable", never as "proven zero landings".
         del since
         return ()
+
+    def link_child(self, parent: int, child: int) -> None:
+        """A no-op (issue #283): parentage has exactly one owner here,
+        `record.parent`, already set by `create_child`'s own single write.
+        GitHub's `link_child` recovers an orphan its own two-write
+        `create_child` could leave behind (a created issue with no recorded
+        sub-issue relation); a state-ref item write is one CAS write, so
+        that half-finished state can never occur and there is nothing left
+        to link."""
+        del parent, child
+
+    def create_child(self, *, parent: int, title: str, body: str, kind: board.ItemKind) -> int:
+        parent_id = self._by_number[parent]
+        new_id = items.mint_item_id(self._items.keys())
+        now = items.format_record_timestamp(datetime.now(UTC))
+        record = items.ItemRecord(
+            number=items.item_number(new_id),
+            title=title,
+            state=items.RecordState.OPEN,
+            kind=kind.value,
+            labels=(),
+            blocked_by=(),
+            parent=parent_id,
+            origin=None,
+            created_at=now,
+            updated_at=now,
+            closed_at=None,
+        )
+        new_body = _with_record(body, record)
+        new_oid = self._writer.write_item(new_id, expected=None, content=new_body.encode("utf-8"))
+        self._items[new_id] = _DecodedItem(record=record, body=new_body, oid=new_oid)
+        self._by_number[record.number] = new_id
+        return record.number
+
+    def update_item_body(self, number: int, body: str) -> None:
+        item_id = self._by_number[number]
+        current = self._items[item_id]
+        updated_record = replace(
+            current.record, updated_at=items.format_record_timestamp(datetime.now(UTC))
+        )
+        new_body = _with_record(body, updated_record)
+        new_oid = self._writer.write_item(
+            item_id, expected=current.oid, content=new_body.encode("utf-8")
+        )
+        self._items[item_id] = _DecodedItem(record=updated_record, body=new_body, oid=new_oid)

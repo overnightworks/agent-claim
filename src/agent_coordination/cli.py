@@ -65,12 +65,6 @@ WHOLE_HELP = (
     "three paths, any directory, or, once the repository has at least twelve "
     "versioned files, more than a quarter of them"
 )
-# Every forge write under `storage = "state-ref"` (issue #248): `cut`,
-# `rule`, `ask`, an issue-scoped `claim`'s body check, and `release
-# --merged` all refuse with this one sentence, naming the slice that
-# retires it, rather than leaking `state_board.py`'s own unsupported-
-# capability wording.
-NOT_YET_STATE_REF_WRITE = "not yet: items in the state ref are read-only until #230 slice 4"
 
 
 def _resolved_identity(issue: int | None, branch: str) -> protocol.ClaimIdentity:
@@ -2148,24 +2142,70 @@ def _refuse_repo_under_state_ref(repo: str | None) -> None:
         raise protocol.ClaimUnavailableError("--repo is meaningless under storage = state-ref")
 
 
-def _refuse_state_ref_write(toplevel: Path) -> None:
-    """A write command's own precondition when its forge stays a
-    `forge.ForgeReader` (issue #248): `claim`'s issue-scoped body check and
-    `release --merged`'s landing verification both only ever read, so
-    neither goes through `_LazyForge.writer()` -- this is their equivalent
-    gate, worded exactly the same as that one.
+# `release --merged`'s own residual under `storage = "state-ref"` (issue
+# #283): `LANDING` stays `forge.Capability.UNSUPPORTED` through #230 slice
+# 6, so a merged release still cannot verify its own pull request there --
+# named by the offline path that works today, rather than leaking
+# `state_board.py`'s own unsupported-capability wording.
+STATE_REF_MERGED_LANDING_NOT_YET = (
+    "state-ref cannot verify a merged pull request yet (#230 slice 6); land "
+    'offline with `item close` and `release --abandoned "landed as <sha>"` until then'
+)
+
+
+def _refuse_state_ref_merged_release(toplevel: Path) -> None:
+    """`release --merged`'s own precondition under `storage = "state-ref"`
+    (issue #283): refused by name before `_verify_merged_release` ever calls
+    `client.landing`, which `state_board.StateRefBoard` has no data for at
+    all -- `claim`'s issue-scoped body check needs no equivalent gate
+    anymore, since it only ever reads and `state_board.StateRefBoard` has
+    read `board`/`next`/`check` since #248.
     """
     if board.load_config(toplevel / board.CONFIG_PATH).storage is board.Storage.STATE_REF:
-        raise protocol.ClaimUnavailableError(NOT_YET_STATE_REF_WRITE)
+        raise protocol.ClaimUnavailableError(STATE_REF_MERGED_LANDING_NOT_YET)
+
+
+@dataclass(frozen=True)
+class _StoreItemWriter:
+    """`state_board.ItemWriter`, implemented over `store` (issue #283): the
+    one place this tool hashes an item's finished bytes into a blob and
+    writes it through one `ItemWriteIntent` CAS transition (issue #279).
+    `state_board.py` itself may not import `store` (Layers contract), so
+    every actual git call a state-ref item write makes funnels through this
+    one method.
+    """
+
+    worktree: Path
+    canonical_remote: str
+
+    def write_item(
+        self, item_id: str, *, expected: protocol.ObjectId | None, content: bytes
+    ) -> protocol.ObjectId:
+        new_oid = store.hash_blob(self.worktree, content)
+        intent = protocol.ItemWriteIntent(
+            item_id=item_id,
+            expected=expected,
+            new_oid=new_oid,
+            operation_id=uuid.uuid4().hex,
+        )
+        new_state = store.commit_transition(
+            worktree=self.worktree,
+            remote=self.canonical_remote,
+            subject=f"write item {item_id}",
+            intent=intent,
+        )
+        return new_state.items[item_id]
 
 
 def _state_ref_forge(repo: str | None, canonical_remote: str) -> state_board.StateRefBoard:
-    """The `state-ref` storage pin's forge (issue #248): repository identity
-    read host-neutrally from the canonical remote's own URL (issue #245's
-    `RemoteLocation`, never GitHub's syntax), the default branch read from
-    git, and item content read once through `store.read_item_files` -- this
-    is the one place `state_board.StateRefBoard` is ever handed live data,
-    since the Layers contract keeps that module from reaching `store`
+    """The `state-ref` storage pin's forge (issues #248, #283): repository
+    identity read host-neutrally from the canonical remote's own URL (issue
+    #245's `RemoteLocation`, never GitHub's syntax), the default branch read
+    from git, item content and blob oids read once through
+    `store.read_item_files`/`ClaimState.items`, and a write port over that
+    same `store` (`_StoreItemWriter`) -- this is the one place
+    `state_board.StateRefBoard` is ever handed live data or a way to write
+    it, since the Layers contract keeps that module from reaching `store`
     itself.
 
     `checkout.default_branch_name()` reads `origin/HEAD` specifically, not
@@ -2184,7 +2224,11 @@ def _state_ref_forge(repo: str | None, canonical_remote: str) -> state_board.Sta
     state = store.fetch_state(worktree=worktree, remote=canonical_remote)
     item_files = {} if state.tip is None else store.read_item_files(worktree, state.tip)
     return state_board.StateRefBoard(
-        repository=repository, default_branch=default_branch, item_files=item_files
+        repository=repository,
+        default_branch=default_branch,
+        item_files=item_files,
+        item_oids=state.items,
+        writer=_StoreItemWriter(worktree, canonical_remote),
     )
 
 
@@ -2609,22 +2653,14 @@ class _LazyForge:
         return self._resolved
 
     def writer(self) -> forge.ForgeWriter:
-        """The same resolved forge, narrowed to its writing surface --
-        every write command's own precondition (issue #248): checked, and
-        refused, before this ever resolves a forge at all -- the same
-        "refuse by name before doing the real work" doctrine
-        `_refuse_unsupported_forge_host` already follows for a bad host.
-        `state_board.StateRefBoard` has no `create_child`/`update_item_body`
-        at all, by design, so a state-ref pin refuses here with the
-        sentence #230 slice 4 will retire. The cast is honest, not a
-        suppression: every adapter this tool builds once storage is not
-        state-ref (`github.GitHubForge` and every test fake standing in for
-        it) already implements the full `ForgeWriter` surface, checked at
-        its own call sites by `capability()`, never by `isinstance`.
+        """The same resolved forge, narrowed to its writing surface (issue
+        #248, #283). The cast is honest, not a suppression: every adapter
+        this tool builds -- `github.GitHubForge`, `state_board.StateRefBoard`
+        (its `ItemWriter` injected by `_state_ref_forge`), and every test
+        fake standing in for either -- already implements the full
+        `ForgeWriter` surface, checked at each call site by `capability()`,
+        never by `isinstance`.
         """
-        storage = board.load_config(_resolve_toplevel() / board.CONFIG_PATH).storage
-        if storage is board.Storage.STATE_REF:
-            raise protocol.ClaimUnavailableError(NOT_YET_STATE_REF_WRITE)
         return cast(forge.ForgeWriter, self())
 
 
@@ -3022,7 +3058,6 @@ def _cmd_claim(parsed: argparse.Namespace, session: _WriteSession) -> int:
             # already replayed does), so `session.forge()` -- built and
             # Erwartung-6-checked on this first call (issue #245) -- never
             # runs for a lane claim at all.
-            _refuse_state_ref_write(_resolve_toplevel())
             client = session.forge()
             open_issues = client.list_open_board_issues()
             open_by_number = {issue.number: issue for issue in open_issues}
@@ -3080,7 +3115,7 @@ def _cmd_release(parsed: argparse.Namespace, session: _WriteSession) -> None:
         # forge (issue #245); an abandoned release -- lane or issue -- never
         # calls `session.forge()`, so it never resolves a repository or
         # invokes `gh`.
-        _refuse_state_ref_write(_resolve_toplevel())
+        _refuse_state_ref_merged_release(_resolve_toplevel())
         client = session.forge()
         _verify_merged_release(client, client.repository.path, identity, outcome)
     worktree, canonical_remote, observed = _store_observation()
@@ -3379,12 +3414,16 @@ def _require_matching_title(number: int, link: board.SliceRow, title: str) -> No
         )
 
 
-def _located_block_or_refuse(number: int, body: str, *, command: str) -> board.LocatedBlock:
+def _located_block_or_refuse(
+    number: int, body: str, *, command: str, storage: board.Storage = board.Storage.GITHUB
+) -> board.LocatedBlock:
     """`body`'s located `agent-claim` block, or a by-name refusal before any
     write: `cut`, `rule`, and `ask` all need a body `parse_body` reads as
     VALID before they touch it, and share this one gate so the message is
-    the same shape for all three."""
-    parsed = board.parse_body(body)
+    the same shape for all three. `storage` is forwarded to `parse_body`
+    unchanged (issue #283): a state-ref item's own `[record]` table must
+    read as a known key, not a malformed one."""
+    parsed = board.parse_body(body, storage=storage)
     if parsed.read_state is board.BodyReadState.MALFORMED:
         defect = parsed.contract.defects[0]
         raise protocol.ClaimUnavailableError(
@@ -3398,9 +3437,10 @@ def _cut_slice(
     target: board.Issue,
     parsed: argparse.Namespace,
     idea_label: str | None,
+    storage: board.Storage,
 ) -> int:
     number = target.number
-    located = _located_block_or_refuse(number, target.body, command="cut")
+    located = _located_block_or_refuse(number, target.body, command="cut", storage=storage)
     link = _cut_link(number, located.data, parsed.row)
     if link is not None:
         _require_matching_title(number, link, parsed.title)
@@ -3454,7 +3494,9 @@ def _cmd_cut(parsed: argparse.Namespace, session: _WriteSession) -> int:
                 f"this forge cannot {operation.value}; cut the slice by hand"
             )
     config = _load_board_config(client, _resolve_toplevel())
-    return _cut_slice(client, _cut_target(client, number), parsed, config.idea_label)
+    return _cut_slice(
+        client, _cut_target(client, number), parsed, config.idea_label, config.storage
+    )
 
 
 def _item_body_or_refuse(client: forge.ForgeReader, number: int, *, command: str) -> str:
@@ -3478,8 +3520,10 @@ def _require_update_item_body(client: forge.ForgeWriter, *, command: str) -> Non
         )
 
 
-def _rule_remaining_open(new_body: str) -> int:
-    return sum(1 for line in board.expectation_lines(new_body) if line.ruling is None)
+def _rule_remaining_open(new_body: str, *, storage: board.Storage) -> int:
+    return sum(
+        1 for line in board.expectation_lines(new_body, storage=storage) if line.ruling is None
+    )
 
 
 def _print_rule_result(
@@ -3514,14 +3558,14 @@ def rule_item(
     (already ruled, out of range, a bad outcome, a malformed or missing
     item), which both callers turn into their own by-name response."""
     _require_update_item_body(client, command="rule")
-    _load_board_config(client, _resolve_toplevel())
+    config = _load_board_config(client, _resolve_toplevel())
     body = _item_body_or_refuse(client, number, command="rule")
-    _located_block_or_refuse(number, body, command="rule")
+    _located_block_or_refuse(number, body, command="rule", storage=config.storage)
     ruled_on = datetime.now(UTC).date()
     new_body = board.rule_expectation(body, line, ruling, ruled_on, note=note)
     client.update_item_body(number, new_body)
-    ruled_line = board.expectation_lines(new_body)[line - 1]
-    return ruled_line, _rule_remaining_open(new_body)
+    ruled_line = board.expectation_lines(new_body, storage=config.storage)[line - 1]
+    return ruled_line, _rule_remaining_open(new_body, storage=config.storage)
 
 
 def _cmd_rule(parsed: argparse.Namespace, session: _WriteSession) -> int:
@@ -3581,12 +3625,12 @@ def _print_ask_result(number: int, index: int, text: str, default: str, *, as_js
 def _cmd_ask(parsed: argparse.Namespace, session: _WriteSession) -> int:
     client = session.forge.writer()
     _require_update_item_body(client, command="ask")
-    _load_board_config(client, _resolve_toplevel())
+    config = _load_board_config(client, _resolve_toplevel())
     number = int(parsed.item)
     body = _item_body_or_refuse(client, number, command="ask")
-    _located_block_or_refuse(number, body, command="ask")
+    _located_block_or_refuse(number, body, command="ask", storage=config.storage)
     new_body = board.append_expectation(body, parsed.text, parsed.default)
-    index = len(board.expectation_lines(new_body))
+    index = len(board.expectation_lines(new_body, storage=config.storage))
     client.update_item_body(number, new_body)
     _print_ask_result(number, index, parsed.text, parsed.default, as_json=parsed.json)
     return 0

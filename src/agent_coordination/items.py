@@ -19,12 +19,14 @@ several `ItemRecord`s at once, sits above both.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+import secrets
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TypeAlias, cast
 
-from .protocol import MalformedStateTreeError
+from .protocol import ClaimUnavailableError, MalformedStateTreeError
 
 # `aco-` plus six lowercase hex characters (issue #248, parent #230 ruling
 # 15.09.2026): a short random id, never a counter, never reused. The
@@ -32,6 +34,16 @@ from .protocol import MalformedStateTreeError
 # key, so a rename of the file is the only way its id ever changes.
 ITEM_ID_PATTERN = re.compile(r"aco-[0-9a-f]{6}")
 ITEM_FILENAME_SUFFIX = ".md"
+# Refuse rather than silently widen (issue #283, ruling 16.09.2026): an id
+# never grows a seventh hex character just because the id space (16.7
+# million values per repository) is filling up. Three tries against real
+# randomness is already astronomically unlikely to collide even once; a
+# fourth would only mask a broken randomness source.
+_MAX_MINT_ATTEMPTS = 3
+# The RFC 3339 UTC, second-precision shape `board.RECORD_TIMESTAMP_PATTERN`
+# reads back -- named once here, the `[record]` timestamp fields' own write
+# side, rather than each caller formatting its own `datetime`.
+_RECORD_TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 # `cast`'s type argument for every `ItemRecord` field `board.py`'s schema
 # leaves optional: named once as a real type, not a repeated string literal,
 # so the four call sites below share one owner.
@@ -119,3 +131,58 @@ def parse_item_record(item_id: str, record: Mapping[str, object]) -> ItemRecord:
         updated_at=cast(str, record["updated_at"]),
         closed_at=cast(_OptionalStr, record.get("closed_at")),
     )
+
+
+def _random_hex_suffix() -> str:
+    return secrets.token_hex(3)
+
+
+def mint_item_id(
+    existing: Iterable[str], *, random_hex: Callable[[], str] = _random_hex_suffix
+) -> str:
+    """A fresh, unpredictable item id (issue #283): `aco-` plus six
+    lowercase hex characters from `random_hex` (`secrets.token_hex` by
+    default) -- never a counter, never reused. Refuses by name after
+    `_MAX_MINT_ATTEMPTS` collisions against `existing`'s ids rather than
+    retrying forever or silently widening. `random_hex` is the one seam a
+    test injects a collision stub through; production never overrides it.
+    """
+    known = frozenset(existing)
+    for _attempt in range(_MAX_MINT_ATTEMPTS):
+        candidate = f"aco-{random_hex()}"
+        if candidate not in known:
+            return candidate
+    raise ClaimUnavailableError(
+        f"could not mint a fresh item id in {_MAX_MINT_ATTEMPTS} attempts; retry"
+    )
+
+
+def format_record_timestamp(moment: datetime) -> str:
+    """`moment`, in the RFC 3339 UTC second-precision shape every `[record]`
+    timestamp field uses (`board.RECORD_TIMESTAMP_PATTERN`)."""
+    return moment.astimezone(UTC).strftime(_RECORD_TIMESTAMP_FORMAT)
+
+
+def record_table(record: ItemRecord) -> dict[str, object]:
+    """`record`, turned back into the `[record]` table's TOML-ready dict
+    shape `board.render_block`/`board._render_record` expect: the write-side
+    mirror of `parse_item_record`, so the two directions share one field
+    list and one owner for what an optional field's absence means (omitted
+    entirely, never written empty)."""
+    table: dict[str, object] = {
+        "title": record.title,
+        "state": record.state.value,
+        "labels": list(record.labels),
+        "blocked_by": list(record.blocked_by),
+        "created_at": record.created_at,
+        "updated_at": record.updated_at,
+    }
+    if record.kind is not None:
+        table["kind"] = record.kind
+    if record.parent is not None:
+        table["parent"] = record.parent
+    if record.origin is not None:
+        table["origin"] = record.origin
+    if record.closed_at is not None:
+        table["closed_at"] = record.closed_at
+    return table
