@@ -540,11 +540,16 @@ invalid.
 part of `check` read a work item's `Now`/`Next`/`Done when`, freeze,
 expectations, and undispatched slices from one typed `agent-claim` fenced TOML
 block. That block is the whole grammar: the human prose around it — including
-another tool's own section headings in the same body — is never parsed.
+another tool's own section headings in the same body — carries no board
+contract and is never read by `board`, `next`, `claim`, or `rulings`. The one
+exception is `cut`'s own `Parent: #<n>` line (below): a recovery marker only
+`cut`'s orphan adoption reads back, so a failed relation write can be
+finished by re-running the same `cut`.
 
-A fresh, unfilled item looks like this — the same four lines `cut` writes
-automatically for a dispatched child, and what a human pastes by hand into a
-`gh issue create` / operator-opened item:
+A fresh, unfilled item looks like this — the same four skeleton lines `cut`
+writes inside the fence for a dispatched child (ahead of which `cut` also
+writes that `Parent: #<n>` line, never part of this grammar), and what a
+human pastes by hand into a `gh issue create` / operator-opened item:
 
 ````
 ```agent-claim
@@ -616,8 +621,10 @@ owner/repo#n` mixed with a local one). A same-repository *closed* dependency
 does not block and lets `board`'s `FREED` column and `claim` proceed; a closed
 *foreign* dependency does not free an item on its own (foreign relations can
 only block, never free). A pull-request dependency blocks and frees exactly
-like any other dependency. **Parentage stays on sub-issues**; it never passes
-through the body.
+like any other dependency. **Parentage stays on sub-issues**: no reader ever
+derives a parent from the body. `cut` writes a `Parent: #<n>` line as a
+recovery marker (below) that everything but `cut`'s own orphan adoption
+ignores.
 
 **`cut`** reads and rewrites the block: without `--row` it links the first
 `[[slice]]` entry when one exists and otherwise creates an untied child;
@@ -641,9 +648,11 @@ only `cut` writes that skeleton automatically.
 as a fresh child issue in one step: it creates the issue (native type `Task`),
 records it as the container's sub-issue, and, when there is a `[[slice]]`
 entry to link, removes that entry from the container's block. The fresh
-child's body is `board.BLOCK_CHILD_SKELETON` — every projection key present
-and empty — so it is named `body incomplete: Now, Next, Done when` (invisible
-to `next`, refused by `claim`) until the head fills it in.
+child's body opens with a `Parent: #<container>` line (#260 — the signal a
+repeat `cut` reads back to adopt its own orphan, never another container's)
+ahead of `board.BLOCK_CHILD_SKELETON` — every projection key present and
+empty — so it is named `body incomplete: Now, Next, Done when` (invisible to
+`next`, refused by `claim`) until the head fills it in.
 
 `cut` without `--row` links the first `[[slice]]` entry when one exists and
 otherwise creates an untied child (#151): a container with no `slice` key at
@@ -657,15 +666,29 @@ select a row from`), or no such entry left (`#79 has no row 9; cuttable rows:
 1, 2`).
 
 Every refusal precedes every write. `cut` refuses when the forge cannot
-create a child issue or update an item body (`capability()` answers anything
-but `read_write` for either); when the target is not an open container, or is
-itself a child of another issue (nested containers are not supported); when
-the target's own body is legacy or malformed; and, for `--row N`, when the
-block names no such entry. None of the three writes are atomic with each
-other — nor is the child issue's creation atomic with its own sub-issue
-relation write inside `create_child` — so a failure at any point after the
-child issue exists names the created child and the step that failed, and
-instructs a hand fix rather than a re-run, which would create a second child.
+create a child issue, link one as a sub-issue, or update an item body
+(`capability()` answers anything but `read_write` for any of the three);
+when the target is not an open container, or is itself a child of another
+issue (nested containers are not supported); when the target's own body is
+legacy or malformed; and, for `--row N`, when the block names no such entry.
+None of the three writes are atomic with each other — nor is the child
+issue's own creation atomic with its sub-issue relation write, since
+`create_child` is composed from GitHub's own issue-creation POST and the
+separate `link_child` port operation — so a failure at any point after the
+child issue exists names the created child and the step that failed. Re-run
+the same cut; it adopts the child (#260): before creating anything, `cut`
+looks for one titled exactly the row's title, among the container's
+already-recorded children and among orphans. A title match alone never
+adopts an orphan — any unrelated open issue could share it — so an orphan
+is adoptable only when it is also a `Task`, is not the container itself, is
+not idea-labelled, and its body still opens with the `Parent: #<container>`
+line `cut` wrote for it, exactly the shape a failed relation write leaves
+behind. Exactly one open match is adopted (linking an orphan first if that
+is where it was found) — no second issue, the remaining steps (row removal,
+output) finish for that child instead. More than one open match refuses by
+name rather than guess; a *closed* match refuses too, instead of reopening
+it; no match at all
+takes today's create-a-child path.
 
 ## Issueless lane claims
 

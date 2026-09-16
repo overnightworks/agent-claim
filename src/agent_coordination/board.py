@@ -610,6 +610,15 @@ def _line_without_ending(raw_line: str) -> str:
     return raw_line[: len(raw_line) - len(ending)] if ending else raw_line
 
 
+def first_line(body: str) -> str:
+    """`body`'s first line with its ending stripped, whether the body uses
+    LF or CRLF -- a GitHub GET returns CRLF (`_line_ending` above), so a
+    caller comparing against a fixed marker line must not split on a bare
+    `"\\n"`."""
+    lines = body.splitlines(keepends=True)
+    return _line_without_ending(lines[0]) if lines else ""
+
+
 def _agent_claim_fence_matches(body: str) -> list[tuple[int, int | None, str]]:
     """Every fence in `body` whose info string is exactly `agent-claim`
     (issue #150 §4): `(opening line index, closing line index or None when
@@ -1437,7 +1446,7 @@ def _priority_index(labels: tuple[str, ...], config: BoardConfig) -> int | None:
     return min(matches, default=None)
 
 
-def _has_label(labels: tuple[str, ...], label: str | None) -> bool:
+def has_label(labels: tuple[str, ...], label: str | None) -> bool:
     return label is not None and any(item.casefold() == label.casefold() for item in labels)
 
 
@@ -1699,7 +1708,7 @@ def _board_item(
         open_branches=context.open_branches,
     )
     single_next = _single_concrete_next(contract.next)
-    projectionless_idea = parsed.projectionless and _has_label(issue.labels, config.idea_label)
+    projectionless_idea = parsed.projectionless and has_label(issue.labels, config.idea_label)
     next_step = IDEA_REFINEMENT_STEP if projectionless_idea else contract.next
     unblocks_count = context.unblocks[issue.number]
     container_parent = context.child_container.get(issue.number)

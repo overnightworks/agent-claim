@@ -51,11 +51,13 @@ class ForgePartialChildCreationError(ForgeError):
 
     Not atomic across `create_child`'s own two writes (the issue and its
     sub-issue relation), nor across `create_child` and the later block
-    rewrite: retrying either would risk a second child, so the caller
-    recovers `step` by hand instead and never re-runs `cut`. Raised by the
-    GitHub adapter when its own relation write fails, and reused by
+    rewrite -- but a repeat is safe (#260): re-run the same cut and it
+    adopts `child` -- an orphan open issue with no recorded parent, exactly
+    what a failed relation write leaves behind -- instead of risking a
+    second one, finishing whichever `step` failed. Raised by the GitHub
+    adapter when its own relation write fails, and reused by
     `cli._cmd_cut` when the later block rewrite fails -- one type, so both
-    failures are recovered the same way.
+    failures recover the same way.
     """
 
     def __init__(self, *, child: int, parent: int, step: str, cause: Exception) -> None:
@@ -138,6 +140,7 @@ class ForgeOperation(StrEnum):
     LIST_BOARD_DEPENDENCIES = "list_board_dependencies"
     LIST_OPEN_BOARD_PULL_REQUESTS = "list_open_board_pull_requests"
     LIST_RECENT_MERGED_BOARD_PULL_REQUESTS = "list_recent_merged_board_pull_requests"
+    LINK_CHILD = "link_child"
     CREATE_CHILD = "create_child"
     UPDATE_ITEM_BODY = "update_item_body"
 
@@ -209,6 +212,8 @@ class ForgeReader(Protocol):
 
 class ForgeWriter(ForgeReader, Protocol):
     """`ForgeReader` plus every operation that mutates forge state."""
+
+    def link_child(self, parent: int, child: int) -> None: ...
 
     def create_child(self, *, parent: int, title: str, body: str, kind: board.ItemKind) -> int: ...
 
