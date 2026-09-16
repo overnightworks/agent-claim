@@ -24,6 +24,7 @@ from . import (
     hook_input,
     protocol,
     providers,
+    state_board,
     store,
     terminal,
     workspace,
@@ -62,6 +63,12 @@ WHOLE_HELP = (
     "three paths, any directory, or, once the repository has at least twelve "
     "versioned files, more than a quarter of them"
 )
+# Every forge write under `storage = "state-ref"` (issue #248): `cut`,
+# `rule`, `ask`, an issue-scoped `claim`'s body check, and `release
+# --merged` all refuse with this one sentence, naming the slice that
+# retires it, rather than leaking `state_board.py`'s own unsupported-
+# capability wording.
+NOT_YET_STATE_REF_WRITE = "not yet: items in the state ref are read-only until #230 slice 4"
 
 
 def _resolved_identity(issue: int | None, branch: str) -> protocol.ClaimIdentity:
@@ -1155,6 +1162,14 @@ def _board(
             dependencies=dependencies,
             requests=client.requests,
             claim_ages=claim_ages or {},
+            open_pull_requests_supported=(
+                client.capability(forge.ForgeOperation.LIST_OPEN_BOARD_PULL_REQUESTS)
+                is not forge.Capability.UNSUPPORTED
+            ),
+            landings_derivable=(
+                client.capability(forge.ForgeOperation.LIST_RECENT_MERGED_BOARD_PULL_REQUESTS)
+                is not forge.Capability.UNSUPPORTED
+            ),
         )
     )
 
@@ -1170,11 +1185,15 @@ class _RulingsRow:
     lines: tuple[board.ExpectationLine, ...]
 
 
-def _rulings_rows(projected: board.Board, bodies: Mapping[int, str]) -> tuple[_RulingsRow, ...]:
+def _rulings_rows(
+    projected: board.Board, bodies: Mapping[int, str], *, storage: board.Storage
+) -> tuple[_RulingsRow, ...]:
     """Every open board item that still carries an open expectation line,
     board-ranked then by fewer open lines then issue number (unchanged from
     before #240), each paired with its lines read fresh from `bodies` --
-    `projected.items` itself carries only the open/total counters."""
+    `projected.items` itself carries only the open/total counters. `storage`
+    is forwarded to `expectation_lines` unchanged (issue #248): a state-ref
+    body's `[record]` table must read as a known key, not a malformed one."""
     ranked = sorted(
         (
             (item, item.expectation_progress)
@@ -1184,7 +1203,9 @@ def _rulings_rows(projected: board.Board, bodies: Mapping[int, str]) -> tuple[_R
         key=lambda entry: (*board.board_rank(entry[0])[:2], entry[1].open, entry[0].number),
     )
     return tuple(
-        _RulingsRow(item, progress, board.expectation_lines(bodies.get(item.number, "")))
+        _RulingsRow(
+            item, progress, board.expectation_lines(bodies.get(item.number, ""), storage=storage)
+        )
         for item, progress in ranked
     )
 
@@ -1203,8 +1224,10 @@ def _rulings_row_text(row: _RulingsRow) -> str:
     return "\n".join((header, *(_rulings_line_text(line) for line in row.lines)))
 
 
-def _rulings(projected: board.Board, bodies: Mapping[int, str], *, as_json: bool) -> None:
-    rows = _rulings_rows(projected, bodies)
+def _rulings(
+    projected: board.Board, bodies: Mapping[int, str], *, as_json: bool, storage: board.Storage
+) -> None:
+    rows = _rulings_rows(projected, bodies, storage=storage)
     if as_json:
         print(
             json.dumps(
@@ -1869,13 +1892,16 @@ def _refused_issue(number: int, finding: str) -> CheckOutcome:
     return CheckOutcome(CheckKind.ISSUE, number, _issue_line(number, finding), finding)
 
 
-def _body_shape_defects(body: str) -> tuple[str, ...]:
+def _body_shape_defects(
+    body: str, *, storage: board.Storage = board.Storage.GITHUB
+) -> tuple[str, ...]:
     """Every finding a body's own shape can carry without asking a forge
     anything -- legacy, malformed (one sentence per schema defect), or
     incomplete (one joined sentence, matching `check <item>`'s own wording).
     `_issue_check` and `body --check` (issue #262) both read this; neither
-    writes a second rendering of these sentences."""
-    parsed = board.parse_body(body)
+    writes a second rendering of these sentences. `storage` gates the one
+    storage-specific extension, `[record]` (issue #248)."""
+    parsed = board.parse_body(body, storage=storage)
     if parsed.read_state is board.BodyReadState.LEGACY:
         return ("body legacy",)
     if parsed.read_state is board.BodyReadState.MALFORMED:
@@ -1885,12 +1911,18 @@ def _body_shape_defects(body: str) -> tuple[str, ...]:
 
 
 def _issue_check(
-    client: forge.ForgeReader, repository: str, body: str, number: int
+    client: forge.ForgeReader,
+    repository: str,
+    body: str,
+    number: int,
+    *,
+    storage: board.Storage,
 ) -> CheckOutcome:
     """Whether this issue's body is the contract a builder can start from:
     readable, complete, and unblocked. Its dependencies come from GitHub's
-    own `blocked_by` relation -- a body never states them itself."""
-    shape_defects = _body_shape_defects(body)
+    own `blocked_by` relation, or the state-ref item's own `[record]` table
+    under `storage = "state-ref"` -- a body never states them itself."""
+    shape_defects = _body_shape_defects(body, storage=storage)
     if shape_defects:
         return _refused_issue(number, shape_defects[0])
     blockers = board.open_dependency_blockers(client.list_board_dependencies(number), repository)
@@ -2027,11 +2059,14 @@ def _canonical_remote_location(canonical_remote: str) -> checkout.RemoteLocation
 
 
 def _refuse_unsupported_forge_host(location: checkout.RemoteLocation) -> None:
-    """A forge command's precondition beyond Erwartung 6: GitHub is the one
-    forge adapter this tool has (until #230 slice 2 adds forge-by-host
-    routing), so a canonical remote on any other host refuses by name here,
-    before ever asking `gh`, rather than failing deep inside
-    `discover_repository` with GitHub's own "not a GitHub repository" text.
+    """The GitHub-storage forge command's precondition beyond Erwartung 6:
+    GitHub is the one forge adapter reached by host, so a canonical remote
+    on any other host refuses by name here, before ever asking `gh`, rather
+    than failing deep inside `discover_repository` with GitHub's own "not a
+    GitHub repository" text. Never reached under `storage = "state-ref"`
+    (issue #248): that pin routes to `state_board.StateRefBoard` before
+    this host check would even run, so a non-GitHub canonical remote is no
+    error there.
     """
     if location.host != github.GITHUB_HOST:
         raise protocol.ClaimUnavailableError(f"no forge adapter for host {location.host}")
@@ -2064,6 +2099,53 @@ def _resolved_forge_target(repo: str | None, canonical_remote: str) -> forge.Rep
     forge_target = github.discover_repository(repo, remote_url=checkout.origin_remote_url)
     _refuse_canonical_remote_mismatch(forge_target, location)
     return forge_target
+
+
+def _refuse_repo_under_state_ref(repo: str | None) -> None:
+    """`--repo` names a GitHub target; under `storage = "state-ref"` there
+    is no host-based target to override (issue #248)."""
+    if repo is not None:
+        raise protocol.ClaimUnavailableError("--repo is meaningless under storage = state-ref")
+
+
+def _refuse_state_ref_write(toplevel: Path) -> None:
+    """A write command's own precondition when its forge stays a
+    `forge.ForgeReader` (issue #248): `claim`'s issue-scoped body check and
+    `release --merged`'s landing verification both only ever read, so
+    neither goes through `_LazyForge.writer()` -- this is their equivalent
+    gate, worded exactly the same as that one.
+    """
+    if board.load_config(toplevel / board.CONFIG_PATH).storage is board.Storage.STATE_REF:
+        raise protocol.ClaimUnavailableError(NOT_YET_STATE_REF_WRITE)
+
+
+def _state_ref_forge(repo: str | None, canonical_remote: str) -> state_board.StateRefBoard:
+    """The `state-ref` storage pin's forge (issue #248): repository identity
+    read host-neutrally from the canonical remote's own URL (issue #245's
+    `RemoteLocation`, never GitHub's syntax), the default branch read from
+    git, and item content read once through `store.read_item_files` -- this
+    is the one place `state_board.StateRefBoard` is ever handed live data,
+    since the Layers contract keeps that module from reaching `store`
+    itself.
+
+    `checkout.default_branch_name()` reads `origin/HEAD` specifically, not
+    whatever `canonical_remote` names (a named residual: every repository
+    piloting this pin today also names its canonical remote `origin`).
+    """
+    _refuse_repo_under_state_ref(repo)
+    location = _canonical_remote_location(canonical_remote)
+    repository = forge.RepositoryId(location.host, (), location.path)
+    default_branch = checkout.default_branch_name()
+    if default_branch is None:
+        raise protocol.ClaimUnavailableError(
+            "cannot resolve the default branch; run aco from a checkout with origin/HEAD set"
+        )
+    worktree = Path.cwd()
+    state = store.fetch_state(worktree=worktree, remote=canonical_remote)
+    item_files = {} if state.tip is None else store.read_item_files(worktree, state.tip)
+    return state_board.StateRefBoard(
+        repository=repository, default_branch=default_branch, item_files=item_files
+    )
 
 
 def _claim_ages(worktree: Path, state: protocol.ClaimState) -> dict[str, datetime]:
@@ -2463,18 +2545,47 @@ class _LazyForge:
     command that never calls it (issue #245) -- `status`, `protect`,
     `bootstrap`, and a lane `claim`/`rescope`/`release` never resolve a
     repository or invoke `gh` because none of them ever does.
+
+    Chooses its adapter by the repository's own `storage` pin (issue #248),
+    never by the canonical remote's host: `github` (the default) builds
+    `github.GitHubForge`; `state-ref` builds `state_board.StateRefBoard`
+    from the state ref's own `items/` tree instead.
     """
 
     def __init__(self, repo: str | None) -> None:
         self._repo = repo
-        self._resolved: github.GitHubForge | None = None
+        self._resolved: forge.ForgeReader | None = None
 
-    def __call__(self) -> github.GitHubForge:
+    def __call__(self) -> forge.ForgeReader:
         if self._resolved is None:
-            canonical_remote = _canonical_remote_name(_resolve_toplevel())
-            target = _resolved_forge_target(self._repo, canonical_remote)
-            self._resolved = github.GitHubForge(target)
+            toplevel = _resolve_toplevel()
+            config = board.load_config(toplevel / board.CONFIG_PATH)
+            canonical_remote = config.canonical_remote
+            if config.storage is board.Storage.STATE_REF:
+                self._resolved = _state_ref_forge(self._repo, canonical_remote)
+            else:
+                target = _resolved_forge_target(self._repo, canonical_remote)
+                self._resolved = github.GitHubForge(target)
         return self._resolved
+
+    def writer(self) -> forge.ForgeWriter:
+        """The same resolved forge, narrowed to its writing surface --
+        every write command's own precondition (issue #248): checked, and
+        refused, before this ever resolves a forge at all -- the same
+        "refuse by name before doing the real work" doctrine
+        `_refuse_unsupported_forge_host` already follows for a bad host.
+        `state_board.StateRefBoard` has no `create_child`/`update_item_body`
+        at all, by design, so a state-ref pin refuses here with the
+        sentence #230 slice 4 will retire. The cast is honest, not a
+        suppression: every adapter this tool builds once storage is not
+        state-ref (`github.GitHubForge` and every test fake standing in for
+        it) already implements the full `ForgeWriter` surface, checked at
+        its own call sites by `capability()`, never by `isinstance`.
+        """
+        storage = board.load_config(_resolve_toplevel() / board.CONFIG_PATH).storage
+        if storage is board.Storage.STATE_REF:
+            raise protocol.ClaimUnavailableError(NOT_YET_STATE_REF_WRITE)
+        return cast(forge.ForgeWriter, self())
 
 
 @dataclass(frozen=True)
@@ -2523,7 +2634,7 @@ def _cmd_check(parsed: argparse.Namespace, session: _ReadSession) -> int:
     # Read for its refusals only: a repository pinned to a grammar this tool
     # no longer reads, or a forge that cannot answer `blocked_by`, must fail
     # here rather than hand back a half-read answer.
-    _load_board_config(client, _resolve_toplevel())
+    config = _load_board_config(client, _resolve_toplevel())
     reference = client.item_reference(number)
     if reference.state is forge.ItemState.MISSING:
         outcome = _missing_number(repository, number)
@@ -2531,7 +2642,9 @@ def _cmd_check(parsed: argparse.Namespace, session: _ReadSession) -> int:
         _worktree, _remote, observed = _store_observation()
         outcome = _pull_request_check(client, tuple(observed.claims.values()), repository, number)
     else:
-        outcome = _issue_check(client, repository, reference.body or "", number)
+        outcome = _issue_check(
+            client, repository, reference.body or "", number, storage=config.storage
+        )
     return outcome.report(as_json=parsed.json)
 
 
@@ -2730,7 +2843,8 @@ def _cmd_rulings(parsed: argparse.Namespace, session: _ReadSession) -> None:
     issues = session.forge().list_open_board_issues()
     projected = _observed_board(session, issues=issues)
     bodies = {issue.number: issue.body for issue in issues}
-    _rulings(projected, bodies, as_json=parsed.json)
+    storage = board.load_config(_resolve_toplevel() / board.CONFIG_PATH).storage
+    _rulings(projected, bodies, as_json=parsed.json, storage=storage)
 
 
 def _next_action_container_number(action: board.NextAction | None) -> int | None:
@@ -2814,6 +2928,7 @@ def _cmd_claim(parsed: argparse.Namespace, session: _WriteSession) -> int:
             # already replayed does), so `session.forge()` -- built and
             # Erwartung-6-checked on this first call (issue #245) -- never
             # runs for a lane claim at all.
+            _refuse_state_ref_write(_resolve_toplevel())
             client = session.forge()
             open_issues = client.list_open_board_issues()
             open_by_number = {issue.number: issue for issue in open_issues}
@@ -2871,6 +2986,7 @@ def _cmd_release(parsed: argparse.Namespace, session: _WriteSession) -> None:
         # forge (issue #245); an abandoned release -- lane or issue -- never
         # calls `session.forge()`, so it never resolves a repository or
         # invokes `gh`.
+        _refuse_state_ref_write(_resolve_toplevel())
         client = session.forge()
         _verify_merged_release(client, client.repository.path, identity, outcome)
     worktree, canonical_remote, observed = _store_observation()
@@ -3236,7 +3352,7 @@ def _cut_slice(
 
 
 def _cmd_cut(parsed: argparse.Namespace, session: _WriteSession) -> int:
-    client = session.forge()
+    client = session.forge.writer()
     number = int(parsed.issue)
     for operation in (
         forge.ForgeOperation.CREATE_CHILD,
@@ -3298,7 +3414,7 @@ def _print_rule_result(
 
 
 def _cmd_rule(parsed: argparse.Namespace, session: _WriteSession) -> int:
-    client = session.forge()
+    client = session.forge.writer()
     _require_update_item_body(client, command="rule")
     _load_board_config(client, _resolve_toplevel())
     number = int(parsed.item)
@@ -3320,7 +3436,7 @@ def _print_ask_result(number: int, index: int, text: str, default: str, *, as_js
 
 
 def _cmd_ask(parsed: argparse.Namespace, session: _WriteSession) -> int:
-    client = session.forge()
+    client = session.forge.writer()
     _require_update_item_body(client, command="ask")
     _load_board_config(client, _resolve_toplevel())
     number = int(parsed.item)

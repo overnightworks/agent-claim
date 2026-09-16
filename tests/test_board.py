@@ -1609,6 +1609,18 @@ def test_board_configuration_reads_and_validates_canonical_remote(tmp_path: Path
         board.load_config(config_path)
 
 
+def test_board_configuration_reads_and_validates_storage(tmp_path: Path) -> None:
+    config_path = tmp_path / "board.toml"
+    assert board.load_config(config_path).storage is board.Storage.GITHUB
+
+    config_path.write_text('storage = "state-ref"\n')
+    assert board.load_config(config_path).storage is board.Storage.STATE_REF
+
+    config_path.write_text('storage = "gitlab"\n')
+    with pytest.raises(ClaimError, match="storage must be 'github' or 'state-ref'"):
+        board.load_config(config_path)
+
+
 def test_board_configuration_refuses_an_unknown_key_by_name(tmp_path: Path) -> None:
     """A typo would otherwise leave the setting at its default, with
     nothing in any output saying the file's own value was never read."""
@@ -1632,9 +1644,12 @@ def test_board_configuration_accepts_every_key_it_defines(tmp_path: Path) -> Non
     config_path.write_text(
         'priority_labels = ["ux"]\nidea_label = "idea"\n'
         'body_contract = "block"\ncanonical_remote = "upstream"\n'
+        'storage = "state-ref"\n'
     )
 
-    assert board.load_config(config_path) == board.BoardConfig(("ux",), "idea", "upstream")
+    assert board.load_config(config_path) == board.BoardConfig(
+        ("ux",), "idea", "upstream", board.Storage.STATE_REF
+    )
 
 
 def test_parse_body_reads_a_valid_minimal_block() -> None:

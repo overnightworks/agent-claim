@@ -61,9 +61,10 @@ layers = [
     "terminal",
     "providers",
     "checkout | store",
-    "github",
+    "github | state_board",
     "forge",
     "board",
+    "items",
     "protocol | process | hook_input",
 ]
 
@@ -73,8 +74,10 @@ type = "forbidden"
 source_modules = ["agent_coordination.store"]
 forbidden_modules = [
     "agent_coordination.github",
+    "agent_coordination.state_board",
     "agent_coordination.forge",
     "agent_coordination.board",
+    "agent_coordination.items",
     "agent_coordination.checkout",
 ]
 allow_indirect_imports = true
@@ -92,7 +95,9 @@ forbidden_modules = [
     "agent_coordination.store",
     "agent_coordination.checkout",
     "agent_coordination.github",
+    "agent_coordination.state_board",
     "agent_coordination.forge",
+    "agent_coordination.items",
 ]
 allow_indirect_imports = false
 as_packages = false

@@ -64,6 +64,14 @@ WORK_ITEM_KIND = "work-item"
 CLASSIFICATION_LINE_PATTERN = re.compile(r"(?im)^(?P<kind>Work-Item|No-Item):(?P<value>[^\r\n]*)$")
 WORK_ITEM_VALUE_PATTERN = re.compile(QUALIFIED_REFERENCE, re.ASCII)
 RECOVERY_STEP = "close or re-project"
+# Printed by `render` (issue #248) whenever `Board.landings_derivable` is
+# `False`: a board source that cannot list merged pull requests leaves
+# `RECOVERY` and every `Stage.CODE_LANDED` row structurally empty, not
+# temporarily so, and this line is the difference a reader cannot otherwise
+# tell from the same "none" a proven-empty GitHub board would also print.
+LANDINGS_NOT_DERIVABLE_LINE = (
+    "landings are not derivable from this board source: recovery and code-landed stay empty"
+)
 # A slice's pull request must never close its still-open epic — that would
 # retire the epic before its remaining slices exist. This repository's
 # established substitute is a whole line opening with one of these markers
@@ -118,6 +126,47 @@ BLOCK_EXPECTATION_DEFAULTS = frozenset({"yes", "no", "later"})
 # proposer's guessed default, so it rules exactly like "yes"/"no" (`rule
 # --later` writes `ruling = "later"` the same way `--yes`/`--no` do).
 BLOCK_EXPECTATION_RULINGS = frozenset({"yes", "no", "later"})
+
+
+class Storage(StrEnum):
+    """Where a repository's board and item data live (`.agent-claim/board.toml`
+    `storage`, issue #248): `GITHUB` reads issues, `STATE_REF` reads
+    `items/<id>.md` files in the tree of `refs/aco/state`. The pin decides
+    which adapter `cli._resolved_forge_target` builds; it never guesses from
+    the remote's own host."""
+
+    GITHUB = "github"
+    STATE_REF = "state-ref"
+
+
+# A state-ref item file's own `[record]` table (issue #248): the identity
+# and relations a GitHub issue would otherwise carry through its native
+# type, sub-issue, and blocked-by relations. Legal only under
+# `storage = "state-ref"` -- `_block_schema_defects` refuses it by name as
+# an unknown top-level key under `storage = "github"` (decision record 0001
+# §2: blockers and parentage on GitHub, never duplicated in the body).
+RECORD_KEY = "record"
+RECORD_STATES = frozenset({"open", "closed"})
+RECORD_KEYS = frozenset(
+    {
+        "title",
+        "state",
+        "kind",
+        "labels",
+        "blocked_by",
+        "parent",
+        "origin",
+        "created_at",
+        "updated_at",
+        "closed_at",
+    }
+)
+# RFC 3339 UTC, second precision -- the one timestamp shape this repository
+# reads from a forge (github.TIMESTAMP_PATTERN) and now from a state-ref
+# item's own record: duplicated here, not imported, because the Layers
+# contract forbids `board` from depending on `github` (`github` depends on
+# `board`, not the reverse).
+RECORD_TIMESTAMP_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 
 
 class ItemKind(StrEnum):
@@ -293,6 +342,11 @@ class BoardConfig:
     # already "origin" (`store.DEFAULT_CANONICAL_REMOTE`) -- this is the one
     # place a repository overrides it.
     canonical_remote: str = "origin"
+    # Which adapter owns this repository's board and item data (issue #248):
+    # `cli._resolved_forge_target` builds the one the pin names, never
+    # guessed from the remote's own host. `github` is the default -- every
+    # repository pinned today lives there.
+    storage: Storage = Storage.GITHUB
 
 
 # The body pin (issue #150) is still a key this file defines, but no longer
@@ -424,6 +478,12 @@ class Board:
     uncut: tuple[UncutSlices, ...]
     repository: str
     requests: int
+    # False for a board source that cannot list merged pull requests at all
+    # (issue #248): `recovery` and `Stage.CODE_LANDED` then stay
+    # structurally empty rather than temporarily so, and `render`/
+    # `board_json` say that plainly instead of rendering the same "none"
+    # either way.
+    landings_derivable: bool = True
 
 
 def _validated_priority_labels(raw: dict[str, object]) -> tuple[str, ...]:
@@ -487,6 +547,18 @@ def _validated_canonical_remote(raw: dict[str, object], path: Path) -> str:
     )
 
 
+def _validated_storage(raw: dict[str, object], path: Path) -> Storage:
+    storage_raw = raw.get("storage")
+    if storage_raw is None:
+        return Storage.GITHUB
+    if isinstance(storage_raw, str) and storage_raw in set(Storage):
+        return Storage(storage_raw)
+    raise protocol.ClaimError(
+        f"board configuration {path} storage must be "
+        f"{Storage.GITHUB.value!r} or {Storage.STATE_REF.value!r}"
+    )
+
+
 def _refuse_unknown_config_keys(raw: dict[str, object], path: Path) -> None:
     """Name a key this file does not define, the way the block parser names
     an unknown top-level key.
@@ -515,6 +587,7 @@ def load_config(path: Path = CONFIG_PATH) -> BoardConfig:
         priority_labels=_validated_priority_labels(raw),
         idea_label=_validated_idea_label(raw),
         canonical_remote=_validated_canonical_remote(raw, path),
+        storage=_validated_storage(raw, path),
     )
 
 
@@ -602,6 +675,10 @@ class ParsedBody:
     frozen_trigger: str | None
     slices: tuple[SliceRow, ...]
     read_state: BodyReadState
+    # The validated `[record]` table (issue #248), or `None` for every body
+    # parsed under `Storage.GITHUB` and every state-ref body without one --
+    # `items.py` is the one reader that ever looks at this field.
+    record: Mapping[str, object] | None = None
 
 
 def _line_ending(raw_line: str) -> str:
@@ -721,6 +798,82 @@ def _block_frozen_until_defects(data: dict[str, object]) -> list[ContractDefect]
     return defects
 
 
+def _record_timestamp_defect(value: object, key_name: str) -> ContractDefect | None:
+    if not isinstance(value, str) or RECORD_TIMESTAMP_PATTERN.fullmatch(value) is None:
+        return ContractDefect(
+            f"record.{key_name}", f"record.{key_name} must be an RFC 3339 UTC timestamp"
+        )
+    return None
+
+
+def _record_identity_defects(value: dict[str, object]) -> list[ContractDefect]:
+    """`[record]`'s own identity fields: `title`, `state`, `kind`, `labels`,
+    `blocked_by` -- split from `_block_record_defects` only to stay under
+    one function's branch budget; the two together are the whole table."""
+    defects: list[ContractDefect] = []
+    title = value.get("title")
+    if not isinstance(title, str) or not title.strip():
+        defects.append(ContractDefect("record.title", "record.title must be a non-empty string"))
+    if value.get("state") not in RECORD_STATES:
+        defects.append(ContractDefect("record.state", "record.state must be open or closed"))
+    kind = value.get("kind")
+    if kind is not None and kind not in set(ItemKind):
+        defects.append(ContractDefect("record.kind", "record.kind must be a known item kind"))
+    labels = value.get("labels", [])
+    if not isinstance(labels, list) or not all(isinstance(label, str) for label in labels):
+        defects.append(ContractDefect("record.labels", "record.labels must be an array of strings"))
+    blocked_by = value.get("blocked_by", [])
+    if not isinstance(blocked_by, list) or not all(isinstance(item, str) for item in blocked_by):
+        defects.append(
+            ContractDefect("record.blocked_by", "record.blocked_by must be an array of item ids")
+        )
+    return defects
+
+
+def _record_relation_defects(value: dict[str, object]) -> list[ContractDefect]:
+    """`[record]`'s remaining fields: `parent`, `origin`, the three
+    timestamps, and the unknown-key sweep."""
+    defects: list[ContractDefect] = []
+    parent = value.get("parent")
+    if parent is not None and not isinstance(parent, str):
+        defects.append(ContractDefect("record.parent", "record.parent must be an item id string"))
+    origin = value.get("origin")
+    if origin is not None and not isinstance(origin, str):
+        defects.append(ContractDefect("record.origin", "record.origin must be a string"))
+    for key_name in ("created_at", "updated_at"):
+        defect = _record_timestamp_defect(value.get(key_name), key_name)
+        if defect is not None:
+            defects.append(defect)
+    closed_at = value.get("closed_at")
+    if closed_at is not None:
+        defect = _record_timestamp_defect(closed_at, "closed_at")
+        if defect is not None:
+            defects.append(defect)
+    if value.get("state") == "closed" and closed_at is None:
+        defects.append(
+            ContractDefect(
+                "record.closed_at", "record.closed_at is required when record.state is closed"
+            )
+        )
+    unknown = sorted(set(value) - RECORD_KEYS)
+    defects.extend(ContractDefect(f"record.{key}", f"unknown key record.{key}") for key in unknown)
+    return defects
+
+
+def _block_record_defects(data: dict[str, object]) -> list[ContractDefect]:
+    """`[record]` (issue #248), valid only when this parse is storage-gated
+    to allow it at all (`_block_schema_defects`'s caller): the identity and
+    relations a GitHub issue would otherwise carry natively. `items.py`
+    trusts every field's shape once this returns no defect -- it never
+    re-validates what this function already checked."""
+    if RECORD_KEY not in data:
+        return []
+    value = data[RECORD_KEY]
+    if not isinstance(value, dict):
+        return [ContractDefect(RECORD_KEY, f"{RECORD_KEY} must be a table")]
+    return _record_identity_defects(value) + _record_relation_defects(value)
+
+
 def _block_expectation_variant_defects(
     prefix: str, entry: dict[str, object]
 ) -> list[ContractDefect]:
@@ -835,7 +988,7 @@ def _block_array_or_defect(
     return value, None
 
 
-def _block_schema_defects(data: dict[str, object]) -> tuple[ContractDefect, ...]:
+def _block_schema_defects(data: dict[str, object], storage: Storage) -> tuple[ContractDefect, ...]:
     defects: list[ContractDefect] = []
     version_defect = _block_version_defect(data)
     if version_defect is not None:
@@ -848,7 +1001,11 @@ def _block_schema_defects(data: dict[str, object]) -> tuple[ContractDefect, ...]
     )
     slices, slice_defect = _block_array_or_defect(data, "slice")
     defects.append(slice_defect) if slice_defect else defects.extend(_block_slice_defects(slices))
-    unknown = sorted(set(data) - BLOCK_TOP_LEVEL_KEYS)
+    allowed_keys = BLOCK_TOP_LEVEL_KEYS
+    if storage is Storage.STATE_REF:
+        allowed_keys = allowed_keys | {RECORD_KEY}
+        defects.extend(_block_record_defects(data))
+    unknown = sorted(set(data) - allowed_keys)
     defects.extend(ContractDefect(key, f"unknown top-level key {key}") for key in unknown)
     return tuple(defects)
 
@@ -931,7 +1088,7 @@ def _block_slices(data: dict[str, object]) -> tuple[SliceRow, ...]:
     )
 
 
-def _valid_block_parsed_body(data: dict[str, object]) -> ParsedBody:
+def _valid_block_parsed_body(data: dict[str, object], storage: Storage) -> ParsedBody:
     now, next_value, done_when = (
         cast(str, data["now"]).strip(),
         cast(str, data["next"]).strip(),
@@ -939,6 +1096,7 @@ def _valid_block_parsed_body(data: dict[str, object]) -> ParsedBody:
     )
     expectations = _block_expectation_dicts(data)
     expectation_state = _block_expectation_state(expectations)
+    record = data.get(RECORD_KEY) if storage is Storage.STATE_REF else None
     return ParsedBody(
         contract=Contract(now, next_value, done_when, ()),
         contract_complete=bool(now and next_value and done_when),
@@ -953,15 +1111,22 @@ def _valid_block_parsed_body(data: dict[str, object]) -> ParsedBody:
         frozen_trigger=_block_frozen_trigger(data),
         slices=_block_slices(data),
         read_state=BodyReadState.VALID,
+        record=cast("Mapping[str, object] | None", record),
     )
 
 
-def parse_body(body: str) -> ParsedBody:
+def parse_body(body: str, *, storage: Storage = Storage.GITHUB) -> ParsedBody:
     """The one read of a work-item body (issue #150, narrowed to one grammar
     by #204): the typed `agent-claim` block. Every consumer reads the
     returned `ParsedBody` instead of re-parsing the raw body. Human prose
     around the block is never parsed -- another repository may own its own
-    section headings in the same body."""
+    section headings in the same body.
+
+    `storage` gates the one storage-specific extension, `[record]` (issue
+    #248): legal, and validated, only under `Storage.STATE_REF`; an unknown
+    top-level key under `Storage.GITHUB`, the default every existing caller
+    keeps reading with.
+    """
     fences = _agent_claim_fence_matches(body)
     if not fences:
         return _LEGACY_PARSED_BODY
@@ -988,10 +1153,10 @@ def parse_body(body: str) -> ParsedBody:
                 ),
             )
         )
-    defects = _block_schema_defects(data)
+    defects = _block_schema_defects(data, storage)
     if defects:
         return _malformed_parsed_body(defects)
-    return _valid_block_parsed_body(data)
+    return _valid_block_parsed_body(data, storage)
 
 
 @dataclass(frozen=True)
@@ -1088,6 +1253,40 @@ def _render_slices(data: Mapping[str, object]) -> list[str]:
     return lines
 
 
+def _render_record_array(values: object) -> str:
+    return "[" + ", ".join(_toml_string(value) for value in cast("list[str]", values)) + "]"
+
+
+def _render_record(data: Mapping[str, object]) -> list[str]:
+    """`[record]` (issue #248), rendered only when `data` carries one --
+    every GitHub-stored block never does. Optional fields (`kind`, `parent`,
+    `origin`, `closed_at`) are omitted entirely rather than written `= ""`,
+    matching how `parse_body`/`_block_record_defects` read their absence as
+    `None`, never as an empty string."""
+    if RECORD_KEY not in data:
+        return []
+    record = cast(Mapping[str, object], data[RECORD_KEY])
+    lines = [
+        "",
+        f"[{RECORD_KEY}]",
+        f"title = {_toml_string(record['title'])}",
+        f"state = {_toml_string(record['state'])}",
+    ]
+    if record.get("kind") is not None:
+        lines.append(f"kind = {_toml_string(record['kind'])}")
+    lines.append(f"labels = {_render_record_array(record.get('labels', []))}")
+    lines.append(f"blocked_by = {_render_record_array(record.get('blocked_by', []))}")
+    if record.get("parent") is not None:
+        lines.append(f"parent = {_toml_string(record['parent'])}")
+    if record.get("origin") is not None:
+        lines.append(f"origin = {_toml_string(record['origin'])}")
+    lines.append(f"created_at = {_toml_string(record['created_at'])}")
+    lines.append(f"updated_at = {_toml_string(record['updated_at'])}")
+    if record.get("closed_at") is not None:
+        lines.append(f"closed_at = {_toml_string(record['closed_at'])}")
+    return lines
+
+
 def render_block(data: Mapping[str, object], newline: str = "\n") -> str:
     """The canonical `agent-claim` block interior for `data` (#150 §4):
     schema key order, TOML-safe strings, unquoted dates, ending in
@@ -1098,6 +1297,7 @@ def render_block(data: Mapping[str, object], newline: str = "\n") -> str:
     lines.extend(_render_frozen_until(data))
     lines.extend(_render_expectations(data))
     lines.extend(_render_slices(data))
+    lines.extend(_render_record(data))
     return newline.join((*lines, ""))
 
 
@@ -1129,14 +1329,17 @@ class ExpectationLine:
     ruled_on: date | None
 
 
-def expectation_lines(body: str) -> tuple[ExpectationLine, ...]:
+def expectation_lines(
+    body: str, *, storage: Storage = Storage.GITHUB
+) -> tuple[ExpectationLine, ...]:
     """Every `[[expectation]]` entry of `body`'s `agent-claim` block, in
     block order -- the one projection `rulings`, `rule --line`, and `ask`'s
     fresh index all share, so a printed index always matches what `rule`
     accepts. Empty for a body with no block, no expectations, or one
     `parse_body` reads as LEGACY/MALFORMED -- a malformed body's lines are
-    not addressable until it is fixed by hand."""
-    if parse_body(body).read_state is not BodyReadState.VALID:
+    not addressable until it is fixed by hand. `storage` is forwarded to
+    `parse_body` unchanged (issue #248)."""
+    if parse_body(body, storage=storage).read_state is not BodyReadState.VALID:
         return ()
     entries = _block_expectation_dicts(locate_agent_claim_block(body).data)
     return tuple(
@@ -1603,6 +1806,7 @@ class _BoardBuildContext:
     in_flight_references: frozenset[int]
     landed_references: frozenset[int]
     open_branches: frozenset[str]
+    open_pull_requests_supported: bool
     trunk_landings: tuple[datetime, ...]
     container_progress: dict[int, ContainerProgress]
     child_container: dict[int, int]
@@ -1610,19 +1814,20 @@ class _BoardBuildContext:
 
 
 def _board_stage(
-    issue: Issue,
-    claim: protocol.ScopedClaim | None,
-    *,
-    in_flight_references: frozenset[int],
-    landed_references: frozenset[int],
-    open_branches: frozenset[str],
+    issue: Issue, claim: protocol.ScopedClaim | None, context: _BoardBuildContext
 ) -> Stage:
-    in_flight = issue.number in in_flight_references or (
-        claim is not None and claim.branch in open_branches
+    # A board source that cannot list open pull requests at all (issue #248,
+    # `state-ref`) never populates `open_branches`, so a live claim can never
+    # match it; its own honest in-flight signal is a live claim with a
+    # branch, not a PR head this source structurally cannot see.
+    in_flight = issue.number in context.in_flight_references or (
+        claim is not None
+        and bool(claim.branch)
+        and (not context.open_pull_requests_supported or claim.branch in context.open_branches)
     )
     if in_flight:
         return Stage.IN_FLIGHT
-    if issue.number in landed_references:
+    if issue.number in context.landed_references:
         return Stage.CODE_LANDED
     return Stage.TEXT_ONLY
 
@@ -1707,13 +1912,7 @@ def _board_item(
     ruling_landings, ruling_old = _ruling_freshness_from(parsed.ruling_date, context.trunk_landings)
     frozen = parsed.frozen_trigger
     claim = context.claims_by_issue.get(issue.number)
-    stage = _board_stage(
-        issue,
-        claim,
-        in_flight_references=context.in_flight_references,
-        landed_references=context.landed_references,
-        open_branches=context.open_branches,
-    )
+    stage = _board_stage(issue, claim, context)
     single_next = _single_concrete_next(contract.next)
     projectionless_idea = parsed.projectionless and has_label(issue.labels, config.idea_label)
     next_step = IDEA_REFINEMENT_STEP if projectionless_idea else contract.next
@@ -1803,6 +2002,13 @@ class BoardBuildInputs:
     # already read from the store's git history, since board.py's own build
     # stays pure and never reaches for git itself. Keyed by claim_id.
     claim_ages: Mapping[str, datetime] = field(default_factory=dict)
+    # The board source's own capability (issue #248), never the storage
+    # pin: a source that cannot list pull requests at all -- `state-ref`
+    # today, honestly, not by name -- still has an in-flight signal (a live
+    # claim with a branch) but no landed one, so the two stay independent
+    # booleans instead of one storage-shaped flag.
+    open_pull_requests_supported: bool = True
+    landings_derivable: bool = True
 
 
 def build_board(inputs: BoardBuildInputs) -> Board:
@@ -1812,7 +2018,9 @@ def build_board(inputs: BoardBuildInputs) -> Board:
     config = inputs.config
     repository = inputs.repository
     observed_at = (inputs.now or datetime.now(UTC)).astimezone(UTC)
-    parsed_bodies = {issue.number: parse_body(issue.body) for issue in issues}
+    parsed_bodies = {
+        issue.number: parse_body(issue.body, storage=config.storage) for issue in issues
+    }
     contracts = {number: parsed.contract for number, parsed in parsed_bodies.items()}
     blockers: dict[int, tuple[IssueReference, ...]] = {
         issue.number: open_dependency_blockers(
@@ -1855,6 +2063,7 @@ def build_board(inputs: BoardBuildInputs) -> Board:
         landed_references=_associated_issues(recent_merged_pull_requests, repository)
         | _touched_without_closing(recent_merged_pull_requests),
         open_branches=frozenset(pr.head_ref_name for pr in open_pull_requests),
+        open_pull_requests_supported=inputs.open_pull_requests_supported,
         trunk_landings=inputs.trunk_landings,
         container_progress=container_progress,
         child_container=child_container,
@@ -1888,6 +2097,7 @@ def build_board(inputs: BoardBuildInputs) -> Board:
         uncut=uncut,
         repository=repository,
         requests=inputs.requests,
+        landings_derivable=inputs.landings_derivable,
     )
 
 
@@ -2117,8 +2327,10 @@ def render(board: Board) -> str:
     recovery = ", ".join(f"#{item.number}" for item in board.recovery) or "none"
     containers = "\n".join(_container_lines(board)) or "none"
     uncut = "\n".join(_uncut_line(finding) for finding in board.uncut) or "none"
+    landings_note = "" if board.landings_derivable else f"\n{LANDINGS_NOT_DERIVABLE_LINE}"
     return (
         f"{table}\n\nREADY NOW\n{ready}\n\nSTALE\n{stale}\n\nRECOVERY ({RECOVERY_STEP})\n{recovery}"
+        f"{landings_note}"
         f"\n\nCONTAINERS\n{containers}\n\nUNCUT\n{uncut}\n\nrequests: {board.requests}"
     )
 
