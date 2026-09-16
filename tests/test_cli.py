@@ -45,6 +45,7 @@ from cli_fixtures import (
     _patch_command,
     _real_git,
     _set_agent_identity_env,
+    arrange_scope_width,
 )
 from github_fixtures import LANDING_BRANCH, WORK_ITEM_ISSUE
 
@@ -6444,19 +6445,388 @@ def test_cli_rescope_refuses_primary_checkout(
     assert "linked isolated worktree" in captured.err
 
 
-def test_cli_claim_refuses_a_directory_scope_without_whole(
+@dataclass(frozen=True)
+class _ScopeWidthRefusal:
+    """One `claim`/`rescope` case that must refuse for a wide scope, sharing
+    the monkeypatch quadruple and argv skeleton with every other row and
+    differing only in what trips the width check and what the refusal says."""
+
+    id: str
+    command: str
+    argv_tail: tuple[str, ...]
+    directories: frozenset[str] = frozenset()
+    versioned: tuple[str, ...] | None = None
+    board_issues: tuple[board.Issue, ...] = ()
+    standing_scope: tuple[str, ...] | None = None
+    exact_err: str | None = None
+
+
+_SCOPE_WIDTH_REFUSALS = (
+    _ScopeWidthRefusal(
+        id="directory-scope",
+        command="claim",
+        argv_tail=("--scope", "docs", "--claim-id", "tree"),
+        directories=frozenset({"docs"}),
+    ),
+    _ScopeWidthRefusal(
+        id="named-directory",
+        command="claim",
+        argv_tail=("--scope", "docs", "--claim-id", "named-directory"),
+        directories=frozenset({"docs"}),
+        exact_err="ERROR: scope is wide: 1 directory in scope (docs); pass --whole REASON\n",
+    ),
+    _ScopeWidthRefusal(
+        id="directory-plus-child-scope",
+        command="claim",
+        argv_tail=("--scope", "docs", "--scope", "docs/a.md", "--claim-id", "tree"),
+        directories=frozenset({"docs"}),
+    ),
+    _ScopeWidthRefusal(
+        id="rescope-add-directory",
+        command="rescope",
+        argv_tail=("--add", "docs"),
+        directories=frozenset({"docs"}),
+        standing_scope=("src/widget.py",),
+    ),
+    _ScopeWidthRefusal(
+        id="share-above-quarter",
+        command="claim",
+        argv_tail=(
+            "--scope",
+            "LICENSE",
+            "--scope",
+            "README.md",
+            "--scope",
+            "src",
+            "--claim-id",
+            "wide",
+        ),
+        versioned=TWELVE_VERSIONED_FILES,
+    ),
+    _ScopeWidthRefusal(
+        id="named-share",
+        command="claim",
+        argv_tail=(
+            "--scope",
+            "LICENSE",
+            "--scope",
+            "README.md",
+            "--scope",
+            "src",
+            "--claim-id",
+            "named-share",
+        ),
+        versioned=TWELVE_VERSIONED_FILES,
+        exact_err=(
+            "ERROR: scope is wide: 4 paths of 12 versioned files (33 %) exceeds a quarter; "
+            "pass --whole REASON\n"
+        ),
+    ),
+    _ScopeWidthRefusal(
+        id="cut-directory-scope",
+        command="claim",
+        argv_tail=("--scope", "docs", "--claim-id", "cut"),
+        directories=frozenset({"docs"}),
+        board_issues=(
+            board_issue(
+                72,
+                "Cut work",
+                complete_contract("Claim #72.") + "\n\n## Schnitt\n\n**Scheibe 1: Title**\n",
+            ),
+        ),
+    ),
+    _ScopeWidthRefusal(
+        id="schnitt-heading-without-scheibe",
+        command="claim",
+        argv_tail=("--scope", "docs", "--claim-id", "heading"),
+        directories=frozenset({"docs"}),
+        board_issues=(
+            board_issue(
+                72,
+                "Uncut",
+                complete_contract("Claim #72.") + "\n\n## Schnitt\n\nNo slices yet.\n",
+            ),
+        ),
+    ),
+    _ScopeWidthRefusal(
+        id="lane-directory",
+        command="claim-lane",
+        argv_tail=("--scope", "docs", "--claim-id", "lane-docs"),
+        directories=frozenset({"docs"}),
+    ),
+    _ScopeWidthRefusal(
+        id="cut-directory-high-share",
+        command="claim",
+        argv_tail=("--scope", "docs", "--claim-id", "wide-cut"),
+        directories=frozenset({"docs"}),
+        versioned=("LICENSE", "README.md", "docs/a.md", "docs/b.md"),
+        board_issues=(
+            board_issue(
+                72,
+                "Cut work",
+                complete_contract("Claim #72.") + "\n\n## Schnitt\n\n**Scheibe 1: Title**\n",
+            ),
+        ),
+    ),
+    _ScopeWidthRefusal(
+        id="rescope-add-combined-share",
+        command="rescope",
+        argv_tail=("--add", "LICENSE", "--add", "README.md"),
+        versioned=TWELVE_VERSIONED_FILES,
+        standing_scope=("src",),
+    ),
+    _ScopeWidthRefusal(
+        id="claim-refuses-four-named-paths",
+        command="claim",
+        argv_tail=(
+            "--scope",
+            "new_a.py",
+            "--scope",
+            "new_b.py",
+            "--scope",
+            "new_c.py",
+            "--scope",
+            "new_d.py",
+            "--claim-id",
+            "four",
+        ),
+    ),
+    _ScopeWidthRefusal(
+        id="named-path-count",
+        command="claim",
+        argv_tail=(
+            "--scope",
+            "new_a.py",
+            "--scope",
+            "new_b.py",
+            "--scope",
+            "new_c.py",
+            "--scope",
+            "new_d.py",
+            "--claim-id",
+            "named-path-count",
+        ),
+        exact_err="ERROR: scope is wide: 4 paths exceeds three; pass --whole REASON\n",
+    ),
+    _ScopeWidthRefusal(
+        id="rescope-widening-to-four-paths",
+        command="rescope",
+        argv_tail=("--add", "new_b.py", "--add", "new_c.py", "--add", "new_d.py"),
+        standing_scope=("new_a.py",),
+    ),
+)
+
+
+@dataclass(frozen=True)
+class _ScopeWidthAcceptance:
+    """One `claim`/`rescope` case that must accept a scope within the width
+    limits, sharing the same arrangement as `_ScopeWidthRefusal` and
+    differing only in the trigger and in what the acceptance reports."""
+
+    id: str
+    command: str
+    argv_tail: tuple[str, ...]
+    check: Callable[[str, str], None]
+    directories: frozenset[str] = frozenset()
+    versioned: tuple[str, ...] | None = None
+    standing_scope: tuple[str, ...] | None = None
+
+
+def _assert_below_share_floor_human_line(out: str, err: str) -> None:
+    assert out.endswith("4 of 11 versioned files (36%); overlaps no other open claims\n")
+
+
+def _assert_share_at_quarter_human_line(out: str, err: str) -> None:
+    assert out.endswith("3 of 12 versioned files (25%); overlaps no other open claims\n")
+
+
+def _assert_share_above_a_quarter_with_whole_payload(out: str, err: str) -> None:
+    payload = json.loads(out)
+    assert payload["versioned_files"] == 4
+    assert payload["versioned_files_total"] == 12
+    assert payload["share"] == pytest.approx(1 / 3)
+    assert payload["touches"] == []
+
+
+def _assert_rescope_persisted_whole_reason(out: str, err: str) -> None:
+    standing = _live_store_claim()
+    assert standing.scope == ("src/widget.py", "docs")
+    assert standing.whole_reason == "widen to the docs tree"
+
+
+def _assert_claim_accepted_three_named_paths(out: str, err: str) -> None:
+    posted = _live_store_claim()
+    assert posted.scope == ("new_a.py", "new_b.py", "new_c.py")
+    assert posted.whole_reason is None
+
+
+def _assert_claim_persisted_whole_reason(out: str, err: str) -> None:
+    posted = _live_store_claim()
+    assert posted.whole_reason == "the four adapters share one lock"
+
+
+def _assert_claim_allowed_directory_with_whole(out: str, err: str) -> None:
+    posted = _live_store_claim()
+    assert posted.scope == ("docs",)
+    assert posted.whole_reason == "rewrite the docs tree"
+
+
+_SCOPE_WIDTH_ACCEPTANCES = (
+    _ScopeWidthAcceptance(
+        id="below-share-floor",
+        command="claim",
+        argv_tail=(
+            "--scope",
+            "LICENSE",
+            "--scope",
+            "README.md",
+            "--scope",
+            "src",
+            "--claim-id",
+            "below-floor",
+        ),
+        versioned=TWELVE_VERSIONED_FILES[:-1],
+        check=_assert_below_share_floor_human_line,
+    ),
+    _ScopeWidthAcceptance(
+        id="share-above-quarter-with-whole",
+        command="claim",
+        argv_tail=(
+            "--scope",
+            "LICENSE",
+            "--scope",
+            "README.md",
+            "--scope",
+            "src",
+            "--whole",
+            "cover four files",
+            "--claim-id",
+            "wide",
+            "--json",
+        ),
+        versioned=TWELVE_VERSIONED_FILES,
+        check=_assert_share_above_a_quarter_with_whole_payload,
+    ),
+    _ScopeWidthAcceptance(
+        id="share-at-quarter",
+        command="claim",
+        argv_tail=(
+            "--scope",
+            "LICENSE",
+            "--scope",
+            "README.md",
+            "--scope",
+            "pyproject.toml",
+            "--claim-id",
+            "quarter",
+        ),
+        versioned=TWELVE_VERSIONED_FILES,
+        check=_assert_share_at_quarter_human_line,
+    ),
+    _ScopeWidthAcceptance(
+        id="rescope-persists-whole-reason",
+        command="rescope",
+        argv_tail=("--add", "docs", "--whole", "widen to the docs tree"),
+        directories=frozenset({"docs"}),
+        standing_scope=("src/widget.py",),
+        check=_assert_rescope_persisted_whole_reason,
+    ),
+    _ScopeWidthAcceptance(
+        id="claim-accepts-three-named-paths",
+        command="claim",
+        argv_tail=(
+            "--scope",
+            "new_a.py",
+            "--scope",
+            "new_b.py",
+            "--scope",
+            "new_c.py",
+            "--claim-id",
+            "three",
+        ),
+        check=_assert_claim_accepted_three_named_paths,
+    ),
+    _ScopeWidthAcceptance(
+        id="claim-persists-whole-reason",
+        command="claim",
+        argv_tail=(
+            "--scope",
+            "new_a.py",
+            "--scope",
+            "new_b.py",
+            "--scope",
+            "new_c.py",
+            "--scope",
+            "new_d.py",
+            "--whole",
+            "the four adapters share one lock",
+            "--claim-id",
+            "wide",
+        ),
+        check=_assert_claim_persisted_whole_reason,
+    ),
+    _ScopeWidthAcceptance(
+        id="claim-allows-directory-with-whole",
+        command="claim",
+        argv_tail=("--scope", "docs", "--whole", "rewrite the docs tree", "--claim-id", "tree"),
+        directories=frozenset({"docs"}),
+        check=_assert_claim_allowed_directory_with_whole,
+    ),
+)
+
+
+def _run_scope_width_command(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-) -> None:
-    client = FakeForge()
-    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
-    monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
-    monkeypatch.setattr(
-        checkout, "_scope_directories", lambda paths: tuple(p for p in paths if p == "docs")
-    )
-
-    status = issue_claim.main(
-        [
+    *,
+    command: str,
+    argv_tail: tuple[str, ...],
+    directories: frozenset[str] = frozenset(),
+    versioned: tuple[str, ...] | None = None,
+    standing_scope: tuple[str, ...] | None = None,
+    board_issues: tuple[board.Issue, ...] = (),
+) -> tuple[int, str, str]:
+    """Run one `claim`/`rescope` scope-width case end to end and return its
+    exit status, stdout, and stderr, for the refusal and acceptance tables
+    that share every arrangement and differ only in trigger and outcome."""
+    client = FakeForge(board_issues=board_issues)
+    if command == "rescope":
+        assert standing_scope is not None
+        _patch_store_write(
+            monkeypatch,
+            _store_claim_from_request(
+                request(issue=72, branch="codex/issue-72", scope=standing_scope)
+            ),
+        )
+        git_values = _git_checkout()
+        monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
+        _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Codex Sol"})
+        arrange_scope_width(
+            monkeypatch,
+            client,
+            directories=directories,
+            versioned=versioned,
+            validate_checkout=False,
+        )
+        argv = ["--repo", "example/agent-claim", "rescope", "72", *argv_tail]
+    elif command == "claim-lane":
+        _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Ada"})
+        git_values = {("branch", "--show-current"): "docs/lane-cleanup"}
+        monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
+        arrange_scope_width(monkeypatch, client, directories=directories, versioned=versioned)
+        argv = [
+            "--repo",
+            "example/agent-claim",
+            "claim",
+            "--base",
+            BASE,
+            "--branch",
+            "docs/lane-cleanup",
+            *argv_tail,
+        ]
+    else:
+        arrange_scope_width(monkeypatch, client, directories=directories, versioned=versioned)
+        argv = [
             "--repo",
             "example/agent-claim",
             "claim",
@@ -6467,94 +6837,64 @@ def test_cli_claim_refuses_a_directory_scope_without_whole(
             BASE,
             "--branch",
             "codex/issue-72",
-            "--scope",
-            "docs",
-            "--claim-id",
-            "tree",
+            *argv_tail,
         ]
-    )
+
+    status = issue_claim.main(argv)
     captured = capsys.readouterr()
-
-    assert status == 2
-    assert captured.out == ""
-    assert "scope is wide" in captured.err
-    assert "--whole" in captured.err
+    return status, captured.out, captured.err
 
 
-def test_cli_claim_wide_scope_refusal_names_the_directory(
+@pytest.mark.parametrize(
+    "case", _SCOPE_WIDTH_REFUSALS, ids=[case.id for case in _SCOPE_WIDTH_REFUSALS]
+)
+def test_cli_claim_and_rescope_refuse_a_wide_scope_without_whole(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    case: _ScopeWidthRefusal,
 ) -> None:
-    """A directory-tripped refusal names the directory, not the whole rule."""
-    client = FakeForge()
-    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
-    monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
-    monkeypatch.setattr(
-        checkout, "_scope_directories", lambda paths: tuple(p for p in paths if p == "docs")
-    )
-
-    status = issue_claim.main(
-        [
-            "--repo",
-            "example/agent-claim",
-            "claim",
-            "72",
-            "--agent",
-            "Ada",
-            "--base",
-            BASE,
-            "--branch",
-            "codex/issue-72",
-            "--scope",
-            "docs",
-            "--claim-id",
-            "named-directory",
-        ]
+    status, out, err = _run_scope_width_command(
+        monkeypatch,
+        capsys,
+        command=case.command,
+        argv_tail=case.argv_tail,
+        directories=case.directories,
+        versioned=case.versioned,
+        standing_scope=case.standing_scope,
+        board_issues=case.board_issues,
     )
 
     assert status == 2
-    assert capsys.readouterr().err == (
-        "ERROR: scope is wide: 1 directory in scope (docs); pass --whole REASON\n"
-    )
+    assert out == ""
+    if case.exact_err is not None:
+        assert err == case.exact_err
+    else:
+        assert "scope is wide" in err
+        assert "--whole" in err
+    if case.command == "rescope":
+        assert _live_store_claim().scope == case.standing_scope
 
 
-def test_cli_claim_refuses_a_directory_plus_child_scope_without_whole(
+@pytest.mark.parametrize(
+    "case", _SCOPE_WIDTH_ACCEPTANCES, ids=[case.id for case in _SCOPE_WIDTH_ACCEPTANCES]
+)
+def test_cli_claim_and_rescope_accept_a_scope_within_width_limits(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    case: _ScopeWidthAcceptance,
 ) -> None:
-    client = FakeForge()
-    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
-    monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
-    monkeypatch.setattr(
-        checkout, "_scope_directories", lambda paths: tuple(p for p in paths if p == "docs")
+    status, out, err = _run_scope_width_command(
+        monkeypatch,
+        capsys,
+        command=case.command,
+        argv_tail=case.argv_tail,
+        directories=case.directories,
+        versioned=case.versioned,
+        standing_scope=case.standing_scope,
     )
 
-    status = issue_claim.main(
-        [
-            "--repo",
-            "example/agent-claim",
-            "claim",
-            "72",
-            "--agent",
-            "Ada",
-            "--base",
-            BASE,
-            "--branch",
-            "codex/issue-72",
-            "--scope",
-            "docs",
-            "--scope",
-            "docs/a.md",
-            "--claim-id",
-            "tree",
-        ]
-    )
-    captured = capsys.readouterr()
-
-    assert status == 2
-    assert captured.out == ""
-    assert "scope is wide" in captured.err
-    assert "--whole" in captured.err
+    assert status == 0
+    case.check(out, err)
 
 
 def test_cli_status_path_prints_the_claim_holding_a_path(
@@ -6630,240 +6970,6 @@ def test_cli_status_path_answers_even_when_a_claim_age_read_would_raise(
 
     assert status == 0
     assert "CLAIMED docs/PRODUCT.md issue #72: Ada (builder) claim=mine" in capsys.readouterr().out
-
-
-def test_cli_rescope_refuses_adding_a_directory_without_whole(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    client = FakeForge()
-    _patch_store_write(
-        monkeypatch,
-        _store_claim_from_request(
-            request(issue=72, branch="codex/issue-72", scope=("src/widget.py",))
-        ),
-    )
-    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
-    git_values = _git_checkout()
-    monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
-    monkeypatch.setattr(checkout, "_scope_directories", lambda paths: paths)
-    _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Codex Sol"})
-
-    status = issue_claim.main(["--repo", "example/agent-claim", "rescope", "72", "--add", "docs"])
-    captured = capsys.readouterr()
-
-    assert status == 2
-    assert captured.out == ""
-    assert "scope is wide" in captured.err
-    assert "--whole" in captured.err
-    standing = _live_store_claim()
-    assert standing.scope == ("src/widget.py",)
-
-
-def test_cli_claim_share_above_a_quarter_requires_whole(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    client = FakeForge()
-    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
-    monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
-    monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
-    monkeypatch.setattr(checkout, "versioned_paths", lambda: TWELVE_VERSIONED_FILES)
-
-    status = issue_claim.main(
-        [
-            "--repo",
-            "example/agent-claim",
-            "claim",
-            "72",
-            "--agent",
-            "Ada",
-            "--base",
-            BASE,
-            "--branch",
-            "codex/issue-72",
-            "--scope",
-            "LICENSE",
-            "--scope",
-            "README.md",
-            "--scope",
-            "src",
-            "--claim-id",
-            "wide",
-        ]
-    )
-    captured = capsys.readouterr()
-
-    assert status == 2
-    assert captured.out == ""
-    assert "scope is wide" in captured.err
-    assert "--whole" in captured.err
-
-
-def test_cli_claim_below_the_share_floor_is_never_wide_on_share(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Eleven versioned files stay under `WIDE_SCOPE_SHARE_FLOOR`: three named
-    paths covering 4 of 11 is still not wide (Audit ruling 7c, #163)."""
-    client = FakeForge()
-    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
-    monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
-    monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
-    monkeypatch.setattr(checkout, "versioned_paths", lambda: TWELVE_VERSIONED_FILES[:-1])
-
-    status = issue_claim.main(
-        [
-            "--repo",
-            "example/agent-claim",
-            "claim",
-            "72",
-            "--agent",
-            "Ada",
-            "--base",
-            BASE,
-            "--branch",
-            "codex/issue-72",
-            "--scope",
-            "LICENSE",
-            "--scope",
-            "README.md",
-            "--scope",
-            "src",
-            "--claim-id",
-            "below-floor",
-        ]
-    )
-    captured = capsys.readouterr()
-
-    assert status == 0
-    assert captured.out.endswith("4 of 11 versioned files (36%); overlaps no other open claims\n")
-
-
-def test_cli_claim_wide_scope_refusal_names_the_share(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """A share-tripped refusal names the covered/versioned counts and the
-    percentage, not the whole rule."""
-    client = FakeForge()
-    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
-    monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
-    monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
-    monkeypatch.setattr(checkout, "versioned_paths", lambda: TWELVE_VERSIONED_FILES)
-
-    status = issue_claim.main(
-        [
-            "--repo",
-            "example/agent-claim",
-            "claim",
-            "72",
-            "--agent",
-            "Ada",
-            "--base",
-            BASE,
-            "--branch",
-            "codex/issue-72",
-            "--scope",
-            "LICENSE",
-            "--scope",
-            "README.md",
-            "--scope",
-            "src",
-            "--claim-id",
-            "named-share",
-        ]
-    )
-
-    assert status == 2
-    assert capsys.readouterr().err == (
-        "ERROR: scope is wide: 4 paths of 12 versioned files (33 %) exceeds a quarter; "
-        "pass --whole REASON\n"
-    )
-
-
-def test_cli_claim_share_above_a_quarter_succeeds_with_whole(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    client = FakeForge()
-    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
-    monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
-    monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
-    monkeypatch.setattr(checkout, "versioned_paths", lambda: TWELVE_VERSIONED_FILES)
-
-    status = issue_claim.main(
-        [
-            "--repo",
-            "example/agent-claim",
-            "claim",
-            "72",
-            "--agent",
-            "Ada",
-            "--base",
-            BASE,
-            "--branch",
-            "codex/issue-72",
-            "--scope",
-            "LICENSE",
-            "--scope",
-            "README.md",
-            "--scope",
-            "src",
-            "--whole",
-            "cover four files",
-            "--claim-id",
-            "wide",
-            "--json",
-        ]
-    )
-    payload = json.loads(capsys.readouterr().out)
-
-    assert status == 0
-    assert payload["versioned_files"] == 4
-    assert payload["versioned_files_total"] == 12
-    assert payload["share"] == pytest.approx(1 / 3)
-    assert payload["touches"] == []
-
-
-def test_cli_claim_share_at_a_quarter_does_not_need_whole(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Exactly a quarter of twelve versioned files does not exceed the limit."""
-    client = FakeForge()
-    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
-    monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
-    monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
-    monkeypatch.setattr(checkout, "versioned_paths", lambda: TWELVE_VERSIONED_FILES)
-
-    status = issue_claim.main(
-        [
-            "--repo",
-            "example/agent-claim",
-            "claim",
-            "72",
-            "--agent",
-            "Ada",
-            "--base",
-            BASE,
-            "--branch",
-            "codex/issue-72",
-            "--scope",
-            "LICENSE",
-            "--scope",
-            "README.md",
-            "--scope",
-            "pyproject.toml",
-            "--claim-id",
-            "quarter",
-        ]
-    )
-
-    assert status == 0
-    assert capsys.readouterr().out.endswith(
-        "3 of 12 versioned files (25%); overlaps no other open claims\n"
-    )
 
 
 def test_cli_claim_touches_stay_empty_beside_a_disjoint_standing_claim(
@@ -7163,448 +7269,6 @@ def test_cli_status_marks_a_claim_old_after_sixty_one_minutes(
     assert payload["claims"][0]["old"] is True
 
 
-def test_cli_claim_cut_does_not_exempt_a_directory_scope(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    client = FakeForge()
-    client.board_issues = (
-        board_issue(
-            72,
-            "Cut work",
-            complete_contract("Claim #72.") + "\n\n## Schnitt\n\n**Scheibe 1: Title**\n",
-        ),
-    )
-    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
-    monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
-    monkeypatch.setattr(
-        checkout, "_scope_directories", lambda paths: tuple(p for p in paths if p == "docs")
-    )
-
-    status = issue_claim.main(
-        [
-            "--repo",
-            "example/agent-claim",
-            "claim",
-            "72",
-            "--agent",
-            "Ada",
-            "--base",
-            BASE,
-            "--branch",
-            "codex/issue-72",
-            "--scope",
-            "docs",
-            "--claim-id",
-            "cut",
-        ]
-    )
-
-    captured = capsys.readouterr()
-
-    assert status == 2
-    assert "scope is wide" in captured.err
-    assert "--whole" in captured.err
-
-
-def test_cli_claim_refuses_a_schnitt_heading_without_a_scheibe_line(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    client = FakeForge()
-    client.board_issues = (
-        board_issue(
-            72,
-            "Uncut",
-            complete_contract("Claim #72.") + "\n\n## Schnitt\n\nNo slices yet.\n",
-        ),
-    )
-    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
-    monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
-    monkeypatch.setattr(
-        checkout, "_scope_directories", lambda paths: tuple(p for p in paths if p == "docs")
-    )
-
-    status = issue_claim.main(
-        [
-            "--repo",
-            "example/agent-claim",
-            "claim",
-            "72",
-            "--agent",
-            "Ada",
-            "--base",
-            BASE,
-            "--branch",
-            "codex/issue-72",
-            "--scope",
-            "docs",
-            "--claim-id",
-            "heading",
-        ]
-    )
-    captured = capsys.readouterr()
-
-    assert status == 2
-    assert "scope is wide" in captured.err
-    assert "--whole" in captured.err
-
-
-def test_cli_lane_directory_without_whole_is_wide(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    _set_agent_identity_env(monkeypatch, {"ACO_AGENT": "Ada"})
-    client = FakeForge()
-    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
-    monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
-    monkeypatch.setattr(
-        checkout, "_scope_directories", lambda paths: tuple(p for p in paths if p == "docs")
-    )
-    git_values = {("branch", "--show-current"): "docs/lane-cleanup"}
-    monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
-
-    status = issue_claim.main(
-        [
-            "--repo",
-            "example/agent-claim",
-            "claim",
-            "--base",
-            BASE,
-            "--branch",
-            "docs/lane-cleanup",
-            "--scope",
-            "docs",
-            "--claim-id",
-            "lane-docs",
-        ]
-    )
-    captured = capsys.readouterr()
-
-    assert status == 2
-    assert "scope is wide" in captured.err
-    assert "--whole" in captured.err
-
-
-def test_cli_claim_cut_directory_still_needs_whole_when_share_is_high(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    client = FakeForge()
-    client.board_issues = (
-        board_issue(
-            72,
-            "Cut work",
-            complete_contract("Claim #72.") + "\n\n## Schnitt\n\n**Scheibe 1: Title**\n",
-        ),
-    )
-    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
-    monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
-    monkeypatch.setattr(
-        checkout, "_scope_directories", lambda paths: tuple(p for p in paths if p == "docs")
-    )
-    monkeypatch.setattr(
-        checkout,
-        "versioned_paths",
-        lambda: ("LICENSE", "README.md", "docs/a.md", "docs/b.md"),
-    )
-
-    status = issue_claim.main(
-        [
-            "--repo",
-            "example/agent-claim",
-            "claim",
-            "72",
-            "--agent",
-            "Ada",
-            "--base",
-            BASE,
-            "--branch",
-            "codex/issue-72",
-            "--scope",
-            "docs",
-            "--claim-id",
-            "wide-cut",
-        ]
-    )
-    captured = capsys.readouterr()
-
-    assert status == 2
-    assert captured.out == ""
-    assert "scope is wide" in captured.err
-    assert "--whole" in captured.err
-
-
-def test_cli_rescope_add_that_raises_combined_share_requires_whole(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    client = FakeForge()
-    standing = request(issue=72, branch="codex/issue-72", scope=("src",))
-    _patch_store_write(monkeypatch, _store_claim_from_request(standing))
-    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
-    git_values = _git_checkout()
-    monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
-    monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
-    monkeypatch.setattr(checkout, "versioned_paths", lambda: TWELVE_VERSIONED_FILES)
-    _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Codex Sol"})
-
-    status = issue_claim.main(
-        [
-            "--repo",
-            "example/agent-claim",
-            "rescope",
-            "72",
-            "--add",
-            "LICENSE",
-            "--add",
-            "README.md",
-        ]
-    )
-    captured = capsys.readouterr()
-
-    assert status == 2
-    assert captured.out == ""
-    assert "scope is wide" in captured.err
-    assert "--whole" in captured.err
-    standing = _live_store_claim()
-    assert standing.scope == ("src",)
-
-
-def test_cli_rescope_persists_whole_reason(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    client = FakeForge()
-    _patch_store_write(
-        monkeypatch,
-        _store_claim_from_request(
-            request(issue=72, branch="codex/issue-72", scope=("src/widget.py",))
-        ),
-    )
-    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
-    git_values = _git_checkout()
-    monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
-    monkeypatch.setattr(checkout, "_scope_directories", lambda paths: paths)
-    _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Codex Sol"})
-
-    status = issue_claim.main(
-        [
-            "--repo",
-            "example/agent-claim",
-            "rescope",
-            "72",
-            "--add",
-            "docs",
-            "--whole",
-            "widen to the docs tree",
-        ]
-    )
-
-    assert status == 0
-    standing = _live_store_claim()
-    assert standing.scope == ("src/widget.py", "docs")
-    assert standing.whole_reason == "widen to the docs tree"
-
-
-def test_cli_claim_accepts_three_named_paths_without_whole(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    client = FakeForge()
-    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
-    monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
-    monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
-
-    status = issue_claim.main(
-        [
-            "--repo",
-            "example/agent-claim",
-            "claim",
-            "72",
-            "--agent",
-            "Ada",
-            "--base",
-            BASE,
-            "--branch",
-            "codex/issue-72",
-            "--scope",
-            "new_a.py",
-            "--scope",
-            "new_b.py",
-            "--scope",
-            "new_c.py",
-            "--claim-id",
-            "three",
-        ]
-    )
-
-    assert status == 0
-    posted = _live_store_claim()
-    assert posted.scope == ("new_a.py", "new_b.py", "new_c.py")
-    assert posted.whole_reason is None
-
-
-def test_cli_claim_refuses_four_named_paths_without_whole(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    client = FakeForge()
-    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
-    monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
-    monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
-
-    status = issue_claim.main(
-        [
-            "--repo",
-            "example/agent-claim",
-            "claim",
-            "72",
-            "--agent",
-            "Ada",
-            "--base",
-            BASE,
-            "--branch",
-            "codex/issue-72",
-            "--scope",
-            "new_a.py",
-            "--scope",
-            "new_b.py",
-            "--scope",
-            "new_c.py",
-            "--scope",
-            "new_d.py",
-            "--claim-id",
-            "four",
-        ]
-    )
-    captured = capsys.readouterr()
-
-    assert status == 2
-    assert captured.out == ""
-    assert "scope is wide" in captured.err
-    assert "--whole" in captured.err
-
-
-def test_cli_claim_wide_scope_refusal_names_the_path_count(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """A path-count-tripped refusal names the count and the limit, not the
-    whole rule."""
-    client = FakeForge()
-    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
-    monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
-    monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
-
-    status = issue_claim.main(
-        [
-            "--repo",
-            "example/agent-claim",
-            "claim",
-            "72",
-            "--agent",
-            "Ada",
-            "--base",
-            BASE,
-            "--branch",
-            "codex/issue-72",
-            "--scope",
-            "new_a.py",
-            "--scope",
-            "new_b.py",
-            "--scope",
-            "new_c.py",
-            "--scope",
-            "new_d.py",
-            "--claim-id",
-            "named-path-count",
-        ]
-    )
-
-    assert status == 2
-    assert capsys.readouterr().err == (
-        "ERROR: scope is wide: 4 paths exceeds three; pass --whole REASON\n"
-    )
-
-
-def test_cli_rescope_widening_to_four_paths_refuses_without_whole(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    client = FakeForge()
-    standing = request(issue=72, branch="codex/issue-72", scope=("new_a.py",))
-    _patch_store_write(monkeypatch, _store_claim_from_request(standing))
-    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
-    git_values = _git_checkout()
-    monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
-    monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
-    _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Codex Sol"})
-
-    status = issue_claim.main(
-        [
-            "--repo",
-            "example/agent-claim",
-            "rescope",
-            "72",
-            "--add",
-            "new_b.py",
-            "--add",
-            "new_c.py",
-            "--add",
-            "new_d.py",
-        ]
-    )
-    captured = capsys.readouterr()
-
-    assert status == 2
-    assert captured.out == ""
-    assert "scope is wide" in captured.err
-    assert "--whole" in captured.err
-    standing = _live_store_claim()
-    assert standing.scope == ("new_a.py",)
-
-
-def test_cli_claim_persists_whole_reason(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    client = FakeForge()
-    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
-    monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
-    monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
-    reason = "the four adapters share one lock"
-
-    status = issue_claim.main(
-        [
-            "--repo",
-            "example/agent-claim",
-            "claim",
-            "72",
-            "--agent",
-            "Ada",
-            "--base",
-            BASE,
-            "--branch",
-            "codex/issue-72",
-            "--scope",
-            "new_a.py",
-            "--scope",
-            "new_b.py",
-            "--scope",
-            "new_c.py",
-            "--scope",
-            "new_d.py",
-            "--whole",
-            reason,
-            "--claim-id",
-            "wide",
-        ]
-    )
-
-    assert status == 0
-    posted = _live_store_claim()
-    assert posted.whole_reason == reason
-
-
 def test_cli_status_and_status_path_show_the_whole_reason(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -7640,43 +7304,6 @@ def test_cli_status_and_status_path_show_the_whole_reason(
     )
     who_payload = json.loads(capsys.readouterr().out)
     assert who_payload["claims"][0]["whole"] == reason
-
-
-def test_cli_claim_allows_a_directory_scope_with_whole(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    client = FakeForge()
-    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
-    monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
-    monkeypatch.setattr(
-        checkout, "_scope_directories", lambda paths: tuple(p for p in paths if p == "docs")
-    )
-
-    status = issue_claim.main(
-        [
-            "--repo",
-            "example/agent-claim",
-            "claim",
-            "72",
-            "--agent",
-            "Ada",
-            "--base",
-            BASE,
-            "--branch",
-            "codex/issue-72",
-            "--scope",
-            "docs",
-            "--whole",
-            "rewrite the docs tree",
-            "--claim-id",
-            "tree",
-        ]
-    )
-
-    assert status == 0
-    posted = _live_store_claim()
-    assert posted.scope == ("docs",)
-    assert posted.whole_reason == "rewrite the docs tree"
 
 
 def test_cli_release_without_json_prints_the_released_line(
