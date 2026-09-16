@@ -650,14 +650,13 @@ def _live_text(body: str) -> str:
 class BodyReadState(StrEnum):
     """How `parse_body` read one issue's body.
 
-    `LEGACY` means no recognized `agent-claim` block was found at all -- not
-    that some other grammar was recognized instead; there is no other
-    grammar. `MALFORMED` means the block was found and its schema refused
-    it.
+    `MALFORMED` covers both a block whose schema was refused and a body
+    with no recognized `agent-claim` block at all -- the latter carries the
+    one defect `no agent-claim block` (issue #273: there is no third state
+    for a body written before the block existed).
     """
 
     VALID = "valid"
-    LEGACY = "legacy"
     MALFORMED = "malformed"
 
 
@@ -1024,16 +1023,8 @@ def _malformed_parsed_body(defects: tuple[ContractDefect, ...]) -> ParsedBody:
     )
 
 
-_LEGACY_PARSED_BODY = ParsedBody(
-    contract=Contract(None, None, None, ()),
-    contract_complete=False,
-    projectionless=False,
-    expectation_state=ExpectationState.NONE,
-    expectation_progress=ExpectationProgress(0, 0),
-    ruling_date=None,
-    frozen_trigger=None,
-    slices=(),
-    read_state=BodyReadState.LEGACY,
+_NO_BLOCK_PARSED_BODY = _malformed_parsed_body(
+    (ContractDefect(AGENT_CLAIM_FENCE_INFO, "no agent-claim block"),)
 )
 
 
@@ -1129,7 +1120,7 @@ def parse_body(body: str, *, storage: Storage = Storage.GITHUB) -> ParsedBody:
     """
     fences = _agent_claim_fence_matches(body)
     if not fences:
-        return _LEGACY_PARSED_BODY
+        return _NO_BLOCK_PARSED_BODY
     if len(fences) > 1:
         return _malformed_parsed_body(
             (
@@ -1165,7 +1156,7 @@ class LocatedBlock:
     of its interior -- between the fence lines, which stay byte-identical --
     and the newline convention new interior lines are rendered with (#150
     §4/§7). Callable only on a body `parse_body` already read as `VALID`;
-    `cut` refuses a legacy or malformed target before ever calling this."""
+    `cut` refuses a malformed target before ever calling this."""
 
     data: dict[str, object]
     content_start: int
@@ -1336,8 +1327,8 @@ def expectation_lines(
     block order -- the one projection `rulings`, `rule --line`, and `ask`'s
     fresh index all share, so a printed index always matches what `rule`
     accepts. Empty for a body with no block, no expectations, or one
-    `parse_body` reads as LEGACY/MALFORMED -- a malformed body's lines are
-    not addressable until it is fixed by hand. `storage` is forwarded to
+    `parse_body` reads as MALFORMED -- a malformed body's lines are not
+    addressable until it is fixed by hand. `storage` is forwarded to
     `parse_body` unchanged (issue #248)."""
     if parse_body(body, storage=storage).read_state is not BodyReadState.VALID:
         return ()
@@ -2182,11 +2173,10 @@ def next_action(board: Board) -> NextAction | None:
     prints a command at all, whether or not its `Next` line still names
     work -- inventing one from prose that is not a slice title is #208.
 
-    A `LEGACY` or `MALFORMED` container (#150) is skipped here exactly like
-    one still holding an open child: its own finding already surfaces
-    through `actionable_reason`/`SKIPPED`, and proposing to cut or close a
-    body that could not be read would act on a guess this module never
-    makes.
+    A `MALFORMED` container (#150) is skipped here exactly like one still
+    holding an open child: its own finding already surfaces through
+    `actionable_reason`/`SKIPPED`, and proposing to cut or close a body
+    that could not be read would act on a guess this module never makes.
     """
     uncut_by_container = {finding.item: finding for finding in board.uncut}
     for item in board.items:
@@ -2388,11 +2378,9 @@ class _ActionabilityFacts:
 
 
 def _read_state_actionable_reason(facts: _ActionabilityFacts) -> str | None:
-    """The one refusal a legacy or malformed body gets, ahead of every other
-    reason -- including the container rule, so a container whose body
-    itself cannot be read is never offered as "claim a child" (#150 §5)."""
-    if facts.read_state is BodyReadState.LEGACY:
-        return "body legacy"
+    """The one refusal a malformed body gets, ahead of every other reason --
+    including the container rule, so a container whose body itself cannot
+    be read is never offered as "claim a child" (#150 §5)."""
     if facts.read_state is BodyReadState.MALFORMED and facts.malformed_defect is not None:
         return body_defect_text(facts.malformed_defect)
     return None

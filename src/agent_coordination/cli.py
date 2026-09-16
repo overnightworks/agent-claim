@@ -1495,13 +1495,11 @@ def _parent_checks(
     )
 
 
-def _legacy_or_malformed_checks(item: board.BoardItem) -> tuple[SliceCheck, ...] | None:
-    """The one refusal a legacy or malformed block body gets (#150) --
-    every other body-contract check (blocker state, completeness) never
-    runs, since neither the parsed projections nor the blocker set can be
-    trusted once the body itself failed to read."""
-    if item.read_state is board.BodyReadState.LEGACY:
-        return (SliceCheck("error", "body-legacy", "body legacy", issue=item.number),)
+def _malformed_checks(item: board.BoardItem) -> tuple[SliceCheck, ...] | None:
+    """The one refusal a malformed block body gets (#150) -- every other
+    body-contract check (blocker state, completeness) never runs, since
+    neither the parsed projections nor the blocker set can be trusted once
+    the body itself failed to read."""
     if item.read_state is board.BodyReadState.MALFORMED:
         return tuple(
             SliceCheck("error", "body-contract", board.body_defect_text(defect))
@@ -1511,9 +1509,9 @@ def _legacy_or_malformed_checks(item: board.BoardItem) -> tuple[SliceCheck, ...]
 
 
 def _body_contract_checks(item: board.BoardItem) -> tuple[SliceCheck, ...]:
-    legacy_or_malformed = _legacy_or_malformed_checks(item)
-    if legacy_or_malformed is not None:
-        return legacy_or_malformed
+    malformed = _malformed_checks(item)
+    if malformed is not None:
+        return malformed
     contract = item.contract
     checks = [SliceCheck("error", "body-contract", defect.message) for defect in contract.defects]
     # Read the two atomic facts directly rather than `item.actionable_reason`:
@@ -1667,10 +1665,8 @@ class _ParentRequirement:
 
 
 def _parent_body_finding(reference: board.IssueReference, parsed: board.ParsedBody) -> str:
-    """Why a legacy or malformed parent body refuses the last-child rule
-    before its `Next` line is ever consulted (#150)."""
-    if parsed.read_state is board.BodyReadState.LEGACY:
-        return f"has parent {reference} with a legacy body"
+    """Why a malformed parent body refuses the last-child rule before its
+    `Next` line is ever consulted (#150)."""
     defect = parsed.contract.defects[0]
     return f"has parent {reference} with a {board.body_defect_text(defect)}"
 
@@ -1896,14 +1892,12 @@ def _body_shape_defects(
     body: str, *, storage: board.Storage = board.Storage.GITHUB
 ) -> tuple[str, ...]:
     """Every finding a body's own shape can carry without asking a forge
-    anything -- legacy, malformed (one sentence per schema defect), or
-    incomplete (one joined sentence, matching `check <item>`'s own wording).
+    anything -- malformed (one sentence per schema defect) or incomplete
+    (one joined sentence, matching `check <item>`'s own wording).
     `_issue_check` and `body --check` (issue #262) both read this; neither
     writes a second rendering of these sentences. `storage` gates the one
     storage-specific extension, `[record]` (issue #248)."""
     parsed = board.parse_body(body, storage=storage)
-    if parsed.read_state is board.BodyReadState.LEGACY:
-        return ("body legacy",)
     if parsed.read_state is board.BodyReadState.MALFORMED:
         return tuple(board.body_defect_text(defect) for defect in parsed.contract.defects)
     missing = board.missing_or_empty_sections(parsed.contract)
@@ -3291,10 +3285,6 @@ def _located_block_or_refuse(number: int, body: str, *, command: str) -> board.L
     VALID before they touch it, and share this one gate so the message is
     the same shape for all three."""
     parsed = board.parse_body(body)
-    if parsed.read_state is board.BodyReadState.LEGACY:
-        raise protocol.ClaimUnavailableError(
-            f"#{number} body legacy; {command} needs a valid agent-claim block"
-        )
     if parsed.read_state is board.BodyReadState.MALFORMED:
         defect = parsed.contract.defects[0]
         raise protocol.ClaimUnavailableError(

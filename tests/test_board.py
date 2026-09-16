@@ -230,7 +230,7 @@ def test_expectation_lines_reports_index_text_ruling_and_ruled_on() -> None:
         "No agent-claim fence at all.",
         agent_claim_body('version = 2\nnow = "N"\nnext = "X"\ndone_when = "D"\n'),
     ],
-    ids=["legacy", "malformed"],
+    ids=["no_block", "malformed"],
 )
 def test_expectation_lines_is_empty_for_an_unaddressable_body(body: str) -> None:
     assert board.expectation_lines(body) == ()
@@ -1691,11 +1691,11 @@ def test_missing_or_empty_sections_never_names_a_dependency_key(
     assert board.missing_or_empty_sections(contract) == missing
 
 
-def test_parse_body_treats_a_fenceless_body_as_legacy() -> None:
+def test_parse_body_treats_a_fenceless_body_as_malformed() -> None:
     parsed = board.parse_body("## Now\nOld prose.\n")
 
-    assert parsed.read_state is board.BodyReadState.LEGACY
-    assert parsed.contract == board.Contract(None, None, None, ())
+    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert parsed.contract.defects == (board.ContractDefect("agent-claim", "no agent-claim block"),)
 
 
 def test_parse_body_refuses_multiple_agent_claim_blocks() -> None:
@@ -1911,10 +1911,10 @@ def test_parse_body_recognizes_a_crlf_fenced_block() -> None:
     assert parsed.contract == board.Contract("N", "X", "D", ())
 
 
-def test_next_action_skips_a_legacy_childless_container() -> None:
+def test_next_action_skips_a_blockless_childless_container() -> None:
     body = "## Now\nStill going.\n\n## Next\nDo the thing.\n"
     container = replace(
-        board_issue(210, "Legacy container", body),
+        board_issue(210, "Blockless container", body),
         kind=board.ItemKind.CONTAINER,
         children_closed=0,
         children_total=0,
@@ -1930,7 +1930,7 @@ def test_next_action_skips_a_legacy_childless_container() -> None:
 
     assert board.next_action(projected) is None
     item = next(item for item in projected.items if item.number == 210)
-    assert item.actionable_reason == "body legacy"
+    assert item.actionable_reason == "body malformed: agent-claim: no agent-claim block"
 
 
 def test_next_action_skips_a_malformed_childless_container() -> None:
