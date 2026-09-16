@@ -1,0 +1,8 @@
+claim_id = "8f51f71133574e05929e1c4c57163801"
+agent = "Claude head (coordinator)"
+role = "builder"
+base = "ea4bc6f47ff3bddfc49eeb0a8625e4f24da317aa"
+branch = "claude/issue-291-cut-state-ref"
+scope = ["src/agent_coordination/cli.py", "src/agent_coordination/state_board.py", "tests/test_state_board.py", "tests/test_cli.py", "README.md"]
+opened_commit = "c96743569ac60120098480033bdaf64969f00801"
+whole_reason = "cut over the adapter: the adoption key per storage, the cli path, their test modules and the README line; splitting leaves a cut nothing adopts"
