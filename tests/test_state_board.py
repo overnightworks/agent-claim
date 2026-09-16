@@ -794,6 +794,34 @@ class TestStateRefBoardWrites:
         assert after_record.updated_at != before_record.updated_at
         assert board.RECORD_TIMESTAMP_PATTERN.fullmatch(after_record.updated_at)
 
+    def test_update_item_body_overwrites_a_hostile_record_with_the_stored_one(
+        self, bare_remote: Path, worktree: Path
+    ) -> None:
+        """A caller's piped body can carry any `[record]` table it likes --
+        `update_item_body` never trusts it. Only `updated_at` moves; every
+        other field, `parent` and `state` included, comes from the record
+        this adapter already holds for the item, not from the body it was
+        handed."""
+        _push_item_tree(bare_remote, worktree, _item_files())
+        adapter = _fetch_state_ref_board(
+            bare_remote, worktree, writer=self._writer(bare_remote, worktree)
+        )
+        before_body = adapter.item_reference(CHILD_A_NUMBER).body
+        assert before_body is not None
+        before_record = _decoded_record(before_body, CHILD_A_ID)
+        hostile_record = _record(title="Hostile", state="closed", kind="task", parent=CHILD_B_ID)
+        hostile_body = _state_ref_body(_CHILD_A_PROJECTION, hostile_record)
+
+        adapter.update_item_body(CHILD_A_NUMBER, hostile_body)
+
+        after = adapter.item_reference(CHILD_A_NUMBER)
+        assert after.body is not None
+        after_record = _decoded_record(after.body, CHILD_A_ID)
+        assert replace(after_record, updated_at=before_record.updated_at) == before_record
+        assert after_record.updated_at != before_record.updated_at
+        assert after_record.parent != hostile_record["parent"]
+        assert after_record.state.value != hostile_record["state"]
+
     def test_a_second_write_from_the_same_read_state_refuses_and_overwrites_nothing(
         self, bare_remote: Path, worktree: Path
     ) -> None:
@@ -811,11 +839,10 @@ class TestStateRefBoardWrites:
         assert second_body is not None
 
         first.update_item_body(CHILD_A_NUMBER, first_body.replace("Prose.", "First writer.", 1))
+        second_writer_body = second_body.replace("Prose.", "Second writer.", 1)
 
         with pytest.raises(ClaimUnavailableError, match="written since it was read"):
-            second.update_item_body(
-                CHILD_A_NUMBER, second_body.replace("Prose.", "Second writer.", 1)
-            )
+            second.update_item_body(CHILD_A_NUMBER, second_writer_body)
         state = store.fetch_state(worktree=worktree, remote=str(bare_remote))
         assert state.tip is not None
         stored = store.read_item_files(worktree, state.tip)[f"{CHILD_A_ID}.md"]
@@ -932,6 +959,37 @@ class TestCliStateRefForge:
         record = _decoded_record(stored, RULABLE_ID)
         assert record.title == "Rulable"
         assert record.updated_at.startswith(datetime.now(UTC).date().isoformat())
+
+    def test_ask_appends_a_state_ref_item_and_a_fresh_process_reads_it_open(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+    ) -> None:
+        """Issue #283 proof 2: `aco ask --text ...` under `storage =
+        state-ref` appends the proposed line straight into `items/<id>.md`
+        through `_StoreItemWriter` -- no `gh`, no forge -- and a second `aco
+        rulings` invocation (its own fresh fetch, standing in for a second
+        process) reads the line back open."""
+        self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, _item_files())
+        asked_text = "Does a second process see the appended line?"
+
+        asked = issue_claim.main(["ask", str(CHILD_A_NUMBER), "--text", asked_text])
+        assert asked == 0
+        capsys.readouterr()
+
+        remote_url = f"file://{bare_remote}"
+        state = store.fetch_state(worktree=worktree, remote=remote_url)
+        assert state.tip is not None
+        stored = store.read_item_files(worktree, state.tip)[f"{CHILD_A_ID}.md"].decode()
+        assert asked_text in stored
+
+        rulings_status = issue_claim.main(["rulings"])
+        assert rulings_status == 0
+        lines = capsys.readouterr().out.splitlines()
+        assert any(line.strip() == f"2 open: {asked_text}" for line in lines)
 
     def test_claim_passes_slice_rules_against_a_state_ref_item_and_check_reads_it_back(
         self,
