@@ -9098,6 +9098,22 @@ def test_cli_status_before_bootstrap_prints_unclaimed_repository(
     assert capsys.readouterr().out == "UNCLAIMED repository\n"
 
 
+def test_cli_status_json_before_bootstrap_reports_a_null_tip(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`status --json`'s `tip` is `null` for `EMPTY_STATE` (issue #256): a
+    repository with no `refs/aco/state` ref yet has no oid a monitor could
+    poll for movement."""
+    monkeypatch.setattr(checkout, "remote_url", lambda remote: f"git@github.com:{REPOSITORY}.git")
+    monkeypatch.setattr(store, "fetch_state", lambda *, worktree, remote: protocol.EMPTY_STATE)
+    monkeypatch.setattr(issue_claim, "datetime", FixedDateTime)
+
+    assert issue_claim.main(["--repo", "example/agent-claim", "status", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["tip"] is None
+
+
 def test_cli_status_issue_with_no_claim_prints_unclaimed_issue(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -9344,7 +9360,7 @@ def test_cli_status_json_empty_store_prints_unclaimed_object(
     assert issue_claim.main(["--repo", "example/agent-claim", "status", "--json"]) == 0
     assert (
         capsys.readouterr().out
-        == json.dumps({"issue": None, "state": "UNCLAIMED", "claims": []}) + "\n"
+        == json.dumps({"issue": None, "state": "UNCLAIMED", "tip": BASE, "claims": []}) + "\n"
     )
 
 
@@ -9357,7 +9373,7 @@ def test_cli_status_json_issue_with_no_claim_prints_unclaimed_object(
     assert issue_claim.main(["--repo", "example/agent-claim", "status", "72", "--json"]) == 0
     assert (
         capsys.readouterr().out
-        == json.dumps({"issue": 72, "state": "UNCLAIMED", "claims": []}) + "\n"
+        == json.dumps({"issue": 72, "state": "UNCLAIMED", "tip": BASE, "claims": []}) + "\n"
     )
 
 
@@ -9378,6 +9394,7 @@ def test_cli_status_json_shows_a_live_store_claim(
             {
                 "issue": 72,
                 "state": "CLAIMED",
+                "tip": BASE,
                 "claims": [
                     {
                         "issue": 72,
@@ -9424,6 +9441,7 @@ def test_cli_status_json_overlapping_store_claims_print_claimed_object(
             {
                 "issue": None,
                 "state": "CLAIMED",
+                "tip": BASE,
                 "claims": [
                     {
                         "issue": 72,
@@ -9500,6 +9518,7 @@ def test_cli_status_json_issue_on_overlap_prints_related_claimed_object(
             {
                 "issue": 72,
                 "state": "CLAIMED",
+                "tip": BASE,
                 "claims": [
                     {
                         "issue": 72,
@@ -13822,7 +13841,7 @@ def test_identity_conflict_still_marks_status_json_conflict(
     opened_at = datetime(2026, 8, 21, tzinfo=UTC)
     ages: dict[str, datetime] = {first.claim_id: opened_at, second.claim_id: opened_at}
 
-    assert _status_json((first, second), None, ages) == 2
+    assert _status_json((first, second), None, ages, None) == 2
     payload = json.loads(capsys.readouterr().out)
     assert payload["state"] == "CONFLICT"
 
@@ -14498,6 +14517,188 @@ def test_release_merged_records_the_pull_request_that_landed_the_item(
     assert store.fetch_state(worktree=Path("."), remote="origin").claims == {}
 
 
+def _landed_dependency(
+    closed_at: datetime = datetime(2026, 9, 10, tzinfo=UTC),
+) -> board.IssueDependency:
+    """The now-closed `blocked_by` relation a dependent of `WORK_ITEM_ISSUE`
+    carries once GitHub has recorded the landing (issue #256)."""
+    return block_dependency(WORK_ITEM_ISSUE, state=board.BlockerState.CLOSED, closed_at=closed_at)
+
+
+def _two_dependants_freed_by_the_landing() -> tuple[
+    tuple[board.Issue, ...], dict[int, tuple[board.IssueDependency, ...]]
+]:
+    """Two open items whose only blocker was `WORK_ITEM_ISSUE`, one of which
+    also unblocks a third, still-waiting item, plus a fourth item a foreign
+    repository still blocks even though its own local blocker just closed
+    (issue #256) -- the fixture `release --merged`'s own `freed`/`next`
+    tests share, so a lower- and a higher-scored freed pick differ only by
+    which one unblocks something else, and a not-fully-freed item stays out
+    of `freed` even once its local blocker is gone."""
+    lower, lower_dependencies = blocked_issue(80, "Lower priority freed item", _landed_dependency())
+    higher, higher_dependencies = blocked_issue(
+        81, "Higher priority freed item", _landed_dependency()
+    )
+    waiting, waiting_dependencies = blocked_issue(82, "Still waiting", block_dependency(81))
+    still_foreign_blocked, still_foreign_blocked_dependencies = blocked_issue(
+        83,
+        "Still foreign-blocked",
+        _landed_dependency(),
+        block_dependency(9, repository="other/repo"),
+    )
+    issues = (lower, higher, waiting, still_foreign_blocked)
+    dependencies = {
+        **lower_dependencies,
+        **higher_dependencies,
+        **waiting_dependencies,
+        **still_foreign_blocked_dependencies,
+    }
+    return issues, dependencies
+
+
+@dataclass(frozen=True)
+class ReleaseFreedScenario:
+    """One landing's currently open board and the `freed`/`next` release
+    should report for it (issue #256)."""
+
+    issues: tuple[board.Issue, ...]
+    dependencies: dict[int, tuple[board.IssueDependency, ...]]
+    freed: list[int]
+    next_number: int | None
+
+
+def _release_freed_scenarios() -> list[ReleaseFreedScenario]:
+    freeing_issues, freeing_dependencies = _two_dependants_freed_by_the_landing()
+    return [
+        ReleaseFreedScenario(freeing_issues, freeing_dependencies, [80, 81], 81),
+        ReleaseFreedScenario((), {}, [], None),
+    ]
+
+
+@pytest.mark.parametrize(
+    "scenario", _release_freed_scenarios(), ids=["two-dependants-freed", "no-dependants"]
+)
+def test_release_merged_reports_the_json_freed_list_and_next_pick(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    scenario: ReleaseFreedScenario,
+) -> None:
+    client = merged_release_client(monkeypatch, body="Work-Item: #72\n\nCloses #72")
+    client.closed_issues.add(WORK_ITEM_ISSUE)
+    monkeypatch.setattr(issue_claim, "_fetch_issue_reference", _LIVE_FETCH_ISSUE_REFERENCE)
+    client.board_issues = scenario.issues
+    client.board_dependencies = scenario.dependencies
+
+    exit_code = issue_claim.main(
+        ["--repo", REPOSITORY, "release", str(WORK_ITEM_ISSUE), "--merged", "12", "--json"]
+    )
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["freed"] == scenario.freed
+    assert payload["next"] == scenario.next_number
+
+
+def test_release_merged_prints_the_freed_and_next_lines(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    client = merged_release_client(monkeypatch, body="Work-Item: #72\n\nCloses #72")
+    client.closed_issues.add(WORK_ITEM_ISSUE)
+    monkeypatch.setattr(issue_claim, "_fetch_issue_reference", _LIVE_FETCH_ISSUE_REFERENCE)
+    client.board_issues, client.board_dependencies = _two_dependants_freed_by_the_landing()
+
+    exit_code = issue_claim.main(
+        ["--repo", REPOSITORY, "release", str(WORK_ITEM_ISSUE), "--merged", "12"]
+    )
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert f"RELEASED issue #{WORK_ITEM_ISSUE}: landing\n" in out
+    assert "freed: #80, #81\n" in out
+    assert "next: #81 score" in out
+    assert "Higher priority freed item" in out
+
+
+def test_release_merged_fetches_each_candidates_dependencies_only_once(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The `freed` report and the projected `next` pick share one dependency
+    fetch (issue #256 review): `_board`'s own board build must not re-list
+    the same blocked-by candidates `_freed_item_numbers` already read."""
+    client = merged_release_client(monkeypatch, body="Work-Item: #72\n\nCloses #72")
+    client.closed_issues.add(WORK_ITEM_ISSUE)
+    monkeypatch.setattr(issue_claim, "_fetch_issue_reference", _LIVE_FETCH_ISSUE_REFERENCE)
+    client.board_issues, client.board_dependencies = _two_dependants_freed_by_the_landing()
+    observed_dependency_calls: list[int] = []
+    original_list_board_dependencies = client.list_board_dependencies
+
+    def spy_list_board_dependencies(number: int) -> tuple[board.IssueDependency, ...]:
+        observed_dependency_calls.append(number)
+        return original_list_board_dependencies(number)
+
+    monkeypatch.setattr(client, "list_board_dependencies", spy_list_board_dependencies)
+
+    exit_code = issue_claim.main(
+        ["--repo", REPOSITORY, "release", str(WORK_ITEM_ISSUE), "--merged", "12"]
+    )
+
+    assert exit_code == 0
+    assert sorted(observed_dependency_calls) == [80, 81, 82, 83]
+
+
+def test_release_merged_prints_a_hint_instead_of_failing_when_the_board_is_unreachable(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A forge outage that only starts after the release itself already
+    committed must not undo or fail it (issue #256): the release's own
+    exit code and store effect stay exactly what a reachable forge would
+    have produced, with one hint line standing in for `freed`/`next`."""
+    client = merged_release_client(monkeypatch, body="Work-Item: #72\n\nCloses #72")
+    client.closed_issues.add(WORK_ITEM_ISSUE)
+    monkeypatch.setattr(issue_claim, "_fetch_issue_reference", _LIVE_FETCH_ISSUE_REFERENCE)
+
+    def unreachable() -> tuple[board.Issue, ...]:
+        raise forge.ForgeTransientError("gh: connection reset")
+
+    monkeypatch.setattr(client, "list_open_board_issues", unreachable)
+
+    exit_code = issue_claim.main(
+        ["--repo", REPOSITORY, "release", str(WORK_ITEM_ISSUE), "--merged", "12"]
+    )
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert out.startswith(f"RELEASED issue #{WORK_ITEM_ISSUE}: landing\n")
+    assert "hint:" in out
+    assert "freed:" not in out
+    assert "next:" not in out
+    assert store.fetch_state(worktree=Path("."), remote="origin").claims == {}
+
+
+def test_release_merged_json_omits_freed_and_next_when_the_board_is_unreachable(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    client = merged_release_client(monkeypatch, body="Work-Item: #72\n\nCloses #72")
+    client.closed_issues.add(WORK_ITEM_ISSUE)
+    monkeypatch.setattr(issue_claim, "_fetch_issue_reference", _LIVE_FETCH_ISSUE_REFERENCE)
+
+    def unreachable() -> tuple[board.Issue, ...]:
+        raise forge.ForgeTransientError("gh: connection reset")
+
+    monkeypatch.setattr(client, "list_open_board_issues", unreachable)
+
+    exit_code = issue_claim.main(
+        ["--repo", REPOSITORY, "release", str(WORK_ITEM_ISSUE), "--merged", "12", "--json"]
+    )
+
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert "freed" not in payload
+    assert "next" not in payload
+    assert "hint:" in captured.err
+
+
 def test_release_merged_accepts_an_issueless_lane_that_landed_without_an_item(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -14589,6 +14790,19 @@ def test_release_abandoned_records_why_the_lane_stopped(
     )
 
     assert store.fetch_state(worktree=Path("."), remote="origin").claims == {}
+
+
+def test_release_abandoned_prints_no_freed_or_next_lines(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An abandoned release never resolves the forge (issue #245), so it has
+    nothing to report a landing freed (issue #256): `RELEASED` stands alone."""
+    merged_release_client(monkeypatch, body="Work-Item: #72\n\nCloses #72")
+
+    exit_code = issue_claim.main(["--repo", REPOSITORY, "release", "72", "--abandoned", "stopped"])
+
+    assert exit_code == 0
+    assert capsys.readouterr().out == f"RELEASED issue #{WORK_ITEM_ISSUE}: landing\n"
 
 
 @pytest.mark.parametrize(

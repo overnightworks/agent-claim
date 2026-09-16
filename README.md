@@ -194,6 +194,14 @@ item (or it must carry `No-Item:` for an issue-less lane), and that item must be
 closed; otherwise the release is refused, naming what is missing. A `--claim-id`
 already consumed, active or released, is refused before anything is written;
 release the old claim and pass a fresh `--claim-id` instead.
+A successful `--merged` release then reads the board once, lazily, to name
+what it freed: `freed: #a, #b` (or `freed: none`) for every open item whose
+last open blocker was this landing, and `next: #n score s: <title>` (or
+`next: none`) for the same pick `aco next` would make; `--json` carries these
+as `freed` (a list of numbers) and `next` (a number or `null`). `--abandoned`
+never reads the board and reports neither. A forge failure after the release
+has already committed never undoes or fails it -- one hint line stands in for
+`freed`/`next` instead, naming the repair.
 `rescope <issue> --add <path> [--drop <path>]` changes a live claim's scope
 without releasing it: the claim id and base stay, added paths are advisory
 like `claim`, and a resulting wide scope uses the same `--whole` rule as
@@ -241,7 +249,10 @@ checks no claim's ancestry (the fetched tip itself stays guarded on every read).
 Agents should read `--json` from `status`, `claim`, `release`, and `rescope`.
 `status` prints each live claim's age from its `opened_commit`'s committer date
 (the state-ref commit that first introduced it) as `Xh Ym`, and marks it `old`
-after more than one hour.
+after more than one hour. `status --json` also carries `tip`, the fetched
+state ref's own oid (`null` when the repository has no ref yet), so a monitor
+can poll a cheap `ls-remote` for whether the fleet moved without re-reading
+every claim; the human `status` text is unchanged.
 
 `claim`, `rescope`, `release`, and `status` read and write exclusively through
 `refs/aco/state` -- a compare-and-swap git ref on the repository's configured
