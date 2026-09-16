@@ -621,6 +621,11 @@ def _add_item_parser(commands: argparse._SubParsersAction) -> None:
     )
     edit.add_argument("item", type=_parse_item_ref, help=f"the item to edit, {ITEM_REF_HELP}")
     edit.add_argument("--json", action="store_true", help=JSON_HELP)
+    close = item_commands.add_parser(
+        "close", help="close a state-ref item; the file stays, next and board let it go"
+    )
+    close.add_argument("item", type=_parse_item_ref, help=f"the item to close, {ITEM_REF_HELP}")
+    close.add_argument("--json", action="store_true", help=JSON_HELP)
 
 
 def _add_protect_parser(commands: argparse._SubParsersAction) -> None:
@@ -2393,6 +2398,78 @@ def _print_item_edit_result(
         print(f"EDITED {item_id}")
 
 
+ITEM_CLOSE_GITHUB_REFUSAL = "the forge closes its issues; aco never governs them"
+
+
+def _cmd_item_close(parsed: argparse.Namespace) -> int:
+    """`aco item close ITEM` (issue #289): the state-ref item's own record,
+    closed -- `state` to `CLOSED`, `closed_at`/`updated_at` to now, the item
+    file and every other byte untouched (`StateRefBoard.close_item`'s one
+    CAS write over this process's own already-read oid, extending #287's
+    record-owner rule by one field rather than composing a record here).
+    Refuses under `storage = "github"` by name -- the forge closes its own
+    issues, aco never governs them -- and refuses a live claim on the item
+    before ever writing: a closed item with a live claim still on it is the
+    `RECOVERY` anomaly the board already guards against, never a state this
+    command creates. Existence is checked through the ordinary
+    `item_reference` read before `close_item` is ever called, so an unknown
+    id gets this command's own "does not exist" sentence rather than
+    `close_item`'s internal `_by_number` lookup failing with the wrong
+    shape; `close_item` itself refuses a second close on an already-closed
+    item, naming its date. Prints one line, `CLOSED aco-xxxxxx` (`--json`:
+    `{"item", "number", "closed_at"}`), then `release --merged`'s own
+    `freed:` line -- open items whose only open local blocker was this one
+    (`_freed_item_numbers`, issue #256; nothing new)."""
+    toplevel = _resolve_toplevel()
+    config = board.load_config(toplevel / board.CONFIG_PATH)
+    if config.storage is not board.Storage.STATE_REF:
+        raise protocol.ClaimUnavailableError(ITEM_CLOSE_GITHUB_REFUSAL)
+    number = parsed.item
+    _worktree, _remote, observed = _store_observation()
+    _require_state_ref(observed)
+    live_claim = observed.claims.get(protocol.claim_key(protocol.IssueIdentity(number), ""))
+    if live_claim is not None:
+        raise protocol.ClaimUnavailableError(
+            f"#{number} has a live claim "
+            f"({protocol._claimant_text(live_claim.agent, live_claim.role)}); "
+            "release the claim first"
+        )
+    client = _state_ref_forge(parsed.repo, config.canonical_remote)
+    if client.item_reference(number).state is forge.ItemState.MISSING:
+        raise protocol.ClaimUnavailableError(
+            f"#{number} does not exist in {client.repository.path}"
+        )
+    closed_at = client.close_item(number)
+    freed = _item_close_freed(client, number)
+    _print_item_close_result(
+        items.format_item_id(number), number, closed_at, freed, as_json=parsed.json
+    )
+    return 0
+
+
+def _item_close_freed(client: forge.ForgeReader, number: int) -> tuple[int, ...]:
+    """Every open item `number`'s own close just freed -- issue #256's own
+    derivation, reused rather than reinvented, the same base-issues-plus-
+    dependency-fetch wave `_release_landing` runs for a merged release, read
+    fresh off `client`'s own already-closed view so `number` itself never
+    appears among its own candidates."""
+    issues = client.list_open_board_issues()
+    candidates = tuple(issue.number for issue in issues if issue.blocked_by_count > 0)
+    dependencies = _validated_dependencies(issues, _fetch_dependencies(client, candidates))
+    landed = board.IssueReference(client.repository.path, number)
+    return _freed_item_numbers(dependencies, landed)
+
+
+def _print_item_close_result(
+    item_id: str, number: int, closed_at: str, freed: tuple[int, ...], *, as_json: bool
+) -> None:
+    if as_json:
+        print(json.dumps({"item": item_id, "number": number, "closed_at": closed_at}))
+        return
+    print(f"CLOSED {item_id}")
+    print(_release_freed_line(freed))
+
+
 def _item_state_text(state: forge.ItemState) -> str:
     return "open" if state is forge.ItemState.OPEN else "closed"
 
@@ -3912,6 +3989,8 @@ def _dispatch(parsed: argparse.Namespace) -> int:
             return _cmd_item_new(parsed)
         if parsed.item_command == "edit":
             return _cmd_item_edit(parsed)
+        if parsed.item_command == "close":
+            return _cmd_item_close(parsed)
         return _cmd_item_show(parsed, _ReadSession(forge=_LazyForge(parsed.repo)))
     release_branch = _release_branch_for(parsed) if parsed.command == "release" else None
     forge_accessor = _LazyForge(parsed.repo)

@@ -8,7 +8,7 @@ IO of its own -- the Layers contract puts `store` above this module, so
 `store.read_item_files`/`ClaimState.items` and hands them to the
 constructor; every read method below is a pure projection over that
 already-fetched data. Every write (`create_item`, `create_child`,
-`update_item_body`, `link_child`) instead calls the injected `ItemWriter`
+`update_item_body`, `close_item`, `link_child`) instead calls the injected `ItemWriter`
 port: one
 compare-and-swap write to `items/<id>.md`, implemented in `cli.py` over
 `store` (hash-object once, then one `commit_transition` with an
@@ -33,7 +33,7 @@ from types import MappingProxyType
 from typing import Protocol, cast
 
 from . import board, forge, items
-from .protocol import MalformedStateTreeError, ObjectId
+from .protocol import ClaimUnavailableError, MalformedStateTreeError, ObjectId
 
 STATE_REF_CAPABILITIES: Mapping[forge.ForgeOperation, forge.Capability] = MappingProxyType(
     {
@@ -108,8 +108,8 @@ def _with_record(body: str, record: items.ItemRecord) -> str:
     """`body`'s `agent-claim` block, its `[record]` table replaced by
     `record`'s own fields, every other byte untouched -- the one place a
     write composes a fresh `[record]` table, shared by `create_child` (a
-    brand new one) and `update_item_body` (an existing one with `updated_at`
-    refreshed)."""
+    brand new one), `update_item_body` (an existing one with `updated_at`
+    refreshed), and `close_item` (an existing one moved to `CLOSED`)."""
     located = board.locate_agent_claim_block(body)
     new_data = {**located.data, board.RECORD_KEY: items.record_table(record)}
     return board.replace_agent_claim_block(body, located, new_data)
@@ -385,6 +385,36 @@ class StateRefBoard:
             item_id, expected=current.oid, content=new_body.encode("utf-8")
         )
         self._items[item_id] = _DecodedItem(record=updated_record, body=new_body, oid=new_oid)
+
+    def close_item(self, number: int) -> str:
+        """Closes `number`'s item record (issue #289): `state` moves to
+        `CLOSED`, `closed_at` and `updated_at` both move to now, and every
+        other field -- the body included -- stays byte-identical, in one CAS
+        write over this instance's own already-read `current.oid` (the same
+        oid discipline `update_item_body` uses, issue #279). The one place
+        `state`/`closed_at` are ever composed -- `cli._cmd_item_close`
+        delegates the whole write here rather than building its own record.
+        Refuses loud, before any write, when the record already carries
+        `state = CLOSED`: a second `close` on the same item is a stale
+        caller, not an idempotent no-op, so it gets its own named date
+        rather than a generic conflict. Returns the fresh `closed_at` for
+        the CLI's own report line."""
+        item_id = self._by_number[number]
+        current = self._items[item_id]
+        if current.record.state is items.RecordState.CLOSED:
+            raise ClaimUnavailableError(
+                f"#{number} is already closed (closed on {current.record.closed_at})"
+            )
+        now = items.format_record_timestamp(datetime.now(UTC))
+        updated_record = replace(
+            current.record, state=items.RecordState.CLOSED, closed_at=now, updated_at=now
+        )
+        new_body = _with_record(current.body, updated_record)
+        new_oid = self._writer.write_item(
+            item_id, expected=current.oid, content=new_body.encode("utf-8")
+        )
+        self._items[item_id] = _DecodedItem(record=updated_record, body=new_body, oid=new_oid)
+        return now
 
     def item_oid(self, number: int) -> ObjectId:
         """This item's own current blob oid, straight off this adapter's
