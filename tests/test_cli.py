@@ -16052,8 +16052,8 @@ def test_check_json_discriminates_an_issue(
     assert json.loads(capsys.readouterr().out) == expected
 
 
-def body_check_main(*, file_value: str, extra: tuple[str, ...] = ()) -> int:
-    return issue_claim.main(["body", "--check", file_value, *extra])
+def body_check_main(*, extra: tuple[str, ...] = ()) -> int:
+    return issue_claim.main(["body", "--check", *extra])
 
 
 def _body_template_skeleton(kind: str) -> str:
@@ -16095,7 +16095,7 @@ def test_body_template_round_trips_through_body_check_for_every_kind(
     printed = capsys.readouterr().out
 
     monkeypatch.setattr(sys, "stdin", io.StringIO(printed))
-    assert body_check_main(file_value="-") == 1
+    assert body_check_main() == 1
     assert capsys.readouterr().err == "body incomplete: Now, Next, Done when\n"
 
 
@@ -16105,7 +16105,7 @@ def test_body_check_accepts_a_complete_block_with_no_defects(
     body_file = io.StringIO(agent_claim_body(MINIMAL_BLOCK_TOML))
     with pytest.MonkeyPatch.context() as monkeypatch:
         monkeypatch.setattr(sys, "stdin", body_file)
-        assert body_check_main(file_value="-") == 0
+        assert body_check_main() == 0
     assert capsys.readouterr().out == "body ok\n"
 
 
@@ -16113,7 +16113,7 @@ def test_body_check_names_a_body_with_no_recognized_block_as_legacy(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setattr(sys, "stdin", io.StringIO("no block\n"))
-    assert body_check_main(file_value="-") == 1
+    assert body_check_main() == 1
     assert capsys.readouterr().err == "body legacy\n"
 
 
@@ -16145,15 +16145,42 @@ def test_body_check_names_defects_with_checks_own_sentences(
     reason: str,
 ) -> None:
     monkeypatch.setattr(sys, "stdin", io.StringIO(agent_claim_body(toml_text)))
-    assert body_check_main(file_value="-") == 1
+    assert body_check_main() == 1
     assert capsys.readouterr().err == f"body malformed: {reason}\n"
+
+
+def test_body_check_prints_every_simultaneous_defect_not_just_the_first(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The one behavior that sets `body --check` apart from `check <item>`,
+    which truncates to the first malformed defect
+    (`_body_contract_checks`): with two simultaneous defects, both surface,
+    in order, in plain text and in `--json`'s `defects` list (Sonnet review,
+    issue #262)."""
+    toml_text = 'version = 1\nnext = "X"\n'  # missing both now and done_when
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO(agent_claim_body(toml_text)))
+    assert body_check_main() == 1
+    assert capsys.readouterr().err == (
+        "body malformed: now: now is required\nbody malformed: done_when: done_when is required\n"
+    )
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO(agent_claim_body(toml_text)))
+    assert body_check_main(extra=("--json",)) == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "ok": False,
+        "defects": [
+            "body malformed: now: now is required",
+            "body malformed: done_when: done_when is required",
+        ],
+    }
 
 
 def test_body_check_json_carries_the_defect_list(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setattr(sys, "stdin", io.StringIO("no block\n"))
-    assert body_check_main(file_value="-", extra=("--json",)) == 1
+    assert body_check_main(extra=("--json",)) == 1
     assert json.loads(capsys.readouterr().out) == {"ok": False, "defects": ["body legacy"]}
 
 
@@ -16161,25 +16188,26 @@ def test_body_check_json_reports_ok_with_an_empty_defect_list(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setattr(sys, "stdin", io.StringIO(agent_claim_body(MINIMAL_BLOCK_TOML)))
-    assert body_check_main(file_value="-", extra=("--json",)) == 0
+    assert body_check_main(extra=("--json",)) == 0
     assert json.loads(capsys.readouterr().out) == {"ok": True, "defects": []}
 
 
-def test_body_check_reads_a_named_file_instead_of_stdin(
-    capsys: pytest.CaptureFixture[str], tmp_path: Path
+class _NotUtf8Stdin:
+    """A stdin stand-in for the one input `body --check` cannot decode --
+    `sys.stdin.read()` raises `UnicodeDecodeError` on invalid bytes exactly
+    like this (issue #262 Sonar S8707 follow-up)."""
+
+    def read(self) -> str:
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+
+def test_body_check_refuses_stdin_that_is_not_valid_utf8(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    body_path = tmp_path / "body.md"
-    body_path.write_text(agent_claim_body(MINIMAL_BLOCK_TOML))
+    monkeypatch.setattr(sys, "stdin", _NotUtf8Stdin())
 
-    assert body_check_main(file_value=str(body_path)) == 0
-    assert capsys.readouterr().out == "body ok\n"
-
-
-def test_body_check_refuses_a_missing_file_by_name(capsys: pytest.CaptureFixture[str]) -> None:
-    missing = "/nonexistent/body.md"
-
-    assert body_check_main(file_value=missing) == 2
-    assert f"cannot read {missing}" in capsys.readouterr().err
+    assert body_check_main() == 2
+    assert "stdin is not valid UTF-8" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
@@ -16193,7 +16221,7 @@ def test_body_refuses_kind_or_parent_together_with_check(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], extra: tuple[str, ...]
 ) -> None:
     monkeypatch.setattr(sys, "stdin", io.StringIO(agent_claim_body(MINIMAL_BLOCK_TOML)))
-    assert body_check_main(file_value="-", extra=extra) == 2
+    assert body_check_main(extra=extra) == 2
     assert "--kind and --parent apply only to --template, not --check" in capsys.readouterr().err
 
 
@@ -16206,7 +16234,7 @@ def test_body_refuses_json_together_with_template(capsys: pytest.CaptureFixture[
     "argv",
     [
         pytest.param(["body"], id="neither-mode"),
-        pytest.param(["body", "--template", "--check", "-"], id="both-modes"),
+        pytest.param(["body", "--template", "--check"], id="both-modes"),
     ],
 )
 def test_body_requires_exactly_one_mode(argv: list[str]) -> None:
@@ -16230,7 +16258,7 @@ def test_body_check_never_touches_a_forge_the_store_or_gh(
     monkeypatch.setattr(store, "fetch_state", unused)
     monkeypatch.setattr(sys, "stdin", io.StringIO(agent_claim_body(MINIMAL_BLOCK_TOML)))
 
-    assert body_check_main(file_value="-") == 0
+    assert body_check_main() == 0
     assert capsys.readouterr().out == "body ok\n"
 
 

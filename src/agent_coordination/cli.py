@@ -502,8 +502,8 @@ def _add_body_parser(commands: argparse._SubParsersAction) -> None:
     mode.add_argument("--template", action="store_true", help="print the skeleton body for --kind")
     mode.add_argument(
         "--check",
-        metavar="FILE",
-        help="read this file (or - for stdin) and report its body defects",
+        action="store_true",
+        help="read a body from stdin and report its defects",
     )
     body.add_argument(
         "--kind",
@@ -1914,16 +1914,16 @@ def _body_template(kind: str, parent: int | None) -> str:
     return _body_with_parent(skeleton, parent)
 
 
-def _read_body_check_input(file_value: str) -> str:
-    """`file_value`'s text -- stdin for `-`, otherwise the named file, read
-    once and never reinterpreted as a path once it is `-`."""
-    if file_value == "-":
-        return sys.stdin.read()
-    path = Path(file_value)
+def _read_body_check_input() -> str:
+    """`body --check`'s body text, read from stdin only (issue #262 Sonar
+    S8707): an agent pipes the file in (`aco body --check < body.md`)
+    rather than naming a path the CLI would have to trust."""
     try:
-        return path.read_text()
-    except OSError as error:
-        raise protocol.ClaimError(f"cannot read {path}: {error}") from error
+        return sys.stdin.read()
+    except UnicodeDecodeError as error:
+        raise protocol.ClaimError(
+            f"stdin is not valid UTF-8: {error}; pipe the body as UTF-8 text"
+        ) from error
 
 
 def _body_check_report(defects: tuple[str, ...], *, as_json: bool) -> int:
@@ -1943,17 +1943,17 @@ def _body_check_report(defects: tuple[str, ...], *, as_json: bool) -> int:
 def _cmd_body(parsed: argparse.Namespace) -> int:
     """`body` is forge-free (issue #262), the same way `status` and
     `bootstrap` are (issue #245): a template is composed from this
-    repository's own skeleton owners, and a check reads a file or stdin --
-    never an issue, a live claim, or the forge's own `blocked_by` relation,
-    so it never resolves a `_LazyForge` at all (`main` dispatches it
-    outside `_dispatch`, exactly like `status`)."""
-    if parsed.check is not None:
+    repository's own skeleton owners, and a check reads stdin only --
+    never an issue, a live claim, a filesystem path, or the forge's own
+    `blocked_by` relation, so it never resolves a `_LazyForge` at all
+    (`main` dispatches it outside `_dispatch`, exactly like `status`)."""
+    if parsed.check:
         if parsed.kind is not None or parsed.parent is not None:
             raise protocol.ClaimUnavailableError(
                 "--kind and --parent apply only to --template, not --check"
             )
         board.load_config(_resolve_toplevel() / board.CONFIG_PATH)
-        defects = _body_shape_defects(_read_body_check_input(parsed.check))
+        defects = _body_shape_defects(_read_body_check_input())
         return _body_check_report(defects, as_json=parsed.json)
     if parsed.json:
         raise protocol.ClaimUnavailableError("--json applies only to --check, not --template")

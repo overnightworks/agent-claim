@@ -302,6 +302,12 @@ dependency key at all, so a body-incomplete line never asks for one. The issue
 mode reads nothing else: it repeats none of `claim`'s working-tree, identity,
 or ordering checks.
 
+`body legacy`, `body malformed`, and `body incomplete` are the same sentences
+a body can already earn before it ever becomes an issue: run `aco body
+--check` ("The work-item body contract" below) as the forge-free pre-flight,
+so a draft fails here instead of after `gh issue create` has already written
+it.
+
 A number that is in **neither** number space prints `REFUSED: #<n> does not
 exist in <owner>/<repo>` and exits 1. It names no kind: GitHub gives issues
 and pull requests one number space, so an absent number was never proven to
@@ -651,13 +657,14 @@ Validate a hand-written body before it ever reaches the forge with
   a container — with a `Parent: #N` line ahead of it when `--parent` is
   given. Pipe it into `gh issue create --body-file -` (or `gh issue edit
   --body-file -`) and fill in `now`/`next`/`done_when` before dispatch.
-- `aco body --check FILE` (or `-` for stdin) parses `FILE` exactly as
-  `check <item>` reads a live body — legacy, malformed (one sentence per
-  schema defect), or incomplete — and prints every defect it finds, never
-  truncated to the first since there is no live item to refuse a single
-  verdict about; exit 1 with a defect, 0 without one. `--json` prints
-  `{"ok": …, "defects": […]}`. It reads no dependency, since a body carries
-  no dependency key at all, and touches no forge, store, or `gh` call.
+- `aco body --check` reads a body from stdin (`aco body --check < body.md`,
+  or piped from `--template`) and parses it exactly as `check <item>` reads
+  a live body — legacy, malformed (one sentence per schema defect), or
+  incomplete — and prints every defect it finds, never truncated to the
+  first since there is no live item to refuse a single verdict about; exit 1
+  with a defect, 0 without one. `--json` prints `{"ok": …, "defects": […]}`.
+  It takes no file path, reads no dependency, since a body carries no
+  dependency key at all, and touches no forge, store, or `gh` call.
 
 ## Cutting a container's next slice
 
