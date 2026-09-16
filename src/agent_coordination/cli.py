@@ -493,6 +493,32 @@ def _add_check_parser(commands: argparse._SubParsersAction) -> None:
     check.add_argument("--json", action="store_true", help=JSON_HELP)
 
 
+def _add_body_parser(commands: argparse._SubParsersAction) -> None:
+    body = commands.add_parser(
+        "body",
+        help="print a body skeleton, or check one for defects before it reaches the forge",
+    )
+    mode = body.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--template", action="store_true", help="print the skeleton body for --kind")
+    mode.add_argument(
+        "--check",
+        metavar="FILE",
+        help="read this file (or - for stdin) and report its body defects",
+    )
+    body.add_argument(
+        "--kind",
+        choices=BODY_TEMPLATE_KINDS,
+        help=f"the fresh item's kind for --template; default {DEFAULT_BODY_TEMPLATE_KIND}",
+    )
+    body.add_argument(
+        "--parent",
+        type=int,
+        metavar="N",
+        help="prepend a Parent: #N line to --template's skeleton",
+    )
+    body.add_argument("--json", action="store_true", help=JSON_HELP)
+
+
 def _add_brief_parser(commands: argparse._SubParsersAction) -> None:
     brief = commands.add_parser(
         "brief",
@@ -569,6 +595,7 @@ _SUBPARSER_BUILDERS: tuple[Callable[[argparse._SubParsersAction], None], ...] = 
     _add_ask_parser,
     _add_rule_parser,
     _add_check_parser,
+    _add_body_parser,
     _add_brief_parser,
     _add_protect_parser,
     _add_register_parser,
@@ -1842,25 +1869,96 @@ def _refused_issue(number: int, finding: str) -> CheckOutcome:
     return CheckOutcome(CheckKind.ISSUE, number, _issue_line(number, finding), finding)
 
 
+def _body_shape_defects(body: str) -> tuple[str, ...]:
+    """Every finding a body's own shape can carry without asking a forge
+    anything -- legacy, malformed (one sentence per schema defect), or
+    incomplete (one joined sentence, matching `check <item>`'s own wording).
+    `_issue_check` and `body --check` (issue #262) both read this; neither
+    writes a second rendering of these sentences."""
+    parsed = board.parse_body(body)
+    if parsed.read_state is board.BodyReadState.LEGACY:
+        return ("body legacy",)
+    if parsed.read_state is board.BodyReadState.MALFORMED:
+        return tuple(board.body_defect_text(defect) for defect in parsed.contract.defects)
+    missing = board.missing_or_empty_sections(parsed.contract)
+    return (f"body incomplete: {', '.join(missing)}",) if missing else ()
+
+
 def _issue_check(
     client: forge.ForgeReader, repository: str, body: str, number: int
 ) -> CheckOutcome:
     """Whether this issue's body is the contract a builder can start from:
     readable, complete, and unblocked. Its dependencies come from GitHub's
     own `blocked_by` relation -- a body never states them itself."""
-    parsed = board.parse_body(body)
-    if parsed.read_state is board.BodyReadState.LEGACY:
-        return _refused_issue(number, "body legacy")
-    if parsed.read_state is board.BodyReadState.MALFORMED:
-        return _refused_issue(number, board.body_defect_text(parsed.contract.defects[0]))
-    missing = board.missing_or_empty_sections(parsed.contract)
-    if missing:
-        return _refused_issue(number, f"body incomplete: {', '.join(missing)}")
+    shape_defects = _body_shape_defects(body)
+    if shape_defects:
+        return _refused_issue(number, shape_defects[0])
     blockers = board.open_dependency_blockers(client.list_board_dependencies(number), repository)
     if blockers:
         named = ", ".join(board.open_blocker_label(blocker, repository) for blocker in blockers)
         return _refused_issue(number, f"blocked by {named}")
     return CheckOutcome(CheckKind.ISSUE, number, _issue_line(number, "body ok"))
+
+
+BODY_TEMPLATE_KINDS = ("task", "feature", "container")
+DEFAULT_BODY_TEMPLATE_KIND = "task"
+
+
+def _body_template(kind: str, parent: int | None) -> str:
+    """The skeleton `body --template` prints for `kind` (issue #262): the
+    same `board.BLOCK_CHILD_SKELETON` `cut` writes for a task or feature
+    child, or `board.BLOCK_CONTAINER_SKELETON` for a container -- with
+    `parent`'s own `Parent:` line ahead of it when given, exactly as `cut`
+    composes one for its own fresh child (`_body_with_parent`)."""
+    skeleton = board.BLOCK_CONTAINER_SKELETON if kind == "container" else board.BLOCK_CHILD_SKELETON
+    return _body_with_parent(skeleton, parent)
+
+
+def _read_body_check_input(file_value: str) -> str:
+    """`file_value`'s text -- stdin for `-`, otherwise the named file, read
+    once and never reinterpreted as a path once it is `-`."""
+    if file_value == "-":
+        return sys.stdin.read()
+    path = Path(file_value)
+    try:
+        return path.read_text()
+    except OSError as error:
+        raise protocol.ClaimError(f"cannot read {path}: {error}") from error
+
+
+def _body_check_report(defects: tuple[str, ...], *, as_json: bool) -> int:
+    """The one rendering of a `body --check` answer: `check <item>`'s own
+    sentences (`_body_shape_defects`), never truncated to the first, since
+    there is no live item here to refuse a single verdict about."""
+    if as_json:
+        print(json.dumps({"ok": not defects, "defects": list(defects)}))
+    elif defects:
+        for defect in defects:
+            print(defect, file=sys.stderr)
+    else:
+        print("body ok")
+    return 1 if defects else 0
+
+
+def _cmd_body(parsed: argparse.Namespace) -> int:
+    """`body` is forge-free (issue #262), the same way `status` and
+    `bootstrap` are (issue #245): a template is composed from this
+    repository's own skeleton owners, and a check reads a file or stdin --
+    never an issue, a live claim, or the forge's own `blocked_by` relation,
+    so it never resolves a `_LazyForge` at all (`main` dispatches it
+    outside `_dispatch`, exactly like `status`)."""
+    if parsed.check is not None:
+        if parsed.kind is not None or parsed.parent is not None:
+            raise protocol.ClaimUnavailableError(
+                "--kind and --parent apply only to --template, not --check"
+            )
+        board.load_config(_resolve_toplevel() / board.CONFIG_PATH)
+        defects = _body_shape_defects(_read_body_check_input(parsed.check))
+        return _body_check_report(defects, as_json=parsed.json)
+    if parsed.json:
+        raise protocol.ClaimUnavailableError("--json applies only to --check, not --template")
+    print(_body_template(parsed.kind or DEFAULT_BODY_TEMPLATE_KIND, parsed.parent), end="")
+    return 0
 
 
 def _release_outcome(merged: int | None, abandoned: str | None) -> protocol.ReleaseOutcome:
@@ -2941,14 +3039,22 @@ def _print_cut_result(
     print(f"{verb} #{number}{suffix} -> #{child}")
 
 
+def _body_with_parent(skeleton: str, parent: int | None) -> str:
+    """`skeleton`, preceded by one `Parent: #<parent>` line -- the same
+    wording issue bodies already use for this fact -- when `parent` is
+    given; `skeleton` itself otherwise. The one place that composes a
+    parent line onto a body, shared by `cut`'s own child body and `body
+    --template` (issue #262)."""
+    return skeleton if parent is None else f"Parent: #{parent}\n\n{skeleton}"
+
+
 def _cut_child_body(container: int) -> str:
     """The body `cut` writes for a fresh child: one `Parent: #<container>`
-    line -- the same wording issue bodies already use for this fact -- ahead
-    of `board.BLOCK_CHILD_SKELETON`. A repeat `cut` after a partial failure
-    reads this line back (`_orphan_names_container`) to tell `container`'s
-    own orphan apart from an unrelated open issue that merely shares the
-    row's title (#260)."""
-    return f"Parent: #{container}\n\n{board.BLOCK_CHILD_SKELETON}"
+    line ahead of `board.BLOCK_CHILD_SKELETON`. A repeat `cut` after a
+    partial failure reads this line back (`_orphan_names_container`) to
+    tell `container`'s own orphan apart from an unrelated open issue that
+    merely shares the row's title (#260)."""
+    return _body_with_parent(board.BLOCK_CHILD_SKELETON, container)
 
 
 def _orphan_names_container(body: str, container: int) -> bool:
@@ -3404,6 +3510,17 @@ def _local_operation(parsed: argparse.Namespace) -> int:
     return _register_workspace(parsed) if parsed.command == "register" else _run_workspace(parsed)
 
 
+def _read_status_body_or_dispatch(parsed: argparse.Namespace) -> int:
+    """`status` and `body` are forge-free (issue #245, #262): both are
+    resolved here, ahead of `_dispatch`'s own `_LazyForge`, so neither ever
+    resolves one."""
+    if parsed.command == "status":
+        return _cmd_status(parsed)
+    if parsed.command == "body":
+        return _cmd_body(parsed)
+    return _dispatch(parsed)
+
+
 def main(arguments: list[str] | None = None) -> int:
     parsed = _parser().parse_args(arguments)
     if parsed.command in {"_run-at-login", "register", "run", "login"}:
@@ -3415,9 +3532,7 @@ def main(arguments: list[str] | None = None) -> int:
     if parsed.command == "protect":
         return _protect()
     try:
-        if parsed.command == "status":
-            return _cmd_status(parsed)
-        return _dispatch(parsed)
+        return _read_status_body_or_dispatch(parsed)
     except protocol.ClaimError as error:
         print(f"ERROR: {error}", file=sys.stderr)
         if getattr(parsed, "json", False):

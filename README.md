@@ -642,6 +642,23 @@ Every hand-created issue (`gh issue create`, an operator-opened item) must
 carry a valid block — the four-line skeleton above — or it is `body legacy`;
 only `cut` writes that skeleton automatically.
 
+Validate a hand-written body before it ever reaches the forge with
+`aco body`, forge-free like `status`:
+
+- `aco body --template [--kind task|feature|container] [--parent N]` prints
+  the skeleton to compose an issue from — the same block `cut` writes for a
+  task or feature child, or the `Blocked by: nichts` line plus that block for
+  a container — with a `Parent: #N` line ahead of it when `--parent` is
+  given. Pipe it into `gh issue create --body-file -` (or `gh issue edit
+  --body-file -`) and fill in `now`/`next`/`done_when` before dispatch.
+- `aco body --check FILE` (or `-` for stdin) parses `FILE` exactly as
+  `check <item>` reads a live body — legacy, malformed (one sentence per
+  schema defect), or incomplete — and prints every defect it finds, never
+  truncated to the first since there is no live item to refuse a single
+  verdict about; exit 1 with a defect, 0 without one. `--json` prints
+  `{"ok": …, "defects": […]}`. It reads no dependency, since a body carries
+  no dependency key at all, and touches no forge, store, or `gh` call.
+
 ## Cutting a container's next slice
 
 `aco cut <container> --title "…"` dispatches a container's next slice
