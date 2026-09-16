@@ -493,6 +493,15 @@ def _add_check_parser(commands: argparse._SubParsersAction) -> None:
     check.add_argument("--json", action="store_true", help=JSON_HELP)
 
 
+def _add_brief_parser(commands: argparse._SubParsersAction) -> None:
+    brief = commands.add_parser(
+        "brief",
+        help="print one item's body, live claim, lane tip and touched files for a dispatch",
+    )
+    brief.add_argument("item", type=int, help="the work item to brief")
+    brief.add_argument("--json", action="store_true", help=JSON_HELP)
+
+
 def _add_protect_parser(commands: argparse._SubParsersAction) -> None:
     commands.add_parser("protect", help="deny PreToolUse writes without this session's live claim")
 
@@ -560,6 +569,7 @@ _SUBPARSER_BUILDERS: tuple[Callable[[argparse._SubParsersAction], None], ...] = 
     _add_ask_parser,
     _add_rule_parser,
     _add_check_parser,
+    _add_brief_parser,
     _add_protect_parser,
     _add_register_parser,
     _add_run_parser,
@@ -2427,6 +2437,149 @@ def _cmd_check(parsed: argparse.Namespace, session: _ReadSession) -> int:
     return outcome.report(as_json=parsed.json)
 
 
+def _brief_claim(
+    claims: tuple[protocol.ActiveClaim, ...], item: int
+) -> protocol.ActiveClaim | None:
+    """This item's own live claim -- one exclusive build claim per issue
+    before the first edit (README), so at most one is ever live; the first
+    match is it. `None` when the item carries no live claim at all."""
+    for claim in claims:
+        if isinstance(claim.identity, protocol.IssueIdentity) and claim.identity.issue == item:
+            return claim
+    return None
+
+
+@dataclass(frozen=True)
+class _BriefClaim:
+    """`brief`'s own live-claim reading: the claim paired with the one age it
+    needs -- never every live claim's age like `_claim_ages`, so a lineage
+    break in an unrelated claim can never stop this item's brief."""
+
+    claim: protocol.ActiveClaim
+    opened_at: datetime
+
+
+def _brief_live_claim(worktree: Path, state: protocol.ClaimState, item: int) -> _BriefClaim | None:
+    claim = _brief_claim(tuple(state.claims.values()), item)
+    if claim is None:
+        return None
+    # A live claim cannot exist without the ref it was read from.
+    tip = cast(protocol.ObjectId, state.tip)
+    opened_at = store.claim_ages(worktree=worktree, tip=tip, claims=(claim,))[claim.claim_id]
+    return _BriefClaim(claim, opened_at)
+
+
+def _lane_tip(branch: str) -> str | None:
+    """`branch`'s current commit -- local first, then `origin/` -- or `None`
+    when neither ref resolves (a deleted or not-yet-pushed lane branch)."""
+    for ref in (branch, f"origin/{branch}"):
+        try:
+            return checkout._git_output(["rev-parse", "--verify", ref])
+        except protocol.ClaimError:
+            continue
+    return None
+
+
+def _touched_files(base: str, tip: str) -> tuple[str, ...]:
+    diff = checkout._git_output(["diff", "--name-only", f"{base}..{tip}"])
+    return tuple(diff.splitlines()) if diff else ()
+
+
+def _print_brief_claim(
+    claim: protocol.ActiveClaim, opened_at: datetime, observed_at: datetime
+) -> None:
+    print(
+        f"{claim.agent} ({claim.role}) branch={claim.branch} base={claim.base}"
+        f"{_claim_age_suffix(opened_at, observed_at)}"
+    )
+    for path in claim.scope:
+        print(f"  {path}")
+    if claim.whole_reason is not None:
+        print(f"  whole: {claim.whole_reason}")
+
+
+def _print_brief(
+    body: str,
+    live: _BriefClaim | None,
+    observed_at: datetime,
+    tip: str | None,
+    touched: tuple[str, ...],
+) -> None:
+    print(body)
+    print()
+    print("CLAIM")
+    if live is None:
+        print("no active claim")
+    else:
+        _print_brief_claim(live.claim, live.opened_at, observed_at)
+    print()
+    print("TIP")
+    if live is not None:
+        print(tip if tip is not None else "branch not found")
+    print()
+    print("TOUCHED")
+    for path in touched:
+        print(path)
+
+
+def _brief_claim_json(live: _BriefClaim, observed_at: datetime) -> dict[str, object]:
+    claim = live.claim
+    return {
+        "agent": claim.agent,
+        "role": claim.role,
+        "branch": claim.branch,
+        "base": claim.base,
+        "scope": list(claim.scope),
+        "whole": claim.whole_reason,
+        "age": _claim_age_fields(live.opened_at, observed_at)[0],
+    }
+
+
+def _brief_json(
+    body: str,
+    live: _BriefClaim | None,
+    observed_at: datetime,
+    tip: str | None,
+    touched: tuple[str, ...],
+) -> int:
+    print(
+        json.dumps(
+            {
+                "body": body,
+                "claim": None if live is None else _brief_claim_json(live, observed_at),
+                "tip": tip,
+                "touched": list(touched),
+            }
+        )
+    )
+    return 0
+
+
+def _cmd_brief(parsed: argparse.Namespace, session: _ReadSession) -> int:
+    """Compose one item's own reads into the one dispatch brief a lane step's
+    body otherwise gets assembled from by hand (AGENTS.md "the next brief
+    names the body, the lane tip ... and the commands"): the item's body from
+    the forge, its live claim from the store, the claim branch's current tip,
+    and the files the lane touches against its base. Never a new data
+    source, and never a write."""
+    item = int(parsed.item)
+    client = session.forge()
+    body = client.item_reference(item).body or ""
+    worktree, _remote, state = _store_observation()
+    live = _brief_live_claim(worktree, state, item)
+    if live is None:
+        tip: str | None = None
+        touched: tuple[str, ...] = ()
+    else:
+        tip = _lane_tip(live.claim.branch)
+        touched = _touched_files(live.claim.base, tip) if tip is not None else ()
+    observed_at = datetime.now(UTC)
+    if parsed.json:
+        return _brief_json(body, live, observed_at, tip, touched)
+    _print_brief(body, live, observed_at, tip, touched)
+    return 0
+
+
 def _cmd_status(parsed: argparse.Namespace) -> int:
     """`status` reads live claims from the store directly (issue #176),
     dispatched straight from `main` -- it never needs `_dispatch`'s ledger
@@ -2966,6 +3119,7 @@ def _cmd_ask(parsed: argparse.Namespace, session: _WriteSession) -> int:
 
 _READ_HANDLERS: dict[str, Callable[[argparse.Namespace, _ReadSession], int | None]] = {
     "check": _cmd_check,
+    "brief": _cmd_brief,
     "board": _cmd_board,
     "rulings": _cmd_rulings,
     "next": _cmd_next,

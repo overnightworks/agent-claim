@@ -340,6 +340,29 @@ when a slice-shaped title such as `Schema (#79 Scheibe 21)` names a parent
 that GitHub does not record as one, and refuses outright when the target
 itself is a container (`claim a child`).
 
+## Briefing a lane step's dispatch
+
+`aco brief <item>` composes one item's own body, live claim, lane tip, and
+touched files into the one artifact a dispatch brief is built from -- the
+reads `status`, `check`, and `checkout` already make, never a new data source,
+and never a write. It prints, in this fixed order: the item's body, read
+whole from the forge; its live claim (agent, role, branch, base, scope,
+`whole`, and age) or `no active claim`; the claim branch's current tip
+(`git rev-parse`, local then `origin/`, or `branch not found`); and the files
+the lane branch touches against its base (`git diff --name-only base..tip`).
+Without a live claim the tip and touched-files sections are empty; with a
+claim whose branch resolves to neither a local nor an `origin/` ref, the tip
+section prints `branch not found` and touched files stays empty. `--json`
+prints one object, `{"body", "claim", "tip", "touched"}`, with `claim` `null`
+when the item carries none.
+
+`brief` is a forge command like `check` and `board`: without a GitHub remote
+under the `canonical_remote` pin it refuses the same way `board` does, before
+ever calling `gh`. The head pastes its output straight into a dispatched lane
+step's brief -- the body, the lane tip, and the touched files a fresh
+delegated agent needs -- instead of assembling it by hand from `gh issue
+view`, `git rev-parse`, and `aco status`.
+
 ## Read-only board projection
 
 `aco board` reads the open issues, open PRs, PRs merged since the
