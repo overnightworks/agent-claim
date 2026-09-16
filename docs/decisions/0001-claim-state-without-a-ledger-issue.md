@@ -72,6 +72,12 @@ configuration says so.** Capabilities *validate* the pin; they never *choose* th
 round-2 counter-check named runtime capability selection as an unresolved defect in the
 concept: a forge plan change must never silently move a fact's owner without a migration.
 
+**Addendum (16.09.2026, issue #260).** `cut` writes `Parent: #<container>` as the first prose
+line of every fresh child body. It is a recovery marker, not a parentage source: only `cut`'s
+own orphan adoption reads it back, so a repeat `cut` after a failed relation write can finish
+the same relation instead of creating a second child. No reader derives parentage from the
+body; the sub-issue relation stays the only owner.
+
 **A provider port with a capability enum `UNSUPPORTED | READ_ONLY | READ_WRITE`,** replacing
 the concept's `Support(read, write)` pair, which could represent the illegal
 `read=False, write=True`. The adapter owns every fallback so no caller branches on a
