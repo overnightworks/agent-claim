@@ -8,8 +8,8 @@ Grok, people, and future agents use the same contract. Its command is `aco`.
 ## Install and maintain
 
 ```bash
-uv tool install git+https://github.com/overnightworks/agent-claim.git@v1.0.0
-# or: pipx install git+https://github.com/overnightworks/agent-claim.git@v1.0.0
+uv tool install git+https://github.com/overnightworks/agent-claim.git@v2.0.0
+# or: pipx install git+https://github.com/overnightworks/agent-claim.git@v2.0.0
 uv tool upgrade agent-coordination
 uv tool uninstall agent-coordination
 ```
