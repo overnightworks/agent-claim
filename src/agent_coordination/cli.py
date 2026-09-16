@@ -1102,10 +1102,10 @@ def _rulings(projected: board.Board, bodies: Mapping[int, str], *, as_json: bool
 
 def _ruling_pull_hint(item: board.BoardItem) -> str | None:
     if item.expectation_state is board.ExpectationState.PROPOSED:
-        return "Erwartungen ungeregelt, beim Ziehen zuerst refinen"
+        return "expectations unruled: refine before the pull"
     if not item.ruling_old:
         return None
-    return f"vor {item.ruling_landings} Landungen geregelt, beim Ziehen neu refinen"
+    return f"ruled {item.ruling_landings} landings ago: refine again at the pull"
 
 
 def _next_action_command(action: board.WorkItemAction | board.CutSliceAction) -> str:

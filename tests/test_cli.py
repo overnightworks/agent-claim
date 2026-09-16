@@ -1500,7 +1500,7 @@ PULLED_WITH_REFINING_FIRST = (
     "#10 score -10: Work\nNext: Claim #10.\n"
     "Run: aco claim 10 --scope <paths>\n"
     "<paths> cannot be derived; take the files to claim from the item body.\n"
-    "Erwartungen ungeregelt, beim Ziehen zuerst refinen\n"
+    "expectations unruled: refine before the pull\n"
 )
 
 
@@ -1594,7 +1594,7 @@ def test_next_pulls_an_unruled_item_and_names_only_unworkable_ones_as_skipped(
         "Next: Claim #11.\n"
         "Run: aco claim 11 --scope <paths>\n"
         "<paths> cannot be derived; take the files to claim from the item body.\n"
-        "Erwartungen ungeregelt, beim Ziehen zuerst refinen\n"
+        "expectations unruled: refine before the pull\n"
         "\n"
         "SKIPPED\n"
         "#12: blocked by #11\n"
@@ -1611,7 +1611,7 @@ def test_next_pulls_an_unruled_item_and_names_only_unworkable_ones_as_skipped(
         "command": "aco claim 11 --scope <paths>",
         "ruling_landings": None,
         "ruling_old": None,
-        "ruling_hint": "Erwartungen ungeregelt, beim Ziehen zuerst refinen",
+        "ruling_hint": "expectations unruled: refine before the pull",
         "recovery": [],
         "skipped": [
             {"number": 12, "reason": "blocked by #11"},
@@ -13760,14 +13760,14 @@ def test_next_names_an_old_ruling_when_the_item_is_pulled(
         "Next: Claim #10.\n"
         "Run: aco claim 10 --scope <paths>\n"
         "<paths> cannot be derived; take the files to claim from the item body.\n"
-        "vor 10 Landungen geregelt, beim Ziehen neu refinen\n"
+        "ruled 10 landings ago: refine again at the pull\n"
     )
 
     assert issue_claim.main(["--repo", "example/agent-claim", "next", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["ruling_landings"] == 10
     assert payload["ruling_old"] is True
-    assert payload["ruling_hint"] == "vor 10 Landungen geregelt, beim Ziehen neu refinen"
+    assert payload["ruling_hint"] == "ruled 10 landings ago: refine again at the pull"
 
 
 def test_each_item_carries_its_own_ruling_age() -> None:

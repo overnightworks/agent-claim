@@ -469,8 +469,8 @@ slice title (#208). The head closes the container only when `next_step` is
 `null`; otherwise it reads that sentence. A container is never
 itself the `work_item` target. Pulling is not dispatching, so unruled
 expectations never withhold a `work_item`; the pulled item carries
-`Erwartungen ungeregelt, beim Ziehen zuerst refinen` instead, and an item
-ruled long ago carries `vor N Landungen geregelt, beim Ziehen neu refinen`
+`expectations unruled: refine before the pull` instead, and an item
+ruled long ago carries `ruled N landings ago: refine again at the pull`
 (both as the JSON `ruling_hint`). Items that genuinely cannot be worked —
 claimed, blocked by an open issue, frozen, or without a complete contract
 when they are not a configured projectionless idea — are named with that
