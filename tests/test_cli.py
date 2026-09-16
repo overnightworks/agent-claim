@@ -456,7 +456,15 @@ def test_board_projects_fixture_json_without_github_writes(
 
     assert issue_claim.main(["--repo", "example/agent-claim", "board", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert set(payload) == {"items", "ready_now", "stale", "recovery", "uncut", "requests"}
+    assert set(payload) == {
+        "items",
+        "ready_now",
+        "stale",
+        "recovery",
+        "uncut",
+        "requests",
+        "landings_derivable",
+    }
     first = payload["items"][0]
     ten = next(item for item in payload["items"] if item["number"] == 10)
     eleven = next(item for item in payload["items"] if item["number"] == 11)
@@ -4057,6 +4065,90 @@ def test_resolved_forge_target_checks_erwartung_6_against_a_github_remote(
     target = issue_claim._resolved_forge_target(None, "origin")
 
     assert target == forge.RepositoryId(github.GITHUB_HOST, ("owner",), "repo")
+
+
+def _write_state_ref_pin(tmp_path: Path) -> None:
+    """`.agent-claim/board.toml` pinned to `storage = "state-ref"`, in the
+    isolated toplevel `_isolate_git_toplevel` (conftest.py) already
+    redirects this process's `rev-parse --show-toplevel` to (issue #248)."""
+    config_dir = tmp_path / ".agent-claim"
+    config_dir.mkdir()
+    (config_dir / "board.toml").write_text('storage = "state-ref"\n')
+
+
+def test_lazy_forge_builds_a_state_ref_board_under_the_state_ref_pin(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`_LazyForge` chooses its adapter by the repository's own `storage`
+    pin (issue #248), never by the canonical remote's host: a state-ref
+    pin must never build a `github.GitHubForge`, even when nothing else
+    about the checkout looks unusual."""
+    _write_state_ref_pin(tmp_path)
+    stub = FakeForge(repository=forge.RepositoryId("file", (), str(tmp_path)))
+    monkeypatch.setattr(issue_claim, "_state_ref_forge", lambda _repo, _remote: stub)
+
+    def unused(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("storage = state-ref must never build a GitHubForge")
+
+    monkeypatch.setattr(github, "GitHubForge", unused)
+
+    assert issue_claim.main(["board"]) == 0
+
+
+def test_repo_is_refused_under_the_state_ref_pin(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """`--repo` names a GitHub target; under `storage = "state-ref"` there
+    is no host-based target to override (issue #248), refused before this
+    ever resolves a repository identity or touches the state ref."""
+    _write_state_ref_pin(tmp_path)
+
+    status = issue_claim.main(["--repo", "acme/items", "board"])
+
+    assert status == 2
+    assert capsys.readouterr().err == "ERROR: --repo is meaningless under storage = state-ref\n"
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        pytest.param(["cut", "10", "--title", "Scheibe 1"], id="cut"),
+        pytest.param(["rule", "10", "--line", "1", "--yes"], id="rule"),
+        pytest.param(["ask", "10", "--text", "New question?"], id="ask"),
+        pytest.param(["claim", "10", "--scope", "src/work.py", "--agent", "Codex Sol"], id="claim"),
+        pytest.param(
+            ["release", "10", "--merged", "12", "--agent", "Codex Sol", "--claim-id", "claim-1"],
+            id="release-merged",
+        ),
+    ],
+)
+def test_writing_forge_commands_refuse_under_the_state_ref_pin(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    arguments: list[str],
+) -> None:
+    """`cut`, `rule`, `ask`, an issue-scoped `claim`'s body check, and
+    `release --merged` all refuse under `storage = "state-ref"` (issue
+    #248) before ever resolving a forge: `state_board.StateRefBoard` stays
+    read-only until #230 slice 4. `_request` is replaced the same way
+    every other `claim` test replaces it (its own worktree-cleanliness
+    precondition is unrelated to this one, and this checkout is not the
+    isolated one that precondition demands). `release --merged` also passes
+    `--claim-id` so its branch precondition never reads this process's real
+    current branch, which is empty under CI's detached-HEAD checkout."""
+    _write_state_ref_pin(tmp_path)
+    monkeypatch.setattr(
+        issue_claim, "_request", lambda _arguments: request(issue=10, scope=("src/work.py",))
+    )
+
+    status = issue_claim.main(arguments)
+
+    assert status == 2
+    assert (
+        capsys.readouterr().err
+        == "ERROR: not yet: items in the state ref are read-only until #230 slice 4\n"
+    )
 
 
 def test_cli_version_exits_before_requiring_a_command(

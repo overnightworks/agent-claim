@@ -24,12 +24,13 @@ Local proofs run under the pinned interpreter named in `.python-version`
 ### Reader/writer compatibility
 
 Claim state is a git tree, `claims/<key>.toml` / `ids/<claim_id>` /
-`resources/<name>.toml` under a `schema.toml` `version`, read and written
-whole: an unknown key or a malformed record fails the whole read loud, never
-a single quarantinable claim -- a commit is the unit a writer writes, so a
-broken tree is corrupt state. `version = 1` is the compatibility contract
-this release actually makes; a later tree version is a new cut, not a silent
-patch. Every repository migrated off the old GitHub-issue ledger carries this
+`resources/<name>.toml` / `items/<id>.md` under a `schema.toml` `version`,
+read and written whole: an unknown key or a malformed record fails the whole
+read loud, never a single quarantinable claim -- a commit is the unit a
+writer writes, so a broken tree is corrupt state. `version = 2` is the
+compatibility contract this release actually makes (`items/`, issue #248,
+raised it from `1`); a later tree version is a new cut, not a silent patch.
+Every repository migrated off the old GitHub-issue ledger carries this
 tombstone, posted once on that now-closed issue and never edited afterward:
 
 ```
@@ -270,7 +271,7 @@ how many claims the state tree holds.
 `bootstrap` has one job: it creates or reports the state ref. A present ref
 is a pure read (prints the ref's commit id, writes nothing); an absent ref
 (proven by `git ls-remote --exit-code`, never inferred from a fetch failure)
-gets one commit holding an empty state tree (`schema.toml`, `version = 1`)
+gets one commit holding an empty state tree (`schema.toml`, `version = 2`)
 pushed as a plain fast-forward; an unreachable remote (auth or transport
 failure) fails loud instead of either printing or writing. It is forge-free
 (see "Scope and boundaries" below), so `--repo` and the canonical remote's
@@ -410,14 +411,41 @@ Item verfeinern`. Once it has a complete contract, its own Next takes over;
 without the configured label, a projectionless item remains
 `body incomplete: <missing sections>` — the same rendering `claim` and
 `check` use, detailed below.
-The file defines exactly `priority_labels`, `idea_label`, `body_contract` and
-`canonical_remote`; any other key is refused by name (`board configuration
-<path> has unknown top-level key priorty_labels`) rather than read past, since
-a typo would otherwise leave the setting at its default with nothing saying
-so. `body_contract` survives as a known key with a single legal value,
-`"block"` (below): an absent key means the same thing, and `"prose"` is
-refused by name — `board configuration <path> pins body_contract 'prose':
-prose bodies are no longer supported`.
+The file defines exactly `priority_labels`, `idea_label`, `body_contract`,
+`canonical_remote`, and `storage`; any other key is refused by name (`board
+configuration <path> has unknown top-level key priorty_labels`) rather than
+read past, since a typo would otherwise leave the setting at its default with
+nothing saying so. `body_contract` survives as a known key with a single
+legal value, `"block"` (below): an absent key means the same thing, and
+`"prose"` is refused by name — `board configuration <path> pins body_contract
+'prose': prose bodies are no longer supported`.
+
+### Storage pin
+
+`storage = "github" | "state-ref"` (default `github`) names which adapter
+owns this repository's board and item data (issue #248, parent #230). Under
+`github` (every repository today), items are GitHub issues, exactly as
+described throughout this document. Under `state-ref`, an item is instead a
+file `items/<id>.md` in the tree of `refs/aco/state` — its id the file name,
+`aco-` plus six lowercase hex characters, never a block key — and blockers
+and parentage live in that file's own nested `[record]` table
+(`title`/`state`/`kind`/`labels`/`blocked_by`/`parent`/`origin`/
+`created_at`/`updated_at`/`closed_at`) instead of GitHub's native relations;
+`record` is refused as an unknown key under `storage = "github"`, so the two
+storages never both claim the same fact. `board`, `next`, `rulings`, `check`,
+and `status` all read a `state-ref` repository fully, including one without
+any GitHub remote at all, and `default_branch` is read from the checkout's
+own `origin/HEAD` rather than an API call. `--repo` is meaningless under
+`state-ref` and is refused by name.
+
+`state-ref` is read-only today: `cut`, `rule`, `ask`, an issue-scoped
+`claim`'s body check, and `release --merged` all refuse with "not yet: items
+in the state ref are read-only until #230 slice 4" — #230's slice 4 adds the
+item-writing intents (`item new`/`edit`/`close`) this pin is waiting for.
+Landings are not yet derived from the state ref either (#230 slice 6), so
+every `state-ref` item's stage is either `IN_FLIGHT` (an active claim on an
+open branch) or `TEXT_ONLY`; `CODE_LANDED` and the board's recovery section
+stay empty until that slice lands.
 The board table's `FREED` column shows `YYYY-MM-DD (N d)` when every listed
 issue blocker has closed, using the latest such UTC closing date and whole days
 since then; it otherwise shows `-`. Every item in `board --json` carries the

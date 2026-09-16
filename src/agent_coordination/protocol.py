@@ -562,7 +562,7 @@ def _require_coordinator_override(role: str | None) -> None:
 # `schema.toml` codec. C1 writes and reads exactly one file, `schema.toml`;
 # `claims/`, `ids/`, and `resources/` are C2's `apply`.
 
-SUPPORTED_STATE_SCHEMA_VERSION = 1
+SUPPORTED_STATE_SCHEMA_VERSION = 2
 
 
 class UnsupportedStateSchemaError(ClaimError):

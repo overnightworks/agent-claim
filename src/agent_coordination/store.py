@@ -66,10 +66,15 @@ DEFAULT_CANONICAL_REMOTE = "origin"
 CLAIMS_DIRECTORY = "claims"
 IDS_DIRECTORY = "ids"
 RESOURCES_DIRECTORY = "resources"
+# Item files (issue #248): board/item data, never claim-ledger data, so it
+# is a recognized top-level entry but deliberately excluded from
+# `_parse_state_tree`'s own archive read (`read_item_files` below) -- a
+# command that never touches items pays nothing to fetch them.
+ITEMS_DIRECTORY = "items"
 SCHEMA_TOML_FILENAME = "schema.toml"
 TOML_SUFFIX = ".toml"
 _STATE_TOP_LEVEL_NAMES = frozenset(
-    {SCHEMA_TOML_FILENAME, CLAIMS_DIRECTORY, IDS_DIRECTORY, RESOURCES_DIRECTORY}
+    {SCHEMA_TOML_FILENAME, CLAIMS_DIRECTORY, IDS_DIRECTORY, RESOURCES_DIRECTORY, ITEMS_DIRECTORY}
 )
 
 # The transition each intent type carries, for the commit message trailer
@@ -369,18 +374,34 @@ def _extract_archive_member(archive: tarfile.TarFile, member: tarfile.TarInfo) -
     return handle.read()
 
 
-def _read_state_archive(worktree: Path, tree_oid: ObjectId, *, tip: ObjectId) -> dict[str, bytes]:
+def _read_state_archive(
+    worktree: Path, tree_oid: ObjectId, *, tip: ObjectId, paths: Iterable[str] | None = None
+) -> dict[str, bytes]:
     """Every blob's raw bytes under `tree_oid`, read via one `git archive`
     instead of one `cat-file -p` per file (issue #241, audit findings 20-21):
     a state tree with hundreds of claims used to cost one process per file
     to read; this costs one regardless of how many. `tarfile` owns the
     framing, never a hand-rolled parse of git's batch output.
 
+    `paths`, when given, restricts the archive to exactly those top-level
+    entries (issue #248): `_parse_state_tree` uses this to exclude
+    `items/`, so a store command that never reads items never pays to
+    fetch their content. `git archive` errors on a pathspec that matches
+    nothing, so an empty `paths` short-circuits to an empty read rather
+    than asking git to archive everything by accident.
+
     A missing object fails the whole `git archive` loud, the same doctrine a
     per-blob read used to enforce (ruling 9c): a broken tree is corrupt
     state, never a single quarantinable claim.
     """
-    result = _run_git(worktree, ["archive", "--format=tar", str(tree_oid)])
+    if paths is not None:
+        paths = tuple(paths)
+        if not paths:
+            return {}
+    command = ["archive", "--format=tar", str(tree_oid)]
+    if paths is not None:
+        command.extend(["--", *paths])
+    result = _run_git(worktree, command)
     if result.exit_status != 0:
         detail = result.stderr.decode().strip() or _UNKNOWN_GIT_FAILURE
         raise MalformedStateTreeError(f"cannot read the state tree at {tip}: {detail}")
@@ -471,7 +492,10 @@ def _parse_state_tree(worktree: Path, tip: ObjectId) -> ClaimState:
     One recursive `ls-tree` for structure and one `git archive` for every
     blob's bytes (issue #241) replace what used to be one `ls-tree` and one
     `cat-file -p` per entry -- the process count this function pays is fixed
-    regardless of how many claims, ids, or resources the tree holds.
+    regardless of how many claims, ids, or resources the tree holds. `items/`
+    (issue #248) is recognized here but excluded from that one archive: item
+    content is board data, read lazily and separately by `read_item_files`,
+    never folded into `ClaimState`.
 
     A defect anywhere fails the whole read loud (ruling 9c): a commit is the
     unit a writer writes, so a broken tree is corrupt state, never a single
@@ -483,7 +507,9 @@ def _parse_state_tree(worktree: Path, tip: ObjectId) -> ClaimState:
     unknown = set(top_level) - _STATE_TOP_LEVEL_NAMES
     if unknown:
         raise MalformedStateTreeError(f"state tree at {tip} has unknown entries: {sorted(unknown)}")
-    archive = _read_state_archive(worktree, tree_oid, tip=tip)
+    archive = _read_state_archive(
+        worktree, tree_oid, tip=tip, paths=sorted(top_level.keys() - {ITEMS_DIRECTORY})
+    )
     parse_schema_toml(_read_schema_toml(top_level, archive, tip=tip), tip=tip)
     return ClaimState(
         tip=tip,
@@ -505,6 +531,34 @@ def _parse_state_tree(worktree: Path, tip: ObjectId) -> ClaimState:
             tip=tip,
         ),
     )
+
+
+def read_item_files(worktree: Path, tip: ObjectId) -> Mapping[str, bytes]:
+    """Every `items/<id>.md` blob's raw bytes at `tip`, fetched only when a
+    caller actually asks for it (issue #248): one `ls-tree` plus one `git
+    archive` scoped to the `items/` subtree alone, decoupled from
+    `ClaimState` and from every other store read (`_parse_state_tree`'s own
+    archive explicitly excludes this directory). Empty when `items/` does
+    not exist -- the proven-empty-board case a fresh or GitHub-pinned
+    repository is in.
+
+    Structural shape only: every entry must be a blob, the same doctrine
+    `claims/`/`ids/`/`resources/` already enforce (a broken tree is corrupt
+    state, ruling 9c). Filename and content grammar -- the `aco-` id
+    pattern, the `[record]` table -- belong to `items.py`, this function's
+    one caller.
+    """
+    tree_oid = _tree_oid(worktree, tip)
+    top_entries = _list_tree(worktree, tree_oid, tip=tip, context="state")
+    top_level = {name: value for name, value in top_entries.items() if "/" not in name}
+    items_oid = _subtree_oid(top_level, ITEMS_DIRECTORY, tip=tip)
+    if items_oid is None:
+        return MappingProxyType({})
+    item_entries = _list_tree(worktree, items_oid, tip=tip, context=ITEMS_DIRECTORY)
+    for name, (kind, _oid) in item_entries.items():
+        if kind != "blob":
+            raise MalformedStateTreeError(f"{ITEMS_DIRECTORY}/{name} at {tip} is not a file")
+    return MappingProxyType(_read_state_archive(worktree, items_oid, tip=tip))
 
 
 def fetch_state(*, worktree: Path, remote: str = DEFAULT_CANONICAL_REMOTE) -> ClaimState:
@@ -753,6 +807,14 @@ def _write_incremental_state_tree(
     top_entries: list[_TreeEntry] = [
         ("100644", "blob", ObjectId(existing[SCHEMA_TOML_FILENAME][1]), SCHEMA_TOML_FILENAME)
     ]
+    if ITEMS_DIRECTORY in existing:
+        # No transition intent ever touches `items/` (issue #248): the board's
+        # own writer owns that subtree, so a claim/rescope/release transition
+        # always carries the parent tree's `items/` oid forward unchanged --
+        # the same reuse-by-copy the schema blob above already relies on.
+        top_entries.append(
+            ("040000", "tree", ObjectId(existing[ITEMS_DIRECTORY][1]), ITEMS_DIRECTORY)
+        )
     if new_state.claims:
         top_entries.append(
             (

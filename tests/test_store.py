@@ -25,6 +25,11 @@ from agent_coordination import github, process, protocol, store
 # exercise a failure path where the actual value never reaches an assertion.
 _UNRESOLVABLE_OBJECT_ID = protocol.ObjectId("0" * 40)
 _PLACEHOLDER_TIP = protocol.ObjectId("1" * 40)
+# `schema.toml`'s content one version below `SUPPORTED_STATE_SCHEMA_VERSION`
+# (2, issue #248's `items/` directory): unsupported for the same reason
+# version 3 is, and reused verbatim wherever a test needs any syntactically
+# valid `schema.toml` body that is not the currently supported one.
+_SCHEMA_TOML_VERSION_ONE = b"version = 1\n"
 
 
 @pytest.fixture(autouse=True)
@@ -270,7 +275,7 @@ def test_bootstrap_creates_the_empty_state_tree_on_a_proven_empty_remote(
     tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
 
     assert _state_ref_oid(bare_remote) == tip
-    assert _tree_entries(bare_remote, tip) == {"schema.toml": "version = 1\n"}
+    assert _tree_entries(bare_remote, tip) == {"schema.toml": "version = 2\n"}
 
 
 def test_bootstrap_is_a_no_op_read_when_the_ref_already_exists(
@@ -327,7 +332,7 @@ def test_fetch_state_reads_via_fetch_head_without_creating_a_local_ref(
     ("files", "expected_error", "match"),
     [
         pytest.param(
-            {"schema.toml": b"version = 1\n", "extra.txt": b"stray\n"},
+            {"schema.toml": _SCHEMA_TOML_VERSION_ONE, "extra.txt": b"stray\n"},
             protocol.MalformedStateTreeError,
             "unknown entries",
             id="extra-file",
@@ -351,9 +356,9 @@ def test_fetch_state_reads_via_fetch_head_without_creating_a_local_ref(
             id="unparsable-toml",
         ),
         pytest.param(
-            {"schema.toml": b"version = 2\n"},
+            {"schema.toml": b"version = 3\n"},
             protocol.UnsupportedStateSchemaError,
-            "unsupported state schema version 2",
+            "unsupported state schema version 3",
             id="unsupported-version",
         ),
     ],
@@ -371,6 +376,27 @@ def test_fetch_state_rejects_a_malformed_or_unsupported_tree(
         store.fetch_state(worktree=worktree, remote=str(bare_remote))
 
 
+def test_fetch_state_rejects_schema_version_one_without_stamping_its_lineage(
+    bare_remote: Path, worktree: Path
+) -> None:
+    """`version = 1` predates `SUPPORTED_STATE_SCHEMA_VERSION = 2` (issue
+    #248's `items/` directory): it is exactly as unsupported as the version-3
+    case above, and `_parse_state_tree` must raise before `fetch_state` ever
+    reaches `_write_lineage_stamp`, so a first, unsupported observation never
+    poisons the lineage check a later, supported fetch relies on.
+    """
+    _push_custom_tree(
+        bare_remote, worktree, parent=None, files={"schema.toml": _SCHEMA_TOML_VERSION_ONE}
+    )
+
+    with pytest.raises(
+        protocol.UnsupportedStateSchemaError, match="unsupported state schema version 1"
+    ):
+        store.fetch_state(worktree=worktree, remote=str(bare_remote))
+
+    assert store._read_lineage_stamp(worktree) is None
+
+
 def test_fetch_state_rejects_a_tree_missing_schema_toml(bare_remote: Path, worktree: Path) -> None:
     empty_tree = _raw_tree(worktree, [])
     _push_raw_state_tree(
@@ -384,7 +410,7 @@ def test_fetch_state_rejects_a_tree_missing_schema_toml(bare_remote: Path, workt
 def test_fetch_state_rejects_a_claims_entry_that_is_not_a_directory(
     bare_remote: Path, worktree: Path
 ) -> None:
-    schema_blob = _blob(worktree, b"version = 1\n")
+    schema_blob = _blob(worktree, b"version = 2\n")
     claims_blob = _blob(worktree, b"not a tree\n")
     _push_raw_state_tree(
         bare_remote,
@@ -400,7 +426,7 @@ def test_fetch_state_rejects_a_claims_entry_that_is_not_a_directory(
 
 
 def test_fetch_state_rejects_a_non_toml_entry_in_claims(bare_remote: Path, worktree: Path) -> None:
-    schema_blob = _blob(worktree, b"version = 1\n")
+    schema_blob = _blob(worktree, b"version = 2\n")
     stray_blob = _blob(worktree, b"junk\n")
     claims_tree = _raw_tree(worktree, [("100644", "blob", stray_blob, "issue-42.txt")])
     _push_raw_state_tree(
@@ -417,7 +443,7 @@ def test_fetch_state_rejects_a_non_toml_entry_in_claims(bare_remote: Path, workt
 
 
 def test_fetch_state_rejects_an_invalid_id_entry(bare_remote: Path, worktree: Path) -> None:
-    schema_blob = _blob(worktree, b"version = 1\n")
+    schema_blob = _blob(worktree, b"version = 2\n")
     empty_blob = _blob(worktree, b"")
     ids_tree = _raw_tree(worktree, [("100644", "blob", empty_blob, "not valid!")])
     _push_raw_state_tree(
@@ -436,7 +462,7 @@ def test_fetch_state_rejects_an_invalid_id_entry(bare_remote: Path, worktree: Pa
 def test_fetch_state_rejects_a_non_toml_entry_in_resources(
     bare_remote: Path, worktree: Path
 ) -> None:
-    schema_blob = _blob(worktree, b"version = 1\n")
+    schema_blob = _blob(worktree, b"version = 2\n")
     stray_blob = _blob(worktree, b"junk\n")
     resources_tree = _raw_tree(worktree, [("100644", "blob", stray_blob, "display.txt")])
     _push_raw_state_tree(
@@ -452,13 +478,106 @@ def test_fetch_state_rejects_a_non_toml_entry_in_resources(
         store.fetch_state(worktree=worktree, remote=str(bare_remote))
 
 
+def test_fetch_state_never_archives_items_content(
+    bare_remote: Path, worktree: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`items/` (issue #248) is a recognized top-level entry, but
+    `_parse_state_tree`'s own archive excludes it by naming exactly the
+    paths it wants (never a bare `git archive <tree>`): reading claim state
+    never pays to fetch item content."""
+    archive_commands: list[list[str]] = []
+
+    def spy(real: Callable[..., object]) -> Callable[..., object]:
+        def wrapped(command: list[str], **kwargs: object) -> object:
+            if command[0] == "git" and "archive" in command:
+                archive_commands.append(command)
+            return real(command, **kwargs)
+
+        return wrapped
+
+    monkeypatch.setattr(store.process, "run_captured", spy(process.run_captured))
+    schema_blob = _blob(worktree, protocol.serialize_empty_schema_toml().encode())
+    item_blob = _blob(worktree, b"item body\n")
+    items_tree = _raw_tree(worktree, [("100644", "blob", item_blob, "aco-000001.md")])
+    _push_raw_state_tree(
+        bare_remote,
+        worktree,
+        [
+            ("100644", "blob", schema_blob, "schema.toml"),
+            ("040000", "tree", items_tree, store.ITEMS_DIRECTORY),
+        ],
+    )
+
+    state = store.fetch_state(worktree=worktree, remote=str(bare_remote))
+
+    assert state.claims == {}
+    assert len(archive_commands) == 1
+    assert "items" not in archive_commands[0]
+    assert "schema.toml" in archive_commands[0]
+
+
+def test_read_item_files_is_empty_when_the_items_directory_is_absent(
+    bare_remote: Path, worktree: Path
+) -> None:
+    tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
+
+    assert store.read_item_files(worktree, tip) == {}
+
+
+def test_read_item_files_reads_every_blob_under_items(bare_remote: Path, worktree: Path) -> None:
+    schema_blob = _blob(worktree, protocol.serialize_empty_schema_toml().encode())
+    item_blob = _blob(worktree, b"item body\n")
+    items_tree = _raw_tree(worktree, [("100644", "blob", item_blob, "aco-000001.md")])
+    tip = protocol.ObjectId(
+        _push_raw_state_tree(
+            bare_remote,
+            worktree,
+            [
+                ("100644", "blob", schema_blob, "schema.toml"),
+                ("040000", "tree", items_tree, store.ITEMS_DIRECTORY),
+            ],
+        )
+    )
+
+    assert store.read_item_files(worktree, tip) == {"aco-000001.md": b"item body\n"}
+
+
+def test_read_item_files_rejects_a_non_blob_entry(bare_remote: Path, worktree: Path) -> None:
+    schema_blob = _blob(worktree, protocol.serialize_empty_schema_toml().encode())
+    inner_tree = _raw_tree(worktree, [])
+    items_tree = _raw_tree(worktree, [("040000", "tree", inner_tree, "aco-000001.md")])
+    tip = protocol.ObjectId(
+        _push_raw_state_tree(
+            bare_remote,
+            worktree,
+            [
+                ("100644", "blob", schema_blob, "schema.toml"),
+                ("040000", "tree", items_tree, store.ITEMS_DIRECTORY),
+            ],
+        )
+    )
+
+    with pytest.raises(protocol.MalformedStateTreeError, match="is not a file"):
+        store.read_item_files(worktree, tip)
+
+
+def test_read_state_archive_short_circuits_on_an_empty_paths_list(worktree: Path) -> None:
+    """An empty `paths` sequence means "nothing to fetch" (issue #248): `git
+    archive -- ` with zero path arguments would otherwise archive the whole
+    tree, silently defeating the exclusion `_parse_state_tree` relies on."""
+    schema_blob = _blob(worktree, protocol.serialize_empty_schema_toml().encode())
+    tree = protocol.ObjectId(_raw_tree(worktree, [("100644", "blob", schema_blob, "schema.toml")]))
+
+    assert store._read_state_archive(worktree, tree, tip=_PLACEHOLDER_TIP, paths=()) == {}
+
+
 def test_lineage_error_when_the_ref_is_rewritten_without_this_worktrees_stamp_as_an_ancestor(
     bare_remote: Path, worktree: Path
 ) -> None:
     store.bootstrap(worktree=worktree, remote=str(bare_remote))  # first observation, stamps it
 
     _push_custom_tree(
-        bare_remote, worktree, parent=None, files={"schema.toml": b"version = 1\n"}
+        bare_remote, worktree, parent=None, files={"schema.toml": b"version = 2\n"}
     )  # unrelated root commit: not a descendant of the stamped tip
 
     with pytest.raises(protocol.StateLineageError, match="may have been rewritten"):
@@ -750,7 +869,7 @@ def test_parse_state_tree_fails_loud_when_a_blob_is_missing_from_the_object_data
     blob_oid = (
         subprocess.run(
             ["git", "-C", str(worktree), "hash-object", "-w", "--stdin"],
-            input=b"version = 1\n",
+            input=_SCHEMA_TOML_VERSION_ONE,
             check=True,
             capture_output=True,
         )
@@ -1060,6 +1179,73 @@ def test_commit_transition_rescope_and_release_round_trip(
     released = store.fetch_state(worktree=worktree, remote=str(bare_remote))
     assert "issue-42" not in released.claims
     assert protocol.ClaimId("a1") in released.consumed_ids
+
+
+def test_commit_transition_preserves_items_across_claim_rescope_and_release(
+    bare_remote: Path, worktree: Path
+) -> None:
+    """`items/` (issue #248) is board data no transition intent ever
+    touches: `_write_incremental_state_tree` must carry its oid forward
+    unchanged on every claim, rescope, and release -- not silently rebuild
+    the top-level tree from `schema.toml` plus the claim-ledger directories
+    alone, which would drop the whole board (Grok final gate, blocking 1).
+    """
+    schema_blob = _blob(worktree, protocol.serialize_empty_schema_toml().encode())
+    item_blob = _blob(worktree, b"item body\n")
+    items_tree = _raw_tree(worktree, [("100644", "blob", item_blob, "aco-000001.md")])
+    _push_raw_state_tree(
+        bare_remote,
+        worktree,
+        [
+            ("100644", "blob", schema_blob, "schema.toml"),
+            ("040000", "tree", items_tree, store.ITEMS_DIRECTORY),
+        ],
+    )
+
+    def assert_items_unchanged() -> None:
+        tip = store.fetch_state(worktree=worktree, remote=str(bare_remote)).tip
+        assert tip is not None
+        entries = store._list_tree(worktree, tip, tip=tip, context="state")
+        assert entries[store.ITEMS_DIRECTORY] == ("tree", items_tree)
+        assert store.read_item_files(worktree, tip) == {"aco-000001.md": b"item body\n"}
+
+    assert_items_unchanged()
+
+    store.commit_transition(
+        worktree=worktree,
+        remote=str(bare_remote),
+        subject="claim issue 42",
+        intent=_issue_claim_intent(42),
+    )
+    assert_items_unchanged()
+
+    store.commit_transition(
+        worktree=worktree,
+        remote=str(bare_remote),
+        subject="rescope issue 42",
+        intent=protocol.RescopeIntent(
+            claim_id=protocol.ClaimId("a1"),
+            agent="Ada",
+            role="builder",
+            scope=("README.md",),
+            operation_id="op-2",
+        ),
+    )
+    assert_items_unchanged()
+
+    store.commit_transition(
+        worktree=worktree,
+        remote=str(bare_remote),
+        subject="release issue 42",
+        intent=protocol.ReleaseIntent(
+            claim_id=protocol.ClaimId("a1"),
+            agent="Ada",
+            role="builder",
+            outcome=protocol.AbandonedRelease("done"),
+            operation_id="op-3",
+        ),
+    )
+    assert_items_unchanged()
 
 
 def test_commit_transition_a_local_two_racer_claim_on_different_keys_both_land(

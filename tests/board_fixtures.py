@@ -71,6 +71,8 @@ def projected_board(
     trunk_landings: tuple[datetime, ...] = (),
     children: Mapping[int, tuple[board.ChildItem, ...]] = MappingProxyType({}),
     dependencies: Mapping[int, tuple[board.IssueDependency, ...]] = MappingProxyType({}),
+    open_pull_requests_supported: bool = True,
+    landings_derivable: bool = True,
 ) -> board.Board:
     """`board.build_board` for scenarios that do not turn on which repository is projected."""
     observed_at = now or datetime(2026, 8, 21, tzinfo=UTC)
@@ -87,6 +89,8 @@ def projected_board(
             children=children,
             dependencies=dependencies,
             claim_ages={claim.claim_id: observed_at for claim in claims},
+            open_pull_requests_supported=open_pull_requests_supported,
+            landings_derivable=landings_derivable,
         )
     )
 
