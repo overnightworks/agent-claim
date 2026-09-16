@@ -657,15 +657,25 @@ select a row from`), or no such entry left (`#79 has no row 9; cuttable rows:
 1, 2`).
 
 Every refusal precedes every write. `cut` refuses when the forge cannot
-create a child issue or update an item body (`capability()` answers anything
-but `read_write` for either); when the target is not an open container, or is
-itself a child of another issue (nested containers are not supported); when
-the target's own body is legacy or malformed; and, for `--row N`, when the
-block names no such entry. None of the three writes are atomic with each
-other — nor is the child issue's creation atomic with its own sub-issue
-relation write inside `create_child` — so a failure at any point after the
-child issue exists names the created child and the step that failed, and
-instructs a hand fix rather than a re-run, which would create a second child.
+create a child issue, link one as a sub-issue, or update an item body
+(`capability()` answers anything but `read_write` for any of the three);
+when the target is not an open container, or is itself a child of another
+issue (nested containers are not supported); when the target's own body is
+legacy or malformed; and, for `--row N`, when the block names no such entry.
+None of the three writes are atomic with each other — nor is the child
+issue's own creation atomic with its sub-issue relation write, since
+`create_child` is composed from separate `create_issue` and `link_child`
+port operations — so a failure at any point after the child issue exists
+names the created child and the step that failed. Re-run the same cut; it
+adopts the child (#260): before creating anything, `cut` looks for one
+titled exactly the row's title, among the container's already-recorded
+children and among orphans — open issues with no recorded parent at all,
+exactly the shape a failed relation write leaves behind. Exactly one open
+match is adopted (linking an orphan first if that is where it was found) —
+no second issue, the remaining steps (row removal, output) finish for that
+child instead. More than one open match refuses by name rather than guess;
+a *closed* match refuses too, instead of reopening it; no match at all
+takes today's create-a-child path.
 
 ## Issueless lane claims
 

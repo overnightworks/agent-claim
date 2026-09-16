@@ -226,6 +226,8 @@ _READ_ONLY_OPERATIONS = (
     forge.ForgeOperation.LIST_RECENT_MERGED_BOARD_PULL_REQUESTS,
 )
 _READ_WRITE_OPERATIONS = (
+    forge.ForgeOperation.CREATE_ISSUE,
+    forge.ForgeOperation.LINK_CHILD,
     forge.ForgeOperation.CREATE_CHILD,
     forge.ForgeOperation.UPDATE_ITEM_BODY,
 )
@@ -790,14 +792,14 @@ class GitHubForge:
                 recent.append(pull_request)
         return tuple(recent)
 
-    def create_child(self, *, parent: int, title: str, body: str, kind: board.ItemKind) -> int:
-        """Create a fresh issue of `kind` and record it as `parent`'s sub-issue.
+    def create_issue(self, *, title: str, body: str, kind: board.ItemKind) -> int:
+        """Create a fresh issue of `kind`, linked to no parent.
 
-        Not atomic: GitHub has no transaction across the create and the
-        sub-issue POST. A failure in the relation POST raises
-        `forge.ForgePartialChildCreationError` naming the child that already
-        exists, so `cli._cmd_cut` can refuse with a hand-link instruction
-        instead of risking a second child on retry.
+        Validates the same response shape `create_child` depends on --
+        `id` alongside `number` -- even though only the number is returned
+        here: GitHub always sends both, and a caller that later runs
+        `link_child` against this issue needs that id to already be
+        trustworthy rather than fail out of place.
         """
         raw = self._run(
             ["api", "--method", "POST", f"repos/{self.repository}/issues", "--input", "-"],
@@ -822,26 +824,63 @@ class GitHubForge:
             or number < 1
         ):
             raise forge.ForgeMalformedResponseError("GitHub did not return a created child issue")
+        return number
+
+    def _issue_identifier(self, number: int) -> int:
+        """`number`'s internal id, which the sub-issue POST needs and the
+        issue-number-only port surface never otherwise carries."""
+        raw = self._run(["api", f"repos/{self.repository}/issues/{number}", "--jq", ".id"])
         try:
-            self._run(
-                [
-                    "api",
-                    "--method",
-                    "POST",
-                    f"repos/{self.repository}/issues/{parent}/sub_issues",
-                    "--input",
-                    "-",
-                ],
-                input_data=json.dumps({"sub_issue_id": identifier}).encode("utf-8"),
-            )
+            identifier = int(strip_ansi(raw).strip())
+        except ValueError as error:
+            raise forge.ForgeMalformedResponseError(
+                "GitHub returned a malformed issue id"
+            ) from error
+        if identifier < 1:
+            raise forge.ForgeMalformedResponseError("GitHub returned a malformed issue id")
+        return identifier
+
+    def link_child(self, parent: int, child: int) -> None:
+        """Record already-existing issue `child` as `parent`'s sub-issue --
+        the write a repeat `cut` uses to adopt an orphan a failed
+        `create_child` left behind (#260), instead of creating a second
+        issue. GitHub's sub-issue POST wants `child`'s internal id, not its
+        issue number, so this reads it first.
+        """
+        identifier = self._issue_identifier(child)
+        self._run(
+            [
+                "api",
+                "--method",
+                "POST",
+                f"repos/{self.repository}/issues/{parent}/sub_issues",
+                "--input",
+                "-",
+            ],
+            input_data=json.dumps({"sub_issue_id": identifier}).encode("utf-8"),
+        )
+
+    def create_child(self, *, parent: int, title: str, body: str, kind: board.ItemKind) -> int:
+        """Create a fresh issue of `kind` and record it as `parent`'s sub-issue.
+
+        Composed from `create_issue` and `link_child` (#260): not atomic,
+        since GitHub has no transaction across the two writes. A failure in
+        the relation POST raises `forge.ForgePartialChildCreationError`
+        naming the child that already exists; safe to retry the same `cut`,
+        since it then finds this child orphaned -- open, no recorded parent
+        -- and adopts it with `link_child` rather than creating a second one.
+        """
+        child = self.create_issue(title=title, body=body, kind=kind)
+        try:
+            self.link_child(parent, child)
         except protocol.ClaimError as error:
             raise forge.ForgePartialChildCreationError(
-                child=number,
+                child=child,
                 parent=parent,
-                step=f"record #{number} as a sub-issue of #{parent}",
+                step=f"record #{child} as a sub-issue of #{parent}",
                 cause=error,
             ) from error
-        return number
+        return child
 
     def update_item_body(self, number: int, body: str) -> None:
         self._run(

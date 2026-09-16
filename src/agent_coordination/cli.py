@@ -2911,8 +2911,8 @@ def _link_created_child(
     two writes. A failure here still leaves the created child behind, so it
     raises the same `forge.ForgePartialChildCreationError` a failed relation
     write inside `create_child` itself would -- one type, so `_cmd_cut`
-    renders one recovery message for either, `step` naming the exact manual
-    repair.
+    renders one recovery message for either, `step` naming what an
+    identical re-run finishes.
     """
     try:
         client.update_item_body(container, new_body)
@@ -2922,12 +2922,73 @@ def _link_created_child(
         ) from error
 
 
-def _print_cut_result(number: int, row_index: int | None, child: int, *, as_json: bool) -> None:
+def _print_cut_result(
+    number: int, row_index: int | None, child: int, *, as_json: bool, adopted: bool
+) -> None:
+    """Print `cut`'s result, `adopted` naming whether `child` was an already-open
+    child GitHub already recorded rather than one just created (#260). Today's
+    (`adopted=False`) shape is exactly what `cut` has always printed -- no
+    `adopted` key, `CUT` as the verb -- so a run that hits no matching child
+    is byte-identical to before this behaviour existed."""
     if as_json:
-        print(json.dumps({"container": number, "row": row_index, "child": child}))
+        payload: dict[str, object] = {"container": number, "row": row_index, "child": child}
+        if adopted:
+            payload["adopted"] = True
+        print(json.dumps(payload))
         return
     suffix = "" if row_index is None else f" row {row_index}"
-    print(f"CUT #{number}{suffix} -> #{child}")
+    verb = "ADOPTED" if adopted else "CUT"
+    print(f"{verb} #{number}{suffix} -> #{child}")
+
+
+def _adoptable_child(
+    client: forge.ForgeWriter, container: int, title: str
+) -> board.ChildItem | None:
+    """`container`'s already-open child titled exactly `title`, so a repeat
+    `cut` after a partial failure (`forge.ForgePartialChildCreationError`)
+    adopts the child GitHub already recorded instead of risking a second one
+    (#260). Two sources can carry that child: already linked under
+    `container` (`list_children`), or an orphan -- an open issue with no
+    recorded parent at all, exactly the shape a failed `link_child` POST
+    leaves behind. An orphan match is linked under `container` right here
+    before it is returned, so the caller's remaining steps treat it exactly
+    like an already-linked child; `create_issue` is never called for it.
+    More than one open match refuses by name rather than guess which one
+    the failed cut actually created. A closed linked child with that title
+    refuses too -- adoption finishes an interrupted cut, it does not reopen
+    a closed one. `None` when nothing matches, so the caller falls through
+    to `create_child`.
+    """
+    linked = [
+        child
+        for child in client.list_children(container)
+        if client.item_reference(child.number).title == title
+    ]
+    open_linked = [child.number for child in linked if child.state is board.ChildState.OPEN]
+    orphans = [
+        issue.number
+        for issue in client.list_open_board_issues()
+        if issue.title == title and client.parent_issue(issue.number) is None
+    ]
+    open_matches = open_linked + orphans
+    if len(open_matches) > 1:
+        named = ", ".join(f"#{number}" for number in open_matches)
+        raise protocol.ClaimUnavailableError(
+            f"#{container}'s row {title!r} matches more than one open issue ({named}); "
+            "adopt the right one by hand and remove the row"
+        )
+    if open_matches:
+        [number] = open_matches
+        if number in orphans:
+            client.link_child(container, number)
+        return board.ChildItem(number, board.ChildState.OPEN)
+    closed = next((child for child in linked if child.state is board.ChildState.CLOSED), None)
+    if closed is None:
+        return None
+    raise protocol.ClaimUnavailableError(
+        f"#{container} already has a closed child #{closed.number} titled {title!r}; "
+        "reopen it or remove the row by hand"
+    )
 
 
 def _block_slice_entries(data: Mapping[str, object]) -> list[dict[str, object]]:
@@ -2997,12 +3058,17 @@ def _cut_slice(client: forge.ForgeWriter, target: board.Issue, parsed: argparse.
     link = _cut_link(number, located.data, parsed.row)
     if link is not None:
         _require_matching_title(number, link, parsed.title)
+    adopted = _adoptable_child(client, number, parsed.title)
     try:
-        child = client.create_child(
-            parent=number,
-            title=parsed.title,
-            body=board.BLOCK_CHILD_SKELETON,
-            kind=board.ItemKind.TASK,
+        child = (
+            adopted.number
+            if adopted is not None
+            else client.create_child(
+                parent=number,
+                title=parsed.title,
+                body=board.BLOCK_CHILD_SKELETON,
+                kind=board.ItemKind.TASK,
+            )
         )
         if link is not None:
             remaining = [
@@ -3017,16 +3083,26 @@ def _cut_slice(client: forge.ForgeWriter, target: board.Issue, parsed: argparse.
     except forge.ForgePartialChildCreationError as error:
         raise protocol.ClaimUnavailableError(
             f"created #{error.child} but failed to {error.step}: {error.cause}; "
-            "do not re-run -- finish it by hand"
+            "re-run the same cut -- it adopts the child"
         ) from error
-    _print_cut_result(number, None if link is None else link.index, child, as_json=parsed.json)
+    _print_cut_result(
+        number,
+        None if link is None else link.index,
+        child,
+        as_json=parsed.json,
+        adopted=adopted is not None,
+    )
     return 0
 
 
 def _cmd_cut(parsed: argparse.Namespace, session: _WriteSession) -> int:
     client = session.forge()
     number = int(parsed.issue)
-    for operation in (forge.ForgeOperation.CREATE_CHILD, forge.ForgeOperation.UPDATE_ITEM_BODY):
+    for operation in (
+        forge.ForgeOperation.CREATE_CHILD,
+        forge.ForgeOperation.LINK_CHILD,
+        forge.ForgeOperation.UPDATE_ITEM_BODY,
+    ):
         if client.capability(operation) is not forge.Capability.READ_WRITE:
             raise protocol.ClaimUnavailableError(
                 f"this forge cannot {operation.value}; cut the slice by hand"
