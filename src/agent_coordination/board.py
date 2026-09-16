@@ -1437,7 +1437,7 @@ def _priority_index(labels: tuple[str, ...], config: BoardConfig) -> int | None:
     return min(matches, default=None)
 
 
-def _has_label(labels: tuple[str, ...], label: str | None) -> bool:
+def has_label(labels: tuple[str, ...], label: str | None) -> bool:
     return label is not None and any(item.casefold() == label.casefold() for item in labels)
 
 
@@ -1699,7 +1699,7 @@ def _board_item(
         open_branches=context.open_branches,
     )
     single_next = _single_concrete_next(contract.next)
-    projectionless_idea = parsed.projectionless and _has_label(issue.labels, config.idea_label)
+    projectionless_idea = parsed.projectionless and has_label(issue.labels, config.idea_label)
     next_step = IDEA_REFINEMENT_STEP if projectionless_idea else contract.next
     unblocks_count = context.unblocks[issue.number]
     container_parent = context.child_container.get(issue.number)

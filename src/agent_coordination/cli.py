@@ -2996,7 +2996,7 @@ def _adoptable_child(
         if issue.title == title
         and issue.number != container
         and issue.kind is board.ItemKind.TASK
-        and not board._has_label(issue.labels, idea_label)
+        and not board.has_label(issue.labels, idea_label)
         and _orphan_names_container(issue.body, container)
         and client.parent_issue(issue.number) is None
     ]
