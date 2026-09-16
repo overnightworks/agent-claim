@@ -424,6 +424,31 @@ page carries the mockup's design tokens for light and dark and stays
 narrow-width safe; the same board state renders the identical page
 byte-for-byte regardless of which head writes it.
 
+### Served board page
+
+`aco board --serve [--port PORT]` (issue #280, parent #234) serves the same
+page on a stdlib `http.server.ThreadingHTTPServer` bound to `127.0.0.1`
+only — never `0.0.0.0` — on `PORT` (default `0`, an ephemeral port). It is a
+write command, so it goes through the same writer the rest of this document
+calls the writer session; `--serve` refuses together with `--html` or
+`--json`. On start it prints exactly one line, the page's URL with a fresh
+`secrets.token_urlsafe(32)` token in the query string
+(`http://127.0.0.1:<port>/?t=<token>`), and keeps running until Ctrl-C.
+
+Exactly two routes exist. `GET /?t=<token>` renders the page fresh for every
+request — the same reads and the same renderer `--html` uses, so nothing
+caches — with `Cache-Control: no-store`; every open `[[expectation]]` card
+carries three `yes`/`no`/`later` forms (the item's own default marked) plus a
+note field that goes to `aco rule`'s own `--note`. `POST /rule` (fields `t`,
+`item`, `line`, `outcome`, `note`) rules exactly one line through the same
+write path `aco rule` uses and answers `303` back to `/?t=<token>`; a refusal
+(an already-ruled line, an out-of-range one, ...) writes nothing and shows
+as a sentence on the reloaded page instead of a stack trace. A missing or
+wrong token — compared with `hmac.compare_digest` — answers `403` with no
+page and no write, on either route; every other path answers `404`. Static
+`--html` is unchanged: it keeps the copyable `aco rule` command lines, no
+server, no token.
+
 ### Storage pin
 
 `storage = "github" | "state-ref"` (default `github`) names which adapter

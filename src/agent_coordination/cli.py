@@ -19,6 +19,7 @@ from . import (
     __version__,
     board,
     board_html,
+    board_serve,
     checkout,
     forge,
     github,
@@ -304,6 +305,21 @@ def _add_board_parser(commands: argparse._SubParsersAction) -> None:
         default=None,
         metavar="PATH",
         help="write a static HTML board page (stdout when PATH is omitted)",
+    )
+    output.add_argument(
+        "--serve",
+        action="store_true",
+        help=(
+            "serve the board page on 127.0.0.1 with a one-click aco-rule form per "
+            "expectation line (issue #280); a write command, so it needs the writer"
+        ),
+    )
+    board_command.add_argument(
+        "--port",
+        type=int,
+        default=0,
+        metavar="PORT",
+        help="loopback port for --serve; 0 (default) picks an ephemeral one",
     )
 
 
@@ -2867,10 +2883,14 @@ def _lane_claimants(observed: protocol.ClaimState) -> dict[int, board_html.LaneC
     }
 
 
-def _cmd_board_html(parsed: argparse.Namespace, session: _ReadSession) -> None:
-    """`board --html` (issue #276): the exact reads `board` already performs
-    -- `_board`'s own merged-pull-request fetch (`_BoardFetch`) serves the
-    Landungen section instead of asking `gh` a second time."""
+def _board_html_page(
+    session: _ReadSession, *, served: board_html.ServedRuleForm | None = None
+) -> str:
+    """The one state -> page render both `board --html` (issue #276) and
+    `board --serve` (issue #280) use -- the exact reads `board` already
+    performs (`_board`'s own merged-pull-request fetch serves the Landungen
+    section instead of asking `gh` a second time), rendered fresh every
+    call so `--serve`'s `GET` never reads stale state."""
     client = session.forge()
     issues = client.list_open_board_issues()
     worktree, _remote, observed = _store_observation()
@@ -2890,7 +2910,13 @@ def _cmd_board_html(parsed: argparse.Namespace, session: _ReadSession) -> None:
         storage=storage,
     )
     page = board_html.build_page(fetch.board, sources)
-    rendered = board_html.render(page)
+    return board_html.render(page, served=served)
+
+
+def _cmd_board_html(parsed: argparse.Namespace, session: _ReadSession) -> None:
+    """`board --html` (issue #276): writes `_board_html_page`'s static
+    rendering to `PATH`, or to stdout when `PATH` is omitted."""
+    rendered = _board_html_page(session)
     if parsed.html:
         Path(parsed.html).write_text(rendered, encoding="utf-8")
     else:
@@ -3475,19 +3501,71 @@ def _print_rule_result(
     print(f"RULED #{number} line {line.index} {ruling}; {open_remaining} line(s) still open")
 
 
-def _cmd_rule(parsed: argparse.Namespace, session: _WriteSession) -> int:
-    client = session.forge.writer()
+def rule_item(
+    client: forge.ForgeWriter, number: int, line: int, ruling: str, note: str | None
+) -> tuple[board.ExpectationLine, int]:
+    """`_cmd_rule`'s own write, extracted (issue #280) so `board --serve`'s
+    `POST /rule` calls the exact same path a CLI `aco rule` invocation does
+    -- one owner for "click -> ruled line", never a second one behind the
+    loopback server. Returns the newly ruled line and how many the item
+    still has open; raises `protocol.ClaimError` by name for every refusal
+    (already ruled, out of range, a bad outcome, a malformed or missing
+    item), which both callers turn into their own by-name response."""
     _require_update_item_body(client, command="rule")
     _load_board_config(client, _resolve_toplevel())
-    number = int(parsed.item)
     body = _item_body_or_refuse(client, number, command="rule")
     _located_block_or_refuse(number, body, command="rule")
     ruled_on = datetime.now(UTC).date()
-    new_body = board.rule_expectation(body, parsed.line, parsed.ruling, ruled_on, note=parsed.note)
+    new_body = board.rule_expectation(body, line, ruling, ruled_on, note=note)
     client.update_item_body(number, new_body)
-    ruled_line = board.expectation_lines(new_body)[parsed.line - 1]
-    _print_rule_result(number, ruled_line, _rule_remaining_open(new_body), as_json=parsed.json)
+    ruled_line = board.expectation_lines(new_body)[line - 1]
+    return ruled_line, _rule_remaining_open(new_body)
+
+
+def _cmd_rule(parsed: argparse.Namespace, session: _WriteSession) -> int:
+    client = session.forge.writer()
+    number = int(parsed.item)
+    ruled_line, open_remaining = rule_item(client, number, parsed.line, parsed.ruling, parsed.note)
+    _print_rule_result(number, ruled_line, open_remaining, as_json=parsed.json)
     return 0
+
+
+def _board_server(parsed: argparse.Namespace, session: _WriteSession) -> board_serve.BoardServer:
+    """`board --serve`'s bound, listening server (issue #280), built but not
+    yet run: a loopback page that reads through `_board_html_page` and
+    writes through `rule_item`, exactly like `--html` and `aco rule` do
+    apart -- `board_serve.py` is transport only, so this function is still
+    the one place that resolves the forge, renders a page, and rules a
+    line. Split from `_cmd_board_serve`'s own `serve_forever` loop so a test
+    can bind a real ephemeral port and drive it without blocking."""
+    client = session.forge.writer()
+    read_session = _ReadSession(forge=session.forge)
+    server: board_serve.BoardServer
+
+    def render_page(refused: str | None) -> str:
+        served = board_html.ServedRuleForm(token=server.token, refused=refused)
+        return _board_html_page(read_session, served=served)
+
+    def post_rule(item: int, line: int, ruling: str, note: str | None) -> board_serve.RuleOutcome:
+        try:
+            rule_item(client, item, line, ruling, note)
+        except protocol.ClaimError as error:
+            return board_serve.RuleOutcome(refusal=str(error))
+        return board_serve.RuleOutcome(refusal=None)
+
+    server = board_serve.start(port=parsed.port, render_page=render_page, rule_item=post_rule)
+    return server
+
+
+def _cmd_board_serve(parsed: argparse.Namespace, session: _WriteSession) -> None:
+    server = _board_server(parsed, session)
+    print(server.url)
+    try:
+        server.httpd.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.httpd.server_close()
 
 
 def _print_ask_result(number: int, index: int, text: str, default: str, *, as_json: bool) -> None:
@@ -3569,7 +3647,12 @@ def _dispatch(parsed: argparse.Namespace) -> int:
         return _bootstrap_state()
     release_branch = _release_branch_for(parsed) if parsed.command == "release" else None
     forge_accessor = _LazyForge(parsed.repo)
-    if parsed.command in _READ_HANDLERS:
+    if parsed.command == "board" and parsed.serve:
+        # `board --serve` writes through a click (issue #280), so it needs
+        # the writer session even though its own name reads like every
+        # other `board` output mode.
+        result = _cmd_board_serve(parsed, _WriteSession(forge=forge_accessor, release_branch=None))
+    elif parsed.command in _READ_HANDLERS:
         result = _READ_HANDLERS[parsed.command](parsed, _ReadSession(forge=forge_accessor))
     else:
         result = _WRITE_HANDLERS[parsed.command](

@@ -14,9 +14,15 @@ lands. `RepositoryId.host` is likewise part of the port's declared shape with
 no production reader yet -- it only matters once a second forge host exists.
 None of this is speculative: it is the port surface issue #131 declares today,
 each with a named future caller.
+
+`_BoardRequestHandler.do_GET`/`do_POST` (issue #280) are `http.server`'s own
+dispatch surface: `BaseHTTPRequestHandler.handle_one_request` calls them by
+`getattr(self, "do_" + self.command)`, never by a literal call this package
+writes, so vulture never sees a caller either.
 """
 
 from agent_coordination.board import NoItemKind
+from agent_coordination.board_serve import _BoardRequestHandler
 from agent_coordination.forge import Capability, ForgeUnsupportedError, RepositoryId
 
 _referenced_only_for_vulture = (
@@ -25,4 +31,6 @@ _referenced_only_for_vulture = (
     ForgeUnsupportedError,
     Capability.UNSUPPORTED,
     RepositoryId("host", (), "name").host,
+    _BoardRequestHandler.do_GET,
+    _BoardRequestHandler.do_POST,
 )

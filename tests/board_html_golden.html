@@ -95,6 +95,25 @@ summary:focus-visible {
 .copy:hover { background: var(--you); color: var(--surface); }
 .copy:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .copy.copied { background: var(--done); border-color: var(--done); color: var(--surface); }
+.rule-forms { display: grid; gap: 8px; }
+.rule-form {
+  display: grid; gap: 6px; padding: 10px 12px; border-radius: 8px; background: var(--sunk);
+}
+.rule-form.rec { background: var(--you-soft); outline: 1.5px solid var(--you); }
+.rule-form textarea {
+  font: inherit; resize: vertical; min-height: 2.4em; padding: 6px 8px; border-radius: 6px;
+  border: 1px solid var(--rule); background: var(--surface); color: inherit;
+}
+.rule-actions { display: flex; align-items: center; gap: 8px; }
+.rule-form button {
+  font: 600 0.82rem var(--body); color: var(--surface); background: var(--accent); border: none;
+  border-radius: 999px; padding: 5px 16px; cursor: pointer;
+}
+.rule-form.rec button { background: var(--you); }
+.refused {
+  margin: 0; padding: 10px 14px; border-radius: 8px; background: var(--work-soft);
+  color: var(--work); font-weight: 600;
+}
 
 .topics { list-style: none; margin: 0; padding: 0; display: grid; }
 .topics > li { border-top: 1px solid var(--rule); }
