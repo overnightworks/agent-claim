@@ -496,20 +496,20 @@ both storages (a state-ref item's own file, or a GitHub issue's body), shows
 a closed item exactly like an open one (closing never deletes), and refuses
 an unknown id by name.
 
-`aco item edit ITEM` reads the whole new body from stdin only (`aco item
-edit ITEM < body.md`; no `--file`, no editor) and refuses before any write
-when it carries no valid `agent-claim` block — the same sentences `aco body
---check` reports (issue #287). The stored body is replaced with the piped
-one; only `[record]` is composed by aco itself: `parent`, `state`, `origin`,
-and the three timestamps come from the item's own already-stored record — a
-value the piped body's `[record]` names for one of them is silently
-overwritten, never refused — while `title`, `labels`, and `blocked_by` come
-from the piped record when it carries one (an omitted key keeps the stored
-value). The compare-and-swap `expected` oid is this process's own
-already-read snapshot, never a re-read; a second worktree writing from that
-same snapshot refuses with the same "written since it was read" sentence
-`cut`/`rule`/`ask` already use. Prints one line, `EDITED aco-xxxxxx`
-(`--json`: `{"item", "number", "oid"}`). It refuses under `storage =
+`aco item edit ITEM` reads the whole new body from stdin only (`aco item edit
+ITEM < body.md`; no `--file`, no editor) and refuses before any write when it
+carries no valid `agent-claim` block — the same sentences `aco body --check`
+reports (issue #287). The stored body is replaced with the piped one; only
+`[record]` is composed by aco itself: `parent`, `state`, `origin`,
+`created_at`, and `closed_at` come from the item's own already-stored record —
+a value the piped body's `[record]` names for one of them is silently
+overwritten, never refused — `updated_at` always moves to now, while `title`,
+`labels`, and `blocked_by` come from the piped record when it carries one (an
+omitted key keeps the stored value). The compare-and-swap `expected` oid is
+this process's own already-read snapshot, never a re-read; a second worktree
+writing from that same snapshot refuses with the same "written since it was
+read" sentence `cut`/`rule`/`ask` already use. Prints one line, `EDITED
+aco-xxxxxx` (`--json`: `{"item", "number", "oid"}`). It refuses under `storage =
 "github"` by name ("forge issues are edited on the forge; aco never governs
 them") — a forge issue is edited on the forge, never through aco.
 

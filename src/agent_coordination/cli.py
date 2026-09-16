@@ -2354,13 +2354,13 @@ def _cmd_item_edit(parsed: argparse.Namespace) -> int:
     `current.oid`, set once at `_state_ref_forge` construction): a second
     process writing from that same snapshot refuses with issue #279's own
     sentence, never merged, never silently overwritten. `parent`, `state`,
-    `origin`, and the three timestamps stay this item's own stored values
-    regardless of what the piped body's `[record]` names for them --
-    `update_item_body`'s own owner rule; `title`, `labels`, `blocked_by`
-    come from the piped record when it carries one. Refuses under
-    `storage = "github"`: forge issues are edited on the forge, never
-    governed by aco -- mirrors `item new`'s own refusal, and calls
-    `_state_ref_forge` directly for the same reason (`create_item`/
+    `origin`, `created_at`, and `closed_at` stay this item's own stored
+    values regardless of what the piped body's `[record]` names for them --
+    `update_item_body`'s own owner rule; `updated_at` always moves to now;
+    `title`, `labels`, `blocked_by` come from the piped record when it
+    carries one. Refuses under `storage = "github"`: forge issues are edited
+    on the forge, never governed by aco -- mirrors `item new`'s own refusal,
+    and calls `_state_ref_forge` directly for the same reason (`create_item`/
     `update_item_body` are not part of the generic `ForgeWriter` port every
     other write command narrows to)."""
     toplevel = _resolve_toplevel()

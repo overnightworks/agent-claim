@@ -923,6 +923,17 @@ class TestStateRefBoardWrites:
         assert after_record.parent == before_record.parent
         assert after_record.created_at == before_record.created_at
         assert after_record.updated_at != before_record.updated_at
+        if delivered_body_factory == "_full_delivered_record_body":
+            assert (
+                replace(
+                    after_record,
+                    title=before_record.title,
+                    labels=before_record.labels,
+                    blocked_by=before_record.blocked_by,
+                    updated_at=before_record.updated_at,
+                )
+                == before_record
+            )
 
     def test_a_second_write_from_the_same_read_state_refuses_and_overwrites_nothing(
         self, bare_remote: Path, worktree: Path
@@ -1646,10 +1657,9 @@ class TestCliStateRefForge:
         assert edited == 0
         capsys.readouterr()
 
+        second_writer_body = second_body.replace("Prose.", "Second writer.", 1)
         with pytest.raises(ClaimUnavailableError, match="written since it was read"):
-            second.update_item_body(
-                CHILD_A_NUMBER, second_body.replace("Prose.", "Second writer.", 1)
-            )
+            second.update_item_body(CHILD_A_NUMBER, second_writer_body)
 
         remote_url = f"file://{bare_remote}"
         state = store.fetch_state(worktree=worktree, remote=remote_url)
