@@ -409,10 +409,14 @@ legal value, `"block"` (below): an absent key means the same thing, and
 page from exactly the reads `board` already performs — no second `gh` call,
 no clock, no randomness — to `PATH`, or to stdout when `PATH` is omitted.
 `--json` and `--html` are mutually exclusive. Four sections in fixed order:
-"Wartet auf dich" (every still-open `[[expectation]]` line as a card —
-text, default, and a copyable `aco rule <item> --line N --yes` /
-`--no` / `--later` command per outcome, with a copy button, the page's only
-JavaScript), "Lanes" (active claims — agent, role, branch, age — with the
+"Wartet auf dich" (every still-open `[[expectation]]` line as a card, in the
+operator's own words when `aco ask` gave them (issue #295) — `question` as
+the heading, the inline-SVG `picture`, `example` under a "Beispiel" tag,
+else `text` alone as the heading, as before — then a copyable
+`aco rule <item> --line N --yes` / `--no` / `--later` command per outcome,
+with a copy button, the page's only JavaScript, and the full `text`
+disclosed under "Der volle Satz" whenever a `question` shortened the
+heading), "Lanes" (active claims — agent, role, branch, age — with the
 item's own Now/Next/Blocked by/Done when verbatim from the body), "Themen"
 (containers with their open children and closed/total progress, then
 standalone items), and "Landungen" (items `board` already classified
@@ -438,8 +442,9 @@ calls the writer session; `--serve` refuses together with `--html` or
 Exactly two routes exist. `GET /?t=<token>` renders the page fresh for every
 request — the same reads and the same renderer `--html` uses, so nothing
 caches — with `Cache-Control: no-store`; every open `[[expectation]]` card
-carries three `yes`/`no`/`later` forms (the item's own default marked) plus a
-note field that goes to `aco rule`'s own `--note`. `POST /rule` (fields `t`,
+carries exactly one `POST /rule` form (issue #295) with one note field that
+goes to `aco rule`'s own `--note`, and three `yes`/`no`/`later` submit
+buttons inside it (the item's own default marked). `POST /rule` (fields `t`,
 `item`, `line`, `outcome`, `note`) rules exactly one line through the same
 write path `aco rule` uses and answers `303` back to `/?t=<token>`; a refusal
 (an already-ruled line, an out-of-range one, ...) writes nothing and shows

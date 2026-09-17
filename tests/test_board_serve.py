@@ -24,11 +24,10 @@ import pytest
 from board_fixtures import board_issue, complete_contract, proposed_expectation
 from test_cli import FakeForge, _patch_store_write, _single_item_board_environment
 
-from agent_coordination import board, board_html, board_serve, checkout, forge, github, protocol
+from agent_coordination import board, board_serve, checkout, forge, github, protocol
 from agent_coordination import cli as issue_claim
 
 OPEN_LINE_TEXT = "Brauchen wir Admin-Rechte?"
-FORM_COUNT_PER_CARD = len(board_html.RULE_OUTCOMES)
 SERVED_ITEM = 10
 
 
@@ -151,22 +150,27 @@ def test_get_without_or_with_a_wrong_token_is_forbidden_with_no_card_content(
     assert OPEN_LINE_TEXT.encode() not in response.body
 
 
-def test_get_with_the_valid_token_serves_a_form_per_outcome_with_a_note_field(
+def test_get_with_the_valid_token_serves_one_form_per_card_with_a_note_field(
     served_board: ServedBoard,
 ) -> None:
+    """Issue #295: a card carries exactly one `POST /rule` form and one
+    `<textarea name="note">`, its three outcomes as submit buttons."""
     response = served_board.get(token=served_board.server.token)
     assert response.status == 200
     assert response.cache_control == "no-store"
     page = response.body.decode("utf-8")
     assert f"#{SERVED_ITEM} Plain item" in page
     assert OPEN_LINE_TEXT in page
-    assert page.count('<form method="post" action="/rule"') == FORM_COUNT_PER_CARD
+    assert page.count('<form method="post" action="/rule"') == 1
     token_field = f'<input type="hidden" name="t" value="{served_board.server.token}">'
-    assert page.count(token_field) == FORM_COUNT_PER_CARD
-    assert page.count('<textarea name="note"') == FORM_COUNT_PER_CARD
+    assert page.count(token_field) == 1
+    assert page.count('<textarea name="note"') == 1
+    assert page.count('<button type="submit" name="outcome" value="yes"') == 1
+    assert page.count('<button type="submit" name="outcome" value="no"') == 1
+    assert page.count('<button type="submit" name="outcome" value="later"') == 1
     # `proposed_expectation`'s own `default="later"` (this module's fixture)
     # is the one outcome `board_html._render_served_form` marks `rec`/`Vorgabe`.
-    assert page.count('class="rule-form rec"') == 1
+    assert page.count('name="outcome" value="later" class="rec"') == 1
     assert page.count('<span class="tag">Vorgabe</span>') == 1
 
 
@@ -186,21 +190,28 @@ def test_a_get_and_a_post_leave_stderr_silent(
     assert capsys.readouterr().err == ""
 
 
+@pytest.mark.parametrize(
+    ("outcome", "note"), [("yes", "Ja bitte"), ("later", "Erst nach dem Review")]
+)
 def test_post_rule_with_a_valid_token_writes_exactly_one_ruling_and_redirects(
-    served_board: ServedBoard,
+    served_board: ServedBoard, outcome: str, note: str
 ) -> None:
+    """Issue #295 proof 4: the single per-card form's `outcome` button
+    (including `later`, the one served by the card's own submit button
+    rather than a note-less command line) carries the note through to
+    `board.rule_expectation`'s ` Anmerkung: <note>` suffix."""
     token = served_board.server.token
     response = served_board.post_rule(
-        {"t": token, "item": str(SERVED_ITEM), "line": "1", "outcome": "yes", "note": "Ja bitte"}
+        {"t": token, "item": str(SERVED_ITEM), "line": "1", "outcome": outcome, "note": note}
     )
 
     assert response.status == 303
     assert response.location == f"/?t={token}"
     lines = board.expectation_lines(served_board.client.item_bodies[SERVED_ITEM])
     assert len(lines) == 1
-    assert lines[0].ruling == "yes"
+    assert lines[0].ruling == outcome
     assert lines[0].ruled_on == datetime.now(UTC).date()
-    assert "Ja bitte" in lines[0].text
+    assert lines[0].text == f"{OPEN_LINE_TEXT} Anmerkung: {note}"
 
     follow_up = served_board.get(token=token)
     assert OPEN_LINE_TEXT.encode() not in follow_up.body
