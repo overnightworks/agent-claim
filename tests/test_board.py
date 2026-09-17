@@ -254,9 +254,45 @@ def test_append_expectation_writes_the_card_fields() -> None:
             "<svg><script>alert(1)</script></svg>", "must not contain <script>", id="script"
         ),
         pytest.param(
+            "<svg><SCRIPT>alert(1)</SCRIPT></svg>",
+            "must not contain <script>",
+            id="script-uppercase",
+        ),
+        pytest.param(
+            '<svg><foreignObject><body xmlns="http://www.w3.org/1999/xhtml">x</body>'
+            "</foreignObject></svg>",
+            "must not contain <foreignObject>",
+            id="foreignobject",
+        ),
+        pytest.param(
+            '<svg><circle onclick="alert(1)"/></svg>',
+            "must not contain an event-handler attribute",
+            id="event-handler",
+        ),
+        pytest.param(
+            '<svg><a href="javascript:alert(1)"></a></svg>',
+            "must not contain a javascript: reference",
+            id="javascript-scheme",
+        ),
+        pytest.param(
+            '<svg><image href="data:image/png;base64,AAAA"/></svg>',
+            "must not contain a data: reference",
+            id="data-scheme",
+        ),
+        pytest.param(
             '<svg><a href="http://evil.example"/></svg>',
-            "must not reference an external href",
+            "must not reference an href outside the document",
             id="external-href",
+        ),
+        pytest.param(
+            '<svg><use xlink:href="http://evil.example/sprite.svg#x"/></svg>',
+            "must not reference an href outside the document",
+            id="external-xlink-href",
+        ),
+        pytest.param(
+            "<svg><style>rect{fill:url(http://evil.example/x.png)}</style></svg>",
+            "must not load a url() from <style>",
+            id="style-url",
         ),
         pytest.param(
             f"<svg>{'x' * board.EXPECTATION_PICTURE_MAXIMUM_BYTES}</svg>",
@@ -326,16 +362,49 @@ def test_parse_body_still_refuses_an_unknown_expectation_key() -> None:
     )
 
 
+def test_parse_body_refuses_a_non_string_expectation_question() -> None:
+    """`question` must be a string (issue #295); a stored non-string value
+    -- an integer, say -- is refused by the same defect the empty-string
+    case uses, not a TOML type error."""
+    toml_text = f'{MINIMAL_BLOCK_TOML}[[expectation]]\ntext = "E"\ndefault = "yes"\nquestion = 1\n'
+
+    parsed = board.parse_body(agent_claim_body(toml_text))
+
+    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert parsed.contract.defects == (
+        board.ContractDefect(
+            "expectation[0].question", "expectation[0].question must be a non-empty string"
+        ),
+    )
+
+
+def test_parse_body_refuses_a_non_string_expectation_picture() -> None:
+    """`picture` must be a string (issue #295); a stored non-string value
+    is refused before any SVG-shape check runs."""
+    toml_text = f'{MINIMAL_BLOCK_TOML}[[expectation]]\ntext = "E"\ndefault = "yes"\npicture = 1\n'
+
+    parsed = board.parse_body(agent_claim_body(toml_text))
+
+    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert parsed.contract.defects == (
+        board.ContractDefect("expectation[0].picture", "expectation[0].picture must be a string"),
+    )
+
+
 def test_render_block_round_trips_question_example_and_a_multiline_picture() -> None:
     """The picture round trip (issue #295) needs its own case: a multi-line
-    SVG with embedded quotes and a backslash, which only a TOML multi-line
-    basic string -- not the single-line `_toml_string` every other field
-    uses -- can carry byte-exact."""
+    SVG with embedded quotes and a backslash, a literal `\"\"\"` run that
+    must not be mistaken for the closing delimiter, and a value ending in a
+    trailing `"` right before the writer's own closing `\"\"\"` -- only a
+    TOML multi-line basic string (`_toml_multiline_string`), not the
+    single-line `_toml_string` every other field uses, can carry this
+    byte-exact."""
     picture = (
         '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">\n'
         '  <!-- a "quoted" comment with a back\\slash -->\n'
+        '  <!-- a literal triple quote: """ -->\n'
         '  <circle cx="5" cy="5" r="4"/>\n'
-        "</svg>"
+        '</svg>"'
     )
     data = {
         "version": 1,

@@ -129,10 +129,10 @@ def test_render_matches_the_golden_page_byte_for_byte() -> None:
 
 def test_render_labels_cards_topics_and_lanes_with_state_ref_ids() -> None:
     """Issue #292 proof 3: under `storage = "state-ref"`, `board --html`
-    shows `aco-xxxxxx` -- never `#n` -- in every topic and lane heading (a
-    card carries no item label at all since issue #295 -- its heading is
-    `question`/`text`); the `github` golden page above stays byte-identical,
-    so only this storage's own rendering differs."""
+    shows `aco-xxxxxx` -- never `#n` -- in every topic, lane, and card
+    heading (a card's `item-tag` carries the item label since issue #295);
+    the `github` golden page above stays byte-identical, so only this
+    storage's own rendering differs."""
     rendered = board_html.render(_fixture_page(storage=board.Storage.STATE_REF))
     open_child_id = items.format_item_id(101)  # the card's topic part
     container_id = items.format_item_id(100)  # the container topic
@@ -141,7 +141,8 @@ def test_render_labels_cards_topics_and_lanes_with_state_ref_ids() -> None:
     assert f"<strong>{container_id} Sammelitem</strong>" in rendered
     assert f"<span>{open_child_id} Zugang klären (blocked by #50)</span>" in rendered
     assert f"<h3>{claimed_item_id} Laufende Lane</h3>" in rendered
-    for number in (100, 102):
+    assert f'<span class="item-tag">{open_child_id} Zugang klären</span>' in rendered
+    for number in (100, 101, 102):
         assert f">#{number} " not in rendered
 
 
@@ -178,6 +179,7 @@ def test_a_card_with_question_example_and_picture_shows_them_and_the_full_senten
         cards=(
             board_html.ExpectationCard(
                 item=7,
+                item_title="Import vorbereiten",
                 index=2,
                 text="Brauchen wir für den Import Admin-Rechte auf dem Zielsystem?",
                 default="yes",
@@ -188,6 +190,7 @@ def test_a_card_with_question_example_and_picture_shows_them_and_the_full_senten
         ),
     )
     rendered = board_html.render(page)
+    assert '<span class="item-tag">#7 Import vorbereiten</span>' in rendered
     assert "<h3>Admin-Rechte nötig?</h3>" in rendered
     assert f"<figure>{CARD_SVG}</figure>" in rendered
     assert '<span class="tag">Beispiel</span> Wie beim letzten Import' in rendered
@@ -204,9 +207,14 @@ def test_a_card_without_the_new_fields_shows_text_as_heading_with_no_figure_or_e
     """Issue #295 proof 3 (card with no optional field, unchanged from before)."""
     page = replace(
         _empty_page(),
-        cards=(board_html.ExpectationCard(item=7, index=2, text="Frage?", default="yes"),),
+        cards=(
+            board_html.ExpectationCard(
+                item=7, item_title="Import vorbereiten", index=2, text="Frage?", default="yes"
+            ),
+        ),
     )
     rendered = board_html.render(page)
+    assert '<span class="item-tag">#7 Import vorbereiten</span>' in rendered
     assert "<h3>Frage?</h3>" in rendered
     assert "<figure>" not in rendered
     assert "Beispiel" not in rendered
@@ -248,7 +256,11 @@ def test_a_landed_item_with_no_resolved_pull_request_still_shows() -> None:
 def test_the_default_outcome_is_marked_recommended(default: str, recommended_flag: str) -> None:
     page = replace(
         _empty_page(),
-        cards=(board_html.ExpectationCard(item=7, index=2, text="Frage?", default=default),),
+        cards=(
+            board_html.ExpectationCard(
+                item=7, item_title="Import vorbereiten", index=2, text="Frage?", default=default
+            ),
+        ),
     )
     rendered = board_html.render(page)
     rule_lines = re.findall(r'<li class="([^"]*)">(.*?)</li>', rendered)

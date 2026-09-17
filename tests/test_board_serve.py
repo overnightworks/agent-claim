@@ -160,6 +160,7 @@ def test_get_with_the_valid_token_serves_one_form_per_card_with_a_note_field(
     assert response.cache_control == "no-store"
     page = response.body.decode("utf-8")
     assert f"#{SERVED_ITEM} Plain item" in page
+    assert f'<span class="item-tag">#{SERVED_ITEM} Plain item</span>' in page
     assert OPEN_LINE_TEXT in page
     assert page.count('<form method="post" action="/rule"') == 1
     token_field = f'<input type="hidden" name="t" value="{served_board.server.token}">'

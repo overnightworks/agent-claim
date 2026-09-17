@@ -930,22 +930,50 @@ def _expectation_example_defect(value: object) -> str | None:
     return None if isinstance(value, str) and value.strip() else "must be a non-empty string"
 
 
+_EXPECTATION_PICTURE_EVENT_HANDLER_ATTRIBUTE = re.compile(r"\son[a-z]+\s*=", re.IGNORECASE)
+_EXPECTATION_PICTURE_EXTERNAL_HREF = re.compile(
+    r'(?:^|[\s:])href\s*=\s*(["\'])(?!#)', re.IGNORECASE
+)
+
+
+def _expectation_picture_content_refusals(value: str) -> tuple[tuple[bool, str], ...]:
+    """Every path an inline SVG can run script or reach outside the
+    document, checked case-insensitively: `refused` paired with the
+    sentence for the first one `value` matches, in this fixed order."""
+    lowered = value.lower()
+    return (
+        ("<script" in lowered, "must not contain <script>"),
+        ("<foreignobject" in lowered, "must not contain <foreignObject>"),
+        (
+            bool(_EXPECTATION_PICTURE_EVENT_HANDLER_ATTRIBUTE.search(value)),
+            "must not contain an event-handler attribute",
+        ),
+        ("javascript:" in lowered, "must not contain a javascript: reference"),
+        ("data:" in lowered, "must not contain a data: reference"),
+        (
+            bool(_EXPECTATION_PICTURE_EXTERNAL_HREF.search(value)),
+            "must not reference an href outside the document",
+        ),
+        ("<style" in lowered and "url(" in lowered, "must not load a url() from <style>"),
+    )
+
+
 def _expectation_picture_defect(value: object) -> str | None:
     """The refusal sentence for an invalid `[[expectation]]` picture, or
-    `None` for a valid one (issue #295): an inline SVG, rooted at `<svg`, no
-    `<script`, no external `href="http` reference, at most
-    `EXPECTATION_PICTURE_MAXIMUM_BYTES`. The one owner the body parser's
-    defects and `append_expectation`'s pre-write refusal both call."""
+    `None` for a valid one (issue #295): an inline SVG, rooted at `<svg`, at
+    most `EXPECTATION_PICTURE_MAXIMUM_BYTES`, and free of every refusal
+    `_expectation_picture_content_refusals` names. The one owner the body
+    parser's defects and `append_expectation`'s pre-write refusal both
+    call."""
     if not isinstance(value, str):
         return "must be a string"
     if len(value.encode("utf-8")) > EXPECTATION_PICTURE_MAXIMUM_BYTES:
         return f"must be at most {EXPECTATION_PICTURE_MAXIMUM_BYTES} bytes"
     if not value.strip().startswith("<svg"):
         return "must be inline SVG rooted at <svg>"
-    if "<script" in value:
-        return "must not contain <script>"
-    if 'href="http' in value:
-        return "must not reference an external href"
+    for refused, reason in _expectation_picture_content_refusals(value):
+        if refused:
+            return reason
     return None
 
 

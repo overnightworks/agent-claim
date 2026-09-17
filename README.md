@@ -592,8 +592,11 @@ count as a top-level `"requests"` field.
 renderer shows in place of `text`: `--question` one operator-language
 sentence, at most 160 characters; `--example` one operator-language
 sentence; `--picture` a path to an inline-SVG file, read and validated
-before any write -- at most 8 KiB, rooted at `<svg`, no `<script`, no
-external `href="http` reference -- refused by name otherwise. It refuses by
+before any write -- at most 8 KiB, rooted at `<svg`, and case-insensitively
+free of `<script`, `<foreignObject`, an `on*` event-handler attribute, a
+`javascript:` or `data:` reference anywhere, an `href`/`xlink:href` not
+starting with `#`, and a `<style>` block loading `url(...)` -- refused by
+name otherwise. It refuses by
 name when `<item>` has no valid `agent-claim` block to append to (`aco
 check <item>` shows the exact defect) and when `--text` is empty. `--json`
 returns `item`, `index` (the new line's 1-based, block-order position),
@@ -819,9 +822,12 @@ written by `aco ask`, read by every card renderer): `question`, one
 operator-language sentence of at most 160 characters shown in place of
 `text`; `example`, one operator-language illustration sentence; and
 `picture`, an inline SVG (a multi-line TOML string, at most 8 KiB, rooted at
-`<svg`, no `<script`, no external `href="http` reference — anything else is
-refused with a sentence, both on write and on a stored body that already
-carries one). Absent, a card falls back to `text` as before. Per-slice
+`<svg`, and case-insensitively free of `<script`, `<foreignObject`, an `on*`
+event-handler attribute, a `javascript:` or `data:` reference anywhere, an
+`href`/`xlink:href` not starting with `#`, and a `<style>` block loading
+`url(...)` — anything else is refused with a sentence, both on write and on
+a stored body that already carries one). Absent, a card falls back to `text`
+as before. Per-slice
 files, done-when, and dependencies stay in the human prose beside the block;
 only a slice's `index` and `title` are typed. Schema and version tokens, and
 an expectation's `default`/`ruling` values, are protocol — always this exact

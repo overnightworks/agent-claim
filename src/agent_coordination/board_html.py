@@ -77,6 +77,7 @@ class ExpectationCard:
     example, and no disclosed full sentence (the heading already is it)."""
 
     item: int
+    item_title: str
     index: int
     text: str
     default: str
@@ -180,6 +181,7 @@ def _expectation_cards(
     return tuple(
         ExpectationCard(
             item.number,
+            item.title,
             line.index,
             line.text,
             defaults[line.index],
@@ -443,15 +445,19 @@ def _render_full_sentence(card: ExpectationCard) -> str:
     return f"<details><summary>Der volle Satz</summary><p>{_inline(card.text)}</p></details>"
 
 
-def _render_card(card: ExpectationCard, served: ServedRuleForm | None) -> str:
+def _render_card(
+    card: ExpectationCard, served: ServedRuleForm | None, *, storage: board.Storage
+) -> str:
     if served is None:
         lines = "".join(_render_rule_line(card, outcome) for outcome in RULE_OUTCOMES)
         outcomes = f'<ul class="rule-lines">{lines}</ul>'
     else:
         outcomes = _render_served_form(card, served.token)
     body = _render_figure(card) + _render_example(card) + outcomes + _render_full_sentence(card)
+    item_tag = f"{board.item_label(card.item, storage)} {html.escape(card.item_title)}"
     return f"""
     <article class="card">
+      <span class="item-tag">{item_tag}</span>
       <h3>{_card_heading(card)}</h3>
       {body}
     </article>"""
@@ -561,7 +567,10 @@ def render(page: BoardPage, *, served: ServedRuleForm | None = None) -> str:
         facts=facts,
         notice=notice,
         card_count=len(page.cards),
-        cards=("".join(_render_card(card, served) for card in page.cards) or _EMPTY_PARAGRAPH),
+        cards=(
+            "".join(_render_card(card, served, storage=page.storage) for card in page.cards)
+            or _EMPTY_PARAGRAPH
+        ),
         lane_count=len(page.lanes),
         lanes=(
             "".join(_render_lane(lane, storage=page.storage) for lane in page.lanes)
@@ -659,6 +668,9 @@ summary:focus-visible {{
 .card {{
   background: var(--surface); border: 1px solid color-mix(in srgb, var(--you) 40%, var(--rule));
   border-radius: 12px; padding: 18px 20px; display: grid; gap: 12px; align-content: start;
+}}
+.card .item-tag {{
+  font-size: 0.75rem; font-weight: 600; letter-spacing: 0.04em; color: var(--muted);
 }}
 .card h3 {{ font-size: 1.05rem; font-weight: 600; line-height: 1.3; }}
 .card figure {{ margin: 0; }}
