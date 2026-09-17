@@ -94,7 +94,7 @@ def _claim_subject(
     return (
         f"lane {claim.branch}"
         if isinstance(claim.identity, protocol.LaneIdentity)
-        else f"issue {_item_label(claim.identity.issue, storage)}"
+        else f"issue {board.item_label(claim.identity.issue, storage)}"
     )
 
 
@@ -297,20 +297,6 @@ def _parse_item_ref(value: str) -> int:
     raise protocol.ClaimUnavailableError(
         f"{value!r} is not an item reference; use aco-xxxxxx, #n, or the bare number n"
     )
-
-
-def _item_label(number: int, storage: board.Storage) -> str:
-    """The one display form of `number` a narrative-output command prints
-    (issue #292): `items.format_item_id`'s `aco-xxxxxx` under `storage =
-    "state-ref"` -- an id `_parse_item_ref` already accepts right back, so
-    what a command prints is what the next command takes -- unchanged `#n`
-    under `storage = "github"`. `board`, `next`, `status`, `brief`,
-    `rulings`, `release`'s `freed:`/`next:` lines, and `item close`'s
-    `freed:` line are this chooser's only callers; a refusal sentence keeps
-    naming `#n` regardless of storage (named residual, issue #292)."""
-    if storage is board.Storage.STATE_REF:
-        return items.format_item_id(number)
-    return f"#{number}"
 
 
 def _add_bootstrap_parser(commands: argparse._SubParsersAction) -> None:
@@ -857,7 +843,7 @@ def _status(
     if related:
         context = _ClaimReportContext(index, storage)
         return _print_related_claims(claims, related, context, ages, observed_at)
-    subject = "repository" if issue is None else f"issue {_item_label(issue, storage)}"
+    subject = "repository" if issue is None else f"issue {board.item_label(issue, storage)}"
     print(f"UNCLAIMED {subject}")
     return 0
 
@@ -1103,14 +1089,14 @@ def _release_landing(
 
 def _release_freed_line(freed: tuple[int, ...], storage: board.Storage) -> str:
     return "freed: " + (
-        ", ".join(_item_label(number, storage) for number in freed) if freed else "none"
+        ", ".join(board.item_label(number, storage) for number in freed) if freed else "none"
     )
 
 
 def _release_next_line(item: board.BoardItem | None, storage: board.Storage) -> str:
     if item is None:
         return "next: none"
-    return f"next: {_item_label(item.number, storage)} score {item.score}: {item.title}"
+    return f"next: {board.item_label(item.number, storage)} score {item.score}: {item.title}"
 
 
 def _merged_pull_request_floor(issues: tuple[board.Issue, ...], now: datetime) -> datetime:
@@ -1366,7 +1352,7 @@ def _rulings_line_text(line: board.ExpectationLine) -> str:
 
 
 def _rulings_row_text(row: _RulingsRow, storage: board.Storage) -> str:
-    label = _item_label(row.item.number, storage)
+    label = board.item_label(row.item.number, storage)
     header = f"{label} {row.progress.open}/{row.progress.total}: {row.item.title}"
     return "\n".join((header, *(_rulings_line_text(line) for line in row.lines)))
 
@@ -1482,7 +1468,7 @@ def _next_action_lines(action: board.NextAction, storage: board.Storage) -> list
     if isinstance(action, board.WorkItemAction):
         item = action.item
         lines = [
-            f"{_item_label(item.number, storage)} score {item.score}: {item.title}",
+            f"{board.item_label(item.number, storage)} score {item.score}: {item.title}",
             f"Next: {item.next_step}",
             f"Run: {_next_action_command(action)}",
             "<paths> cannot be derived; take the files to claim from the item body.",
@@ -1491,7 +1477,7 @@ def _next_action_lines(action: board.NextAction, storage: board.Storage) -> list
         if hint is not None:
             lines.append(hint)
         return lines
-    container_label = _item_label(action.container.number, storage)
+    container_label = board.item_label(action.container.number, storage)
     if isinstance(action, board.CutSliceAction):
         return [
             f"cut_slice {container_label}: {action.next_step}",
@@ -1517,7 +1503,7 @@ def _next(
     if recovery:
         lines.append("RECOVERY")
         lines.extend(
-            f"{_item_label(recovery_item.number, storage)}: {board.RECOVERY_STEP}"
+            f"{board.item_label(recovery_item.number, storage)}: {board.RECOVERY_STEP}"
             for recovery_item in recovery
         )
         lines.append("")
@@ -1526,7 +1512,7 @@ def _next(
     )
     if skipped:
         skipped_lines = (
-            f"{_item_label(skipped_item.number, storage)}: {skipped_item.actionable_reason}"
+            f"{board.item_label(skipped_item.number, storage)}: {skipped_item.actionable_reason}"
             for skipped_item in skipped
         )
         lines.extend(("", "SKIPPED", *skipped_lines))

@@ -2261,13 +2261,15 @@ def _kind_cell(item: BoardItem) -> str:
     return item.kind.value
 
 
-def _item_label(number: int, storage: Storage) -> str:
-    """This module's own copy of `cli._item_label`/`board_html._item_label`
-    (issue #292): the real owner, `items.format_item_id`, gives `aco-xxxxxx`
-    under `storage = STATE_REF`; GitHub's own `#n` stays unchanged under
-    `storage = GITHUB`. `board.py` is the plain-text board's own layer, so
-    it keeps this one-line chooser rather than importing either sibling
-    copy."""
+def item_label(number: int, storage: Storage) -> str:
+    """The one display form of `number` any narrative output prints under
+    `storage` (issue #292): `items.format_item_id`'s `aco-xxxxxx` under
+    `storage = STATE_REF` -- an id `cli._parse_item_ref` already accepts
+    right back, so what a command prints is what the next command takes --
+    unchanged `#n` under `storage = GITHUB`. `board` is the lowest layer
+    that may import `items` (the Layers contract), and both `cli` and
+    `board_html` already import `board`, so this is the one owner both call
+    into rather than each keeping its own copy."""
     if storage is Storage.STATE_REF:
         return items.format_item_id(number)
     return f"#{number}"
@@ -2296,7 +2298,7 @@ def render(board: Board, *, storage: Storage = Storage.GITHUB) -> str:
         *(
             (
                 str(item.score),
-                _item_label(item.number, storage),
+                item_label(item.number, storage),
                 _kind_cell(item),
                 item.priority_bucket,
                 item.stage.value,
@@ -2324,9 +2326,9 @@ def render(board: Board, *, storage: Storage = Storage.GITHUB) -> str:
         "  ".join(value.ljust(widths[index]) for index, value in enumerate(row)).rstrip()
         for row in rows
     )
-    ready = ", ".join(_item_label(item.number, storage) for item in board.ready_now) or "none"
-    stale = ", ".join(_item_label(item.number, storage) for item in board.stale) or "none"
-    recovery = ", ".join(_item_label(item.number, storage) for item in board.recovery) or "none"
+    ready = ", ".join(item_label(item.number, storage) for item in board.ready_now) or "none"
+    stale = ", ".join(item_label(item.number, storage) for item in board.stale) or "none"
+    recovery = ", ".join(item_label(item.number, storage) for item in board.recovery) or "none"
     containers = "\n".join(_container_lines(board, storage)) or "none"
     uncut = "\n".join(_uncut_line(finding) for finding in board.uncut) or "none"
     landings_note = "" if board.landings_derivable else f"\n{LANDINGS_NOT_DERIVABLE_LINE}"
@@ -2339,11 +2341,11 @@ def render(board: Board, *, storage: Storage = Storage.GITHUB) -> str:
 
 def _open_child_cell(child: ChildItem, repository: str, storage: Storage) -> str:
     if not child.blocked_by:
-        return _item_label(child.number, storage)
+        return item_label(child.number, storage)
     blockers = ", ".join(
         open_blocker_label(reference, repository) for reference in child.blocked_by
     )
-    return f"{_item_label(child.number, storage)} (blocked by {blockers})"
+    return f"{item_label(child.number, storage)} (blocked by {blockers})"
 
 
 def _container_line(
@@ -2352,7 +2354,7 @@ def _container_line(
     open_children = ", ".join(
         _open_child_cell(child, repository, storage) for child in container.open_children
     )
-    label = _item_label(number, storage)
+    label = item_label(number, storage)
     return f"{label} {container.closed}/{container.total} closed; open: {open_children or 'none'}"
 
 

@@ -33,20 +33,9 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import cast
 
-from . import board, items
+from . import board
 
 RULE_OUTCOMES: tuple[str, ...] = ("yes", "no", "later")
-
-
-def _item_label(number: int, storage: board.Storage) -> str:
-    """This module's own copy of `cli._item_label` (issue #292): `board_html`
-    sits below `cli` in the Layers contract and cannot import it, so each
-    layer keeps its own one-line chooser around the same real owner,
-    `items.format_item_id` -- `aco-xxxxxx` under `storage = "state-ref"`,
-    unchanged `#n` under `storage = "github"`."""
-    if storage is board.Storage.STATE_REF:
-        return items.format_item_id(number)
-    return f"#{number}"
 
 
 @dataclass(frozen=True)
@@ -404,7 +393,7 @@ def _render_served_form(card: ExpectationCard, outcome: str, token: str) -> str:
 def _render_card(
     card: ExpectationCard, served: ServedRuleForm | None, *, storage: board.Storage
 ) -> str:
-    label = _item_label(card.item, storage)
+    label = board.item_label(card.item, storage)
     if served is None:
         lines = "".join(_render_rule_line(card, outcome) for outcome in RULE_OUTCOMES)
         return f"""
@@ -445,7 +434,7 @@ def _render_lane(lane: LaneCard, *, storage: board.Storage) -> str:
     )
     return f"""
     <article class="lane">
-      <h3>{_item_label(lane.item, storage)} {html.escape(lane.item_title)}</h3>
+      <h3>{board.item_label(lane.item, storage)} {html.escape(lane.item_title)}</h3>
       <dl class="facts">{facts}</dl>
     </article>"""
 
@@ -453,7 +442,7 @@ def _render_lane(lane: LaneCard, *, storage: board.Storage) -> str:
 def _part_label(part: TopicPart, *, storage: board.Storage) -> str:
     title = f" {html.escape(part.title)}" if part.title else ""
     blocked = f" (blocked by {html.escape(part.blocked_by)})" if part.blocked_by else ""
-    return f"{_item_label(part.number, storage)}{title}{blocked}"
+    return f"{board.item_label(part.number, storage)}{title}{blocked}"
 
 
 def _render_part(part: TopicPart, *, storage: board.Storage) -> str:
@@ -467,7 +456,7 @@ def _render_part(part: TopicPart, *, storage: board.Storage) -> str:
 def _render_topic(topic: Topic, *, storage: board.Storage) -> str:
     share = 0 if topic.total == 0 else round(100 * topic.closed / topic.total)
     parts = "".join(_render_part(part, storage=storage) for part in topic.parts)
-    label = _item_label(topic.item, storage)
+    label = board.item_label(topic.item, storage)
     return f"""
       <li>
         <details>
