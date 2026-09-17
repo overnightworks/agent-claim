@@ -1313,6 +1313,59 @@ class TestCliStateRefForge:
         lines = capsys.readouterr().out.splitlines()
         assert any(line.strip() == f"2 open: {asked_text}" for line in lines)
 
+    def test_ask_with_a_picture_writes_the_card_fields_into_the_state_ref_item(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+    ) -> None:
+        """Issue #295 against issue #283's own write path: `aco ask --text
+        ... --question ... --example ... --picture FILE.svg` under `storage
+        = state-ref` lands all three optional card fields in the same
+        `items/<id>.md` write -- a combination `--picture` alone was never
+        proved against, since every other `--picture` proof (`test_cli.py`)
+        drives the `FakeForge`, never the real `file://` remote this module
+        owns."""
+        self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, _item_files())
+        picture_file = tmp_path / "sketch.svg"
+        picture_svg = '<svg xmlns="http://www.w3.org/2000/svg"><circle cx="5" cy="5" r="4"/></svg>'
+        picture_file.write_text(picture_svg, encoding="utf-8")
+        asked_text = "Brauchen wir Admin-Rechte?"
+
+        asked = issue_claim.main(
+            [
+                "ask",
+                str(CHILD_A_NUMBER),
+                "--text",
+                asked_text,
+                "--question",
+                "Admin-Rechte nötig?",
+                "--example",
+                "Wie beim letzten Import.",
+                "--picture",
+                str(picture_file),
+            ]
+        )
+        assert asked == 0
+        capsys.readouterr()
+
+        remote_url = f"file://{bare_remote}"
+        state = store.fetch_state(worktree=worktree, remote=remote_url)
+        assert state.tip is not None
+        stored = store.read_item_files(worktree, state.tip)[f"{CHILD_A_ID}.md"].decode()
+        lines = board.expectation_lines(stored, storage=board.Storage.STATE_REF)
+        assert lines[1] == board.ExpectationLine(
+            2,
+            asked_text,
+            None,
+            None,
+            question="Admin-Rechte nötig?",
+            example="Wie beim letzten Import.",
+            picture=picture_svg,
+        )
+
     def test_claim_passes_slice_rules_against_a_state_ref_item_and_check_reads_it_back(
         self,
         monkeypatch: pytest.MonkeyPatch,

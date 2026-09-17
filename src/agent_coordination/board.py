@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 import tomllib
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
@@ -126,6 +126,12 @@ BLOCK_EXPECTATION_DEFAULTS = frozenset({"yes", "no", "later"})
 # proposer's guessed default, so it rules exactly like "yes"/"no" (`rule
 # --later` writes `ruling = "later"` the same way `--yes`/`--no` do).
 BLOCK_EXPECTATION_RULINGS = frozenset({"yes", "no", "later"})
+# The three optional card fields a proposer (`aco ask`) may attach to an
+# `[[expectation]]` entry (issue #295): the operator-language question and
+# example a card shows in place of `text`, and an inline-SVG picture. Absent
+# entirely, a card falls back to `text` unchanged.
+EXPECTATION_QUESTION_MAXIMUM_CHARACTERS = 160
+EXPECTATION_PICTURE_MAXIMUM_BYTES = 8 * 1024
 
 
 class Storage(StrEnum):
@@ -912,6 +918,96 @@ def _block_expectation_variant_defects(
     ]
 
 
+def _expectation_question_defect(value: object) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return "must be a non-empty string"
+    if len(value) > EXPECTATION_QUESTION_MAXIMUM_CHARACTERS:
+        return f"must be at most {EXPECTATION_QUESTION_MAXIMUM_CHARACTERS} characters"
+    return None
+
+
+def _expectation_example_defect(value: object) -> str | None:
+    return None if isinstance(value, str) and value.strip() else "must be a non-empty string"
+
+
+_EXPECTATION_PICTURE_EVENT_HANDLER_ATTRIBUTE = re.compile(r"[\s/]on[a-z]+\s*=", re.IGNORECASE)
+_EXPECTATION_PICTURE_EXTERNAL_HREF = re.compile(
+    r'(?:^|[\s:])href\s*=\s*(?:"(?!#)|\'(?!#)|(?!["\'#]))', re.IGNORECASE
+)
+
+
+def _expectation_picture_content_refusals(value: str) -> tuple[tuple[bool, str], ...]:
+    """Every path an inline SVG can run script or reach outside the
+    document, checked case-insensitively: `refused` paired with the
+    sentence for the first one `value` matches, in this fixed order."""
+    lowered = value.lower()
+    return (
+        ("<script" in lowered, "must not contain <script>"),
+        ("<foreignobject" in lowered, "must not contain <foreignObject>"),
+        (
+            bool(_EXPECTATION_PICTURE_EVENT_HANDLER_ATTRIBUTE.search(value)),
+            "must not contain an event-handler attribute",
+        ),
+        ("javascript:" in lowered, "must not contain a javascript: reference"),
+        ("data:" in lowered, "must not contain a data: reference"),
+        (
+            bool(_EXPECTATION_PICTURE_EXTERNAL_HREF.search(value)),
+            "must not reference an href outside the document",
+        ),
+        ("url(" in lowered, "must not contain a url() reference"),
+        ("<iframe" in lowered, "must not contain <iframe>"),
+        ("<embed" in lowered, "must not contain <embed>"),
+        ("<object" in lowered, "must not contain <object>"),
+        ("srcdoc" in lowered, "must not contain srcdoc"),
+    )
+
+
+def _expectation_picture_defect(value: object) -> str | None:
+    """The refusal sentence for an invalid `[[expectation]]` picture, or
+    `None` for a valid one (issue #295): an inline SVG, rooted at `<svg`, at
+    most `EXPECTATION_PICTURE_MAXIMUM_BYTES`, and free of every refusal
+    `_expectation_picture_content_refusals` names. The one owner the body
+    parser's defects and `append_expectation`'s pre-write refusal both
+    call."""
+    if not isinstance(value, str):
+        return "must be a string"
+    if len(value.encode("utf-8")) > EXPECTATION_PICTURE_MAXIMUM_BYTES:
+        return f"must be at most {EXPECTATION_PICTURE_MAXIMUM_BYTES} bytes"
+    if not value.strip().startswith("<svg"):
+        return "must be inline SVG rooted at <svg>"
+    for refused, reason in _expectation_picture_content_refusals(value):
+        if refused:
+            return reason
+    return None
+
+
+# The three optional `[[expectation]]` card fields (issue #295), each with
+# its own refusal-sentence check -- shared, in this fixed order, by the body
+# parser's defects (`_block_expectation_optional_field_defects`) and by
+# `append_expectation`'s pre-write validation, so the rule is owned once.
+_EXPECTATION_OPTIONAL_FIELDS: tuple[tuple[str, Callable[[object], str | None]], ...] = (
+    ("question", _expectation_question_defect),
+    ("example", _expectation_example_defect),
+    ("picture", _expectation_picture_defect),
+)
+_EXPECTATION_KNOWN_KEYS = frozenset(
+    {"text", "default", "ruling", "ruled_on", *(key for key, _ in _EXPECTATION_OPTIONAL_FIELDS)}
+)
+
+
+def _block_expectation_optional_field_defects(
+    prefix: str, entry: dict[str, object]
+) -> list[ContractDefect]:
+    defects: list[ContractDefect] = []
+    for key, check in _EXPECTATION_OPTIONAL_FIELDS:
+        if key not in entry:
+            continue
+        reason = check(entry[key])
+        if reason is not None:
+            defects.append(ContractDefect(f"{prefix}.{key}", f"{prefix}.{key} {reason}"))
+    return defects
+
+
 def _block_expectation_entry_defects(index: int, entry: object) -> list[ContractDefect]:
     prefix = f"expectation[{index}]"
     if not isinstance(entry, dict):
@@ -923,7 +1019,8 @@ def _block_expectation_entry_defects(index: int, entry: object) -> list[Contract
             ContractDefect(f"{prefix}.text", f"{prefix}.text must be a non-empty string")
         )
     defects.extend(_block_expectation_variant_defects(prefix, entry))
-    unknown = sorted(set(entry) - {"text", "default", "ruling", "ruled_on"})
+    defects.extend(_block_expectation_optional_field_defects(prefix, entry))
+    unknown = sorted(set(entry) - _EXPECTATION_KNOWN_KEYS)
     defects.extend(
         ContractDefect(f"{prefix}.{key}", f"unknown key {prefix}.{key}") for key in unknown
     )
@@ -1200,6 +1297,21 @@ def _toml_string(value: object) -> str:
     return f'"{escaped}"'
 
 
+_TOML_MULTILINE_STRING_ESCAPES = {"\\": "\\\\", '"': '\\"'}
+
+
+def _toml_multiline_string(value: str) -> str:
+    """A TOML multi-line basic string for `value` -- an `[[expectation]]`
+    `picture`'s inline SVG (issue #295), which needs literal newlines a
+    single-line basic string cannot hold. Backslashes and quotes are
+    escaped so no run of the content can be mistaken for the closing
+    `\"\"\"`; raw newlines stay literal. `tomllib.loads` reads it back to
+    `value` unchanged -- the leading newline right after the opening
+    delimiter is the one TOML trims automatically, so none is added here."""
+    escaped = "".join(_TOML_MULTILINE_STRING_ESCAPES.get(char, char) for char in value)
+    return f'"""\n{escaped}"""'
+
+
 def _render_frozen_until(data: Mapping[str, object]) -> list[str]:
     frozen_until = data.get("frozen_until")
     if not isinstance(frozen_until, dict):
@@ -1222,6 +1334,12 @@ def _render_expectations(data: Mapping[str, object]) -> list[str]:
             ruled_on = cast(date, expectation["ruled_on"])
             lines.append(f"ruling = {_toml_string(expectation['ruling'])}")
             lines.append(f"ruled_on = {ruled_on.isoformat()}")
+        if "question" in expectation:
+            lines.append(f"question = {_toml_string(expectation['question'])}")
+        if "example" in expectation:
+            lines.append(f"example = {_toml_string(expectation['example'])}")
+        if "picture" in expectation:
+            lines.append(f"picture = {_toml_multiline_string(cast(str, expectation['picture']))}")
     return lines
 
 
@@ -1312,12 +1430,18 @@ class ExpectationLine:
     see it: `index` is its 1-based position in block order -- what `rule
     --line` accepts and what `rulings` prints -- `text` its full prose, and
     `ruling`/`ruled_on` present only once a `rule` call has replaced its
-    `default`."""
+    `default`. `question`/`example`/`picture` (issue #295) are the card's
+    optional operator-language heading, illustration sentence, and inline
+    SVG -- `None` when `aco ask` was not given them, in which case a card
+    falls back to `text`."""
 
     index: int
     text: str
     ruling: str | None
     ruled_on: date | None
+    question: str | None = None
+    example: str | None = None
+    picture: str | None = None
 
 
 def expectation_lines(
@@ -1337,8 +1461,11 @@ def expectation_lines(
         ExpectationLine(
             index=position,
             text=cast(str, entry["text"]),
-            ruling=cast("str | None", entry.get("ruling")),
+            ruling=cast(str | None, entry.get("ruling")),
             ruled_on=cast("date | None", entry.get("ruled_on")),
+            question=cast(str | None, entry.get("question")),
+            example=cast(str | None, entry.get("example")),
+            picture=cast(str | None, entry.get("picture")),
         )
         for position, entry in enumerate(entries, start=1)
     )
@@ -1396,19 +1523,49 @@ def rule_expectation(
     return replace_agent_claim_block(body, located, new_data)
 
 
-def append_expectation(body: str, text: str, default: str) -> str:
+@dataclass(frozen=True)
+class ExpectationCardFields:
+    """The three optional `[[expectation]]` card fields `aco ask` may
+    attach (issue #295), grouped so a caller passes one value instead of
+    three positional strings that must stay paired: `question` and
+    `example`, one operator-language sentence each, and `picture`, an
+    inline SVG. Each defaults to absent, matching a line with none of
+    them -- the card then falls back to `text`."""
+
+    question: str | None = None
+    example: str | None = None
+    picture: str | None = None
+
+
+def append_expectation(
+    body: str, text: str, default: str, *, card: ExpectationCardFields | None = None
+) -> str:
     """`body` with one fresh proposed `[[expectation]]` entry appended:
-    `text` verbatim, `default` as given. Byte-preserving outside the
-    appended entry, the same write path as `rule_expectation`."""
+    `text` verbatim, `default` as given, plus whichever of `card`'s
+    optional fields (issue #295) `aco ask` was given -- each validated by
+    the same check `_block_expectation_optional_field_defects` reads a
+    stored body with, so a value this refuses can never be written.
+    Byte-preserving outside the appended entry, the same write path as
+    `rule_expectation`."""
     if not text.strip():
         raise protocol.ClaimError("expectation text must be a non-empty string")
     if default not in BLOCK_EXPECTATION_DEFAULTS:
         raise protocol.ClaimError(
             f"default must be one of {', '.join(sorted(BLOCK_EXPECTATION_DEFAULTS))}"
         )
+    provided = asdict(card if card is not None else ExpectationCardFields())
+    entry: dict[str, object] = {"text": text, "default": default}
+    for key, check in _EXPECTATION_OPTIONAL_FIELDS:
+        value = provided[key]
+        if value is None:
+            continue
+        reason = check(value)
+        if reason is not None:
+            raise protocol.ClaimError(f"{key} {reason}")
+        entry[key] = value
     located = locate_agent_claim_block(body)
     entries = _block_expectation_dicts(located.data)
-    new_entries = [*entries, {"text": text, "default": default}]
+    new_entries = [*entries, entry]
     new_data = {**located.data, "expectation": new_entries}
     return replace_agent_claim_block(body, located, new_data)
 

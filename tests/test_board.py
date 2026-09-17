@@ -208,6 +208,256 @@ def test_append_expectation_refuses_an_unknown_default() -> None:
         board.append_expectation(body, "New question?", "maybe")
 
 
+VALID_SVG_PICTURE = '<svg xmlns="http://www.w3.org/2000/svg"><circle cx="5" cy="5" r="4"/></svg>'
+
+
+def test_append_expectation_writes_the_card_fields() -> None:
+    """Issue #295: `question`/`example`/`picture` land on the appended
+    line, `expectation_lines` surfaces all three, and a body with none of
+    them (every earlier `append_expectation` test) keeps reading `None` --
+    absent keys leave the line unchanged."""
+    body = agent_claim_body(MINIMAL_BLOCK_TOML)
+    card = board.ExpectationCardFields(
+        question="Ship it?", example="Release on Friday.", picture=VALID_SVG_PICTURE
+    )
+
+    new_body = board.append_expectation(body, "New question?", "yes", card=card)
+
+    assert board.expectation_lines(new_body) == (
+        board.ExpectationLine(
+            1,
+            "New question?",
+            None,
+            None,
+            question="Ship it?",
+            example="Release on Friday.",
+            picture=VALID_SVG_PICTURE,
+        ),
+    )
+    entries = board.locate_agent_claim_block(new_body).data["expectation"]
+    assert entries == [
+        {
+            "text": "New question?",
+            "default": "yes",
+            "question": "Ship it?",
+            "example": "Release on Friday.",
+            "picture": VALID_SVG_PICTURE,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("picture", "match"),
+    [
+        pytest.param("<div>not an svg</div>", "must be inline SVG rooted at <svg>", id="no-root"),
+        pytest.param(
+            "<svg><script>alert(1)</script></svg>", "must not contain <script>", id="script"
+        ),
+        pytest.param(
+            "<svg><SCRIPT>alert(1)</SCRIPT></svg>",
+            "must not contain <script>",
+            id="script-uppercase",
+        ),
+        pytest.param(
+            '<svg><foreignObject><body xmlns="http://www.w3.org/1999/xhtml">x</body>'
+            "</foreignObject></svg>",
+            "must not contain <foreignObject>",
+            id="foreignobject",
+        ),
+        pytest.param(
+            '<svg><circle onclick="alert(1)"/></svg>',
+            "must not contain an event-handler attribute",
+            id="event-handler",
+        ),
+        pytest.param(
+            "<svg/onload=alert(1)>",
+            "must not contain an event-handler attribute",
+            id="event-handler-after-slash",
+        ),
+        pytest.param(
+            '<svg><a href="javascript:alert(1)"></a></svg>',
+            "must not contain a javascript: reference",
+            id="javascript-scheme",
+        ),
+        pytest.param(
+            '<svg><image href="data:image/png;base64,AAAA"/></svg>',
+            "must not contain a data: reference",
+            id="data-scheme",
+        ),
+        pytest.param(
+            '<svg><a href="http://evil.example"/></svg>',
+            "must not reference an href outside the document",
+            id="external-href",
+        ),
+        pytest.param(
+            "<svg><a href=http://evil.example></a></svg>",
+            "must not reference an href outside the document",
+            id="external-href-unquoted",
+        ),
+        pytest.param(
+            '<svg><use xlink:href="http://evil.example/sprite.svg#x"/></svg>',
+            "must not reference an href outside the document",
+            id="external-xlink-href",
+        ),
+        pytest.param(
+            "<svg><style>rect{fill:url(http://evil.example/x.png)}</style></svg>",
+            "must not contain a url() reference",
+            id="style-element-url",
+        ),
+        pytest.param(
+            '<svg><rect style="fill:url(http://evil.example/x.png)"/></svg>',
+            "must not contain a url() reference",
+            id="style-attribute-url",
+        ),
+        pytest.param(
+            '<svg><iframe src="http://evil.example"></iframe></svg>',
+            "must not contain <iframe>",
+            id="iframe",
+        ),
+        pytest.param(
+            '<svg><embed src="http://evil.example"/></svg>',
+            "must not contain <embed>",
+            id="embed",
+        ),
+        pytest.param(
+            '<svg><object data="http://evil.example"></object></svg>',
+            "must not contain <object>",
+            id="object",
+        ),
+        pytest.param(
+            '<svg><a srcdoc="x"/></svg>',
+            "must not contain srcdoc",
+            id="srcdoc",
+        ),
+        pytest.param(
+            f"<svg>{'x' * board.EXPECTATION_PICTURE_MAXIMUM_BYTES}</svg>",
+            f"must be at most {board.EXPECTATION_PICTURE_MAXIMUM_BYTES} bytes",
+            id="oversized",
+        ),
+    ],
+)
+def test_expectation_picture_is_refused_by_both_the_parser_and_the_writer(
+    picture: str, match: str
+) -> None:
+    """One rule, two callers (issue #295): a body already carrying the bad
+    picture reads MALFORMED at `expectation[0].picture`, and
+    `append_expectation` refuses the same picture before any write --
+    `_expectation_picture_defect` is the one owner both share."""
+    malformed_body = agent_claim_body(
+        board.render_block(
+            {
+                "version": 1,
+                "now": "N",
+                "next": "X",
+                "done_when": "D",
+                "expectation": [proposed_expectation("E", picture=picture)],
+            }
+        ).rstrip("\n")
+    )
+    parsed = board.parse_body(malformed_body)
+    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert parsed.contract.defects == (
+        board.ContractDefect("expectation[0].picture", f"expectation[0].picture {match}"),
+    )
+
+    valid_body = agent_claim_body(MINIMAL_BLOCK_TOML)
+    card = board.ExpectationCardFields(picture=picture)
+    with pytest.raises(protocol.ClaimError, match=re.escape(match)):
+        board.append_expectation(valid_body, "New question?", "yes", card=card)
+
+
+def test_append_expectation_refuses_an_overlong_question() -> None:
+    body = agent_claim_body(MINIMAL_BLOCK_TOML)
+    card = board.ExpectationCardFields(
+        question="Q" * (board.EXPECTATION_QUESTION_MAXIMUM_CHARACTERS + 1)
+    )
+
+    with pytest.raises(protocol.ClaimError, match="question must be at most"):
+        board.append_expectation(body, "New question?", "yes", card=card)
+
+
+def test_append_expectation_refuses_an_empty_example() -> None:
+    body = agent_claim_body(MINIMAL_BLOCK_TOML)
+    card = board.ExpectationCardFields(example="   ")
+
+    with pytest.raises(protocol.ClaimError, match="example must be a non-empty string"):
+        board.append_expectation(body, "New question?", "yes", card=card)
+
+
+def test_parse_body_still_refuses_an_unknown_expectation_key() -> None:
+    """Issue #295 only widens the allowed set by `question`/`example`/
+    `picture`; any other key stays refused by name, unchanged."""
+    toml_text = f'{MINIMAL_BLOCK_TOML}[[expectation]]\ntext = "E"\ndefault = "yes"\nnote = "x"\n'
+
+    parsed = board.parse_body(agent_claim_body(toml_text))
+
+    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert parsed.contract.defects == (
+        board.ContractDefect("expectation[0].note", "unknown key expectation[0].note"),
+    )
+
+
+def test_parse_body_refuses_a_non_string_expectation_question() -> None:
+    """`question` must be a string (issue #295); a stored non-string value
+    -- an integer, say -- is refused by the same defect the empty-string
+    case uses, not a TOML type error."""
+    toml_text = f'{MINIMAL_BLOCK_TOML}[[expectation]]\ntext = "E"\ndefault = "yes"\nquestion = 1\n'
+
+    parsed = board.parse_body(agent_claim_body(toml_text))
+
+    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert parsed.contract.defects == (
+        board.ContractDefect(
+            "expectation[0].question", "expectation[0].question must be a non-empty string"
+        ),
+    )
+
+
+def test_parse_body_refuses_a_non_string_expectation_picture() -> None:
+    """`picture` must be a string (issue #295); a stored non-string value
+    is refused before any SVG-shape check runs."""
+    toml_text = f'{MINIMAL_BLOCK_TOML}[[expectation]]\ntext = "E"\ndefault = "yes"\npicture = 1\n'
+
+    parsed = board.parse_body(agent_claim_body(toml_text))
+
+    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert parsed.contract.defects == (
+        board.ContractDefect("expectation[0].picture", "expectation[0].picture must be a string"),
+    )
+
+
+def test_render_block_round_trips_question_example_and_a_multiline_picture() -> None:
+    """The picture round trip (issue #295) needs its own case: a multi-line
+    SVG with embedded quotes and a backslash, a literal `\"\"\"` run that
+    must not be mistaken for the closing delimiter, and a value ending in a
+    trailing `"` right before the writer's own closing `\"\"\"` -- only a
+    TOML multi-line basic string (`_toml_multiline_string`), not the
+    single-line `_toml_string` every other field uses, can carry this
+    byte-exact."""
+    picture = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">\n'
+        '  <!-- a "quoted" comment with a back\\slash -->\n'
+        '  <!-- a literal triple quote: """ -->\n'
+        '  <circle cx="5" cy="5" r="4"/>\n'
+        '</svg>"'
+    )
+    data = {
+        "version": 1,
+        "now": "N",
+        "next": "X",
+        "done_when": "D",
+        "expectation": [
+            proposed_expectation(
+                "Proposed", question="Ship it?", example="An example.", picture=picture
+            )
+        ],
+    }
+
+    reparsed = tomllib.loads(board.render_block(data))
+
+    assert reparsed == data
+
+
 # --- expectation_lines / expectation_line_state / expectation_line_summary ---
 
 
@@ -221,6 +471,39 @@ def test_expectation_lines_reports_index_text_ruling_and_ruled_on() -> None:
     assert board.expectation_lines(body) == (
         board.ExpectationLine(1, "Open one", None, None),
         board.ExpectationLine(2, "Settled one", "no", date(2026, 9, 1)),
+    )
+
+
+def test_expectation_lines_reads_question_example_and_picture() -> None:
+    body = agent_claim_body(
+        board.render_block(
+            {
+                "version": 1,
+                "now": "N",
+                "next": "X",
+                "done_when": "D",
+                "expectation": [
+                    proposed_expectation(
+                        "Ship it?",
+                        question="Ship it?",
+                        example="Release on Friday.",
+                        picture=VALID_SVG_PICTURE,
+                    )
+                ],
+            }
+        ).rstrip("\n")
+    )
+
+    assert board.expectation_lines(body) == (
+        board.ExpectationLine(
+            1,
+            "Ship it?",
+            None,
+            None,
+            question="Ship it?",
+            example="Release on Friday.",
+            picture=VALID_SVG_PICTURE,
+        ),
     )
 
 

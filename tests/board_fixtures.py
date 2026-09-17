@@ -239,8 +239,24 @@ FROZEN_TRIGGER = "eine zweite Maschine bekommt einen Grund"
 FROZEN_UNTIL = {"trigger": FROZEN_TRIGGER, "ruled_on": date(2026, 8, 31)}
 
 
-def proposed_expectation(text: str, *, default: str = "later") -> dict[str, object]:
-    return {"text": text, "default": default}
+def proposed_expectation(
+    text: str,
+    *,
+    default: str = "later",
+    question: str | None = None,
+    example: str | None = None,
+    picture: str | None = None,
+) -> dict[str, object]:
+    """A proposed `[[expectation]]` entry, plus whichever of the optional
+    card fields (issue #295) the scenario needs -- omitted entirely when
+    left `None`, matching a line `aco ask` was never given one for."""
+    entry: dict[str, object] = {"text": text, "default": default}
+    entry.update(
+        (key, value)
+        for key, value in (("question", question), ("example", example), ("picture", picture))
+        if value is not None
+    )
+    return entry
 
 
 def ruled_expectation(

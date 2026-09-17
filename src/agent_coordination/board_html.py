@@ -11,9 +11,12 @@ function for both: `served=None` writes `--html`'s static page,
 second renderer.
 
 The four sections follow the ruled picture (#234, #276), in fixed order:
-"Wartet auf dich" (open `[[expectation]]` lines as cards -- the copyable
-`aco rule` command per outcome when static, a `POST /rule` form per outcome
-carrying the loopback token when served), "Lanes" (active claims with the
+"Wartet auf dich" (open `[[expectation]]` lines as cards, in the operator's
+own words when `aco ask` gave them (issue #295): `question` as heading, the
+inline-SVG `picture`, `example` -- else `text` alone, as before -- then the
+copyable `aco rule` command per outcome when static, one `POST /rule` form
+per card carrying the loopback token and the note, with the three outcomes
+as its own submit buttons, when served), "Lanes" (active claims with the
 item's own Now/Next/Blocked by/Done when, verbatim from the body), "Themen"
 (containers with their open children, then standalone items), and
 "Landungen" (items `board` already classified `Stage.CODE_LANDED`, paired
@@ -66,13 +69,21 @@ class LaneClaimant:
 
 @dataclass(frozen=True)
 class ExpectationCard:
-    """One still-open `[[expectation]]` line, ready for a "Wartet auf dich" card."""
+    """One still-open `[[expectation]]` line, ready for a "Wartet auf dich" card.
+    `question`/`example`/`picture` (issue #295) are the card's optional
+    operator-language heading, illustration sentence, and inline SVG -- each
+    `None` when the underlying `[[expectation]]` never carried one, in which
+    case the card falls back to `text` as its heading with no figure, no
+    example, and no disclosed full sentence (the heading already is it)."""
 
     item: int
     item_title: str
     index: int
     text: str
     default: str
+    question: str | None = None
+    example: str | None = None
+    picture: str | None = None
 
 
 @dataclass(frozen=True)
@@ -168,7 +179,16 @@ def _expectation_cards(
 ) -> tuple[ExpectationCard, ...]:
     defaults = _open_expectation_defaults(body)
     return tuple(
-        ExpectationCard(item.number, item.title, line.index, line.text, defaults[line.index])
+        ExpectationCard(
+            item.number,
+            item.title,
+            line.index,
+            line.text,
+            defaults[line.index],
+            question=line.question,
+            example=line.example,
+            picture=line.picture,
+        )
         for line in board.expectation_lines(body, storage=storage)
         if line.ruling is None
     )
@@ -375,39 +395,71 @@ def _render_rule_line(card: ExpectationCard, outcome: str) -> str:
     )
 
 
-def _render_served_form(card: ExpectationCard, outcome: str, token: str) -> str:
+def _render_rule_button(card: ExpectationCard, outcome: str) -> str:
     is_default = outcome == card.default
-    return f"""
-      <form method="post" action="/rule" class="rule-form{" rec" if is_default else ""}">
+    return (
+        f'<button type="submit" name="outcome" value="{outcome}" '
+        f'class="{"rec" if is_default else ""}">{outcome}</button>'
+        f"{_DEFAULT_TAG if is_default else ''}"
+    )
+
+
+def _render_served_form(card: ExpectationCard, token: str) -> str:
+    """One `POST /rule` form per card (issue #295): the loopback token, the
+    item and line it rules, and the operator's note, each carried once --
+    unlike the pre-#295 shape of one form (and one textarea) per outcome --
+    with the three outcomes as its own submit buttons."""
+    buttons = "".join(_render_rule_button(card, outcome) for outcome in RULE_OUTCOMES)
+    return f"""<form method="post" action="/rule" class="rule-form">
         <input type="hidden" name="t" value="{html.escape(token)}">
         <input type="hidden" name="item" value="{card.item}">
         <input type="hidden" name="line" value="{card.index}">
-        <input type="hidden" name="outcome" value="{outcome}">
         <textarea name="note" placeholder="Notiz (optional)" rows="2"></textarea>
-        <div class="rule-actions">
-          <button type="submit">{outcome}</button>{_DEFAULT_TAG if is_default else ""}
-        </div>
+        <div class="rule-actions">{buttons}</div>
       </form>"""
+
+
+def _card_heading(card: ExpectationCard) -> str:
+    return _inline(card.question if card.question is not None else card.text)
+
+
+def _render_figure(card: ExpectationCard) -> str:
+    """`card.picture`'s inline SVG verbatim, never `html.escape`d -- it was
+    already validated by board's picture rule at write time
+    (`board._expectation_picture_defect`)."""
+    return "" if card.picture is None else f"<figure>{card.picture}</figure>"
+
+
+def _render_example(card: ExpectationCard) -> str:
+    if card.example is None:
+        return ""
+    return f'<p class="example"><span class="tag">Beispiel</span> {_inline(card.example)}</p>'
+
+
+def _render_full_sentence(card: ExpectationCard) -> str:
+    """The disclosed full `text` -- only when a `question` shortened the
+    heading; a card with no `question` already shows `text` as its
+    heading, so disclosing it again would repeat the same sentence."""
+    if card.question is None:
+        return ""
+    return f"<details><summary>Der volle Satz</summary><p>{_inline(card.text)}</p></details>"
 
 
 def _render_card(
     card: ExpectationCard, served: ServedRuleForm | None, *, storage: board.Storage
 ) -> str:
-    label = board.item_label(card.item, storage)
     if served is None:
         lines = "".join(_render_rule_line(card, outcome) for outcome in RULE_OUTCOMES)
-        return f"""
-    <article class="card">
-      <h3>{label} {html.escape(card.item_title)}</h3>
-      <p>{_inline(card.text)}</p>
-      <ul class="rule-lines">{lines}</ul>
-    </article>"""
-    forms = "".join(_render_served_form(card, outcome, served.token) for outcome in RULE_OUTCOMES)
+        outcomes = f'<ul class="rule-lines">{lines}</ul>'
+    else:
+        outcomes = _render_served_form(card, served.token)
+    body = _render_figure(card) + _render_example(card) + outcomes + _render_full_sentence(card)
+    item_tag = f"{board.item_label(card.item, storage)} {html.escape(card.item_title)}"
     return f"""
     <article class="card">
-      <h3>{label} {html.escape(card.item_title)}</h3>
-      <p>{_inline(card.text)}</p>
-      <div class="rule-forms">{forms}</div>
+      <span class="item-tag">{item_tag}</span>
+      <h3>{_card_heading(card)}</h3>
+      {body}
     </article>"""
 
 
@@ -617,17 +669,30 @@ summary:focus-visible {{
   background: var(--surface); border: 1px solid color-mix(in srgb, var(--you) 40%, var(--rule));
   border-radius: 12px; padding: 18px 20px; display: grid; gap: 12px; align-content: start;
 }}
+.card .item-tag {{
+  font-size: 0.75rem; font-weight: 600; letter-spacing: 0.04em; color: var(--muted);
+}}
 .card h3 {{ font-size: 1.05rem; font-weight: 600; line-height: 1.3; }}
+.card figure {{ margin: 0; }}
+.card figure svg {{ display: block; max-width: 100%; height: auto; }}
+.card details {{ font-size: 0.88rem; color: var(--muted); }}
+.card details summary {{ color: var(--accent); font-weight: 500; }}
+.card details p {{ margin: 6px 0 0; }}
+.example {{
+  margin: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px;
+  padding: 8px 10px; border-radius: 8px; background: var(--sunk); font-size: 0.92rem;
+}}
 .rule-lines {{ list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }}
 .rule-lines li {{
   display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 10px;
   border-radius: 8px; background: var(--sunk);
 }}
 .rule-lines li.rec {{ background: var(--you-soft); outline: 1.5px solid var(--you); }}
-.rule-lines .tag {{
-  margin-left: auto; font-size: 0.7rem; font-weight: 600; letter-spacing: 0.06em;
-  text-transform: uppercase; color: var(--you);
+.example .tag, .rule-lines .tag, .rule-actions .tag {{
+  font-size: 0.7rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--you);
 }}
+.rule-lines .tag {{ margin-left: auto; }}
 .copy {{
   font: 600 0.78rem var(--body); color: var(--you); background: var(--surface);
   border: 1.5px solid var(--you); border-radius: 999px; padding: 3px 12px; cursor: pointer;
@@ -635,21 +700,19 @@ summary:focus-visible {{
 .copy:hover {{ background: var(--you); color: var(--surface); }}
 .copy:focus-visible {{ outline: 2px solid var(--accent); outline-offset: 2px; }}
 .copy.copied {{ background: var(--done); border-color: var(--done); color: var(--surface); }}
-.rule-forms {{ display: grid; gap: 8px; }}
 .rule-form {{
   display: grid; gap: 6px; padding: 10px 12px; border-radius: 8px; background: var(--sunk);
 }}
-.rule-form.rec {{ background: var(--you-soft); outline: 1.5px solid var(--you); }}
 .rule-form textarea {{
   font: inherit; resize: vertical; min-height: 2.4em; padding: 6px 8px; border-radius: 6px;
   border: 1px solid var(--rule); background: var(--surface); color: inherit;
 }}
-.rule-actions {{ display: flex; align-items: center; gap: 8px; }}
+.rule-actions {{ display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }}
 .rule-form button {{
   font: 600 0.82rem var(--body); color: var(--surface); background: var(--accent); border: none;
   border-radius: 999px; padding: 5px 16px; cursor: pointer;
 }}
-.rule-form.rec button {{ background: var(--you); }}
+.rule-form button.rec {{ background: var(--you); }}
 .refused {{
   margin: 0; padding: 10px 14px; border-radius: 8px; background: var(--work-soft);
   color: var(--work); font-weight: 600;

@@ -129,18 +129,19 @@ def test_render_matches_the_golden_page_byte_for_byte() -> None:
 
 def test_render_labels_cards_topics_and_lanes_with_state_ref_ids() -> None:
     """Issue #292 proof 3: under `storage = "state-ref"`, `board --html`
-    shows `aco-xxxxxx` -- never `#n` -- in every card, topic, and lane
-    heading; the `github` golden page above stays byte-identical, so only
-    this storage's own rendering differs."""
+    shows `aco-xxxxxx` -- never `#n` -- in every topic, lane, and card
+    heading (a card's `item-tag` carries the item label since issue #295);
+    the `github` golden page above stays byte-identical, so only this
+    storage's own rendering differs."""
     rendered = board_html.render(_fixture_page(storage=board.Storage.STATE_REF))
-    open_child_id = items.format_item_id(101)  # the card and its topic part
+    open_child_id = items.format_item_id(101)  # the card's topic part
     container_id = items.format_item_id(100)  # the container topic
     claimed_item_id = items.format_item_id(102)  # the lane
 
-    assert f"<h3>{open_child_id} Zugang klären</h3>" in rendered
     assert f"<strong>{container_id} Sammelitem</strong>" in rendered
     assert f"<span>{open_child_id} Zugang klären (blocked by #50)</span>" in rendered
     assert f"<h3>{claimed_item_id} Laufende Lane</h3>" in rendered
+    assert f'<span class="item-tag">{open_child_id} Zugang klären</span>' in rendered
     for number in (100, 101, 102):
         assert f">#{number} " not in rendered
 
@@ -166,6 +167,58 @@ def test_a_card_carries_the_exact_copyable_rule_command_per_outcome() -> None:
     assert 'data-copy="aco rule 101 --line 1 --yes"' in rendered
     assert "<code>aco rule 101 --line 1 --no</code>" in rendered
     assert "<code>aco rule 101 --line 1 --later</code>" in rendered
+
+
+CARD_SVG = '<svg viewBox="0 0 10 10"><circle cx="5" cy="5" r="4"/></svg>'
+
+
+def test_a_card_with_question_example_and_picture_shows_them_and_the_full_sentence() -> None:
+    """Issue #295 proof 3 (card with every optional field)."""
+    page = replace(
+        _empty_page(),
+        cards=(
+            board_html.ExpectationCard(
+                item=7,
+                item_title="Import vorbereiten",
+                index=2,
+                text="Brauchen wir für den Import Admin-Rechte auf dem Zielsystem?",
+                default="yes",
+                question="Admin-Rechte nötig?",
+                example="Wie beim letzten Import, wo wir sudo brauchten.",
+                picture=CARD_SVG,
+            ),
+        ),
+    )
+    rendered = board_html.render(page)
+    assert '<span class="item-tag">#7 Import vorbereiten</span>' in rendered
+    assert "<h3>Admin-Rechte nötig?</h3>" in rendered
+    assert f"<figure>{CARD_SVG}</figure>" in rendered
+    assert '<span class="tag">Beispiel</span> Wie beim letzten Import' in rendered
+    assert "<code>aco rule 7 --line 2 --yes</code>" in rendered
+    assert "<code>aco rule 7 --line 2 --no</code>" in rendered
+    assert "<code>aco rule 7 --line 2 --later</code>" in rendered
+    assert (
+        "<details><summary>Der volle Satz</summary>"
+        "<p>Brauchen wir für den Import Admin-Rechte auf dem Zielsystem?</p></details>"
+    ) in rendered
+
+
+def test_a_card_without_the_new_fields_shows_text_as_heading_with_no_figure_or_example() -> None:
+    """Issue #295 proof 3 (card with no optional field, unchanged from before)."""
+    page = replace(
+        _empty_page(),
+        cards=(
+            board_html.ExpectationCard(
+                item=7, item_title="Import vorbereiten", index=2, text="Frage?", default="yes"
+            ),
+        ),
+    )
+    rendered = board_html.render(page)
+    assert '<span class="item-tag">#7 Import vorbereiten</span>' in rendered
+    assert "<h3>Frage?</h3>" in rendered
+    assert "<figure>" not in rendered
+    assert "Beispiel" not in rendered
+    assert "Der volle Satz" not in rendered
 
 
 def test_css_never_sets_a_min_width_above_400px() -> None:
@@ -205,7 +258,7 @@ def test_the_default_outcome_is_marked_recommended(default: str, recommended_fla
         _empty_page(),
         cards=(
             board_html.ExpectationCard(
-                item=7, item_title="Sache", index=2, text="Frage?", default=default
+                item=7, item_title="Import vorbereiten", index=2, text="Frage?", default=default
             ),
         ),
     )

@@ -872,6 +872,51 @@ def test_rulings_renders_text_json_and_empty_success(
     assert json.loads(capsys.readouterr().out) == []
 
 
+def test_rulings_json_carries_question_example_and_picture(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Issue #295: `rulings --json` carries the three optional card fields
+    through unchanged from `expectation_lines`; the human `rulings` text
+    form (proven above) keeps printing only `text`, untouched."""
+    picture = '<svg xmlns="http://www.w3.org/2000/svg"><circle cx="5" cy="5" r="4"/></svg>'
+    open_issue = board_issue(
+        10,
+        "Open expectation",
+        complete_contract(
+            "Ship #10.",
+            expectation=[
+                proposed_expectation(
+                    "Open decision.",
+                    question="Ship it?",
+                    example="Release on Friday.",
+                    picture=picture,
+                )
+            ],
+        ),
+    )
+    _configured_board_client(monkeypatch, tmp_path, open_issues=(open_issue,))
+
+    assert issue_claim.main(["--repo", "example/agent-claim", "rulings", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == [
+        {
+            "number": 10,
+            "title": "Open expectation",
+            "open": 1,
+            "total": 1,
+            "lines": [
+                {
+                    "index": 1,
+                    "text": "Open decision.",
+                    "state": "open",
+                    "question": "Ship it?",
+                    "example": "Release on Friday.",
+                    "picture": picture,
+                }
+            ],
+        }
+    ]
+
+
 def rulings_issue(
     number: int, title: str, *, open_lines: int, total_lines: int, labels: tuple[str, ...] = ()
 ) -> board.Issue:
@@ -2884,6 +2929,143 @@ def test_ask_refuses_a_blockless_item_before_any_write(
         "body malformed: agent-claim: no agent-claim block; ask needs a valid agent-claim block"
         in capsys.readouterr().err
     )
+    assert client.item_bodies == {}
+
+
+ASK_PICTURE_SVG = '<svg xmlns="http://www.w3.org/2000/svg"><circle cx="5" cy="5" r="4"/></svg>'
+
+
+def test_ask_writes_question_example_and_picture(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Issue #295: `--question`/`--example`/`--picture FILE.svg` land on the
+    appended line -- the same `board.expectation_lines` projection `rulings`
+    reads. The human `ASKED` line stays exactly what it was before."""
+    client = _client_with_item(
+        monkeypatch, tmp_path, RULE_ITEM, agent_claim_body(MINIMAL_BLOCK_TOML)
+    )
+    picture_file = tmp_path / "sketch.svg"
+    picture_file.write_text(ASK_PICTURE_SVG, encoding="utf-8")
+
+    exit_code = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "ask",
+            str(RULE_ITEM),
+            "--text",
+            "New question?",
+            "--question",
+            "Ship it?",
+            "--example",
+            "Release on Friday.",
+            "--picture",
+            str(picture_file),
+        ]
+    )
+
+    assert exit_code == 0
+    assert capsys.readouterr().out == f"ASKED #{RULE_ITEM} line 1: New question?\n"
+    assert board.expectation_lines(client.item_bodies[RULE_ITEM]) == (
+        board.ExpectationLine(
+            1,
+            "New question?",
+            None,
+            None,
+            question="Ship it?",
+            example="Release on Friday.",
+            picture=ASK_PICTURE_SVG,
+        ),
+    )
+
+
+def test_ask_json_reports_question_example_and_picture_when_given(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    _client_with_item(monkeypatch, tmp_path, RULE_ITEM, agent_claim_body(MINIMAL_BLOCK_TOML))
+    picture_file = tmp_path / "sketch.svg"
+    picture_file.write_text(ASK_PICTURE_SVG, encoding="utf-8")
+
+    exit_code = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "ask",
+            str(RULE_ITEM),
+            "--text",
+            "New question?",
+            "--question",
+            "Ship it?",
+            "--example",
+            "Release on Friday.",
+            "--picture",
+            str(picture_file),
+            "--json",
+        ]
+    )
+
+    assert exit_code == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "item": RULE_ITEM,
+        "index": 1,
+        "text": "New question?",
+        "default": "yes",
+        "question": "Ship it?",
+        "example": "Release on Friday.",
+        "picture": ASK_PICTURE_SVG,
+    }
+
+
+def test_ask_refuses_an_invalid_picture_file_before_any_write(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    client = _client_with_item(
+        monkeypatch, tmp_path, RULE_ITEM, agent_claim_body(MINIMAL_BLOCK_TOML)
+    )
+    picture_file = tmp_path / "sketch.svg"
+    picture_file.write_text("<div>not an svg</div>", encoding="utf-8")
+
+    exit_code = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "ask",
+            str(RULE_ITEM),
+            "--text",
+            "New question?",
+            "--picture",
+            str(picture_file),
+        ]
+    )
+
+    assert exit_code == 2
+    assert "picture must be inline SVG rooted at <svg>" in capsys.readouterr().err
+    assert client.item_bodies == {}
+
+
+def test_ask_refuses_a_missing_picture_file_before_any_write(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    client = _client_with_item(
+        monkeypatch, tmp_path, RULE_ITEM, agent_claim_body(MINIMAL_BLOCK_TOML)
+    )
+    missing_file = tmp_path / "missing.svg"
+
+    exit_code = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "ask",
+            str(RULE_ITEM),
+            "--text",
+            "New question?",
+            "--picture",
+            str(missing_file),
+        ]
+    )
+
+    assert exit_code == 2
+    assert f"--picture {missing_file} could not be read" in capsys.readouterr().err
     assert client.item_bodies == {}
 
 

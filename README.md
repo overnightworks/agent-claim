@@ -409,10 +409,14 @@ legal value, `"block"` (below): an absent key means the same thing, and
 page from exactly the reads `board` already performs — no second `gh` call,
 no clock, no randomness — to `PATH`, or to stdout when `PATH` is omitted.
 `--json` and `--html` are mutually exclusive. Four sections in fixed order:
-"Wartet auf dich" (every still-open `[[expectation]]` line as a card —
-text, default, and a copyable `aco rule <item> --line N --yes` /
-`--no` / `--later` command per outcome, with a copy button, the page's only
-JavaScript), "Lanes" (active claims — agent, role, branch, age — with the
+"Wartet auf dich" (every still-open `[[expectation]]` line as a card, in the
+operator's own words when `aco ask` gave them (issue #295) — `question` as
+the heading, the inline-SVG `picture`, `example` under a "Beispiel" tag,
+else `text` alone as the heading, as before — then a copyable
+`aco rule <item> --line N --yes` / `--no` / `--later` command per outcome,
+with a copy button, the page's only JavaScript, and the full `text`
+disclosed under "Der volle Satz" whenever a `question` shortened the
+heading), "Lanes" (active claims — agent, role, branch, age — with the
 item's own Now/Next/Blocked by/Done when verbatim from the body), "Themen"
 (containers with their open children and closed/total progress, then
 standalone items), and "Landungen" (items `board` already classified
@@ -438,8 +442,9 @@ calls the writer session; `--serve` refuses together with `--html` or
 Exactly two routes exist. `GET /?t=<token>` renders the page fresh for every
 request — the same reads and the same renderer `--html` uses, so nothing
 caches — with `Cache-Control: no-store`; every open `[[expectation]]` card
-carries three `yes`/`no`/`later` forms (the item's own default marked) plus a
-note field that goes to `aco rule`'s own `--note`. `POST /rule` (fields `t`,
+carries exactly one `POST /rule` form (issue #295) with one note field that
+goes to `aco rule`'s own `--note`, and three `yes`/`no`/`later` submit
+buttons inside it (the item's own default marked). `POST /rule` (fields `t`,
 `item`, `line`, `outcome`, `note`) rules exactly one line through the same
 write path `aco rule` uses and answers `303` back to `/?t=<token>`; a refusal
 (an already-ruled line, an out-of-range one, ...) writes nothing and shows
@@ -580,12 +585,24 @@ carries the same items under `recovery`.
 the command made through the forge port; `board --json` carries the same
 count as a top-level `"requests"` field.
 
-`aco ask <item> --text TEXT [--default yes|no|later]` appends one fresh
-*proposed* `[[expectation]]` entry to `<item>`'s block (default `yes`).
-It refuses by name when `<item>` has no valid `agent-claim` block to append
-to (`aco check <item>` shows the exact defect) and when `--text` is empty.
-`--json` returns `item`, `index` (the new line's 1-based, block-order
-position), `text`, and `default`.
+`aco ask <item> --text TEXT [--default yes|no|later] [--question TEXT]
+[--example TEXT] [--picture FILE.svg]` appends one fresh *proposed*
+`[[expectation]]` entry to `<item>`'s block (default `yes`). `--question`,
+`--example`, and `--picture` (issue #295) are optional card fields a card
+renderer shows in place of `text`: `--question` one operator-language
+sentence, at most 160 characters; `--example` one operator-language
+sentence; `--picture` a path to an inline-SVG file, read and validated
+before any write -- rooted at `<svg`, at most 8 KiB, and case-insensitively
+free of `<script`, `<foreignObject`, `<iframe`, `<embed`, `<object`, `srcdoc`,
+an event-handler attribute (`on…=`, also right after a `/`), a `javascript:`
+or `data:` reference anywhere, a `url(` reference anywhere, and an
+`href`/`xlink:href` not starting with `#` -- refused by
+name otherwise. It refuses by
+name when `<item>` has no valid `agent-claim` block to append to (`aco
+check <item>` shows the exact defect) and when `--text` is empty. `--json`
+returns `item`, `index` (the new line's 1-based, block-order position),
+`text`, `default`, and whichever of `question`/`example`/`picture` were
+given.
 
 `aco rule <item> --line N (--yes | --no | --later) [--note TEXT]` rules the
 `N`-th (1-based, block order — the same index `rulings` prints) *proposed*
@@ -604,7 +621,9 @@ expectation line, and under it every one of that item's `[[expectation]]`
 lines by index, state (`open`, or `ruled <ruling> <ruled_on>`), and text
 (truncated to one line for the human form; `--json` carries the full text).
 `rulings --json` returns the same `number`, `title`, `open`, and `total`
-values as before, plus a `lines` array of `{index, text, state}` objects.
+values as before, plus a `lines` array of `{index, text, state}` objects,
+each carrying `question`/`example`/`picture` too when the line has them
+(issue #295); the human form keeps printing only `text`.
 It is read-only and uses the board's priority category and score first,
 then fewer open expectation lines and the issue number. An empty list
 succeeds.
@@ -799,13 +818,24 @@ as "has a table" for `cut --row`). Each `[[expectation]]` is either *proposed*
 (`default = "yes" | "no" | "later"`) or *ruled* (`ruling = "yes" | "no" | "later"`
 with a TOML date `ruled_on`) — never both, never neither; a ruled `"later"`
 transcribes an explicit operator decision to defer, not merely a proposer's
-guessed default. Per-slice files, done-when,
-and dependencies stay in the human prose beside the block; only a slice's
-`index` and `title` are typed. Schema and version tokens, and an expectation's
-`default`/`ruling` values, are protocol — always this exact English spelling;
-every other value (`now`/`next`/`done_when`, `frozen_until.trigger`,
-expectation `text`, slice `title`) is the operator's own prose and is never
-parsed. `next`'s own non-parsed vocabulary
+guessed default. It may also carry three optional card fields (issue #295,
+written by `aco ask`, read by every card renderer): `question`, one
+operator-language sentence of at most 160 characters shown in place of
+`text`; `example`, one operator-language illustration sentence; and
+`picture`, an inline SVG (a multi-line TOML string, rooted at `<svg`, at
+most 8 KiB, and case-insensitively free of `<script`, `<foreignObject`,
+`<iframe`, `<embed`, `<object`, `srcdoc`, an event-handler attribute (`on…=`,
+also right after a `/`), a `javascript:` or `data:` reference anywhere, a
+`url(` reference anywhere, and an `href`/`xlink:href` not starting with `#`
+— anything else is refused with a sentence, both on write and on
+a stored body that already carries one). Absent, a card falls back to `text`
+as before. Per-slice
+files, done-when, and dependencies stay in the human prose beside the block;
+only a slice's `index` and `title` are typed. Schema and version tokens, and
+an expectation's `default`/`ruling` values, are protocol — always this exact
+English spelling; every other value (`now`/`next`/`done_when`,
+`frozen_until.trigger`, expectation `text`/`question`/`example`/`picture`,
+slice `title`) is the operator's own prose and is never parsed. `next`'s own non-parsed vocabulary
 (`keiner | keine | nichts | none | -` for "no further work", plus `tbd | todo
 | unknown` for "not yet concrete") still applies to a block's `next` value.
 
