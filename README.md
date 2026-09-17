@@ -665,6 +665,80 @@ in. The check does not limit body size or inspect references in `next`, and
 `release` stays available even when the body's contract has since become
 invalid.
 
+### What is still different under `state-ref`
+
+Under `storage = "state-ref"`, `board` (its plain-text table, including the
+`READY NOW`/`STALE`/`RECOVERY`/`CONTAINERS` lines), `next`, `status`,
+`rulings`, `release`'s `freed:`/`next:` lines, `item close`'s `freed:` line,
+and `board --html`'s cards/topics/lanes print an item as `aco-xxxxxx`
+(`items.format_item_id`) instead of GitHub's `#n` — the same id `item new`
+mints and every item-taking command already accepts back (`aco-xxxxxx`,
+`#n`, or the bare number). What stays `#n` even where that chooser
+applies (named residuals, issue #292): the number in a refusal sentence
+(`protocol`/`cli`) — it names the number the caller typed, not a display
+choice; the branch and worktree naming scheme (`issue-<n>-<slug>`), which the
+coordination contract itself keys by number — renaming it is a rule change
+under the Rule-Gate; `next`'s own tie-break on the numeric id, stable but
+arbitrary, judged again only after a week of real use; and a merged
+release's own board read, which `state-ref` cannot perform yet (#230 slice
+6) — land offline with `item close` plus `release --abandoned "landed as
+<sha>"` until then.
+
+### A week without a forge
+
+A repository with a `file://` remote and no GitHub coordinates a whole week
+of work out of `refs/aco/state` alone. The bare remote is named `origin`,
+with `origin/HEAD` set — aco refuses without it — and
+`.agent-claim/board.toml` carries exactly `storage = "state-ref"`; `aco
+bootstrap` then creates `refs/aco/state` once, at an empty state tree (a
+second run is a pure read of the tip already there):
+
+```bash
+git init --bare -b main /srv/aco/repo.git
+git remote add origin file:///srv/aco/repo.git
+git push origin main
+git remote set-head origin main
+printf 'storage = "state-ref"\n' > .agent-claim/board.toml
+git add .agent-claim && git commit -m "pin state-ref storage"
+aco bootstrap
+```
+
+Day one cuts the epic and its first slice. `aco item new --kind container
+--title "…"` mints the container and prints its id alone; `aco body
+--template --kind container` prints the skeleton body, `aco body --check`
+verifies a filled-in copy before it is piped in, and `aco item edit
+<container-id> < body.md` writes it with `Now`/`Next`/`Done when` filled.
+A first child comes from `aco item new --title "…" --parent <container-id>`
+(an untied slice); once the container's own body later carries `[[slice]]`
+rows, later ones come from `aco cut <container-id> --title "<row title>"`
+instead. A freshly minted child's body is still the bare skeleton, so it
+needs its own `aco item edit <child-id> < body.md` before anything can claim
+it — `claim` refuses an incomplete `Now`/`Next`/`Done when` by name, the
+same check `board`/`next` already report.
+
+Every following day repeats one loop: `aco board` or `aco next` names the
+next item, and `aco claim <item> --scope <paths>` opens the build from a
+linked isolated worktree. Once a build lands offline, there is no pull
+request for `release --merged` to verify (see above), so the claim is
+released first — `aco release --abandoned "landed as <sha>"` — and only then
+does `aco item close <item>` close it: a still-claimed item refuses `item
+close` by name ("release the claim first"), so closing an item is always the
+loop's last step, never its first. `aco status` shows the claim gone.
+
+```bash
+aco claim aco-yyyyyy --scope src/widget.py
+# build, push, merge by hand
+aco release --abandoned "landed as <sha>"
+aco item close aco-yyyyyy
+aco status
+```
+
+An expectation line rides the same items: `aco ask <item> --text "…"`
+proposes one, `aco rule <item> --line N (--yes|--no|--later)` records the
+operator's word, and `aco rulings` lists every item that still carries an
+open one. Nothing above ever reaches a forge — the week runs entirely
+against this repository's own `refs/aco/state`.
+
 ## The work-item body contract
 
 `board`, `next`, issue-mode `claim`, `cut`, `rulings`, and the parent-body

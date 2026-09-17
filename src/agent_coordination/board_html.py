@@ -142,6 +142,7 @@ class BoardPage:
     topics: tuple[Topic, ...]
     landed: tuple[LandedItem, ...]
     landings_derivable: bool
+    storage: board.Storage = board.Storage.GITHUB
 
 
 def _open_expectation_defaults(body: str) -> dict[int, str]:
@@ -345,6 +346,7 @@ def build_page(projected: board.Board, sources: BoardSources) -> BoardPage:
         topics=_topics(projected),
         landed=landed,
         landings_derivable=projected.landings_derivable,
+        storage=sources.storage,
     )
 
 
@@ -388,19 +390,22 @@ def _render_served_form(card: ExpectationCard, outcome: str, token: str) -> str:
       </form>"""
 
 
-def _render_card(card: ExpectationCard, served: ServedRuleForm | None) -> str:
+def _render_card(
+    card: ExpectationCard, served: ServedRuleForm | None, *, storage: board.Storage
+) -> str:
+    label = board.item_label(card.item, storage)
     if served is None:
         lines = "".join(_render_rule_line(card, outcome) for outcome in RULE_OUTCOMES)
         return f"""
     <article class="card">
-      <h3>#{card.item} {html.escape(card.item_title)}</h3>
+      <h3>{label} {html.escape(card.item_title)}</h3>
       <p>{_inline(card.text)}</p>
       <ul class="rule-lines">{lines}</ul>
     </article>"""
     forms = "".join(_render_served_form(card, outcome, served.token) for outcome in RULE_OUTCOMES)
     return f"""
     <article class="card">
-      <h3>#{card.item} {html.escape(card.item_title)}</h3>
+      <h3>{label} {html.escape(card.item_title)}</h3>
       <p>{_inline(card.text)}</p>
       <div class="rule-forms">{forms}</div>
     </article>"""
@@ -412,7 +417,7 @@ def _fact_row(label: str, value: str | None) -> str:
     return f"<div><dt>{label}</dt><dd>{_inline(value)}</dd></div>"
 
 
-def _render_lane(lane: LaneCard) -> str:
+def _render_lane(lane: LaneCard, *, storage: board.Storage) -> str:
     facts = "".join(
         (
             (
@@ -429,33 +434,34 @@ def _render_lane(lane: LaneCard) -> str:
     )
     return f"""
     <article class="lane">
-      <h3>#{lane.item} {html.escape(lane.item_title)}</h3>
+      <h3>{board.item_label(lane.item, storage)} {html.escape(lane.item_title)}</h3>
       <dl class="facts">{facts}</dl>
     </article>"""
 
 
-def _part_label(part: TopicPart) -> str:
+def _part_label(part: TopicPart, *, storage: board.Storage) -> str:
     title = f" {html.escape(part.title)}" if part.title else ""
     blocked = f" (blocked by {html.escape(part.blocked_by)})" if part.blocked_by else ""
-    return f"#{part.number}{title}{blocked}"
+    return f"{board.item_label(part.number, storage)}{title}{blocked}"
 
 
-def _render_part(part: TopicPart) -> str:
+def _render_part(part: TopicPart, *, storage: board.Storage) -> str:
     return (
         f'<li class="{part.state.value}"><span class="dot" aria-hidden="true"></span>'
-        f"<span>{_part_label(part)}</span>"
+        f"<span>{_part_label(part, storage=storage)}</span>"
         f'<span class="p-state">{_PART_STATE_LABEL[part.state]}</span></li>'
     )
 
 
-def _render_topic(topic: Topic) -> str:
+def _render_topic(topic: Topic, *, storage: board.Storage) -> str:
     share = 0 if topic.total == 0 else round(100 * topic.closed / topic.total)
-    parts = "".join(_render_part(part) for part in topic.parts)
+    parts = "".join(_render_part(part, storage=storage) for part in topic.parts)
+    label = board.item_label(topic.item, storage)
     return f"""
       <li>
         <details>
           <summary>
-            <span class="t-name"><strong>#{topic.item} {html.escape(topic.title)}</strong></span>
+            <span class="t-name"><strong>{label} {html.escape(topic.title)}</strong></span>
             <span class="t-progress">
               <span class="bar" role="img" aria-label="{topic.closed} of {topic.total} done">
                 <i style="width:{share}%"></i>
@@ -509,10 +515,19 @@ def render(page: BoardPage, *, served: ServedRuleForm | None = None) -> str:
         facts=facts,
         notice=notice,
         card_count=len(page.cards),
-        cards="".join(_render_card(card, served) for card in page.cards) or _EMPTY_PARAGRAPH,
+        cards=(
+            "".join(_render_card(card, served, storage=page.storage) for card in page.cards)
+            or _EMPTY_PARAGRAPH
+        ),
         lane_count=len(page.lanes),
-        lanes="".join(_render_lane(lane) for lane in page.lanes) or _EMPTY_PARAGRAPH,
-        topics="".join(_render_topic(topic) for topic in page.topics) or _EMPTY_TOPICS,
+        lanes=(
+            "".join(_render_lane(lane, storage=page.storage) for lane in page.lanes)
+            or _EMPTY_PARAGRAPH
+        ),
+        topics=(
+            "".join(_render_topic(topic, storage=page.storage) for topic in page.topics)
+            or _EMPTY_TOPICS
+        ),
         landed_count=len(page.landed),
         landed=_render_landed_section(page),
     )

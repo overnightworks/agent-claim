@@ -725,7 +725,7 @@ def _rulings_lines(
 ) -> tuple[str, ...]:
     bodies = {issue.number: issue.body for issue in client.list_open_board_issues()}
     rows = issue_claim._rulings_rows(built, bodies, storage=storage)
-    return tuple(issue_claim._rulings_row_text(row) for row in rows)
+    return tuple(issue_claim._rulings_row_text(row, storage) for row in rows)
 
 
 _EXPECTED_BOARD = _projected(_github_fake(), storage=board.Storage.GITHUB)
@@ -734,11 +734,26 @@ EXPECTED_NEXT_ACTION = board.next_action(_EXPECTED_BOARD)
 EXPECTED_RULINGS_LINES = _rulings_lines(
     _github_fake(), _EXPECTED_BOARD, storage=board.Storage.GITHUB
 )
+# `rulings`' own header line names the item under the pin (issue #292):
+# `aco-xxxxxx` under state-ref, `#n` unchanged under github -- the same
+# shared scenario re-rendered under each storage, so the only sanctioned
+# difference is that one id-shaped prefix, never a second hand-built
+# expectation.
+EXPECTED_RULINGS_LINES_BY_STORAGE = {
+    board.Storage.GITHUB: EXPECTED_RULINGS_LINES,
+    board.Storage.STATE_REF: _rulings_lines(
+        _github_fake(), _EXPECTED_BOARD, storage=board.Storage.STATE_REF
+    ),
+}
 # `state-ref` renders the identical board plus one honest line (issue #248,
 # Sonnet review blocking 3): the same content as `_EXPECTED_BOARD`, only
 # `landings_derivable` differs, so `replace` -- never a second hand-built
-# scenario -- proves the rendered difference is exactly that one line.
-EXPECTED_STATE_REF_BOARD_TEXT = board.render(replace(_EXPECTED_BOARD, landings_derivable=False))
+# scenario -- proves the rendered difference is exactly that one line, on
+# top of the id-shaped pins `storage=STATE_REF` asks `render` for (issue
+# #292).
+EXPECTED_STATE_REF_BOARD_TEXT = board.render(
+    replace(_EXPECTED_BOARD, landings_derivable=False), storage=board.Storage.STATE_REF
+)
 EXPECTED_BOARD_TEXT_BY_STORAGE = {
     board.Storage.GITHUB: EXPECTED_BOARD_TEXT,
     board.Storage.STATE_REF: EXPECTED_STATE_REF_BOARD_TEXT,
@@ -748,9 +763,10 @@ EXPECTED_BOARD_TEXT_BY_STORAGE = {
 # for `test_a_live_claim_is_in_flight_identically_on_both_adapters` below:
 # GitHub reaches `Stage.IN_FLIGHT` via `LIVE_CLAIM_OPEN_PULL_REQUEST`'s
 # matching branch, never via the state-ref-only capability fallback.
-# `state-ref`'s own expectation is that same board, `replace`d the same way
-# as `EXPECTED_STATE_REF_BOARD_TEXT` above, so the only sanctioned
-# difference stays the one landings-capability line.
+# `state-ref`'s own expectation is that same board, `replace`d and rendered
+# the same way as `EXPECTED_STATE_REF_BOARD_TEXT` above, so the only
+# sanctioned differences stay the landings-capability line and the id-shaped
+# pins.
 _EXPECTED_BOARD_WITH_LIVE_CLAIM = _projected(
     _github_fake(open_pull_requests=(LIVE_CLAIM_OPEN_PULL_REQUEST,)),
     storage=board.Storage.GITHUB,
@@ -759,7 +775,8 @@ _EXPECTED_BOARD_WITH_LIVE_CLAIM = _projected(
 EXPECTED_BOARD_WITH_LIVE_CLAIM_TEXT_BY_STORAGE = {
     board.Storage.GITHUB: board.render(_EXPECTED_BOARD_WITH_LIVE_CLAIM),
     board.Storage.STATE_REF: board.render(
-        replace(_EXPECTED_BOARD_WITH_LIVE_CLAIM, landings_derivable=False)
+        replace(_EXPECTED_BOARD_WITH_LIVE_CLAIM, landings_derivable=False),
+        storage=board.Storage.STATE_REF,
     ),
 }
 
@@ -807,9 +824,12 @@ class TestTwoAdapterParity:
 
         built = _projected(client, storage=storage)
 
-        assert board.render(built) == EXPECTED_BOARD_TEXT_BY_STORAGE[storage]
+        assert board.render(built, storage=storage) == EXPECTED_BOARD_TEXT_BY_STORAGE[storage]
         assert board.next_action(built) == EXPECTED_NEXT_ACTION
-        assert _rulings_lines(client, built, storage=storage) == EXPECTED_RULINGS_LINES
+        assert (
+            _rulings_lines(client, built, storage=storage)
+            == EXPECTED_RULINGS_LINES_BY_STORAGE[storage]
+        )
 
     @pytest.mark.parametrize(
         ("client_kind", "storage"),
@@ -840,7 +860,10 @@ class TestTwoAdapterParity:
 
         built = _projected(client, storage=storage, claims=(LIVE_CLAIM,))
 
-        assert board.render(built) == EXPECTED_BOARD_WITH_LIVE_CLAIM_TEXT_BY_STORAGE[storage]
+        assert (
+            board.render(built, storage=storage)
+            == EXPECTED_BOARD_WITH_LIVE_CLAIM_TEXT_BY_STORAGE[storage]
+        )
 
 
 class TestStateRefBoardWrites:
@@ -1086,6 +1109,37 @@ class TestStateRefBoardWrites:
         assert child_number in {child.number for child in refreshed.list_children(CONTAINER_NUMBER)}
 
 
+def _run_ok(arguments: list[str], capsys: pytest.CaptureFixture[str]) -> str:
+    """Run `arguments` through `main`, asserting success, and return the
+    captured stdout -- the one shape every README-sequence step in
+    `TestCliStateRefForge` shares (issue #292 proof 4)."""
+    status = issue_claim.main(arguments)
+    out = capsys.readouterr().out
+    assert status == 0, out
+    return out
+
+
+def _run_refused(arguments: list[str], capsys: pytest.CaptureFixture[str]) -> str:
+    """`_run_ok`'s own counterpart for a step the README names as a
+    refusal: run `arguments`, assert the CLI's own refusal exit code, and
+    return the captured stderr."""
+    status = issue_claim.main(arguments)
+    err = capsys.readouterr().err
+    assert status == 2, err
+    return err
+
+
+def _filled_body(template: str, *, now: str, next_step: str, done_when: str) -> str:
+    """A `body --template` skeleton with its three blank projection keys
+    filled -- the one substitution the README's "fill Now/Next/Done when"
+    step performs before `body --check`/`item edit`."""
+    return (
+        template.replace('now = ""', f'now = "{now}"')
+        .replace('next = ""', f'next = "{next_step}"')
+        .replace('done_when = ""', f'done_when = "{done_when}"')
+    )
+
+
 def _path_without_gh(tmp_path: Path) -> str:
     """A `PATH` carrying a real `git` and nothing else -- proof that a run
     never shells out to `gh` under `storage = state-ref` rather than an
@@ -1166,6 +1220,67 @@ class TestCliStateRefForge:
         record = _decoded_record(stored, RULABLE_ID)
         assert record.title == "Rulable"
         assert record.updated_at.startswith(datetime.now(UTC).date().isoformat())
+
+    def test_next_status_and_rulings_print_state_ref_ids_where_github_prints_hash_n(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+    ) -> None:
+        """Issue #292 proofs 1-2: `next`'s own pick, `rulings`' row header,
+        and `status`'s claimed-issue line print `aco-xxxxxx` under `storage
+        = "state-ref"` -- the same id `_parse_item_ref` already accepts
+        right back -- never `#n`. `board`'s own plain-text table
+        (`board.render`, owned by `board.py`) is not a file this lane
+        touches; it still prints `#n` under every storage (named gap,
+        issue #292 review)."""
+        self._live_state_ref_checkout(
+            monkeypatch, tmp_path, bare_remote, worktree, _rulable_item_files()
+        )
+
+        next_status = issue_claim.main(["next"])
+        assert next_status == 0
+        next_out = capsys.readouterr().out
+        assert RULABLE_ID in next_out
+        assert f"#{RULABLE_NUMBER}" not in next_out
+
+        rulings_status = issue_claim.main(["rulings"])
+        assert rulings_status == 0
+        rulings_out = capsys.readouterr().out
+        assert rulings_out.splitlines()[0].startswith(f"{RULABLE_ID} ")
+        assert f"#{RULABLE_NUMBER}" not in rulings_out
+
+        monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
+        monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+        monkeypatch.setattr(checkout, "versioned_paths", lambda: ("README",))
+        claimed = issue_claim.main(
+            [
+                "claim",
+                str(RULABLE_NUMBER),
+                "--agent",
+                "Codex Sol",
+                "--role",
+                "builder",
+                "--base",
+                "a" * 40,
+                "--branch",
+                f"codex/issue-{RULABLE_NUMBER}-rulable",
+                "--scope",
+                "README",
+                "--claim-id",
+                "state-ref-claim",
+            ]
+        )
+        assert claimed == 0
+        capsys.readouterr()
+
+        status = issue_claim.main(["status", str(RULABLE_NUMBER)])
+        assert status == 0
+        status_out = capsys.readouterr().out
+        assert f"CLAIMED issue {RULABLE_ID}" in status_out
+        assert f"issue #{RULABLE_NUMBER}" not in status_out
 
     def test_ask_appends_a_state_ref_item_and_a_fresh_process_reads_it_open(
         self,
@@ -1345,10 +1460,11 @@ class TestCliStateRefForge:
         assert board_status == 0
         board_out = capsys.readouterr().out
         assert "Slice C" in board_out
+        container_label = items.format_item_id(CONTAINER_NUMBER)
         container_line = next(
-            line for line in board_out.splitlines() if line.startswith(f"#{CONTAINER_NUMBER} ")
+            line for line in board_out.splitlines() if line.startswith(f"{container_label} ")
         )
-        assert f"#{child_number}" in container_line
+        assert items.format_item_id(child_number) in container_line
 
     def test_cut_row_selects_the_named_slice_entry_under_state_ref(
         self,
@@ -2024,7 +2140,10 @@ class TestCliStateRefForge:
 
         assert issue_claim.main(["next"]) == 0
         blocked_out = capsys.readouterr().out
-        assert f"#{EDIT_TARGET_NUMBER}: blocked by #{EDIT_BLOCKER_NUMBER}" in blocked_out
+        # The item's own prefix is the state-ref id (issue #292); the
+        # blocker it names inside the reason stays board.py's own `#n`
+        # (`open_blocker_label`, out of this lane's scope).
+        assert f"{EDIT_TARGET_ID}: blocked by #{EDIT_BLOCKER_NUMBER}" in blocked_out
 
         freed_body = _state_ref_body(
             _EDIT_TARGET_PROJECTION, _record(title="Target", state="open", kind="task")
@@ -2035,7 +2154,7 @@ class TestCliStateRefForge:
 
         assert issue_claim.main(["next"]) == 0
         freed_out = capsys.readouterr().out
-        assert f"#{EDIT_TARGET_NUMBER}: blocked by" not in freed_out
+        assert f"{EDIT_TARGET_ID}: blocked by" not in freed_out
 
     def test_item_edit_two_processes_from_the_same_snapshot_the_second_refuses(
         self,
@@ -2126,7 +2245,7 @@ class TestCliStateRefForge:
         assert status == 0
         assert capsys.readouterr().out.splitlines() == [
             f"CLOSED {CLOSE_BLOCKER_ID}",
-            f"freed: #{CLOSE_TARGET_NUMBER}",
+            f"freed: {CLOSE_TARGET_ID}",
         ]
 
         shown = issue_claim.main(["item", "show", str(CLOSE_BLOCKER_NUMBER), "--json"])
@@ -2148,7 +2267,8 @@ class TestCliStateRefForge:
         next_status = issue_claim.main(["next"])
         assert next_status == 0
         next_out = capsys.readouterr().out
-        assert f"#{CLOSE_TARGET_NUMBER}" in next_out
+        assert CLOSE_TARGET_ID in next_out
+        assert f"#{CLOSE_TARGET_NUMBER}" not in next_out
         assert "blocked by" not in next_out
 
     def test_item_close_refuses_a_second_close_with_the_closed_date_and_leaves_the_oid_unchanged(
@@ -2293,3 +2413,141 @@ class TestCliStateRefForge:
 
         assert status == 2
         assert "does not exist" in capsys.readouterr().err
+
+    def test_readme_week_without_a_forge_runs_end_to_end_against_a_fresh_bare_remote(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+    ) -> None:
+        """Issue #292 proof 4: the README's "A week without a forge" runs
+        end to end, one `aco` invocation per README sentence, against a
+        fresh bare `file://` remote carrying no items yet -- bootstrap, cut
+        the epic and its first child, the daily claim/release/close loop,
+        and an expectation ruled -- each step asserted by the exact
+        sentence README says it prints."""
+        self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, {})
+        monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
+        monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+        monkeypatch.setattr(checkout, "versioned_paths", lambda: ("README",))
+
+        bootstrap_out = _run_ok(["bootstrap"], capsys).strip()
+        assert protocol.COMMIT_PATTERN.fullmatch(bootstrap_out)
+
+        container_id = _run_ok(
+            ["item", "new", "--kind", "container", "--title", "A week without a forge"], capsys
+        ).strip()
+        assert items.ITEM_ID_PATTERN.fullmatch(container_id)
+        container_number = items.item_number(container_id)
+
+        container_template = _run_ok(["body", "--template", "--kind", "container"], capsys)
+        assert container_template == board.BLOCK_CONTAINER_SKELETON
+        container_body = _filled_body(
+            container_template,
+            now="Land every slice.",
+            next_step="Cut the first slice.",
+            done_when="Both slices are closed.",
+        )
+
+        monkeypatch.setattr(sys, "stdin", io.StringIO(container_body))
+        assert _run_ok(["body", "--check"], capsys) == "body ok\n"
+
+        monkeypatch.setattr(sys, "stdin", io.StringIO(container_body))
+        assert _run_ok(["item", "edit", container_id], capsys) == f"EDITED {container_id}\n"
+
+        child_id = _run_ok(
+            ["item", "new", "--title", "Ship slice one", "--parent", container_id], capsys
+        ).strip()
+        assert items.ITEM_ID_PATTERN.fullmatch(child_id)
+        child_number = items.item_number(child_id)
+
+        child_template = _run_ok(["body", "--template"], capsys)
+        assert child_template == board.BLOCK_CHILD_SKELETON
+        child_body = _filled_body(
+            child_template,
+            now="Build slice one.",
+            next_step="Ship slice one.",
+            done_when="Slice one is merged.",
+        )
+
+        monkeypatch.setattr(sys, "stdin", io.StringIO(child_body))
+        assert _run_ok(["body", "--check"], capsys) == "body ok\n"
+
+        monkeypatch.setattr(sys, "stdin", io.StringIO(child_body))
+        assert _run_ok(["item", "edit", child_id], capsys) == f"EDITED {child_id}\n"
+
+        assert "Ship slice one" in _run_ok(["board"], capsys)
+
+        next_out = _run_ok(["next"], capsys)
+        assert child_id in next_out
+        assert f"#{child_number}" not in next_out
+
+        claim_out = _run_ok(
+            [
+                "claim",
+                child_id,
+                "--agent",
+                "Codex Sol",
+                "--role",
+                "builder",
+                "--base",
+                "a" * 40,
+                "--branch",
+                f"codex/issue-{child_number}-slice-one",
+                "--scope",
+                "README",
+                "--claim-id",
+                "state-ref-claim",
+            ],
+            capsys,
+        )
+        # `claim`'s own success line is outside issue #292's id-visible
+        # commands (`board`/`next`/`status`/`brief`/`rulings`/`release`/
+        # `item close`/`board --html`) -- a named residual, not a defect
+        # this lane introduces.
+        assert claim_out.splitlines()[0] == f"CLAIMED issue #{child_number}: state-ref-claim"
+
+        assert f"CLAIMED issue {child_id}" in _run_ok(["status", child_id], capsys)
+
+        assert "release the claim first" in _run_refused(["item", "close", child_id], capsys)
+
+        release_out = _run_ok(
+            [
+                "release",
+                child_id,
+                "--agent",
+                "Codex Sol",
+                "--claim-id",
+                "state-ref-claim",
+                "--abandoned",
+                "landed as 1234567890123456789012345678901234567890",
+            ],
+            capsys,
+        )
+        # `release`'s own `RELEASED ...` line is likewise outside the
+        # id-visible scope -- only its `freed:`/`next:` lines are, and an
+        # abandoned release prints neither.
+        assert release_out.strip() == f"RELEASED issue #{child_number}: state-ref-claim"
+
+        assert _run_ok(["status", child_id], capsys).strip() == f"UNCLAIMED issue {child_id}"
+
+        close_out = _run_ok(["item", "close", child_id], capsys)
+        assert close_out.splitlines() == [f"CLOSED {child_id}", "freed: none"]
+
+        asked_text = "Does the runbook still hold without a forge?"
+        asked_out = _run_ok(["ask", container_id, "--text", asked_text], capsys)
+        assert asked_out.strip() == f"ASKED #{container_number} line 1: {asked_text}"
+
+        ruled_out = _run_ok(["rule", container_id, "--line", "1", "--yes"], capsys)
+        assert ruled_out.strip() == f"RULED #{container_number} line 1 yes; 0 line(s) still open"
+
+        assert _run_ok(["rulings"], capsys).strip() == "No open expectation lines."
+
+        child_state = json.loads(_run_ok(["item", "show", child_id, "--json"], capsys))["state"]
+        assert child_state == "closed"
+        container_state = json.loads(_run_ok(["item", "show", container_id, "--json"], capsys))[
+            "state"
+        ]
+        assert container_state == "open"

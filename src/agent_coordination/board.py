@@ -12,7 +12,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import cast
 
-from . import protocol
+from . import items, protocol
 
 DEFAULT_PRIORITY_LABELS = ("security", "data", "ci", "product", "ux", "cleanup")
 CONFIG_PATH = Path(".agent-claim/board.toml")
@@ -2261,7 +2261,21 @@ def _kind_cell(item: BoardItem) -> str:
     return item.kind.value
 
 
-def render(board: Board) -> str:
+def item_label(number: int, storage: Storage) -> str:
+    """The one display form of `number` any narrative output prints under
+    `storage` (issue #292): `items.format_item_id`'s `aco-xxxxxx` under
+    `storage = STATE_REF` -- an id `cli._parse_item_ref` already accepts
+    right back, so what a command prints is what the next command takes --
+    unchanged `#n` under `storage = GITHUB`. `board` is the lowest layer
+    that may import `items` (the Layers contract), and both `cli` and
+    `board_html` already import `board`, so this is the one owner both call
+    into rather than each keeping its own copy."""
+    if storage is Storage.STATE_REF:
+        return items.format_item_id(number)
+    return f"#{number}"
+
+
+def render(board: Board, *, storage: Storage = Storage.GITHUB) -> str:
     rows = [
         (
             "SCORE",
@@ -2284,7 +2298,7 @@ def render(board: Board) -> str:
         *(
             (
                 str(item.score),
-                f"#{item.number}",
+                item_label(item.number, storage),
                 _kind_cell(item),
                 item.priority_bucket,
                 item.stage.value,
@@ -2312,10 +2326,10 @@ def render(board: Board) -> str:
         "  ".join(value.ljust(widths[index]) for index, value in enumerate(row)).rstrip()
         for row in rows
     )
-    ready = ", ".join(f"#{item.number}" for item in board.ready_now) or "none"
-    stale = ", ".join(f"#{item.number}" for item in board.stale) or "none"
-    recovery = ", ".join(f"#{item.number}" for item in board.recovery) or "none"
-    containers = "\n".join(_container_lines(board)) or "none"
+    ready = ", ".join(item_label(item.number, storage) for item in board.ready_now) or "none"
+    stale = ", ".join(item_label(item.number, storage) for item in board.stale) or "none"
+    recovery = ", ".join(item_label(item.number, storage) for item in board.recovery) or "none"
+    containers = "\n".join(_container_lines(board, storage)) or "none"
     uncut = "\n".join(_uncut_line(finding) for finding in board.uncut) or "none"
     landings_note = "" if board.landings_derivable else f"\n{LANDINGS_NOT_DERIVABLE_LINE}"
     return (
@@ -2325,25 +2339,28 @@ def render(board: Board) -> str:
     )
 
 
-def _open_child_cell(child: ChildItem, repository: str) -> str:
+def _open_child_cell(child: ChildItem, repository: str, storage: Storage) -> str:
     if not child.blocked_by:
-        return f"#{child.number}"
+        return item_label(child.number, storage)
     blockers = ", ".join(
         open_blocker_label(reference, repository) for reference in child.blocked_by
     )
-    return f"#{child.number} (blocked by {blockers})"
+    return f"{item_label(child.number, storage)} (blocked by {blockers})"
 
 
-def _container_line(number: int, container: ContainerProgress, repository: str) -> str:
+def _container_line(
+    number: int, container: ContainerProgress, repository: str, storage: Storage
+) -> str:
     open_children = ", ".join(
-        _open_child_cell(child, repository) for child in container.open_children
+        _open_child_cell(child, repository, storage) for child in container.open_children
     )
-    return f"#{number} {container.closed}/{container.total} closed; open: {open_children or 'none'}"
+    label = item_label(number, storage)
+    return f"{label} {container.closed}/{container.total} closed; open: {open_children or 'none'}"
 
 
-def _container_lines(board: Board) -> list[str]:
+def _container_lines(board: Board, storage: Storage) -> list[str]:
     return [
-        _container_line(item.number, item.container, board.repository)
+        _container_line(item.number, item.container, board.repository, storage)
         for item in board.items
         if item.container is not None
     ]
