@@ -748,8 +748,12 @@ EXPECTED_RULINGS_LINES_BY_STORAGE = {
 # `state-ref` renders the identical board plus one honest line (issue #248,
 # Sonnet review blocking 3): the same content as `_EXPECTED_BOARD`, only
 # `landings_derivable` differs, so `replace` -- never a second hand-built
-# scenario -- proves the rendered difference is exactly that one line.
-EXPECTED_STATE_REF_BOARD_TEXT = board.render(replace(_EXPECTED_BOARD, landings_derivable=False))
+# scenario -- proves the rendered difference is exactly that one line, on
+# top of the id-shaped pins `storage=STATE_REF` asks `render` for (issue
+# #292).
+EXPECTED_STATE_REF_BOARD_TEXT = board.render(
+    replace(_EXPECTED_BOARD, landings_derivable=False), storage=board.Storage.STATE_REF
+)
 EXPECTED_BOARD_TEXT_BY_STORAGE = {
     board.Storage.GITHUB: EXPECTED_BOARD_TEXT,
     board.Storage.STATE_REF: EXPECTED_STATE_REF_BOARD_TEXT,
@@ -759,9 +763,10 @@ EXPECTED_BOARD_TEXT_BY_STORAGE = {
 # for `test_a_live_claim_is_in_flight_identically_on_both_adapters` below:
 # GitHub reaches `Stage.IN_FLIGHT` via `LIVE_CLAIM_OPEN_PULL_REQUEST`'s
 # matching branch, never via the state-ref-only capability fallback.
-# `state-ref`'s own expectation is that same board, `replace`d the same way
-# as `EXPECTED_STATE_REF_BOARD_TEXT` above, so the only sanctioned
-# difference stays the one landings-capability line.
+# `state-ref`'s own expectation is that same board, `replace`d and rendered
+# the same way as `EXPECTED_STATE_REF_BOARD_TEXT` above, so the only
+# sanctioned differences stay the landings-capability line and the id-shaped
+# pins.
 _EXPECTED_BOARD_WITH_LIVE_CLAIM = _projected(
     _github_fake(open_pull_requests=(LIVE_CLAIM_OPEN_PULL_REQUEST,)),
     storage=board.Storage.GITHUB,
@@ -770,7 +775,8 @@ _EXPECTED_BOARD_WITH_LIVE_CLAIM = _projected(
 EXPECTED_BOARD_WITH_LIVE_CLAIM_TEXT_BY_STORAGE = {
     board.Storage.GITHUB: board.render(_EXPECTED_BOARD_WITH_LIVE_CLAIM),
     board.Storage.STATE_REF: board.render(
-        replace(_EXPECTED_BOARD_WITH_LIVE_CLAIM, landings_derivable=False)
+        replace(_EXPECTED_BOARD_WITH_LIVE_CLAIM, landings_derivable=False),
+        storage=board.Storage.STATE_REF,
     ),
 }
 
@@ -818,7 +824,7 @@ class TestTwoAdapterParity:
 
         built = _projected(client, storage=storage)
 
-        assert board.render(built) == EXPECTED_BOARD_TEXT_BY_STORAGE[storage]
+        assert board.render(built, storage=storage) == EXPECTED_BOARD_TEXT_BY_STORAGE[storage]
         assert board.next_action(built) == EXPECTED_NEXT_ACTION
         assert (
             _rulings_lines(client, built, storage=storage)
@@ -854,7 +860,10 @@ class TestTwoAdapterParity:
 
         built = _projected(client, storage=storage, claims=(LIVE_CLAIM,))
 
-        assert board.render(built) == EXPECTED_BOARD_WITH_LIVE_CLAIM_TEXT_BY_STORAGE[storage]
+        assert (
+            board.render(built, storage=storage)
+            == EXPECTED_BOARD_WITH_LIVE_CLAIM_TEXT_BY_STORAGE[storage]
+        )
 
 
 class TestStateRefBoardWrites:
@@ -1451,10 +1460,11 @@ class TestCliStateRefForge:
         assert board_status == 0
         board_out = capsys.readouterr().out
         assert "Slice C" in board_out
+        container_label = items.format_item_id(CONTAINER_NUMBER)
         container_line = next(
-            line for line in board_out.splitlines() if line.startswith(f"#{CONTAINER_NUMBER} ")
+            line for line in board_out.splitlines() if line.startswith(f"{container_label} ")
         )
-        assert f"#{child_number}" in container_line
+        assert items.format_item_id(child_number) in container_line
 
     def test_cut_row_selects_the_named_slice_entry_under_state_ref(
         self,

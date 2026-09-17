@@ -3307,7 +3307,11 @@ def _cmd_board(parsed: argparse.Namespace, session: _ReadSession) -> None:
         _cmd_board_html(parsed, session)
         return
     projected = _observed_board(session)
-    print(board.board_json(projected) if parsed.json else board.render(projected))
+    if parsed.json:
+        print(board.board_json(projected))
+        return
+    storage = board.load_config(_resolve_toplevel() / board.CONFIG_PATH).storage
+    print(board.render(projected, storage=storage))
 
 
 def _cmd_rulings(parsed: argparse.Namespace, session: _ReadSession) -> None:

@@ -667,13 +667,13 @@ invalid.
 
 ### What is still different under `state-ref`
 
-Under `storage = "state-ref"`, `next`, `status`, `rulings`, `release`'s
-`freed:`/`next:` lines, `item close`'s `freed:` line, and `board --html`'s
-cards/topics/lanes print an item as `aco-xxxxxx` (`items.format_item_id`)
-instead of GitHub's `#n` — the same id `item new` mints and every item-taking
-command already accepts back (`aco-xxxxxx`, `#n`, or the bare number).
-`board`'s own plain-text table still prints `#n` under every storage
-(`board.render`, not yet converted). What stays `#n` even where that chooser
+Under `storage = "state-ref"`, `board` (its plain-text table, including the
+`READY NOW`/`STALE`/`RECOVERY`/`CONTAINERS` lines), `next`, `status`,
+`rulings`, `release`'s `freed:`/`next:` lines, `item close`'s `freed:` line,
+and `board --html`'s cards/topics/lanes print an item as `aco-xxxxxx`
+(`items.format_item_id`) instead of GitHub's `#n` — the same id `item new`
+mints and every item-taking command already accepts back (`aco-xxxxxx`,
+`#n`, or the bare number). What stays `#n` even where that chooser
 applies (named residuals, issue #292): the number in a refusal sentence
 (`protocol`/`cli`) — it names the number the caller typed, not a display
 choice; the branch and worktree naming scheme (`issue-<n>-<slug>`), which the
