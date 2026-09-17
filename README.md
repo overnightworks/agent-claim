@@ -688,16 +688,16 @@ release's own board read, which `state-ref` cannot perform yet (#230 slice
 
 A repository with a `file://` remote and no GitHub coordinates a whole week
 of work out of `refs/aco/state` alone. The bare remote is named `origin`,
-with `origin/HEAD` set — `_state_ref_forge` refuses without it — and
+with `origin/HEAD` set — aco refuses without it — and
 `.agent-claim/board.toml` carries exactly `storage = "state-ref"`; `aco
 bootstrap` then creates `refs/aco/state` once, at an empty state tree (a
 second run is a pure read of the tip already there):
 
 ```bash
-git init --bare /srv/aco/repo.git
+git init --bare -b main /srv/aco/repo.git
 git remote add origin file:///srv/aco/repo.git
 git push origin main
-git remote set-head origin -a
+git remote set-head origin main
 printf 'storage = "state-ref"\n' > .agent-claim/board.toml
 git add .agent-claim && git commit -m "pin state-ref storage"
 aco bootstrap
