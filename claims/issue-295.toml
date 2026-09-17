@@ -1,0 +1,8 @@
+claim_id = "f78ac7df2624434e96143129eff81715"
+agent = "Claude head (coordinator)"
+role = "builder"
+base = "add0e1e53601f7550b2f26aa7507d836f4c3f262"
+branch = "claude/issue-295-card-form"
+scope = ["src/agent_coordination/board.py", "src/agent_coordination/board_html.py", "src/agent_coordination/cli.py", "tests/test_board.py", "tests/test_board_html.py", "tests/test_board_serve.py", "tests/test_cli.py", "README.md"]
+opened_commit = "939f5eb3848e4f83eea14387bddeb08f8b3ef0cd"
+whole_reason = "one body-contract extension (three expectation keys) across the codec, the card renderer, aco ask, their test modules and the README; splitting leaves a field nothing renders"
