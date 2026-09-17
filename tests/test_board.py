@@ -208,6 +208,152 @@ def test_append_expectation_refuses_an_unknown_default() -> None:
         board.append_expectation(body, "New question?", "maybe")
 
 
+VALID_SVG_PICTURE = '<svg xmlns="http://www.w3.org/2000/svg"><circle cx="5" cy="5" r="4"/></svg>'
+
+
+def test_append_expectation_writes_the_card_fields() -> None:
+    """Issue #295: `question`/`example`/`picture` land on the appended
+    line, `expectation_lines` surfaces all three, and a body with none of
+    them (every earlier `append_expectation` test) keeps reading `None` --
+    absent keys leave the line unchanged."""
+    body = agent_claim_body(MINIMAL_BLOCK_TOML)
+    card = board.ExpectationCardFields(
+        question="Ship it?", example="Release on Friday.", picture=VALID_SVG_PICTURE
+    )
+
+    new_body = board.append_expectation(body, "New question?", "yes", card=card)
+
+    assert board.expectation_lines(new_body) == (
+        board.ExpectationLine(
+            1,
+            "New question?",
+            None,
+            None,
+            question="Ship it?",
+            example="Release on Friday.",
+            picture=VALID_SVG_PICTURE,
+        ),
+    )
+    entries = board.locate_agent_claim_block(new_body).data["expectation"]
+    assert entries == [
+        {
+            "text": "New question?",
+            "default": "yes",
+            "question": "Ship it?",
+            "example": "Release on Friday.",
+            "picture": VALID_SVG_PICTURE,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("picture", "match"),
+    [
+        pytest.param("<div>not an svg</div>", "must be inline SVG rooted at <svg>", id="no-root"),
+        pytest.param(
+            "<svg><script>alert(1)</script></svg>", "must not contain <script>", id="script"
+        ),
+        pytest.param(
+            '<svg><a href="http://evil.example"/></svg>',
+            "must not reference an external href",
+            id="external-href",
+        ),
+        pytest.param(
+            f"<svg>{'x' * board.EXPECTATION_PICTURE_MAXIMUM_BYTES}</svg>",
+            f"must be at most {board.EXPECTATION_PICTURE_MAXIMUM_BYTES} bytes",
+            id="oversized",
+        ),
+    ],
+)
+def test_expectation_picture_is_refused_by_both_the_parser_and_the_writer(
+    picture: str, match: str
+) -> None:
+    """One rule, two callers (issue #295): a body already carrying the bad
+    picture reads MALFORMED at `expectation[0].picture`, and
+    `append_expectation` refuses the same picture before any write --
+    `_expectation_picture_defect` is the one owner both share."""
+    malformed_body = agent_claim_body(
+        board.render_block(
+            {
+                "version": 1,
+                "now": "N",
+                "next": "X",
+                "done_when": "D",
+                "expectation": [proposed_expectation("E", picture=picture)],
+            }
+        ).rstrip("\n")
+    )
+    parsed = board.parse_body(malformed_body)
+    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert parsed.contract.defects == (
+        board.ContractDefect("expectation[0].picture", f"expectation[0].picture {match}"),
+    )
+
+    valid_body = agent_claim_body(MINIMAL_BLOCK_TOML)
+    card = board.ExpectationCardFields(picture=picture)
+    with pytest.raises(protocol.ClaimError, match=re.escape(match)):
+        board.append_expectation(valid_body, "New question?", "yes", card=card)
+
+
+def test_append_expectation_refuses_an_overlong_question() -> None:
+    body = agent_claim_body(MINIMAL_BLOCK_TOML)
+    card = board.ExpectationCardFields(
+        question="Q" * (board.EXPECTATION_QUESTION_MAXIMUM_CHARACTERS + 1)
+    )
+
+    with pytest.raises(protocol.ClaimError, match="question must be at most"):
+        board.append_expectation(body, "New question?", "yes", card=card)
+
+
+def test_append_expectation_refuses_an_empty_example() -> None:
+    body = agent_claim_body(MINIMAL_BLOCK_TOML)
+    card = board.ExpectationCardFields(example="   ")
+
+    with pytest.raises(protocol.ClaimError, match="example must be a non-empty string"):
+        board.append_expectation(body, "New question?", "yes", card=card)
+
+
+def test_parse_body_still_refuses_an_unknown_expectation_key() -> None:
+    """Issue #295 only widens the allowed set by `question`/`example`/
+    `picture`; any other key stays refused by name, unchanged."""
+    toml_text = f'{MINIMAL_BLOCK_TOML}[[expectation]]\ntext = "E"\ndefault = "yes"\nnote = "x"\n'
+
+    parsed = board.parse_body(agent_claim_body(toml_text))
+
+    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert parsed.contract.defects == (
+        board.ContractDefect("expectation[0].note", "unknown key expectation[0].note"),
+    )
+
+
+def test_render_block_round_trips_question_example_and_a_multiline_picture() -> None:
+    """The picture round trip (issue #295) needs its own case: a multi-line
+    SVG with embedded quotes and a backslash, which only a TOML multi-line
+    basic string -- not the single-line `_toml_string` every other field
+    uses -- can carry byte-exact."""
+    picture = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">\n'
+        '  <!-- a "quoted" comment with a back\\slash -->\n'
+        '  <circle cx="5" cy="5" r="4"/>\n'
+        "</svg>"
+    )
+    data = {
+        "version": 1,
+        "now": "N",
+        "next": "X",
+        "done_when": "D",
+        "expectation": [
+            proposed_expectation(
+                "Proposed", question="Ship it?", example="An example.", picture=picture
+            )
+        ],
+    }
+
+    reparsed = tomllib.loads(board.render_block(data))
+
+    assert reparsed == data
+
+
 # --- expectation_lines / expectation_line_state / expectation_line_summary ---
 
 
@@ -221,6 +367,39 @@ def test_expectation_lines_reports_index_text_ruling_and_ruled_on() -> None:
     assert board.expectation_lines(body) == (
         board.ExpectationLine(1, "Open one", None, None),
         board.ExpectationLine(2, "Settled one", "no", date(2026, 9, 1)),
+    )
+
+
+def test_expectation_lines_reads_question_example_and_picture() -> None:
+    body = agent_claim_body(
+        board.render_block(
+            {
+                "version": 1,
+                "now": "N",
+                "next": "X",
+                "done_when": "D",
+                "expectation": [
+                    proposed_expectation(
+                        "Ship it?",
+                        question="Ship it?",
+                        example="Release on Friday.",
+                        picture=VALID_SVG_PICTURE,
+                    )
+                ],
+            }
+        ).rstrip("\n")
+    )
+
+    assert board.expectation_lines(body) == (
+        board.ExpectationLine(
+            1,
+            "Ship it?",
+            None,
+            None,
+            question="Ship it?",
+            example="Release on Friday.",
+            picture=VALID_SVG_PICTURE,
+        ),
     )
 
 

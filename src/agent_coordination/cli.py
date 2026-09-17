@@ -9,7 +9,7 @@ import sys
 import uuid
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -516,6 +516,22 @@ def _add_ask_parser(commands: argparse._SubParsersAction) -> None:
         choices=sorted(board.BLOCK_EXPECTATION_DEFAULTS),
         default="yes",
         help="the proposer's suggested outcome; default yes",
+    )
+    ask.add_argument(
+        "--question",
+        help=(
+            "one operator-language sentence the card shows as its heading "
+            f"instead of --text; at most {board.EXPECTATION_QUESTION_MAXIMUM_CHARACTERS} characters"
+        ),
+    )
+    ask.add_argument("--example", help="one operator-language sentence illustrating the question")
+    ask.add_argument(
+        "--picture",
+        metavar="FILE.svg",
+        help=(
+            "a path to an inline-SVG file (root <svg>, no <script>, no external "
+            f"href, at most {board.EXPECTATION_PICTURE_MAXIMUM_BYTES} bytes) the card shows"
+        ),
     )
     ask.add_argument("--json", action="store_true", help=JSON_HELP)
 
@@ -1343,7 +1359,21 @@ def _rulings_rows(
 
 
 def _rulings_line_json(line: board.ExpectationLine) -> dict[str, object]:
-    return {"index": line.index, "text": line.text, "state": board.expectation_line_state(line)}
+    payload: dict[str, object] = {
+        "index": line.index,
+        "text": line.text,
+        "state": board.expectation_line_state(line),
+    }
+    payload.update(
+        (key, value)
+        for key, value in (
+            ("question", line.question),
+            ("example", line.example),
+            ("picture", line.picture),
+        )
+        if value is not None
+    )
+    return payload
 
 
 def _rulings_line_text(line: board.ExpectationLine) -> str:
@@ -3951,24 +3981,66 @@ def _cmd_board_serve(parsed: argparse.Namespace, session: _WriteSession) -> int:
     return 0
 
 
-def _print_ask_result(number: int, index: int, text: str, default: str, *, as_json: bool) -> None:
+@dataclass(frozen=True)
+class _AskedLine:
+    """One `aco ask` write's result (issue #295): the item, the fresh
+    line's 1-based index, its `text`/`default`, and whichever card fields
+    were given -- bundled so `_print_ask_result` takes one value instead of
+    five loose ones."""
+
+    item: int
+    index: int
+    text: str
+    default: str
+    card: board.ExpectationCardFields
+
+
+def _print_ask_result(asked: _AskedLine, *, as_json: bool) -> None:
     if as_json:
-        print(json.dumps({"item": number, "index": index, "text": text, "default": default}))
+        payload = {
+            "item": asked.item,
+            "index": asked.index,
+            "text": asked.text,
+            "default": asked.default,
+        }
+        payload.update(
+            (key, value) for key, value in asdict(asked.card).items() if value is not None
+        )
+        print(json.dumps(payload))
         return
-    print(f"ASKED #{number} line {index}: {text}")
+    print(f"ASKED #{asked.item} line {asked.index}: {asked.text}")
+
+
+def _read_picture_file(path: str) -> str:
+    """`--picture FILE.svg`'s own filesystem boundary (issue #295): read
+    before any forge call, so a missing file refuses before the item body
+    is even fetched. Content validation (size, `<svg>` root, no `<script>`,
+    no external `href`) is `board.append_expectation`'s -- one owner, shared
+    with the body parser's own defects."""
+    try:
+        return Path(path).read_text(encoding="utf-8")
+    except OSError as error:
+        raise protocol.ClaimError(f"--picture {path} could not be read: {error}") from error
 
 
 def _cmd_ask(parsed: argparse.Namespace, session: _WriteSession) -> int:
+    picture = _read_picture_file(parsed.picture) if parsed.picture else None
+    card = board.ExpectationCardFields(
+        question=parsed.question, example=parsed.example, picture=picture
+    )
     client = session.forge.writer()
     _require_update_item_body(client, command="ask")
     config = _load_board_config(client, _resolve_toplevel())
     number = int(parsed.item)
     body = _item_body_or_refuse(client, number, command="ask")
     _located_block_or_refuse(number, body, command="ask", storage=config.storage)
-    new_body = board.append_expectation(body, parsed.text, parsed.default)
+    new_body = board.append_expectation(body, parsed.text, parsed.default, card=card)
     index = len(board.expectation_lines(new_body, storage=config.storage))
     client.update_item_body(number, new_body)
-    _print_ask_result(number, index, parsed.text, parsed.default, as_json=parsed.json)
+    asked = _AskedLine(
+        item=number, index=index, text=parsed.text, default=parsed.default, card=card
+    )
+    _print_ask_result(asked, as_json=parsed.json)
     return 0
 
 
