@@ -270,6 +270,11 @@ def test_append_expectation_writes_the_card_fields() -> None:
             id="event-handler",
         ),
         pytest.param(
+            "<svg/onload=alert(1)>",
+            "must not contain an event-handler attribute",
+            id="event-handler-after-slash",
+        ),
+        pytest.param(
             '<svg><a href="javascript:alert(1)"></a></svg>',
             "must not contain a javascript: reference",
             id="javascript-scheme",
@@ -285,14 +290,44 @@ def test_append_expectation_writes_the_card_fields() -> None:
             id="external-href",
         ),
         pytest.param(
+            "<svg><a href=http://evil.example></a></svg>",
+            "must not reference an href outside the document",
+            id="external-href-unquoted",
+        ),
+        pytest.param(
             '<svg><use xlink:href="http://evil.example/sprite.svg#x"/></svg>',
             "must not reference an href outside the document",
             id="external-xlink-href",
         ),
         pytest.param(
             "<svg><style>rect{fill:url(http://evil.example/x.png)}</style></svg>",
-            "must not load a url() from <style>",
-            id="style-url",
+            "must not contain a url() reference",
+            id="style-element-url",
+        ),
+        pytest.param(
+            '<svg><rect style="fill:url(http://evil.example/x.png)"/></svg>',
+            "must not contain a url() reference",
+            id="style-attribute-url",
+        ),
+        pytest.param(
+            '<svg><iframe src="http://evil.example"></iframe></svg>',
+            "must not contain <iframe>",
+            id="iframe",
+        ),
+        pytest.param(
+            '<svg><embed src="http://evil.example"/></svg>',
+            "must not contain <embed>",
+            id="embed",
+        ),
+        pytest.param(
+            '<svg><object data="http://evil.example"></object></svg>',
+            "must not contain <object>",
+            id="object",
+        ),
+        pytest.param(
+            '<svg><a srcdoc="x"/></svg>',
+            "must not contain srcdoc",
+            id="srcdoc",
         ),
         pytest.param(
             f"<svg>{'x' * board.EXPECTATION_PICTURE_MAXIMUM_BYTES}</svg>",

@@ -592,10 +592,11 @@ count as a top-level `"requests"` field.
 renderer shows in place of `text`: `--question` one operator-language
 sentence, at most 160 characters; `--example` one operator-language
 sentence; `--picture` a path to an inline-SVG file, read and validated
-before any write -- at most 8 KiB, rooted at `<svg`, and case-insensitively
-free of `<script`, `<foreignObject`, an `on*` event-handler attribute, a
-`javascript:` or `data:` reference anywhere, an `href`/`xlink:href` not
-starting with `#`, and a `<style>` block loading `url(...)` -- refused by
+before any write -- rooted at `<svg`, at most 8 KiB, and case-insensitively
+free of `<script`, `<foreignObject`, `<iframe`, `<embed`, `<object`, `srcdoc`,
+an event-handler attribute (`on…=`, also right after a `/`), a `javascript:`
+or `data:` reference anywhere, a `url(` reference anywhere, and an
+`href`/`xlink:href` not starting with `#` -- refused by
 name otherwise. It refuses by
 name when `<item>` has no valid `agent-claim` block to append to (`aco
 check <item>` shows the exact defect) and when `--text` is empty. `--json`
@@ -821,11 +822,12 @@ guessed default. It may also carry three optional card fields (issue #295,
 written by `aco ask`, read by every card renderer): `question`, one
 operator-language sentence of at most 160 characters shown in place of
 `text`; `example`, one operator-language illustration sentence; and
-`picture`, an inline SVG (a multi-line TOML string, at most 8 KiB, rooted at
-`<svg`, and case-insensitively free of `<script`, `<foreignObject`, an `on*`
-event-handler attribute, a `javascript:` or `data:` reference anywhere, an
-`href`/`xlink:href` not starting with `#`, and a `<style>` block loading
-`url(...)` — anything else is refused with a sentence, both on write and on
+`picture`, an inline SVG (a multi-line TOML string, rooted at `<svg`, at
+most 8 KiB, and case-insensitively free of `<script`, `<foreignObject`,
+`<iframe`, `<embed`, `<object`, `srcdoc`, an event-handler attribute (`on…=`,
+also right after a `/`), a `javascript:` or `data:` reference anywhere, a
+`url(` reference anywhere, and an `href`/`xlink:href` not starting with `#`
+— anything else is refused with a sentence, both on write and on
 a stored body that already carries one). Absent, a card falls back to `text`
 as before. Per-slice
 files, done-when, and dependencies stay in the human prose beside the block;

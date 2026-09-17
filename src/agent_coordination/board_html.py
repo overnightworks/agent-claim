@@ -425,8 +425,8 @@ def _card_heading(card: ExpectationCard) -> str:
 
 def _render_figure(card: ExpectationCard) -> str:
     """`card.picture`'s inline SVG verbatim, never `html.escape`d -- it was
-    already validated at write time (`board._expectation_picture_defect`):
-    rooted at `<svg`, no `<script`, no external `href="http`."""
+    already validated by board's picture rule at write time
+    (`board._expectation_picture_defect`)."""
     return "" if card.picture is None else f"<figure>{card.picture}</figure>"
 
 

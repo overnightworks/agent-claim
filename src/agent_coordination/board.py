@@ -930,9 +930,9 @@ def _expectation_example_defect(value: object) -> str | None:
     return None if isinstance(value, str) and value.strip() else "must be a non-empty string"
 
 
-_EXPECTATION_PICTURE_EVENT_HANDLER_ATTRIBUTE = re.compile(r"\son[a-z]+\s*=", re.IGNORECASE)
+_EXPECTATION_PICTURE_EVENT_HANDLER_ATTRIBUTE = re.compile(r"[\s/]on[a-z]+\s*=", re.IGNORECASE)
 _EXPECTATION_PICTURE_EXTERNAL_HREF = re.compile(
-    r'(?:^|[\s:])href\s*=\s*(["\'])(?!#)', re.IGNORECASE
+    r'(?:^|[\s:])href\s*=\s*(?:"(?!#)|\'(?!#)|(?!["\'#]))', re.IGNORECASE
 )
 
 
@@ -954,7 +954,11 @@ def _expectation_picture_content_refusals(value: str) -> tuple[tuple[bool, str],
             bool(_EXPECTATION_PICTURE_EXTERNAL_HREF.search(value)),
             "must not reference an href outside the document",
         ),
-        ("<style" in lowered and "url(" in lowered, "must not load a url() from <style>"),
+        ("url(" in lowered, "must not contain a url() reference"),
+        ("<iframe" in lowered, "must not contain <iframe>"),
+        ("<embed" in lowered, "must not contain <embed>"),
+        ("<object" in lowered, "must not contain <object>"),
+        ("srcdoc" in lowered, "must not contain srcdoc"),
     )
 
 
@@ -1457,11 +1461,11 @@ def expectation_lines(
         ExpectationLine(
             index=position,
             text=cast(str, entry["text"]),
-            ruling=cast("str | None", entry.get("ruling")),
+            ruling=cast(str | None, entry.get("ruling")),
             ruled_on=cast("date | None", entry.get("ruled_on")),
-            question=cast("str | None", entry.get("question")),
-            example=cast("str | None", entry.get("example")),
-            picture=cast("str | None", entry.get("picture")),
+            question=cast(str | None, entry.get("question")),
+            example=cast(str | None, entry.get("example")),
+            picture=cast(str | None, entry.get("picture")),
         )
         for position, entry in enumerate(entries, start=1)
     )
