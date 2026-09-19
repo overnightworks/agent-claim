@@ -506,6 +506,46 @@ class ClaimLifecycle:
     unparsed: int
 
 
+def _record_claim_transition(
+    transition: _RawTransition,
+    accumulators: dict[str, _LifecycleAccumulator],
+    order: list[str],
+) -> bool:
+    """Opens `transition`'s `claim_id` as a new accumulator; returns whether
+    it parsed. A second `claim` for a `claim_id` this walk already opened
+    (issue #357 gate B2) is unparsed instead, its first accumulator left
+    untouched."""
+    if transition.claim_id in accumulators:
+        return False
+    accumulators[transition.claim_id] = _LifecycleAccumulator(
+        item=transition.item, claimed_at=transition.committed_at
+    )
+    order.append(transition.claim_id)
+    return True
+
+
+def _record_release_or_rescope_transition(
+    transition: _RawTransition, accumulator: _LifecycleAccumulator | None
+) -> bool:
+    """Applies a rescope, release, or landing `transition` to its own
+    already-open `accumulator`; returns whether it parsed. A transition
+    naming a `claim_id` this walk never saw claimed, a rescope naming an
+    already-released `claim_id` (issue #357 gate B3), or a second
+    release/landing for one already closed (issue #357 gate B2), is
+    unparsed instead, the accumulator left untouched."""
+    if accumulator is None:
+        return False
+    if transition.intent == _RESCOPE_LABEL:
+        if accumulator.released_at is not None:
+            return False
+        accumulator.rescoped += 1
+        return True
+    if accumulator.released_at is not None:
+        return False
+    accumulator.released_at = transition.committed_at
+    return True
+
+
 def claim_lifecycle(*, worktree: Path, tip: ObjectId) -> ClaimLifecycle:
     """Every claim's own lifecycle on `refs/aco/state`'s first-parent
     history up to `tip` (issue #357), read in one `git log` walk: a claim's
@@ -553,26 +593,12 @@ def claim_lifecycle(*, worktree: Path, tip: ObjectId) -> ClaimLifecycle:
     order: list[str] = []
     for transition in transitions:
         if transition.intent == _CLAIM_LABEL:
-            if transition.claim_id in accumulators:
+            if not _record_claim_transition(transition, accumulators, order):
                 unparsed += 1
-                continue
-            accumulators[transition.claim_id] = _LifecycleAccumulator(
-                item=transition.item, claimed_at=transition.committed_at
-            )
-            order.append(transition.claim_id)
             continue
-        accumulator = accumulators.get(transition.claim_id)
-        if accumulator is None:
-            unparsed += 1
-            continue
-        if transition.intent == _RESCOPE_LABEL:
-            if accumulator.released_at is None:
-                accumulator.rescoped += 1
-            else:
-                unparsed += 1
-        elif accumulator.released_at is None:
-            accumulator.released_at = transition.committed_at
-        else:
+        if not _record_release_or_rescope_transition(
+            transition, accumulators.get(transition.claim_id)
+        ):
             unparsed += 1
     events = tuple(
         metrics.LaneEvent(
