@@ -2645,6 +2645,55 @@ def test_next_action_skips_a_malformed_childless_container() -> None:
     assert item.actionable_reason == "body malformed: version: version must be exactly 1"
 
 
+PARENT_ISSUE_REFERENCE = board.IssueReference(REPOSITORY, 79)
+
+
+@pytest.mark.parametrize(
+    ("kind", "children", "body", "expected"),
+    [
+        pytest.param(
+            board.ItemKind.TASK,
+            (),
+            complete_contract("keiner"),
+            None,
+            id="a_non_container_parent_is_never_named",
+        ),
+        pytest.param(
+            board.ItemKind.CONTAINER,
+            (board.ChildItem(80, board.ChildState.OPEN),),
+            complete_contract("keiner"),
+            None,
+            id="an_open_child_keeps_the_parent_un_closable",
+        ),
+        pytest.param(
+            board.ItemKind.CONTAINER,
+            (board.ChildItem(80, board.ChildState.CLOSED),),
+            complete_contract("Cut it.", slice=slice_entries("Scheibe 1")),
+            None,
+            id="an_uncut_slice_row_keeps_the_parent_un_closable",
+        ),
+        pytest.param(
+            board.ItemKind.CONTAINER,
+            (board.ChildItem(80, board.ChildState.CLOSED),),
+            complete_contract("keiner"),
+            79,
+            id="no_open_children_and_no_uncut_row_names_the_parent",
+        ),
+    ],
+)
+def test_closable_container_number_decides_by_kind_open_children_and_uncut_rows(
+    kind: board.ItemKind,
+    children: tuple[board.ChildItem, ...],
+    body: str,
+    expected: int | None,
+) -> None:
+    """issue #348: `release --merged`/`item close`'s own parent hint shares
+    this one decision with `next`'s `CloseContainerAction` branch."""
+    parent = board.ParentIssue(PARENT_ISSUE_REFERENCE, body, kind)
+
+    assert board.closable_container_number(parent, children, board.Storage.GITHUB) == expected
+
+
 def test_render_shows_projection_presence_and_dash_next_for_a_valid_block_skeleton() -> None:
     skeleton = 'version = 1\nnow = ""\nnext = ""\ndone_when = ""\n'
     issue = board_issue(220, "Skeleton", agent_claim_body(skeleton))

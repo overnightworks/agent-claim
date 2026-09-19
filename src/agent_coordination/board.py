@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 import tomllib
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
@@ -535,6 +535,11 @@ class BoardItem:
     priority_order: int
     container: ContainerProgress | None
     container_parent: int | None
+    # The block's own top-level `scope = [...]` (issue #348), exactly
+    # `ParsedBody.scope`'s canonical tuple -- `None` when the item names no
+    # scope of its own, the case `next`'s `Run:` line and `parallel_set`'s
+    # disjointness walk both have to name rather than guess through.
+    scope: tuple[str, ...] | None
     contract: Contract
     next_step: str | None
     contract_complete: bool
@@ -2347,6 +2352,7 @@ def _board_item(
         priority_order=rank.order,
         container=container_progress,
         container_parent=container_parent,
+        scope=parsed.scope,
         contract=contract,
         next_step=next_step,
         contract_complete=parsed.contract_complete,
@@ -2553,11 +2559,17 @@ class CloseContainerAction:
 NextAction = WorkItemAction | CutSliceAction | CloseContainerAction
 
 
-def next_action(board: Board) -> NextAction | None:
-    """The one action `next` recommends: the board's own top qualifying row.
+def _uncut_by_container(board: Board) -> dict[int, UncutSlices]:
+    return {finding.item: finding for finding in board.uncut}
 
-    Walks `items` in `board_rank` order -- the same order `board` shows --
-    and returns the first row that is either an actionable non-container
+
+def _qualifying_actions(board: Board) -> Iterator[NextAction]:
+    """Every row `next`'s family of readers can ever act on, in `board_rank`
+    order (issue #348) -- not only the first: `next_action`, `parallel_set`,
+    and `zero_cost_closes` all walk this one sequence instead of each
+    re-deriving it, so the three stay in agreement by construction.
+
+    Yields a row that is either an actionable non-container
     (`WorkItemAction`; a container is never actionable, so this branch never
     fires for one) or a container with no open child (`CutSliceAction` when
     its block still carries an undispatched `[[slice]]` row, else
@@ -2568,12 +2580,12 @@ def next_action(board: Board) -> NextAction | None:
     disagrees with its open-children list, so "no open child" here reliably
     means every created child has closed. Every other row -- blocked,
     claimed, incomplete, or a container still holding an open child -- is
-    skipped, never blocking a lower-ranked qualifying row.
+    skipped, never blocking a later qualifying row.
 
-    Whichever branch prints a command, it never carries `--row` (#151): `cut`
-    without `--row` accepts every container a `CutSliceAction` names here,
-    linking its first undispatched slice. `CloseContainerAction` never
-    prints a command at all, whether or not its `Next` line still names
+    Whichever branch carries a command, it never carries `--row` (#151):
+    `cut` without `--row` accepts every container a `CutSliceAction` names
+    here, linking its first undispatched slice. `CloseContainerAction` never
+    carries a command at all, whether or not its `Next` line still names
     work -- inventing one from prose that is not a slice title is #208.
 
     A `MALFORMED` container (#150) is skipped here exactly like one still
@@ -2581,17 +2593,165 @@ def next_action(board: Board) -> NextAction | None:
     `actionable_reason`/`SKIPPED`, and proposing to cut or close a body
     that could not be read would act on a guess this module never makes.
     """
-    uncut_by_container = {finding.item: finding for finding in board.uncut}
+    uncut_by_container = _uncut_by_container(board)
     for item in board.items:
         if item.actionable:
-            return WorkItemAction(item)
+            yield WorkItemAction(item)
+            continue
         container = item.container
         if item.kind is not ItemKind.CONTAINER or container is None or container.open_children:
             continue
         action = _container_next_action(item, container, uncut_by_container)
         if action is not None:
-            return action
-    return None
+            yield action
+
+
+def next_action(board: Board) -> NextAction | None:
+    """The one action `next` recommends: the board's own top qualifying row
+    -- the first of `_qualifying_actions`, whose docstring names what
+    qualifies and why."""
+    return next(_qualifying_actions(board), None)
+
+
+def _action_number(action: NextAction) -> int:
+    return action.item.number if isinstance(action, WorkItemAction) else action.container.number
+
+
+def _action_scope(
+    action: NextAction, uncut_by_container: Mapping[int, UncutSlices]
+) -> tuple[str, ...] | None:
+    """The scope one `NextAction` occupies for `parallel_set`'s disjointness
+    accounting (issue #348): a work item's own top-level `scope`, or a cut
+    proposal's row scope -- the same first uncut row `uncut_by_container`
+    already named its `cut_title` from. `CloseContainerAction` always
+    returns `()`: closing is a zero-cost action against no paths, never one
+    `parallel_set` has to guard against. `None` means unknown -- the action
+    names no scope of its own to check disjointness against."""
+    if isinstance(action, WorkItemAction):
+        return action.item.scope
+    if isinstance(action, CutSliceAction):
+        return uncut_by_container[action.container.number].rows[0].scope
+    return ()
+
+
+@dataclass(frozen=True)
+class ParallelCandidate:
+    """One free item `parallel_set` placed into the maximal disjoint set
+    alongside the first action (issue #348): its own number, and the exact
+    scope that earned it a place -- a work item's own top-level scope, or a
+    cut proposal's row scope."""
+
+    number: int
+    scope: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ParallelSet:
+    """`next`'s own parallel-capacity projection (issue #348, Operator
+    19.09.2026: "ist das die maximale Auslastung?"): a priority-preserving
+    greedy walk of `_qualifying_actions`, occupying live claims' scopes and
+    the first action's own scope before it starts, then placing each further
+    candidate that stays disjoint from everything occupied so far and
+    occupying it in turn -- board order already *is* this repository's
+    priority order, so a greedy walk in that order is the packing this
+    projection owes, not a globally optimal one. `scope_unknown` names every
+    candidate the walk could not place either way, in board order, since a
+    candidate with no scope of its own cannot be checked for disjointness.
+    `first_scope_unknown` is set instead of computing anything at all when
+    the first action itself names no scope -- the one case with no baseline
+    to walk from -- and `candidates`/`scope_unknown` then stay empty."""
+
+    candidates: tuple[ParallelCandidate, ...]
+    scope_unknown: tuple[int, ...]
+    first_scope_unknown: bool
+
+
+def parallel_set(
+    board: Board, live_claims: tuple[protocol.ScopedClaim, ...], action: NextAction | None
+) -> ParallelSet:
+    """The maximal set of further free items `next`'s first `action` can run
+    alongside right now (issue #348) -- see `ParallelSet` for the packing
+    rule. `CloseContainerAction` never competes for scope at all
+    (`zero_cost_closes` names it instead) and is skipped outright, whether it
+    is `action` itself (occupying nothing) or a later candidate. A
+    `board.recovery` item -- landed but still open -- is `zero_cost_closes`'
+    own domain too, never this walk's: it is skipped outright as a later
+    candidate, so it neither claims a place in `candidates` nor occupies a
+    scope that would silently crowd out a real free item behind it."""
+    if action is None:
+        return ParallelSet((), (), False)
+    uncut_by_container = _uncut_by_container(board)
+    first_scope = _action_scope(action, uncut_by_container)
+    if first_scope is None:
+        return ParallelSet((), (), True)
+    occupied = [claim.scope for claim in live_claims]
+    occupied.append(first_scope)
+    first_number = _action_number(action)
+    recovery_numbers = frozenset(item.number for item in board.recovery)
+    candidates: list[ParallelCandidate] = []
+    scope_unknown: list[int] = []
+    for candidate in _qualifying_actions(board):
+        if isinstance(candidate, CloseContainerAction):
+            continue
+        number = _action_number(candidate)
+        if number == first_number or number in recovery_numbers:
+            continue
+        scope = _action_scope(candidate, uncut_by_container)
+        if scope is None:
+            scope_unknown.append(number)
+            continue
+        if any(protocol.scope_overlap_paths(scope, taken) for taken in occupied):
+            continue
+        candidates.append(ParallelCandidate(number, scope))
+        occupied.append(scope)
+    return ParallelSet(tuple(candidates), tuple(scope_unknown), False)
+
+
+def zero_cost_closes(board: Board) -> tuple[int, ...]:
+    """Every item `next` can close for free right now, regardless of which
+    row ranks first (issue #348; #310 finding 29: "warum wurde #122 nicht
+    geclosed? sollte aco das nicht feststellen?"): every childless container
+    with no undispatched `[[slice]]` row -- `_qualifying_actions`'s own
+    `CloseContainerAction` rows, not only the board's top-ranked one --
+    union every landed-but-open item (`board.recovery`), in first-seen
+    order. Neither needs a claim first."""
+    closable_containers = (
+        action.container.number
+        for action in _qualifying_actions(board)
+        if isinstance(action, CloseContainerAction)
+    )
+    recovery_numbers = (item.number for item in board.recovery)
+    seen: set[int] = set()
+    ordered: list[int] = []
+    for number in (*closable_containers, *recovery_numbers):
+        if number not in seen:
+            seen.add(number)
+            ordered.append(number)
+    return tuple(ordered)
+
+
+def closable_container_number(
+    parent: ParentIssue, children: tuple[ChildItem, ...], storage: Storage
+) -> int | None:
+    """The container `release --merged`/`item close` should name as freshly
+    closable once one of its children just landed (issue #348): `parent`'s
+    own kind, `children`'s open count, and its own undispatched `[[slice]]`
+    rows decide it exactly like `_qualifying_actions`'s own
+    `CloseContainerAction` branch -- a non-container parent, one still
+    holding another open child, or one with an uncut row is never named.
+    Whether a parent relation exists at all is the caller's own read
+    (`ParentIssue | None`, forge-specific); this function only ever decides
+    once one is given, never re-checking a state its one caller already
+    ruled out.
+    """
+    if parent.kind is not ItemKind.CONTAINER:
+        return None
+    if any(child.state is ChildState.OPEN for child in children):
+        return None
+    parsed = parse_body(parent.body, storage=storage)
+    if parsed.read_state is not BodyReadState.VALID or parsed.slices:
+        return None
+    return parent.reference.number
 
 
 def _container_next_action(

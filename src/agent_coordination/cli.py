@@ -1075,6 +1075,7 @@ def _release_json(
     if landing is not None:
         payload["freed"] = list(landing.freed)
         payload["next"] = None if landing.next_item is None else landing.next_item.number
+        payload["parent_closable"] = landing.parent_closable
     print(json.dumps(payload))
 
 
@@ -1082,11 +1083,13 @@ def _release_json(
 class ReleaseLanding:
     """What a merged release's lazy board read (issue #256) adds to its
     report once the release itself has already succeeded: every open item
-    this landing fully freed, and the same next pick `aco next` would
-    recommend right after it."""
+    this landing fully freed, the same next pick `aco next` would recommend
+    right after it, and the parent container this landing's own child just
+    made closable, if any (issue #348)."""
 
     freed: tuple[int, ...]
     next_item: board.BoardItem | None
+    parent_closable: int | None
 
 
 def _next_action_item(action: board.NextAction) -> board.BoardItem:
@@ -1125,11 +1128,32 @@ def _freed_item_numbers(
     return tuple(sorted(freed))
 
 
+def _parent_closable_number(
+    client: forge.ForgeReader, closed_child: int, storage: board.Storage
+) -> int | None:
+    """The container `closed_child`'s own landing may just have completed
+    (issue #348, the parent hint `release --merged`/`item close` share): its
+    parent, read fresh, when every other child is already closed too and no
+    undispatched `[[slice]]` row is left to cut -- `board.closable_container_number`
+    is the one owner for that decision, reused rather than re-derived board-wide
+    for one relation. `None` covers every non-container parent, one still
+    holding another open child, an already-closed parent (a second close
+    would only refuse), or no parent at all."""
+    parent = client.parent_issue(closed_child)
+    if parent is None:
+        return None
+    if client.item_reference(parent.reference.number).state is not forge.ItemState.OPEN:
+        return None
+    children = client.list_children(parent.reference.number)
+    return board.closable_container_number(parent, children, storage)
+
+
 def _release_landing(
     client: forge.ForgeReader,
     claims: tuple[protocol.ActiveClaim, ...],
     claim_ages: Mapping[str, datetime],
     landed: board.IssueReference | None,
+    storage: board.Storage,
 ) -> ReleaseLanding:
     """A merged release's own board read (issue #256): fetched once, lazily,
     only after the release transition already committed -- the caller wraps
@@ -1146,13 +1170,24 @@ def _release_landing(
         client, claims, issues=issues, claim_ages=claim_ages, dependencies=dependencies
     ).board
     action = board.next_action(projected)
-    return ReleaseLanding(freed, None if action is None else _next_action_item(action))
+    parent_closable = (
+        None if landed is None else _parent_closable_number(client, landed.number, storage)
+    )
+    return ReleaseLanding(
+        freed, None if action is None else _next_action_item(action), parent_closable
+    )
 
 
 def _release_freed_line(freed: tuple[int, ...], storage: board.Storage) -> str:
     return "freed: " + (
         ", ".join(board.item_label(number, storage) for number in freed) if freed else "none"
     )
+
+
+def _parent_closable_line(number: int | None, storage: board.Storage) -> str | None:
+    if number is None:
+        return None
+    return f"parent {board.item_label(number, storage)}: no open children — close it"
 
 
 def _release_next_line(item: board.BoardItem | None, storage: board.Storage) -> str:
@@ -1519,9 +1554,18 @@ def _next_action_command(
     """The exact `aco` invocation `_next` prints and `_next --json` carries
     as `command` -- one owner so text and JSON never name a different
     command for the same action. `close_container` has none: there is no
-    command to run, and neither grammar invents one."""
+    command to run, and neither grammar invents one.
+
+    A `WorkItemAction` whose item carries its own top-level `scope` (issue
+    #348, #337's own derivation) drops `--scope <paths>` entirely -- `claim`
+    derives it from the same body this command already names -- and only an
+    item with no scope of its own still prints the placeholder, alongside
+    `SCOPE_UNKNOWN_NOTE`.
+    """
     if isinstance(action, board.WorkItemAction):
         item_argument = _next_action_item_argument(action.item.number, storage)
+        if action.item.scope is not None:
+            return f"aco claim {item_argument}"
         return f"aco claim {item_argument} --scope <paths>"
     container_argument = _next_action_item_argument(action.container.number, storage)
     return f'aco cut {container_argument} --title "{action.cut_title}"'
@@ -1563,12 +1607,79 @@ def _next_action_payload(action: board.NextAction, storage: board.Storage) -> di
     }
 
 
-def _next_json(
-    action: board.NextAction | None,
-    skipped: tuple[board.BoardItem, ...],
-    recovery: tuple[board.BoardItem, ...],
-    storage: board.Storage,
-) -> int:
+# The three sentences issue #348 adds to `next`'s own text form, each named
+# once so text and JSON (`_parallel_json`) never restate them (Sonar S1192).
+SCOPE_UNKNOWN_NOTE = "scope unknown"
+PARALLEL_UNKNOWN_LINE = "parallel: unknown (first action names no scope)"
+# "Text zeigt höchstens drei Kandidaten plus 'and N more'" (issue #348 Form):
+# a stable display cap, not something an operator tunes.
+PARALLEL_TEXT_LIMIT = 3
+
+
+def _parallel_candidate_label(candidate: board.ParallelCandidate, storage: board.Storage) -> str:
+    label = board.item_label(candidate.number, storage)
+    count = len(candidate.scope)
+    unit = "path" if count == 1 else "paths"
+    return f"{label} ({count} {unit})"
+
+
+def _parallel_line(parallel: board.ParallelSet, storage: board.Storage) -> str:
+    """`next`'s own `parallel:` line: the unknown sentence when the first
+    action itself names no scope, `none` when the walk placed nothing,
+    otherwise every placed candidate capped at `PARALLEL_TEXT_LIMIT` --
+    reusing `protocol.named_with_overflow_count`, the one "and N more"
+    owner, rather than a second overflow renderer here."""
+    if parallel.first_scope_unknown:
+        return PARALLEL_UNKNOWN_LINE
+    if not parallel.candidates:
+        return "parallel: none"
+    labels = tuple(
+        _parallel_candidate_label(candidate, storage) for candidate in parallel.candidates
+    )
+    return f"parallel: {protocol.named_with_overflow_count(labels, limit=PARALLEL_TEXT_LIMIT)}"
+
+
+def _scope_unknown_line(parallel: board.ParallelSet, storage: board.Storage) -> str:
+    if not parallel.scope_unknown:
+        return "scope unknown: none"
+    named = ", ".join(board.item_label(number, storage) for number in parallel.scope_unknown)
+    return f"scope unknown: {named}"
+
+
+def _close_line(close: tuple[int, ...], storage: board.Storage) -> str:
+    if not close:
+        return "close: none"
+    return "close: " + ", ".join(board.item_label(number, storage) for number in close)
+
+
+def _parallel_json(parallel: board.ParallelSet) -> dict[str, object]:
+    return {
+        "first_scope_unknown": parallel.first_scope_unknown,
+        "candidates": [
+            {"number": candidate.number, "scope": list(candidate.scope)}
+            for candidate in parallel.candidates
+        ],
+        "scope_unknown": list(parallel.scope_unknown),
+    }
+
+
+@dataclass(frozen=True)
+class _NextReport:
+    """Everything `_next`/`_next_json` print for one `next` run, bundled so
+    each printer takes one argument instead of PLR0913's five-scalar
+    ceiling (issue #348): the board's own first action (`None` when nothing
+    qualifies), the unworkable rows `SKIPPED` names, the landed-but-open
+    `RECOVERY` rows, the parallel-capacity projection, and the zero-cost
+    `close:` list."""
+
+    action: board.NextAction | None
+    skipped: tuple[board.BoardItem, ...]
+    recovery: tuple[board.BoardItem, ...]
+    parallel: board.ParallelSet
+    close: tuple[int, ...]
+
+
+def _next_json(report: _NextReport, storage: board.Storage) -> None:
     payload: dict[str, object] = {
         "action": None,
         "recovery": [
@@ -1577,29 +1688,31 @@ def _next_json(
                 "title": recovery_item.title,
                 "step": board.RECOVERY_STEP,
             }
-            for recovery_item in recovery
+            for recovery_item in report.recovery
         ],
         "skipped": [
             {"number": skipped_item.number, "reason": skipped_item.actionable_reason}
-            for skipped_item in skipped
+            for skipped_item in report.skipped
         ],
+        "parallel": _parallel_json(report.parallel),
+        "close": list(report.close),
     }
-    if action is not None:
-        payload.update(_next_action_payload(action, storage))
+    if report.action is not None:
+        payload.update(_next_action_payload(report.action, storage))
     print(json.dumps(payload))
-    return 0
 
 
 def _next_action_lines(action: board.NextAction, storage: board.Storage) -> list[str]:
-    """The action-specific lines `_next` prints before `SKIPPED`."""
+    """The action-specific lines `_next` prints before `parallel:`/`close:`."""
     if isinstance(action, board.WorkItemAction):
         item = action.item
         lines = [
             f"{board.item_label(item.number, storage)} score {item.score}: {item.title}",
             f"Next: {item.next_step}",
             f"Run: {_next_action_command(action, storage)}",
-            "<paths> cannot be derived; take the files to claim from the item body.",
         ]
+        if item.scope is None:
+            lines.append(SCOPE_UNKNOWN_NOTE)
         hint = _ruling_pull_hint(item)
         if hint is not None:
             lines.append(hint)
@@ -1619,32 +1732,36 @@ def _next_action_lines(action: board.NextAction, storage: board.Storage) -> list
     ]
 
 
-def _next(
-    action: board.NextAction | None,
-    skipped: tuple[board.BoardItem, ...],
-    recovery: tuple[board.BoardItem, ...],
-    storage: board.Storage,
-) -> int:
-    """A landed-but-open item is named before anything new is pulled."""
+def _next(report: _NextReport, storage: board.Storage) -> None:
+    """A landed-but-open item is named before anything new is pulled; the
+    parallel set and the zero-cost `close:` list are named right after the
+    first action, unconditionally (issue #348) -- regardless of that
+    action's own rank, so a closable container or a recovery item never goes
+    unmentioned merely because something else pulled ahead of it."""
     lines: list[str] = []
-    if recovery:
+    if report.recovery:
         lines.append("RECOVERY")
         lines.extend(
             f"{board.item_label(recovery_item.number, storage)}: {board.RECOVERY_STEP}"
-            for recovery_item in recovery
+            for recovery_item in report.recovery
         )
         lines.append("")
     lines.extend(
-        _next_action_lines(action, storage) if action is not None else ["No actionable item."]
+        _next_action_lines(report.action, storage)
+        if report.action is not None
+        else ["No actionable item."]
     )
-    if skipped:
+    lines.append(_parallel_line(report.parallel, storage))
+    if not report.parallel.first_scope_unknown:
+        lines.append(_scope_unknown_line(report.parallel, storage))
+    lines.append(_close_line(report.close, storage))
+    if report.skipped:
         skipped_lines = (
             f"{board.item_label(skipped_item.number, storage)}: {skipped_item.actionable_reason}"
-            for skipped_item in skipped
+            for skipped_item in report.skipped
         )
         lines.extend(("", "SKIPPED", *skipped_lines))
     print("\n".join(lines))
-    return 0
 
 
 def _unworkable(projected: board.Board) -> tuple[board.BoardItem, ...]:
@@ -2586,9 +2703,11 @@ def _cmd_item_close(parsed: argparse.Namespace) -> int:
     `close_item`'s internal `_by_number` lookup failing with the wrong
     shape; `close_item` itself refuses a second close on an already-closed
     item, naming its date. Prints one line, `CLOSED aco-xxxxxx` (`--json`:
-    `{"item", "number", "closed_at"}`), then `release --merged`'s own
-    `freed:` line -- open items whose only open local blocker was this one
-    (`_freed_item_numbers`, issue #256; nothing new)."""
+    `{"item", "number", "closed_at", "parent_closable"}`), then `release
+    --merged`'s own `freed:` line -- open items whose only open local
+    blocker was this one (`_freed_item_numbers`, issue #256; nothing new) --
+    and, when this close was its parent's last open child, `release
+    --merged`'s own parent hint (issue #348)."""
     toplevel = _resolve_toplevel()
     config = _board_config(toplevel)
     if config.storage is not board.Storage.STATE_REF:
@@ -2609,10 +2728,14 @@ def _cmd_item_close(parsed: argparse.Namespace) -> int:
             f"#{number} does not exist in {client.repository.path}"
         )
     closed_at = client.close_item(number)
-    freed = _item_close_freed(client, number)
-    _print_item_close_result(
-        items.format_item_id(number), number, closed_at, freed, as_json=parsed.json
+    result = _ItemCloseResult(
+        item_id=items.format_item_id(number),
+        number=number,
+        closed_at=closed_at,
+        freed=_item_close_freed(client, number),
+        parent_closable=_parent_closable_number(client, number, board.Storage.STATE_REF),
     )
+    _print_item_close_result(result, as_json=parsed.json)
     return 0
 
 
@@ -2629,17 +2752,40 @@ def _item_close_freed(client: forge.ForgeReader, number: int) -> tuple[int, ...]
     return _freed_item_numbers(dependencies, landed)
 
 
-def _print_item_close_result(
-    item_id: str, number: int, closed_at: str, freed: tuple[int, ...], *, as_json: bool
-) -> None:
+@dataclass(frozen=True)
+class _ItemCloseResult:
+    """Everything `_print_item_close_result` needs for one `item close`
+    (issue #348), bundled so the printer itself takes one argument instead
+    of PLR0913's five-scalar ceiling."""
+
+    item_id: str
+    number: int
+    closed_at: str
+    freed: tuple[int, ...]
+    parent_closable: int | None
+
+
+def _print_item_close_result(result: _ItemCloseResult, *, as_json: bool) -> None:
     if as_json:
-        print(json.dumps({"item": item_id, "number": number, "closed_at": closed_at}))
+        print(
+            json.dumps(
+                {
+                    "item": result.item_id,
+                    "number": result.number,
+                    "closed_at": result.closed_at,
+                    "parent_closable": result.parent_closable,
+                }
+            )
+        )
         return
-    print(f"CLOSED {item_id}")
+    print(f"CLOSED {result.item_id}")
     # `item close` only ever runs under `storage = "state-ref"`
     # (`_cmd_item_close`'s own refusal otherwise), so `freed:`'s own id
-    # chooser is fixed here rather than threaded as a sixth argument.
-    print(_release_freed_line(freed, board.Storage.STATE_REF))
+    # chooser is fixed here rather than threaded as a further field.
+    print(_release_freed_line(result.freed, board.Storage.STATE_REF))
+    parent_line = _parent_closable_line(result.parent_closable, board.Storage.STATE_REF)
+    if parent_line is not None:
+        print(parent_line)
 
 
 def _item_state_text(state: forge.ItemState) -> str:
@@ -3513,21 +3659,35 @@ def _cmd_status(parsed: argparse.Namespace) -> int:
     return _status(claims, issue, ages, storage, now=now)
 
 
+@dataclass(frozen=True)
+class _ObservedBoard:
+    """`_observed_board`'s own result: the projected board, plus every live
+    claim it was built from (issue #348) -- `next`'s own `parallel_set`
+    needs each claim's scope for its occupied-paths accounting, and this is
+    the one fetch that already read them, never a second store observation
+    for the same run."""
+
+    board: board.Board
+    live_claims: tuple[protocol.ScopedClaim, ...]
+
+
 def _observed_board(
     session: _ReadSession,
     *,
     issues: tuple[board.Issue, ...] | None = None,
-) -> board.Board:
+) -> _ObservedBoard:
     """`board`/`rulings`/`next` share this: the store's live claims, projected
     onto forge board data (issue #176 -- claims no longer come from the
     ledger; the forge is still the board's own data source)."""
     worktree, _remote, observed = _store_observation()
-    return _board(
+    live_claims = tuple(observed.claims.values())
+    fetch = _board(
         session.forge(),
-        tuple(observed.claims.values()),
+        live_claims,
         issues=issues,
         claim_ages=_claim_ages(worktree, observed),
-    ).board
+    )
+    return _ObservedBoard(fetch.board, live_claims)
 
 
 def _lane_claimants(observed: protocol.ClaimState) -> dict[int, board_html.LaneClaimant]:
@@ -3600,7 +3760,7 @@ def _cmd_board(parsed: argparse.Namespace, session: _ReadSession) -> None:
     if parsed.html is not None:
         _cmd_board_html(parsed, session)
         return
-    projected = _observed_board(session)
+    projected = _observed_board(session).board
     if parsed.json:
         print(board.board_json(projected))
         return
@@ -3610,7 +3770,7 @@ def _cmd_board(parsed: argparse.Namespace, session: _ReadSession) -> None:
 
 def _cmd_rulings(parsed: argparse.Namespace, session: _ReadSession) -> None:
     issues = session.forge().list_open_board_issues()
-    projected = _observed_board(session, issues=issues)
+    projected = _observed_board(session, issues=issues).board
     bodies = {issue.number: issue.body for issue in issues}
     storage = _board_config(_resolve_toplevel()).storage
     _rulings(projected, bodies, as_json=parsed.json, storage=storage)
@@ -3625,21 +3785,24 @@ def _next_action_container_number(action: board.NextAction | None) -> int | None
 
 
 def _cmd_next(parsed: argparse.Namespace, session: _ReadSession) -> int:
-    projected = _observed_board(session)
+    observed = _observed_board(session)
+    projected = observed.board
     action = board.next_action(projected)
     chosen_container = _next_action_container_number(action)
     skipped = tuple(item for item in _unworkable(projected) if item.number != chosen_container)
-    recovery = projected.recovery
+    report = _NextReport(
+        action=action,
+        skipped=skipped,
+        recovery=projected.recovery,
+        parallel=board.parallel_set(projected, observed.live_claims, action),
+        close=board.zero_cost_closes(projected),
+    )
     storage = _board_config(_resolve_toplevel()).storage
     if parsed.json:
-        if action is None:
-            _next_json(None, skipped, recovery, storage)
-            return 3
-        return _next_json(action, skipped, recovery, storage)
-    if action is None:
-        _next(None, skipped, recovery, storage)
-        return 3
-    return _next(action, skipped, recovery, storage)
+        _next_json(report, storage)
+    else:
+        _next(report, storage)
+    return 0 if action is not None else 3
 
 
 def _cmd_rescope(parsed: argparse.Namespace, _session: _WriteSession) -> None:
@@ -3947,10 +4110,12 @@ def _cmd_release(parsed: argparse.Namespace, session: _WriteSession) -> None:
         subject=_transition_subject("release", selected.identity, selected.branch),
         intent=intent,
     )
-    landing, hint = (
-        (None, None) if client is None else _landing_report(client, identity, worktree, new_state)
-    )
     storage = _board_config(_resolve_toplevel()).storage
+    landing, hint = (
+        (None, None)
+        if client is None
+        else _landing_report(client, identity, worktree, new_state, storage)
+    )
     _print_release_result(
         ReleaseReport(
             selected, parsed.agent, resolved_role, outcome, client, landing, hint, storage
@@ -3964,6 +4129,7 @@ def _landing_report(
     identity: protocol.ClaimIdentity,
     worktree: Path,
     new_state: store.ClaimState,
+    storage: board.Storage,
 ) -> tuple[ReleaseLanding | None, str | None]:
     """The `(landing, hint)` pair `_cmd_release` prints once its release
     transition already committed (issue #256): a forge hiccup here can only
@@ -3975,7 +4141,11 @@ def _landing_report(
     )
     try:
         landing = _release_landing(
-            client, tuple(new_state.claims.values()), _claim_ages(worktree, new_state), landed
+            client,
+            tuple(new_state.claims.values()),
+            _claim_ages(worktree, new_state),
+            landed,
+            storage,
         )
     except forge.ForgeError as error:
         hint = (
@@ -4020,6 +4190,9 @@ def _print_release_result(report: ReleaseReport, *, as_json: bool) -> None:
             assert landing is not None
             print(_release_freed_line(landing.freed, report.storage))
             print(_release_next_line(landing.next_item, report.storage))
+            parent_line = _parent_closable_line(landing.parent_closable, report.storage)
+            if parent_line is not None:
+                print(parent_line)
 
 
 def _cut_target(client: forge.ForgeWriter, number: int) -> board.Issue:

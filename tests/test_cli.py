@@ -1005,6 +1005,65 @@ _TOP_AND_BLOCKED = (
 )
 _BLOCKED_BY_ELEVEN = {12: (block_dependency(11),)}
 
+# issue #348: every `next` golden below a scopeless `WorkItemAction` needs
+# this note right after its `Run:` line -- the item's own body names no
+# scope, so `claim` cannot derive one either -- and this tail once the
+# action's own lines end: a scopeless first action leaves `parallel_set`
+# nothing to found a set on, so `parallel:`/`scope unknown:` collapse into
+# the one `unknown` sentence, and `close:` still prints `none`.
+_SCOPE_UNKNOWN_NOTE_LINE = "scope unknown\n"
+_PARALLEL_UNKNOWN_TAIL = "parallel: unknown (first action names no scope)\nclose: none\n"
+_UNKNOWN_SCOPE_NEXT_TAIL = _SCOPE_UNKNOWN_NOTE_LINE + _PARALLEL_UNKNOWN_TAIL
+# The same tail once there is no first action to found a parallel set on at
+# all (`board.parallel_set` returns an empty, *not* first-scope-unknown, set).
+_NO_ACTION_NEXT_TAIL = "parallel: none\nscope unknown: none\nclose: none\n"
+_UNKNOWN_SCOPE_PARALLEL_JSON: dict[str, object] = {
+    "first_scope_unknown": True,
+    "candidates": [],
+    "scope_unknown": [],
+}
+_EMPTY_PARALLEL_JSON: dict[str, object] = {
+    "first_scope_unknown": False,
+    "candidates": [],
+    "scope_unknown": [],
+}
+
+# issue #348, Beweis 1: five free items -- Beta and Gamma name the same
+# path (the "two overlapping each other" pair), Delta names no scope at
+# all, Epsilon names a path under claim-live-1's own directory scope (the
+# "excluded by a live claim, not by another candidate" case; R1 review) --
+# read against two live claims that occupy their own, disjoint paths.
+# Alpha out-ranks the rest purely by its lower issue number (every item
+# shares the same score), so it is always the first action; Beta then wins
+# the walk over Gamma (board order), and Gamma is dropped silently --
+# neither `parallel:` nor `scope unknown:` names an item excluded for
+# overlap, only one excluded for lacking a scope at all. Epsilon is
+# dropped the same silent way, but for a different reason: were the walk
+# not occupying the live claims' own scopes, Epsilon would have nothing to
+# collide with and would surface in `parallel:` instead.
+_PARALLEL_ALPHA = board_issue(
+    50, "Alpha", complete_contract("Ship Alpha.", scope=["src/alpha1.py", "src/alpha2.py"])
+)
+_PARALLEL_BETA = board_issue(51, "Beta", complete_contract("Ship Beta.", scope=["src/shared.py"]))
+_PARALLEL_GAMMA = board_issue(
+    52, "Gamma", complete_contract("Ship Gamma.", scope=["src/shared.py"])
+)
+_PARALLEL_DELTA = board_issue(53, "Delta", complete_contract("Ship Delta."))
+_PARALLEL_EPSILON = board_issue(
+    54, "Epsilon", complete_contract("Ship Epsilon.", scope=["claimed/deep/file.py"])
+)
+_PARALLEL_ITEMS = (
+    _PARALLEL_ALPHA,
+    _PARALLEL_BETA,
+    _PARALLEL_GAMMA,
+    _PARALLEL_DELTA,
+    _PARALLEL_EPSILON,
+)
+_PARALLEL_LIVE_CLAIMS = (
+    request(claim_id="claim-live-1", issue=990, scope=("claimed",)),
+    request(claim_id="claim-live-2", issue=991, scope=("claimed/two.py",)),
+)
+
 
 @pytest.mark.parametrize(
     ("issues", "dependencies", "claims", "arguments", "expected_exit", "expected_output"),
@@ -1016,9 +1075,8 @@ _BLOCKED_BY_ELEVEN = {12: (block_dependency(11),)}
             ("next",),
             0,
             "#11 score 10: Top work\nNext: Claim #11.\n"
-            "Run: aco claim 11 --scope <paths>\n"
-            "<paths> cannot be derived; take the files to claim from the item body.\n"
-            "\nSKIPPED\n#12: blocked by #11\n",
+            "Run: aco claim 11 --scope <paths>\n" + _UNKNOWN_SCOPE_NEXT_TAIL + "\nSKIPPED\n"
+            "#12: blocked by #11\n",
             id="names_the_highest_scored_actionable_item",
         ),
         pytest.param(
@@ -1038,6 +1096,8 @@ _BLOCKED_BY_ELEVEN = {12: (block_dependency(11),)}
                 "skipped": [{"number": 12, "reason": "blocked by #11"}],
                 "ruling_landings": None,
                 "ruling_old": None,
+                "parallel": _UNKNOWN_SCOPE_PARALLEL_JSON,
+                "close": [],
             },
             id="emits_the_highest_scored_actionable_item_as_json",
         ),
@@ -1047,7 +1107,8 @@ _BLOCKED_BY_ELEVEN = {12: (block_dependency(11),)}
             (),
             ("next",),
             3,
-            "No actionable item.\n\nSKIPPED\n#10: body incomplete: Next, Done when\n",
+            "No actionable item.\n" + _NO_ACTION_NEXT_TAIL + "\nSKIPPED\n"
+            "#10: body incomplete: Next, Done when\n",
             id="names_an_incomplete_body_as_the_reason_nothing_is_pullable",
         ),
         pytest.param(
@@ -1056,7 +1117,7 @@ _BLOCKED_BY_ELEVEN = {12: (block_dependency(11),)}
             (),
             ("next",),
             3,
-            "No actionable item.\n\nSKIPPED\n"
+            "No actionable item.\n" + _NO_ACTION_NEXT_TAIL + "\nSKIPPED\n"
             "#10: body malformed: agent-claim: no agent-claim block\n",
             id="names_a_body_with_no_block_as_malformed",
         ),
@@ -1066,7 +1127,7 @@ _BLOCKED_BY_ELEVEN = {12: (block_dependency(11),)}
             (request(issue=10),),
             ("next",),
             3,
-            "No actionable item.\n\nSKIPPED\n#10: claimed\n",
+            "No actionable item.\n" + _NO_ACTION_NEXT_TAIL + "\nSKIPPED\n#10: claimed\n",
             id="names_a_live_claim_as_the_reason_nothing_is_pullable",
         ),
         pytest.param(
@@ -1079,9 +1140,8 @@ _BLOCKED_BY_ELEVEN = {12: (block_dependency(11),)}
             ("next",),
             0,
             "#9 score 10: Open blocker\nNext: Claim #9.\n"
-            "Run: aco claim 9 --scope <paths>\n"
-            "<paths> cannot be derived; take the files to claim from the item body.\n"
-            "\nSKIPPED\n#10: blocked by #9\n",
+            "Run: aco claim 9 --scope <paths>\n" + _UNKNOWN_SCOPE_NEXT_TAIL + "\nSKIPPED\n"
+            "#10: blocked by #9\n",
             id="excludes_items_with_open_blockers",
         ),
         pytest.param(
@@ -1090,7 +1150,7 @@ _BLOCKED_BY_ELEVEN = {12: (block_dependency(11),)}
             (),
             ("next",),
             3,
-            "No actionable item.\n",
+            "No actionable item.\n" + _NO_ACTION_NEXT_TAIL,
             id="prints_no_actionable_item_on_a_fully_empty_board",
         ),
         pytest.param(
@@ -1099,8 +1159,53 @@ _BLOCKED_BY_ELEVEN = {12: (block_dependency(11),)}
             (),
             ("next", "--json"),
             3,
-            {"action": None, "recovery": [], "skipped": []},
+            {
+                "action": None,
+                "recovery": [],
+                "skipped": [],
+                "parallel": _EMPTY_PARALLEL_JSON,
+                "close": [],
+            },
             id="emits_action_null_on_a_fully_empty_board",
+        ),
+        pytest.param(
+            _PARALLEL_ITEMS,
+            {},
+            _PARALLEL_LIVE_CLAIMS,
+            ("next",),
+            0,
+            "#50 score -10: Alpha\nNext: Ship Alpha.\n"
+            "Run: aco claim 50\n"
+            "parallel: #51 (1 path)\n"
+            "scope unknown: #53\n"
+            "close: none\n",
+            id="parallel_set_names_the_maximal_disjoint_set_and_the_unknown_scope_item",
+        ),
+        pytest.param(
+            _PARALLEL_ITEMS,
+            {},
+            _PARALLEL_LIVE_CLAIMS,
+            ("next", "--json"),
+            0,
+            {
+                "action": "work_item",
+                "number": 50,
+                "score": -10,
+                "title": "Alpha",
+                "next": "Ship Alpha.",
+                "command": "aco claim 50",
+                "recovery": [],
+                "skipped": [],
+                "ruling_landings": None,
+                "ruling_old": None,
+                "parallel": {
+                    "first_scope_unknown": False,
+                    "candidates": [{"number": 51, "scope": ["src/shared.py"]}],
+                    "scope_unknown": [53],
+                },
+                "close": [],
+            },
+            id="parallel_set_json_carries_full_scopes_for_every_candidate",
         ),
     ],
 )
@@ -1135,8 +1240,9 @@ def test_next_reports_the_highest_scored_actionable_item(
 PULLED_WITH_REFINING_FIRST = (
     "#10 score -10: Work\nNext: Claim #10.\n"
     "Run: aco claim 10 --scope <paths>\n"
-    "<paths> cannot be derived; take the files to claim from the item body.\n"
-    "expectations unruled: refine before the pull\n"
+    + _SCOPE_UNKNOWN_NOTE_LINE
+    + "expectations unruled: refine before the pull\n"
+    + _PARALLEL_UNKNOWN_TAIL
 )
 
 
@@ -1147,8 +1253,7 @@ PULLED_WITH_REFINING_FIRST = (
             (),
             board.ExpectationState.NONE,
             "#10 score -10: Work\nNext: Claim #10.\n"
-            "Run: aco claim 10 --scope <paths>\n"
-            "<paths> cannot be derived; take the files to claim from the item body.\n",
+            "Run: aco claim 10 --scope <paths>\n" + _UNKNOWN_SCOPE_NEXT_TAIL,
             id="no_expectation_entry_remains_actionable",
         ),
         pytest.param(
@@ -1161,8 +1266,7 @@ PULLED_WITH_REFINING_FIRST = (
             (ruled_expectation("Name it."), ruled_expectation("Remove it.", ruling="no")),
             board.ExpectationState.RULED,
             "#10 score -10: Work\nNext: Claim #10.\n"
-            "Run: aco claim 10 --scope <paths>\n"
-            "<paths> cannot be derived; take the files to claim from the item body.\n",
+            "Run: aco claim 10 --scope <paths>\n" + _UNKNOWN_SCOPE_NEXT_TAIL,
             id="fully_ruled_expectations_remain_actionable",
         ),
         pytest.param(
@@ -1229,9 +1333,10 @@ def test_next_pulls_an_unruled_item_and_names_only_unworkable_ones_as_skipped(
         "#11 score 10: Needs rulings\n"
         "Next: Claim #11.\n"
         "Run: aco claim 11 --scope <paths>\n"
-        "<paths> cannot be derived; take the files to claim from the item body.\n"
-        "expectations unruled: refine before the pull\n"
-        "\n"
+        + _SCOPE_UNKNOWN_NOTE_LINE
+        + "expectations unruled: refine before the pull\n"
+        + _PARALLEL_UNKNOWN_TAIL
+        + "\n"
         "SKIPPED\n"
         "#12: blocked by #11\n"
         "#13: claimed\n"
@@ -1253,6 +1358,8 @@ def test_next_pulls_an_unruled_item_and_names_only_unworkable_ones_as_skipped(
             {"number": 12, "reason": "blocked by #11"},
             {"number": 13, "reason": "claimed"},
         ],
+        "parallel": _UNKNOWN_SCOPE_PARALLEL_JSON,
+        "close": [],
     }
 
 
@@ -3363,9 +3470,7 @@ def test_next_skips_a_frozen_item_and_names_it_as_such(
     assert capsys.readouterr().out == (
         "#10 score -10: Lower work\n"
         "Next: Claim #10.\n"
-        "Run: aco claim 10 --scope <paths>\n"
-        "<paths> cannot be derived; take the files to claim from the item body.\n"
-        "\n"
+        "Run: aco claim 10 --scope <paths>\n" + _UNKNOWN_SCOPE_NEXT_TAIL + "\n"
         "SKIPPED\n"
         f"#301: frozen: {FROZEN_TRIGGER}\n"
     )
@@ -3502,7 +3607,7 @@ def test_next_names_a_cuttable_container_slice(
     assert exit_code == 0
     assert capsys.readouterr().out == (
         "cut_slice #180: Scheibe B — Kartenraster\n"
-        'Next: aco cut 180 --title "Scheibe B — Kartenraster"\n'
+        'Next: aco cut 180 --title "Scheibe B — Kartenraster"\n' + _PARALLEL_UNKNOWN_TAIL
     )
 
 
@@ -3728,7 +3833,10 @@ def test_next_names_a_closeable_container(
     exit_code = issue_claim.main(["--repo", "example/agent-claim", "next"])
 
     assert exit_code == 0
-    assert capsys.readouterr().out == "close_container #182: 3/3 children closed, no Next work\n"
+    assert capsys.readouterr().out == (
+        "close_container #182: 3/3 children closed, no Next work\n"
+        "parallel: none\nscope unknown: none\nclose: #182\n"
+    )
 
 
 def test_next_json_names_a_closeable_container(
@@ -3786,6 +3894,7 @@ def test_next_names_a_container_with_no_slice_row_by_its_own_next_line(
     assert exit_code == 0
     assert capsys.readouterr().out == (
         "close_container #187: Schließen, sobald die letzte Bedingung erfüllt ist.\n"
+        "parallel: none\nscope unknown: none\nclose: #187\n"
     )
 
 
@@ -3821,6 +3930,217 @@ def test_next_json_names_a_container_with_no_slice_row_by_its_own_next_line(
     assert payload["next_step"] == "Schließen, sobald die letzte Bedingung erfüllt ist."
     assert "command" not in payload
     assert "cut_title" not in payload
+
+
+def test_next_caps_the_parallel_text_list_at_three_and_counts_the_rest(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """issue #348, Beweis 1 (text cap): five mutually disjoint candidates --
+    the text form names only the first three, in board order, plus a
+    trailing count; `--json` still carries every one with its full scope."""
+    alpha = board_issue(60, "Alpha", complete_contract("Ship Alpha.", scope=["alpha/a.py"]))
+    candidates = tuple(
+        board_issue(60 + offset, name, complete_contract(f"Ship {name}.", scope=[f"{name}/x.py"]))
+        for offset, name in enumerate(("Bravo", "Charlie", "Delta", "Echo", "Foxtrot"), start=1)
+    )
+    _configured_board_client(monkeypatch, tmp_path, open_issues=(alpha, *candidates))
+
+    exit_code = issue_claim.main(["--repo", "example/agent-claim", "next"])
+
+    assert exit_code == 0
+    assert capsys.readouterr().out == (
+        "#60 score -10: Alpha\nNext: Ship Alpha.\nRun: aco claim 60\n"
+        "parallel: #61 (1 path), #62 (1 path), #63 (1 path), and 2 more\n"
+        "scope unknown: none\nclose: none\n"
+    )
+
+    json_exit_code = issue_claim.main(["--repo", "example/agent-claim", "next", "--json"])
+    assert json_exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["parallel"]["candidates"] == [
+        {"number": 61, "scope": ["Bravo/x.py"]},
+        {"number": 62, "scope": ["Charlie/x.py"]},
+        {"number": 63, "scope": ["Delta/x.py"]},
+        {"number": 64, "scope": ["Echo/x.py"]},
+        {"number": 65, "scope": ["Foxtrot/x.py"]},
+    ]
+
+
+def test_next_parallel_set_uses_a_cut_proposals_own_row_scope(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """issue #348, Beweis 2: a cut proposal's own uncut-row scope is what
+    `parallel_set` occupies and checks disjointness against -- exactly like
+    a work item's top-level scope, never a second rule. `#82`'s row repeats
+    `#80`'s own path and is dropped silently, the same way an overlapping
+    work item would be; the scopeless-row collapse into `parallel: unknown`
+    is `test_next_names_a_cuttable_container_slice`'s own proof."""
+    epic1 = board.Issue(
+        80,
+        "Epic1",
+        (),
+        complete_contract(
+            "Cut it.", slice=[{"index": 1, "title": "Slice A", "scope": ["epic/a.py"]}]
+        ),
+        "2026-08-20T00:00:00Z",
+        "2026-08-20T00:00:00Z",
+        kind=board.ItemKind.CONTAINER,
+        children_closed=0,
+        children_total=0,
+    )
+    epic2 = board.Issue(
+        81,
+        "Epic2",
+        (),
+        complete_contract(
+            "Cut it.", slice=[{"index": 1, "title": "Slice B", "scope": ["epic/b.py"]}]
+        ),
+        "2026-08-20T00:00:00Z",
+        "2026-08-20T00:00:00Z",
+        kind=board.ItemKind.CONTAINER,
+        children_closed=0,
+        children_total=0,
+    )
+    epic3 = board.Issue(
+        82,
+        "Epic3",
+        (),
+        complete_contract(
+            "Cut it.", slice=[{"index": 1, "title": "Slice C", "scope": ["epic/a.py"]}]
+        ),
+        "2026-08-20T00:00:00Z",
+        "2026-08-20T00:00:00Z",
+        kind=board.ItemKind.CONTAINER,
+        children_closed=0,
+        children_total=0,
+    )
+    _configured_board_client(monkeypatch, tmp_path, open_issues=(epic1, epic2, epic3))
+
+    exit_code = issue_claim.main(["--repo", "example/agent-claim", "next"])
+
+    assert exit_code == 0
+    assert capsys.readouterr().out == (
+        'cut_slice #80: Cut it.\nNext: aco cut 80 --title "Slice A"\n'
+        "parallel: #81 (1 path)\nscope unknown: none\nclose: none\n"
+        "\nSKIPPED\n#81: container; claim a child\n#82: container; claim a child\n"
+    )
+
+    json_exit_code = issue_claim.main(["--repo", "example/agent-claim", "next", "--json"])
+    assert json_exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["parallel"] == {
+        "first_scope_unknown": False,
+        "candidates": [{"number": 81, "scope": ["epic/b.py"]}],
+        "scope_unknown": [],
+    }
+
+
+def test_next_close_names_every_zero_cost_action_regardless_of_rank(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """issue #348, Beweis 3 (#310 finding 29): a closable container ranked
+    well below the board's top row, and a landed-but-open recovery item,
+    both still appear under `close:` -- unconditionally, never gated by
+    which row `next` happens to recommend."""
+    top_ranked = board_issue(
+        70,
+        "Top ranked work",
+        complete_contract("Ship it.", scope=["a"]),
+        labels=("security",),
+    )
+    closable_container = board.Issue(
+        71,
+        "Closable epic",
+        (),
+        complete_contract("keiner"),
+        "2026-08-20T00:00:00Z",
+        "2026-08-20T00:00:00Z",
+        kind=board.ItemKind.CONTAINER,
+        children_closed=2,
+        children_total=2,
+    )
+    landed_but_open = board_issue(72, "Landed but open", complete_contract("Close it."))
+    client = _configured_board_client(
+        monkeypatch, tmp_path, open_issues=(top_ranked, closable_container, landed_but_open)
+    )
+    monkeypatch.setattr(
+        client,
+        "list_recent_merged_board_pull_requests",
+        lambda _since: (
+            board.PullRequest(
+                150, "Lands it", "Work-Item: #72\n\nCloses #72", "branch", "2026-08-20T00:00:00Z"
+            ),
+        ),
+    )
+
+    exit_code = issue_claim.main(["--repo", "example/agent-claim", "next"])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert out.startswith(f"RECOVERY\n#72: {board.RECOVERY_STEP}\n\n")
+    assert out.splitlines()[0:2] == ["RECOVERY", f"#72: {board.RECOVERY_STEP}"]
+    assert "#70 score" in out
+    assert "close: #71, #72" in out
+
+    json_exit_code = issue_claim.main(["--repo", "example/agent-claim", "next", "--json"])
+    assert json_exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["close"] == [71, 72]
+
+
+_RECOVERY_SHARED_SCOPE = "b"
+
+
+def test_next_parallel_set_never_lets_a_recovery_item_occupy_or_candidate(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """issue #348 review (G1): a landed-but-open item is `zero_cost_closes`'
+    own domain, never `parallel_set`'s. `landed_but_open` (#71) and
+    `free_item` (#72) name the same scope, and board order visits #71
+    first -- pre-fix, the walk occupied that scope for #71 and silently
+    dropped #72 as "overlapping", even though #71 was never real work in
+    flight. #72 must still surface in `parallel:`, and #71 only under
+    `close:`, never as a candidate of its own."""
+    top_ranked = board_issue(
+        70, "Top ranked work", complete_contract("Ship it.", scope=["a"]), labels=("security",)
+    )
+    landed_but_open = board_issue(
+        71, "Landed but open", complete_contract("Close it.", scope=[_RECOVERY_SHARED_SCOPE])
+    )
+    free_item = board_issue(
+        72, "Free item", complete_contract("Ship it too.", scope=[_RECOVERY_SHARED_SCOPE])
+    )
+    client = _configured_board_client(
+        monkeypatch, tmp_path, open_issues=(top_ranked, landed_but_open, free_item)
+    )
+    monkeypatch.setattr(
+        client,
+        "list_recent_merged_board_pull_requests",
+        lambda _since: (
+            board.PullRequest(
+                150, "Lands it", "Work-Item: #71\n\nCloses #71", "branch", "2026-08-20T00:00:00Z"
+            ),
+        ),
+    )
+
+    exit_code = issue_claim.main(["--repo", "example/agent-claim", "next"])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "#70 score" in out
+    assert "parallel: #72 (1 path)\n" in out
+    assert "close: #71\n" in out
+    assert "#71 (1 path)" not in out
+
+    json_exit_code = issue_claim.main(["--repo", "example/agent-claim", "next", "--json"])
+    assert json_exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["parallel"] == {
+        "first_scope_unknown": False,
+        "candidates": [{"number": 72, "scope": [_RECOVERY_SHARED_SCOPE]}],
+        "scope_unknown": [],
+    }
+    assert payload["close"] == [71]
 
 
 def test_board_queries_merged_pull_requests_back_to_the_oldest_open_issue(
@@ -4203,8 +4523,7 @@ def test_next_pulls_a_configured_projectionless_idea_with_refinement_step(
     assert issue_claim.main(["--repo", "example/agent-claim", "next"]) == 0
     assert capsys.readouterr().out == (
         "#10 score -20: Operator idea\nNext: Problem neu prüfen und Item verfeinern\n"
-        "Run: aco claim 10 --scope <paths>\n"
-        "<paths> cannot be derived; take the files to claim from the item body.\n"
+        "Run: aco claim 10 --scope <paths>\n" + _UNKNOWN_SCOPE_NEXT_TAIL
     )
 
     assert issue_claim.main(["--repo", "example/agent-claim", "next", "--json"]) == 0
@@ -4219,6 +4538,8 @@ def test_next_pulls_a_configured_projectionless_idea_with_refinement_step(
         "ruling_old": None,
         "recovery": [],
         "skipped": [],
+        "parallel": _UNKNOWN_SCOPE_PARALLEL_JSON,
+        "close": [],
     }
 
 
@@ -4232,7 +4553,9 @@ def test_next_keeps_an_unlabelled_projectionless_item_skipped_with_an_active_ide
 
     assert issue_claim.main(["--repo", "example/agent-claim", "next"]) == 3
     assert capsys.readouterr().out == (
-        "No actionable item.\n\nSKIPPED\n#10: body incomplete: Now, Next, Done when\n"
+        "No actionable item.\n"
+        + _NO_ACTION_NEXT_TAIL
+        + "\nSKIPPED\n#10: body incomplete: Now, Next, Done when\n"
     )
 
     assert issue_claim.main(["--repo", "example/agent-claim", "next", "--json"]) == 3
@@ -4240,6 +4563,8 @@ def test_next_keeps_an_unlabelled_projectionless_item_skipped_with_an_active_ide
         "action": None,
         "recovery": [],
         "skipped": [{"number": 10, "reason": "body incomplete: Now, Next, Done when"}],
+        "parallel": _EMPTY_PARALLEL_JSON,
+        "close": [],
     }
 
 
@@ -4251,7 +4576,9 @@ def test_next_keeps_a_vision_labelled_projectionless_item_incomplete_without_con
 
     assert issue_claim.main(["--repo", "example/agent-claim", "next"]) == 3
     assert capsys.readouterr().out == (
-        "No actionable item.\n\nSKIPPED\n#10: body incomplete: Now, Next, Done when\n"
+        "No actionable item.\n"
+        + _NO_ACTION_NEXT_TAIL
+        + "\nSKIPPED\n#10: body incomplete: Now, Next, Done when\n"
     )
 
 
@@ -4271,8 +4598,7 @@ def test_next_keeps_a_configured_idea_with_a_complete_projection_own_next(
     assert issue_claim.main(["--repo", "example/agent-claim", "next"]) == 0
     assert capsys.readouterr().out == (
         "#10 score -10: Refined idea\nNext: Build the chosen direction.\n"
-        "Run: aco claim 10 --scope <paths>\n"
-        "<paths> cannot be derived; take the files to claim from the item body.\n"
+        "Run: aco claim 10 --scope <paths>\n" + _UNKNOWN_SCOPE_NEXT_TAIL
     )
 
 
@@ -8850,8 +9176,9 @@ def test_next_names_an_old_ruling_when_the_item_is_pulled(
         "#10 score -10: Work\n"
         "Next: Claim #10.\n"
         "Run: aco claim 10 --scope <paths>\n"
-        "<paths> cannot be derived; take the files to claim from the item body.\n"
-        "ruled 10 landings ago: refine again at the pull\n"
+        + _SCOPE_UNKNOWN_NOTE_LINE
+        + "ruled 10 landings ago: refine again at the pull\n"
+        + _PARALLEL_UNKNOWN_TAIL
     )
 
     assert issue_claim.main(["--repo", "example/agent-claim", "next", "--json"]) == 0
@@ -9358,6 +9685,86 @@ def test_release_merged_prints_the_freed_and_next_lines(
     assert "freed: #80, #81\n" in out
     assert "next: #81 score" in out
     assert "Higher priority freed item" in out
+
+
+PARENT_OF_WORK_ITEM = 79
+
+
+def _released_last_child_client(
+    monkeypatch: pytest.MonkeyPatch, *, sibling_open: bool, parent_closed: bool = False
+) -> FakeForge:
+    """`merged_release_client` plus a recorded parent relation (issue #348,
+    Beweis 4): `WORK_ITEM_ISSUE` is `PARENT_OF_WORK_ITEM`'s only child when
+    `sibling_open` is `False` -- its own close leaves the parent with no
+    open children and no uncut `[[slice]]` row, exactly `next`'s own
+    `CloseContainerAction` branch -- or one still-open sibling when `True`,
+    the parent hint's own negative case. `parent_closed` (G2 review) covers
+    the third negative case: the parent itself already closed (by some
+    other landing) before this release even runs -- a childless, uncut
+    parent that is not open must never be named closable, since a second
+    close would only refuse."""
+    client = merged_release_client(monkeypatch, body="Work-Item: #72\n\nCloses #72")
+    client.closed_issues.add(WORK_ITEM_ISSUE)
+    monkeypatch.setattr(issue_claim, "_fetch_issue_reference", _LIVE_FETCH_ISSUE_REFERENCE)
+    client.parents[WORK_ITEM_ISSUE] = board.ParentIssue(
+        board.IssueReference(REPOSITORY, PARENT_OF_WORK_ITEM),
+        complete_contract("keiner"),
+        board.ItemKind.CONTAINER,
+    )
+    children = [board.ChildItem(WORK_ITEM_ISSUE, board.ChildState.CLOSED)]
+    if sibling_open:
+        children.append(board.ChildItem(999, board.ChildState.OPEN))
+    client.children[PARENT_OF_WORK_ITEM] = tuple(children)
+    if parent_closed:
+        client.closed_issues.add(PARENT_OF_WORK_ITEM)
+    return client
+
+
+@pytest.mark.parametrize(
+    ("sibling_open", "parent_closed", "hint_expected"),
+    [
+        pytest.param(False, False, True, id="last_open_child_names_the_parent"),
+        pytest.param(True, False, False, id="a_sibling_still_open_omits_the_hint"),
+        pytest.param(False, True, False, id="an_already_closed_parent_omits_the_hint"),
+    ],
+)
+def test_release_merged_names_the_parent_hint_only_for_the_last_open_child(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    sibling_open: bool,
+    parent_closed: bool,
+    hint_expected: bool,
+) -> None:
+    """issue #348, Beweis 4: releasing a container's last open child names
+    the parent as freshly closable, the same decision `next`'s own `close:`
+    line makes for a childless, uncut container -- a still-open sibling
+    keeps the container un-closable and the hint absent, and so does a
+    parent that is already closed itself (G2 review)."""
+    _released_last_child_client(monkeypatch, sibling_open=sibling_open, parent_closed=parent_closed)
+
+    exit_code = issue_claim.main(
+        ["--repo", REPOSITORY, "release", str(WORK_ITEM_ISSUE), "--merged", "12"]
+    )
+
+    assert exit_code == 0
+    hint = f"parent #{PARENT_OF_WORK_ITEM}: no open children — close it\n"
+    assert (hint in capsys.readouterr().out) is hint_expected
+
+
+def test_release_merged_json_carries_the_parent_closable_number(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """issue #348, Beweis 4 (JSON): `parent_closable` carries the same
+    number the text form's parent hint names."""
+    _released_last_child_client(monkeypatch, sibling_open=False)
+
+    exit_code = issue_claim.main(
+        ["--repo", REPOSITORY, "release", str(WORK_ITEM_ISSUE), "--merged", "12", "--json"]
+    )
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["parent_closable"] == PARENT_OF_WORK_ITEM
 
 
 def test_release_merged_fetches_each_candidates_dependencies_only_once(
@@ -11080,10 +11487,11 @@ def test_item_close_prints_json_under_the_state_ref_pin(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
     """Issue #289: `item close ITEM --json` under `storage = "state-ref"`
-    prints `{"item", "number", "closed_at"}` -- the same shape `item show
-    --json` prints -- and returns before the plain-text `CLOSED`/`freed:`
-    lines, the branch `test_item_close_refuses_under_github_storage`'s
-    refusal never reaches."""
+    prints `{"item", "number", "closed_at", "parent_closable"}` and returns
+    before the plain-text `CLOSED`/`freed:` lines, the branch
+    `test_item_close_refuses_under_github_storage`'s refusal never reaches.
+    `parent_closable` (issue #348) is `null` here: `42` names no parent on
+    this fake."""
     _write_state_ref_pin(tmp_path)
     client = FakeForge(repository=forge.RepositoryId("file", (), str(tmp_path)))
     client.issue_references[42] = forge.ItemReference(
@@ -11099,6 +11507,7 @@ def test_item_close_prints_json_under_the_state_ref_pin(
         "item": items.format_item_id(42),
         "number": 42,
         "closed_at": "2026-09-16T12:00:00Z",
+        "parent_closable": None,
     }
 
 
