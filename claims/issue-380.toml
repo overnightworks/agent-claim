@@ -3,6 +3,6 @@ agent = "Claude head (coordinator)"
 role = "builder"
 base = "21d1a07f8f97199ec928a0364625726e8fdcc0f8"
 branch = "claude/issue-380-protect-bash"
-scope = ["specs/protect.spec.md", "src/agent_coordination/cli.py", "src/agent_coordination/hook_input.py", "tests/test_hook_input.py", "tests/test_protect.py"]
+scope = ["README.md", "specs/protect.spec.md", "src/agent_coordination/cli.py", "src/agent_coordination/hook_input.py", "tests/test_hook_input.py", "tests/test_protect.py"]
 opened_commit = "cdb3e754c345719d69bbb5b3201865f95f36e0c5"
 whole_reason = "card lane: hook classifier, spec and tests"
