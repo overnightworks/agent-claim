@@ -25,6 +25,7 @@ from agent_coordination.protocol import ClaimError, ClaimRequest
 _LIVE_VERSIONED_PATHS = checkout.versioned_paths
 _LIVE_TRUNK_LANDINGS = checkout.trunk_landings
 _LIVE_REMOTE_URL = checkout.remote_url
+_BOARD_CONFIG_PATH = board.CONFIG_PATH.as_posix()
 
 
 def test_origin_remote_url_reads_the_git_config(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -467,9 +468,7 @@ def test_versioned_paths_reads_nul_terminated_ls_files_without_stripping(
     [
         pytest.param(_LIVE_VERSIONED_PATHS, id="versioned-paths"),
         pytest.param(checkout.origin_remote_url, id="origin-remote-url"),
-        pytest.param(
-            lambda: checkout.path_is_tracked(".agent-claim/board.toml"), id="path-is-tracked"
-        ),
+        pytest.param(lambda: checkout.path_is_tracked(_BOARD_CONFIG_PATH), id="path-is-tracked"),
     ],
 )
 @pytest.mark.parametrize(
@@ -543,8 +542,88 @@ def test_path_is_tracked_reads_the_git_ls_files_exit_status(
 
     monkeypatch.setattr(subprocess, "run", run)
 
-    assert checkout.path_is_tracked(".agent-claim/board.toml") is expected
-    assert observed == [["git", "ls-files", "--error-unmatch", "--", ".agent-claim/board.toml"]]
+    assert checkout.path_is_tracked(_BOARD_CONFIG_PATH) is expected
+    assert observed == [["git", "ls-files", "--error-unmatch", "--", _BOARD_CONFIG_PATH]]
+
+
+def test_path_is_tracked_fails_loud_on_a_git_failure_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only exit 1 means "not tracked" for `git ls-files --error-unmatch`
+    (issue #315 review): any other nonzero exit -- e.g. 128 outside a git
+    repository -- is a real git failure, matching `versioned_paths`'s
+    handling in this module, and must raise rather than silently read back
+    as an untrusted pin."""
+
+    def failed(arguments, **_kwargs):
+        return subprocess.CompletedProcess(
+            arguments, 128, stdout=b"", stderr=b"fatal: not a git repository\n"
+        )
+
+    monkeypatch.setattr(subprocess, "run", failed)
+    with pytest.raises(ClaimError, match="fatal: not a git repository"):
+        checkout.path_is_tracked(_BOARD_CONFIG_PATH)
+
+
+def _untracked_board_config(repository: Path) -> None:
+    config = repository / _BOARD_CONFIG_PATH
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text("version = 1\n")
+
+
+def _write_gitignore_for_dot_directories(repository: Path) -> None:
+    (repository / ".gitignore").write_text(".*/\n")
+    _real_git(repository, "add", ".gitignore")
+    _real_git(repository, "commit", "-q", "-m", "ignore dot directories")
+
+
+def _ignored_board_config(repository: Path) -> None:
+    _write_gitignore_for_dot_directories(repository)
+    _untracked_board_config(repository)
+
+
+def _tracked_board_config(repository: Path) -> None:
+    _untracked_board_config(repository)
+    _real_git(repository, "add", _BOARD_CONFIG_PATH)
+    _real_git(repository, "commit", "-q", "-m", "add board config")
+
+
+def _tracked_but_ignored_board_config(repository: Path) -> None:
+    _write_gitignore_for_dot_directories(repository)
+    _untracked_board_config(repository)
+    _real_git(repository, "add", "-f", _BOARD_CONFIG_PATH)
+    _real_git(repository, "commit", "-q", "-m", "add board config despite ignore")
+
+
+@pytest.mark.parametrize(
+    ("setup", "expected"),
+    [
+        pytest.param(lambda _repository: None, False, id="absent"),
+        pytest.param(_untracked_board_config, False, id="untracked"),
+        pytest.param(_ignored_board_config, False, id="ignored-via-gitignore"),
+        pytest.param(_tracked_board_config, True, id="tracked"),
+        pytest.param(_tracked_but_ignored_board_config, True, id="tracked-but-ignored"),
+    ],
+)
+def test_path_is_tracked_reads_real_git_index_and_ignore_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    setup: Callable[[Path], None],
+    expected: bool,
+) -> None:
+    """`path_is_tracked` against real git filesystem/index state, not a
+    hand-typed exit code (issue #315 review): absent, merely untracked, and
+    `.gitignore`-ignored (`.*/`, the pattern that hid `.agent-claim/` in the
+    field checkout the issue reports) all read `False`; a tracked file reads
+    `True` even when a later `.gitignore` pattern would also match it, since
+    `git ls-files --error-unmatch` answers from the index, not the ignore
+    rules -- the `git add -f` repair this issue's refusal names must keep
+    working after it runs."""
+    repository = _scratch_git_repository(tmp_path)
+    setup(repository)
+    monkeypatch.chdir(repository)
+
+    assert checkout.path_is_tracked(_BOARD_CONFIG_PATH) is expected
 
 
 def _fake_trunk_log_record(*fields: str) -> str:
