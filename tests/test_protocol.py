@@ -7,7 +7,7 @@ codecs are `tests/test_store.py`'s own (the store's pure counterpart)."""
 from __future__ import annotations
 
 import pytest
-from board_fixtures import request
+from board_fixtures import _active_claim, request
 
 from agent_coordination import protocol
 from agent_coordination.protocol import (
@@ -121,6 +121,23 @@ def test_claim_scope_must_be_canonical_repository_relative_paths(scope: object, 
     all hand it operator-supplied text."""
     with pytest.raises(InvalidClaimMarkerError, match=match):
         protocol._valid_scope(scope)
+
+
+def test_claim_scope_is_recorded_and_serialized_in_canonical_order() -> None:
+    """`_valid_scope` is the one place a claim's scope order is decided --
+    `cli._request` calls it at creation, `_combined_scope` calls it again at
+    rescope -- so a claim recorded from paths given in caller order still
+    lands in `claims/<key>.toml` sorted (issue #331 R1): the body-scope
+    projection `board._canonical_scope` reuses this exact function, never a
+    second sort, so a body's own `scope` and a live claim's `scope` stay
+    comparable as tuples no matter which order either was typed in."""
+    scope = protocol._valid_scope(["scripts/issue_claim.py", "docs/COORDINATION.md"])
+
+    assert scope == ("docs/COORDINATION.md", "scripts/issue_claim.py")
+    assert (
+        'scope = ["docs/COORDINATION.md", "scripts/issue_claim.py"]'
+        in protocol.serialize_claim_toml(_active_claim(scope=scope))
+    )
 
 
 def test_scope_overlap_is_repository_wide_and_path_aware() -> None:

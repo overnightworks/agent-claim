@@ -6567,7 +6567,7 @@ def test_cli_rescope_adds_a_path_without_matching_head_or_a_clean_tree(
     standing = _live_store_claim()
     assert standing.claim_id == acquired.claim_id
     assert standing.base == BASE
-    assert standing.scope == ("src/widget.py", "src/new.py")
+    assert standing.scope == ("src/new.py", "src/widget.py")
 
 
 def test_cli_rescope_add_keeps_a_comma_inside_one_path(
@@ -6600,7 +6600,7 @@ def test_cli_rescope_add_keeps_a_comma_inside_one_path(
 
     assert status == 0
     assert capsys.readouterr().out == f"RESCOPED issue #72: {acquired.claim_id}\n"
-    assert _live_store_claim().scope == ("src/widget.py", "reports/a,b.md")
+    assert _live_store_claim().scope == ("reports/a,b.md", "src/widget.py")
 
 
 def test_cli_rescope_drop_matches_a_comma_path_as_one_whole_path(
@@ -7085,7 +7085,7 @@ def _assert_share_above_a_quarter_with_whole_payload(out: str, err: str) -> None
 
 def _assert_rescope_persisted_whole_reason(out: str, err: str) -> None:
     standing = _live_store_claim()
-    assert standing.scope == ("src/widget.py", "docs")
+    assert standing.scope == ("docs", "src/widget.py")
     assert standing.whole_reason == "widen to the docs tree"
 
 
@@ -7812,7 +7812,7 @@ def test_cli_claim_json_prints_acquired_claim_object(
                 "role": "builder",
                 "base": BASE,
                 "branch": branch,
-                "scope": ["src", "docs"],
+                "scope": ["docs", "src"],
                 "resource": None,
                 "resource_value": None,
                 "versioned_files": 1,
@@ -7825,7 +7825,7 @@ def test_cli_claim_json_prints_acquired_claim_object(
         + "\n"
     )
     posted = _live_store_claim()
-    assert posted.scope == ("src", "docs")
+    assert posted.scope == ("docs", "src")
 
 
 @pytest.mark.parametrize(
@@ -10401,8 +10401,8 @@ def test_cli_lane_claim_rescope_and_release_are_forge_free_against_a_non_github_
     assert rescoped == 0
     lane_key = protocol.claim_key(protocol.LaneIdentity(), "docs/lane-cleanup")
     assert store.fetch_state(worktree=Path("."), remote="origin").claims[lane_key].scope == (
-        "docs",
         "README.md",
+        "docs",
     )
     capsys.readouterr()
 

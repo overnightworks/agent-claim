@@ -117,7 +117,7 @@ _SLICE_TITLE_VON_PATTERN = re.compile(
 # fence's info string is ordinary documentation.
 AGENT_CLAIM_FENCE_INFO = "agent-claim"
 BLOCK_TOP_LEVEL_KEYS = frozenset(
-    {"version", "now", "next", "done_when", "frozen_until", "expectation", "slice"}
+    {"version", "now", "next", "done_when", "frozen_until", "scope", "expectation", "slice"}
 )
 BLOCK_VERSION = 1
 BLOCK_EXPECTATION_DEFAULTS = frozenset({"yes", "no", "later"})
@@ -428,10 +428,14 @@ class ClassificationDefect:
 class SliceRow:
     """One `[[slice]]` entry of a body's `agent-claim` block: a slice its
     container still has to dispatch. `index` is exactly what `cut --row N`
-    names it by, `title` exactly what `cut --title` must match."""
+    names it by, `title` exactly what `cut --title` must match. `scope`
+    (issue #331) is the row's own optional `scope = [...]`, validated and
+    canonicalized like the block's top-level field; `None` when the row
+    names no paths of its own."""
 
     index: int
     title: str
+    scope: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -773,6 +777,14 @@ class ParsedBody:
     expectation_progress: ExpectationProgress
     ruling_date: date | None
     frozen_trigger: str | None
+    # The block's own top-level `scope = [...]` (issue #331), exactly the
+    # canonical (sorted, deduplicated) tuple `protocol._valid_scope` returns
+    # -- the same function a live claim's own scope passes through, so the
+    # two stay comparable regardless of typed order. `None` when the block
+    # carries no `scope` key at all, never for an empty one
+    # (`_block_scope_defects` refuses that before this projection is ever
+    # built).
+    scope: tuple[str, ...] | None
     slices: tuple[SliceRow, ...]
     read_state: BodyReadState
     # The validated `[record]` table (issue #248), or `None` for every body
@@ -896,6 +908,44 @@ def _block_frozen_until_defects(data: dict[str, object]) -> list[ContractDefect]
         ContractDefect(f"frozen_until.{key}", f"unknown key frozen_until.{key}") for key in unknown
     )
     return defects
+
+
+SCOPE_MUST_NAME_A_PATH = "must name at least one path"
+
+
+def _scope_value_defect(field_name: str, value: object) -> ContractDefect | None:
+    """One `scope` field's own refusal -- the block's top-level `scope`
+    (`field_name="scope"`) or one `[[slice]]` row's own
+    (`field_name="slice[N].scope"`) -- issue #331. Called only once the
+    caller already knows the key is present; a present value must be a
+    non-empty list, refused with this module's own sentence, and every
+    entry must pass `protocol._valid_scope` -- the one path grammar `claim`
+    already owns, whose own refusal becomes the defect sentence verbatim
+    rather than a second grammar invented here."""
+    if not isinstance(value, list) or not value:
+        return ContractDefect(field_name, f"{field_name} {SCOPE_MUST_NAME_A_PATH}")
+    try:
+        protocol._valid_scope(value)
+    except protocol.InvalidClaimMarkerError as error:
+        return ContractDefect(field_name, str(error))
+    return None
+
+
+def _block_scope_defects(data: dict[str, object]) -> list[ContractDefect]:
+    if "scope" not in data:
+        return []
+    defect = _scope_value_defect("scope", data["scope"])
+    return [defect] if defect is not None else []
+
+
+def _canonical_scope(value: object) -> tuple[str, ...]:
+    """`value`'s validated scope entries, in `protocol._valid_scope`'s own
+    canonical (sorted, deduplicated) order -- the one scope normaliser a
+    live claim's own scope is built through too, so a body's projected
+    `scope` and a claim's recorded `scope` stay comparable as tuples
+    (issue #331). Callable only once a schema check (`_block_scope_defects`,
+    `_block_slice_entry_defects`) has already proven `value` valid."""
+    return protocol._valid_scope(value)
 
 
 def _record_timestamp_defect(value: object, key_name: str) -> ContractDefect | None:
@@ -1217,7 +1267,11 @@ def _block_slice_entry_defects(
         defects.append(
             ContractDefect(f"{prefix}.title", f"{prefix}.title must be a non-empty string")
         )
-    unknown = sorted(set(entry) - {"index", "title"})
+    if "scope" in entry:
+        scope_defect = _scope_value_defect(f"{prefix}.scope", entry["scope"])
+        if scope_defect is not None:
+            defects.append(scope_defect)
+    unknown = sorted(set(entry) - {"index", "title", "scope"})
     defects.extend(
         ContractDefect(f"{prefix}.{key}", f"unknown key {prefix}.{key}") for key in unknown
     )
@@ -1248,6 +1302,7 @@ def _block_schema_defects(data: dict[str, object], storage: Storage) -> tuple[Co
         defects.append(version_defect)
     defects.extend(_block_projection_defects(data))
     defects.extend(_block_frozen_until_defects(data))
+    defects.extend(_block_scope_defects(data))
     expectations, expectation_defect = _block_array_or_defect(data, "expectation")
     defects.append(expectation_defect) if expectation_defect else defects.extend(
         _block_expectation_defects(expectations)
@@ -1272,6 +1327,7 @@ def _malformed_parsed_body(defects: tuple[ContractDefect, ...]) -> ParsedBody:
         expectation_progress=ExpectationProgress(0, 0),
         ruling_date=None,
         frozen_trigger=None,
+        scope=None,
         slices=(),
         read_state=BodyReadState.MALFORMED,
     )
@@ -1323,9 +1379,14 @@ def _block_frozen_trigger(data: dict[str, object]) -> str | None:
 def _block_slices(data: dict[str, object]) -> tuple[SliceRow, ...]:
     """Every still-undispatched `[[slice]]` entry: `cut` removes an entry
     from the block at the moment it links a child to it, so whatever is left
-    here is exactly what is still uncut."""
+    here is exactly what is still uncut. Each row's own `scope` (issue #331)
+    is canonicalized the same way the block's top-level one is."""
     return tuple(
-        SliceRow(cast(int, entry["index"]), cast(str, entry["title"]))
+        SliceRow(
+            cast(int, entry["index"]),
+            cast(str, entry["title"]),
+            _canonical_scope(entry["scope"]) if "scope" in entry else None,
+        )
         for entry in _block_array(data, "slice")
         if isinstance(entry, dict)
         and isinstance(entry.get("index"), int)
@@ -1354,6 +1415,7 @@ def _valid_block_parsed_body(data: dict[str, object], storage: Storage) -> Parse
             else None
         ),
         frozen_trigger=_block_frozen_trigger(data),
+        scope=_canonical_scope(data["scope"]) if "scope" in data else None,
         slices=_block_slices(data),
         read_state=BodyReadState.VALID,
         record=cast("Mapping[str, object] | None", record),
@@ -1481,6 +1543,23 @@ def _render_frozen_until(data: Mapping[str, object]) -> list[str]:
     ]
 
 
+def _render_scope_array(values: object) -> str:
+    """`values`'s scope entries as a canonical TOML array: the one rendering
+    `_render_scope` (top-level) and `_render_slices` (per row) both call,
+    routed through `protocol._valid_scope` -- the one scope canonicalizer
+    (issue #331 REVISE finding 2), rather than a second sort/dedupe owner
+    here. Callable only once a schema check has already proven `values`
+    valid, so this never itself refuses a duplicate."""
+    entries = protocol._valid_scope(values)
+    return "[" + ", ".join(_toml_string(value) for value in entries) + "]"
+
+
+def _render_scope(data: Mapping[str, object]) -> list[str]:
+    if "scope" not in data:
+        return []
+    return ["", f"scope = {_render_scope_array(data['scope'])}"]
+
+
 def _render_expectations(data: Mapping[str, object]) -> list[str]:
     lines: list[str] = []
     for expectation in cast(_JsonRows, data.get("expectation", [])):
@@ -1516,6 +1595,8 @@ def _render_slices(data: Mapping[str, object]) -> list[str]:
                 f"title = {_toml_string(entry['title'])}",
             )
         )
+        if "scope" in entry:
+            lines.append(f"scope = {_render_scope_array(entry['scope'])}")
     return lines
 
 
@@ -1561,6 +1642,7 @@ def render_block(data: Mapping[str, object], newline: str = "\n") -> str:
     lines = [f"version = {data['version']}"]
     lines.extend(f"{key} = {_toml_string(data[key])}" for key in ("now", "next", "done_when"))
     lines.extend(_render_frozen_until(data))
+    lines.extend(_render_scope(data))
     lines.extend(_render_expectations(data))
     lines.extend(_render_slices(data))
     lines.extend(_render_record(data))
@@ -2556,6 +2638,18 @@ def _project_blocker_references(entry: dict[str, object], key: str, repository: 
     ]
 
 
+def _project_uncut_row_scope(finding: dict[str, object]) -> None:
+    """Drop a `None` `scope` from one uncut row's JSON dict rather than
+    printing it (issue #331): the public shape before this lane was
+    `{"index", "title"}` with no third key, and `board --json` still owes
+    that to a row that names no scope of its own -- only a row that
+    actually carries one gains the extra `"scope"` key, canonical and
+    non-empty."""
+    for row in cast(_JsonRows, finding["rows"]):
+        if row["scope"] is None:
+            del row["scope"]
+
+
 def board_json(board: Board) -> str:
     payload = asdict(board)
     repository = payload.pop("repository")
@@ -2571,6 +2665,8 @@ def board_json(board: Board) -> str:
             if container is not None:
                 for child in container["open_children"]:
                     _project_blocker_references(child, "blocked_by", repository)
+    for finding in cast(_JsonRows, payload["uncut"]):
+        _project_uncut_row_scope(finding)
     return json.dumps(payload, default=lambda value: value.value)
 
 

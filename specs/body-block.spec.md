@@ -34,7 +34,7 @@ line per defect, and by a reader as the item's own reason (BODY-50..BODY-52).
 | `question` of exactly 160 characters | BODY-35 | — | — |
 | `[[slice]]` defective | BODY-43..BODY-48 | BODY-50 | BODY-52 |
 | `slice = []` | BODY-49 | — | — |
-| `scope` named | BODY-53..BODY-56 | — | — |
+| `scope` defective | BODY-53..BODY-56 | BODY-50 | BODY-52 |
 | complete valid block | BODY-14 | — | — |
 
 ## Fence and surroundings
@@ -54,7 +54,7 @@ line per defect, and by a reader as the item's own reason (BODY-50..BODY-52).
 - [ ] [BODY-10] A block missing `now`, `next` or `done_when` prints one `body malformed: <key>: <key> is required` line per missing key on stderr, exit `1`.
 - [ ] [BODY-11] A block whose `now`, `next` or `done_when` is not a string prints `body malformed: <key>: <key> must be a string` on stderr, exit `1`.
 - [ ] [BODY-12] A block with all three projection keys present and empty is valid but unfilled: `aco body --check` prints `body incomplete: Now, Next, Done when` on stderr, exit `1`.
-- [ ] [BODY-13] A block carrying a top-level key outside `version`, `now`, `next`, `done_when`, `frozen_until`, `expectation`, `slice` prints `body malformed: <key>: unknown top-level key <key>`, exit `1`.
+- [ ] [BODY-13] A block carrying a top-level key outside `version`, `now`, `next`, `done_when`, `frozen_until`, `scope`, `expectation`, `slice` prints `body malformed: <key>: unknown top-level key <key>`, exit `1`.
 - [ ] [BODY-14] A block whose three projection keys are all non-empty and whose optional tables are valid prints `body ok` on stdout, exit `0`, with nothing on stderr (see E-BODY-01).
 
 ## `[record]`, the state-ref item identity
@@ -104,7 +104,7 @@ line per defect, and by a reader as the item's own reason (BODY-50..BODY-52).
 - [ ] [BODY-45] An entry whose `index` is missing, zero, negative or not an integer prints `body malformed: slice[0].index: slice[0].index must be a positive integer`, exit `1`.
 - [ ] [BODY-46] A second entry repeating an earlier `index` prints `body malformed: slice[1].index: slice[1].index duplicates slice index 4` on stderr, exit `1`.
 - [ ] [BODY-47] An entry whose `title` is missing, blank or not a string prints `body malformed: slice[0].title: slice[0].title must be a non-empty string`, exit `1`.
-- [ ] [BODY-48] An entry key outside `index` and `title` prints `body malformed: slice[0].<key>: unknown key slice[0].<key>` on stderr, exit `1`; per-slice files, done-when and dependencies stay in the prose.
+- [ ] [BODY-48] An entry key outside `index`, `title` and `scope` prints `body malformed: slice[0].<key>: unknown key slice[0].<key>`, exit `1`; per-slice done-when and dependencies stay in the prose.
 - [ ] [BODY-49] A block carrying `slice = []` is valid with nothing left to cut: `aco body --check` prints `body ok`, exit `0`, and the empty table stays present in the body.
 
 ## What a reader does with a defect
@@ -115,10 +115,10 @@ line per defect, and by a reader as the item's own reason (BODY-50..BODY-52).
 
 ## `scope`, the item's own files
 
-- [ ] [BODY-53] A block carrying `scope = ["README.md", "docs"]` is valid: `aco body --check` prints `body ok`, exit `0`, and each entry is one repository-relative path or directory, comma and all.
-- [ ] [BODY-54] A block carrying `scope = []` prints `body malformed: scope: scope must be a non-empty list of repository-relative paths` on stderr, exit `1`; an absent `scope` stays valid and means unknown.
-- [ ] [BODY-55] A `[[slice]]` entry may carry its own `scope = ["docs"]` under the same grammar: `aco body --check` prints `body ok`, exit `0`.
-- [ ] [BODY-56] A rewritten block renders `scope` ahead of the first `[[expectation]]` or `[[slice]]` table, so a re-read body names the same top-level `scope` it was written with.
+- [ ] [BODY-53] A block carrying `scope = ["README.md", "docs"]` is valid, and a `[[slice]]` row may carry its own `scope = ["docs"]` under the same grammar: `aco body --check` prints `body ok`, exit `0`.
+- [ ] [BODY-54] `scope = []` prints `body malformed: scope: scope must name at least one path`, exit `1`; an empty `[[slice]]` row `scope` prints the `slice[0].scope` form. Absent `scope` means unknown, never empty.
+- [ ] [BODY-55] A `scope = ["/etc/passwd"]` entry fails the same way `claim --scope` would: `body malformed: scope: claim scope must be repository-relative: '/etc/passwd'`.
+- [ ] [BODY-56] A valid `scope` renders sorted, deduplicated, ahead of the first `[[expectation]]`/`[[slice]]` table — else TOML binds a bare key to the prior table — so a re-read names the same canonical `scope`.
 
 ## Never
 

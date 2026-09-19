@@ -238,6 +238,14 @@ def _scope_list_entries(scope: object) -> list[str]:
 
 
 def _valid_scope(scope: object) -> tuple[str, ...]:
+    """The one canonical scope form (issue #331): sorted, deduplicated,
+    every entry a validated repository-relative path. Every claim's scope
+    passes through here at creation (`cli._request`) and at rescope
+    (`_combined_scope`), so a live claim's scope is always already this
+    exact form; `board._canonical_scope` calls this same function to
+    project a body's own `scope = [...]`, rather than sorting a second
+    time, so the two stay comparable as tuples regardless of the order
+    either was typed in."""
     result: list[str] = []
     for path in _scope_list_entries(scope):
         if len(path) > MAX_SCOPE_PATH_LENGTH or "\\" in path or _has_control_character(path):
@@ -259,7 +267,7 @@ def _valid_scope(scope: object) -> tuple[str, ...]:
         result.append(path)
     if len(set(result)) != len(result):
         raise InvalidClaimMarkerError("claim scope contains duplicate paths")
-    return tuple(result)
+    return tuple(sorted(result))
 
 
 class WideScopeReason(StrEnum):
@@ -1183,12 +1191,26 @@ def _claim_toml_text(
 
 
 def _claim_toml_scope(data: Mapping[str, object], *, key: str, tip: ObjectId) -> tuple[str, ...]:
+    """`data`'s `scope` field, projected through the one canonicalizer
+    (`_valid_scope`) every live claim's scope already passes through at
+    creation and rescope (issue #331 REVISE finding 1): a claim file
+    written before that canonical order existed can still carry its paths
+    in typed order, so a read here must sort it rather than compare
+    against it unsorted. Never rewrites the ref (this is a read), and
+    never refuses a valid-but-unsorted legacy record -- only content
+    `_valid_scope` itself would refuse from a fresh request, such as a
+    non-repository-relative or duplicated path."""
     raw = data.get("scope")
     if not isinstance(raw, list) or not raw or any(not isinstance(entry, str) for entry in raw):
         raise MalformedStateTreeError(
             f"claim file {key}.toml at {tip} field 'scope' must be a non-empty list of text"
         )
-    return tuple(raw)
+    try:
+        return _valid_scope(raw)
+    except InvalidClaimMarkerError as error:
+        raise MalformedStateTreeError(
+            f"claim file {key}.toml at {tip} has an invalid scope: {error}"
+        ) from error
 
 
 def _claim_toml_resource(

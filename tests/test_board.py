@@ -619,15 +619,91 @@ def test_render_block_round_trips_every_field() -> None:
     toml_text = (
         f"{MINIMAL_BLOCK_TOML}"
         'frozen_until = { trigger = "named trigger", ruled_on = 2026-09-06 }\n'
+        'scope = ["docs/plan.md", "src/widget.py"]\n'
         '[[expectation]]\ntext = "Proposed"\ndefault = "later"\n'
         '[[expectation]]\ntext = "Ruled"\nruling = "yes"\nruled_on = 2026-09-05\n'
         '[[slice]]\nindex = 4\ntitle = "Block contract in issue bodies"\n'
+        'scope = ["src/agent_coordination/board.py"]\n'
     )
     located = board.locate_agent_claim_block(agent_claim_body(toml_text))
 
     reparsed = tomllib.loads(board.render_block(located.data))
 
     assert reparsed == located.data
+
+
+def test_render_block_places_scope_before_expectation_and_slice_tables() -> None:
+    """`render_block` reads its own fixed key order, never `data`'s
+    insertion order (issue #331): a `scope` value that would land after
+    `[[expectation]]`/`[[slice]]` if TOML bound bare keys to the previous
+    table (it would -- `tomllib` attaches a bare `key = value` line to the
+    last open array-of-tables entry) still renders ahead of both, because
+    this dict, unlike raw TOML text, carries `scope` as its own top-level
+    key regardless of where it was inserted."""
+    data = {
+        "version": 1,
+        "now": "N",
+        "next": "X",
+        "done_when": "D",
+        "expectation": [{"text": "E", "default": "later"}],
+        "slice": [{"index": 1, "title": "Row"}],
+        "scope": ["src/widget.py"],
+    }
+
+    rendered = board.render_block(data)
+
+    assert rendered.index("scope =") < rendered.index("[[expectation]]")
+    assert rendered.index("scope =") < rendered.index("[[slice]]")
+
+
+def test_render_block_renders_scope_sorted() -> None:
+    data = {
+        "version": 1,
+        "now": "N",
+        "next": "X",
+        "done_when": "D",
+        "scope": ["src/widget.py", "docs/plan.md"],
+        "slice": [{"index": 1, "title": "Row", "scope": ["b.py", "a.py"]}],
+    }
+
+    rendered = board.render_block(data)
+
+    assert 'scope = ["docs/plan.md", "src/widget.py"]' in rendered
+    assert 'scope = ["a.py", "b.py"]' in rendered
+
+
+def test_render_block_refuses_a_duplicate_scope_entry() -> None:
+    """`_render_scope_array` routes through `protocol._valid_scope` (issue
+    #331 REVISE finding 2), the one scope canonicalizer, rather than
+    silently deduplicating a second time: a duplicate it is ever handed --
+    never a real `cut`/`rule`/`ask` write, which all reuse an
+    already-validated body's own scope -- fails loud instead of vanishing."""
+    data = {
+        "version": 1,
+        "now": "N",
+        "next": "X",
+        "done_when": "D",
+        "scope": ["docs/plan.md", "docs/plan.md"],
+    }
+
+    with pytest.raises(protocol.InvalidClaimMarkerError, match="duplicate paths"):
+        board.render_block(data)
+
+
+def test_render_block_re_renders_a_canonical_scope_body_byte_exact() -> None:
+    """Beweis 1's second half: a body whose `scope` already sits before the
+    tables, canonically ordered -- built through `complete_contract`, the
+    production `render_block` itself, never hand-typed TOML -- re-renders to
+    the exact same bytes."""
+    body = complete_contract(
+        "Next step.",
+        scope=["docs/plan.md", "src/widget.py"],
+        slice=[{"index": 1, "title": "Row", "scope": ["src/agent_coordination/board.py"]}],
+    )
+    located = board.locate_agent_claim_block(body)
+    interior = body[located.content_start : located.content_end]
+
+    assert board.render_block(located.data, located.newline) == interior
 
 
 def test_render_block_escapes_quotes_and_backslashes() -> None:
@@ -1744,6 +1820,58 @@ def test_board_json_and_render_report_an_uncut_slice_entry() -> None:
     assert "UNCUT\n#160: rows 1 uncut" in board.render(projected)
 
 
+def test_board_json_carries_a_scoped_uncut_slice_row_canonically() -> None:
+    """R2 (issue #331 review): the only prior `board --json` uncut-row
+    coverage passed `scope: null` throughout, so a `[[slice]]` row that
+    carries its own `scope = [...]` had never been driven through parse ->
+    board projection -> JSON. Here it survives as that row's canonical
+    (sorted, deduplicated) array; a row without one still omits the key
+    entirely -- the public shape before this lane, proven by the sibling
+    test above."""
+    container = board.Issue(
+        160,
+        "Container",
+        (),
+        complete_contract(
+            "Cut it.",
+            slice=[
+                {
+                    "index": 1,
+                    "title": "Undispatched slice",
+                    "scope": ["src/widget.py", "docs/plan.md"],
+                }
+            ],
+        ),
+        "2026-08-20T00:00:00Z",
+        "2026-08-20T00:00:00Z",
+        kind=board.ItemKind.CONTAINER,
+        children_closed=0,
+        children_total=0,
+    )
+    projected = projected_board(
+        (container,), (), (), (), board.BoardConfig(), now=datetime(2026, 8, 21, tzinfo=UTC)
+    )
+
+    assert projected.uncut == (
+        board.UncutSlices(
+            160, (board.SliceRow(1, "Undispatched slice", ("docs/plan.md", "src/widget.py")),)
+        ),
+    )
+    payload = json.loads(board.board_json(projected))
+    assert payload["uncut"] == [
+        {
+            "item": 160,
+            "rows": [
+                {
+                    "index": 1,
+                    "title": "Undispatched slice",
+                    "scope": ["docs/plan.md", "src/widget.py"],
+                }
+            ],
+        }
+    ]
+
+
 def test_render_names_an_uncut_slice_by_the_state_ref_id_under_the_pin() -> None:
     """`UNCUT` prints `item_label`'s own id under `storage = "state-ref"`
     (issue #300 residual 2), the same id `_uncut_line` names every other
@@ -2116,6 +2244,7 @@ def test_parse_body_reads_a_valid_minimal_block() -> None:
     assert parsed.read_state is board.BodyReadState.VALID
     assert parsed.contract == board.Contract("N", "X", "D", ())
     assert parsed.contract_complete is True
+    assert parsed.scope is None
 
 
 def test_parse_body_reads_a_skeleton_block_as_incomplete_but_valid() -> None:
@@ -2315,6 +2444,88 @@ def test_parse_body_refuses_a_top_level_array_key_that_is_not_a_list(
     assert parsed.contract.defects[0].field == key
 
 
+@pytest.mark.parametrize(
+    ("scope_toml", "expected_message_part"),
+    [
+        pytest.param("scope = []\n", "scope must name at least one path", id="empty-list"),
+        pytest.param(
+            'scope = ["/etc/passwd"]\n', "must be repository-relative", id="absolute-path"
+        ),
+        pytest.param('scope = ["../outside.py"]\n', "must be repository-relative", id="dot-dot"),
+        pytest.param('scope = [""]\n', protocol.SCOPE_ENTRIES_MUST_BE_CANONICAL, id="empty-entry"),
+    ],
+)
+def test_parse_body_refuses_an_invalid_top_level_scope(
+    scope_toml: str, expected_message_part: str
+) -> None:
+    """An empty `scope` list is this module's own defect sentence; every
+    other refusal (absolute, `..`, an empty entry) is `protocol._valid_scope`'s
+    own sentence, forwarded verbatim -- the one path grammar `claim` already
+    owns, never a second one (issue #331)."""
+    parsed = board.parse_body(agent_claim_body(f"{MINIMAL_BLOCK_TOML}{scope_toml}"))
+
+    assert parsed.read_state is board.BodyReadState.MALFORMED
+    defect = parsed.contract.defects[0]
+    assert defect.field == "scope"
+    assert expected_message_part in defect.message
+
+
+@pytest.mark.parametrize(
+    ("scope_toml", "expected_message_part"),
+    [
+        pytest.param("scope = []\n", "slice[0].scope must name at least one path", id="empty-list"),
+        pytest.param(
+            'scope = ["/etc/passwd"]\n', "must be repository-relative", id="absolute-path"
+        ),
+    ],
+)
+def test_parse_body_refuses_an_invalid_slice_scope(
+    scope_toml: str, expected_message_part: str
+) -> None:
+    """A `[[slice]]` row's own `scope` goes through the exact same grammar
+    and the exact same empty-list sentence as the block's top-level one,
+    only prefixed with the row (issue #331)."""
+    toml_text = f'{MINIMAL_BLOCK_TOML}[[slice]]\nindex = 1\ntitle = "Row"\n{scope_toml}'
+
+    parsed = board.parse_body(agent_claim_body(toml_text))
+
+    assert parsed.read_state is board.BodyReadState.MALFORMED
+    defect = parsed.contract.defects[0]
+    assert defect.field == "slice[0].scope"
+    assert expected_message_part in defect.message
+
+
+def test_parse_body_refuses_scope_as_an_unknown_expectation_key() -> None:
+    """`scope` is a field of the block's top level and of `[[slice]]` rows
+    only -- an `[[expectation]]` entry never grew it, so writing one there
+    still refuses by name (issue #331 does not widen
+    `_EXPECTATION_KNOWN_KEYS`)."""
+    toml_text = (
+        f'{MINIMAL_BLOCK_TOML}[[expectation]]\ntext = "E"\ndefault = "later"\nscope = ["src"]\n'
+    )
+
+    parsed = board.parse_body(agent_claim_body(toml_text))
+
+    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert parsed.contract.defects[0] == board.ContractDefect(
+        "expectation[0].scope", "unknown key expectation[0].scope"
+    )
+
+
+def test_parse_body_scope_defects_surface_through_the_body_check_rendering_path() -> None:
+    """`cli._body_shape_defects` -- what `aco body --check` and `check
+    <item>` both call -- is exactly `board.parse_body` plus
+    `board.body_defect_text` over its defects; proven at that board.py level
+    so this does not need `cli.py` at all (issue #331)."""
+    body = agent_claim_body(f"{MINIMAL_BLOCK_TOML}scope = []\n")
+
+    parsed = board.parse_body(body)
+
+    assert parsed.read_state is board.BodyReadState.MALFORMED
+    reported = tuple(board.body_defect_text(defect) for defect in parsed.contract.defects)
+    assert reported == ("body malformed: scope: scope must name at least one path",)
+
+
 def test_parse_body_handles_a_body_with_no_trailing_newline() -> None:
     """`_line_ending` (used while walking every line for a fenced block)
     must also return `""` for the last line of a body that ends without a
@@ -2353,6 +2564,27 @@ def test_parse_body_reads_slice_entries_as_still_uncut() -> None:
     parsed = board.parse_body(agent_claim_body(toml_text))
 
     assert parsed.slices == (board.SliceRow(4, "Block contract in issue bodies"),)
+
+
+def test_parse_body_projects_scope_top_level_and_per_slice_canonically() -> None:
+    """Both the block's own `scope` and a `[[slice]]` row's `scope` project
+    sorted regardless of the order they were written in (issue #331) -- the
+    same normalisation `render_block` renders them in. A duplicate entry is
+    never silently dropped here; `protocol._valid_scope` already refuses one
+    as a defect before this projection is ever built (proven for `claim` in
+    `test_claim_scope_must_be_canonical_repository_relative_paths`), so the
+    only reordering left for an already-valid list is the sort."""
+    toml_text = (
+        f"{MINIMAL_BLOCK_TOML}"
+        'scope = ["src/widget.py", "docs/plan.md"]\n'
+        '[[slice]]\nindex = 1\ntitle = "Row"\nscope = ["b.py", "a.py"]\n'
+    )
+
+    parsed = board.parse_body(agent_claim_body(toml_text))
+
+    assert parsed.read_state is board.BodyReadState.VALID
+    assert parsed.scope == ("docs/plan.md", "src/widget.py")
+    assert parsed.slices == (board.SliceRow(1, "Row", ("a.py", "b.py")),)
 
 
 def test_parse_body_recognizes_a_crlf_fenced_block() -> None:

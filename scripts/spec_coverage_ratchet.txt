@@ -6,10 +6,6 @@
 # Seeded on 19.09.2026 with the ruled but not yet built criteria of the first
 # two contract specs (#326), each with the item that owns building it.
 
-BODY-53  # #309
-BODY-54  # #309
-BODY-55  # #309
-BODY-56  # #309
 CLAIM-53  # #309
 CLAIM-54  # #309
 CLAIM-55  # #309
