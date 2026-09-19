@@ -1,8 +1,0 @@
-claim_id = "8e81ae6835c34c38b42e2c3e1a5a4d68"
-agent = "Claude head (coordinator)"
-role = "builder"
-base = "2c0a55ab28d6174849f3f564cb18170449deccf4"
-branch = "claude/issue-345-spec-ask-rule-check"
-scope = ["scripts/spec_coverage_ratchet.txt", "specs/ask.spec.md", "specs/check.spec.md", "specs/rule.spec.md"]
-opened_commit = "8b1f653b86e7c8512506d1c1f9fcbb43909972f0"
-whole_reason = "three spec files of one wave plus the shared append-only ratchet"
