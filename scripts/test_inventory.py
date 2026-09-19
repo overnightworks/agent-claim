@@ -18,9 +18,10 @@ Three sections, each sorted so two runs over the same file are byte-identical:
 (a) **Spec IDs** -- every criterion ID cited after a ``Spec:`` marker in a ``test_*``
     docstring (the comma-separated list that follows ``Spec:`` up to the first
     ``--``/em-dash/``.``; a prose mention elsewhere in the docstring is not a citation).
-    Dormant for aco: there is no ``specs/`` tree or ``spec_coverage.py`` owner yet, so no test
-    docstring carries a ``Spec:`` marker and this section is always empty -- the detection
-    itself needs no aco-specific change, it simply finds nothing until a spec system exists.
+    Dormant for aco: ``specs/`` exists but there is no ``spec_coverage.py`` owner yet, so no
+    test docstring carries a ``Spec:`` marker and this section is always empty -- the
+    detection itself needs no aco-specific change, it simply finds nothing until a spec
+    coverage gate exists.
 (b) **Assert literals** -- every literal a test *asserts about*, with the tests that hold it.
     A literal is a ``str``/``bytes``/``int``/``bool`` constant (an f-string contributes its
     constant parts). It counts when it sits in an *assertion site* -- a bare ``assert``'s test

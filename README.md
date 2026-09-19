@@ -90,12 +90,12 @@ replacement untouched; uncertain ownership also blocks a launch. Run a manual na
 resume and recovery serially: they do not share a provider lock. An unmanaged live
 conversation is preserved but cannot be attached to a new ACO console.
 
-The local mapping upgrades additively to version 3 when a new registration succeeds,
-preserving every existing project field with an explicit provider. Older installations
-refuse version 3 rather than silently dropping the external-process receipt; an older
-provider-aware installation refuses an unsupported Grok record rather than
-silently dropping provider identity; native provider resume remains available
-independently.
+The local mapping requires version 3 with an explicit provider per project; `aco`
+refuses a mapping an older installation wrote with one sentence instead of migrating
+it. Older installations, in turn, refuse a version 3 mapping rather than silently
+dropping the external-process receipt; an older provider-aware installation refuses
+an unsupported Grok record rather than silently dropping provider identity; native
+provider resume remains available independently.
 
 `aco run` works outside a Git checkout and never accepts `--repo`. It resumes
 the registered UUID in a dedicated local tmux socket and opens one GNOME
