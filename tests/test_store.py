@@ -13,6 +13,7 @@ import subprocess
 import threading
 from collections import Counter
 from collections.abc import Callable
+from enum import Enum
 from pathlib import Path
 from typing import NamedTuple
 
@@ -3330,22 +3331,30 @@ def _fail_temporary_unlink(
     monkeypatch.setattr(Path, "unlink", fake_unlink)
 
 
+class _RefDeletionFailure(Enum):
+    """The three independent ways `_delete_export_ref`'s guard (issue #298,
+    the third and fourth 19.09.2026 gate REVISEs) must survive an injected
+    `update-ref -d EXPORT_BUNDLE_REF` failure: a nonzero exit matching a
+    real `git update-ref` refusal, a raised `OSError` matching an
+    invocation that never reached git at all, and a nonzero exit whose
+    stderr is not valid UTF-8, matching a `.decode()` failure."""
+
+    EXITS_NONZERO = "exits-nonzero"
+    RAISES = "raises"
+    RETURNS_INVALID_UTF8_STDERR = "returns-invalid-utf8-stderr"
+
+
 def _fail_export_ref_deletion(
     monkeypatch: pytest.MonkeyPatch,
     *,
     fail_bundle_create: bool,
-    ref_deletion_raises: bool,
+    ref_deletion_failure: _RefDeletionFailure,
 ) -> None:
     """Patch `process.run_captured` so the bundle-create subprocess and the
     `EXPORT_BUNDLE_REF` cleanup fail the way each row of the parametrized
-    cleanup-independence family below needs -- a nonzero exit for the
-    cleanup, matching a real `git update-ref` refusal, or a raised
-    `OSError`, matching an invocation that never reached git at all (issue
-    #298, the third 19.09.2026 gate REVISE: `_run_git` only wraps
-    `ExecutableMissingError`/`ProcessTimedOutError`, so a broader exception
-    must be shown to actually reach `_delete_export_ref`). Every other
-    invocation, including the real `update-ref` that points
-    `EXPORT_BUNDLE_REF` at `tip`, runs for real."""
+    cleanup-independence family below needs. Every other invocation,
+    including the real `update-ref` that points `EXPORT_BUNDLE_REF` at
+    `tip`, runs for real."""
     real_run_captured = process.run_captured
 
     def fake_run_captured(arguments: list[str]) -> process.CapturedResult:
@@ -3354,8 +3363,12 @@ def _fail_export_ref_deletion(
                 exit_status=1, stdout=b"", stderr=b"simulated bundle create failure"
             )
         if arguments[-3:] == ["update-ref", "-d", store.EXPORT_BUNDLE_REF]:
-            if ref_deletion_raises:
+            if ref_deletion_failure is _RefDeletionFailure.RAISES:
                 raise OSError("simulated ref-deletion invocation failure")
+            if ref_deletion_failure is _RefDeletionFailure.RETURNS_INVALID_UTF8_STDERR:
+                return process.CapturedResult(
+                    exit_status=1, stdout=b"", stderr=b"\xff\xfe not valid utf-8"
+                )
             return process.CapturedResult(
                 exit_status=1, stdout=b"", stderr=b"simulated ref cleanup failure"
             )
@@ -3437,7 +3450,30 @@ def _arrange_a_failed_bundle_create_with_a_failed_ref_cleanup(
     store.fetch_state(worktree=worktree, remote=str(bare_remote))
     destination = tmp_path / "export" / "state.bundle"
     destination.parent.mkdir()
-    _fail_export_ref_deletion(monkeypatch, fail_bundle_create=True, ref_deletion_raises=False)
+    _fail_export_ref_deletion(
+        monkeypatch,
+        fail_bundle_create=True,
+        ref_deletion_failure=_RefDeletionFailure.EXITS_NONZERO,
+    )
+    return tip, destination
+
+
+def _arrange_a_successful_publish_with_invalid_utf8_ref_cleanup_stderr(
+    monkeypatch: pytest.MonkeyPatch,
+    bare_remote: Path,
+    worktree: Path,
+    tmp_path: Path,
+    attempted_unlinks: list[Path],
+) -> tuple[protocol.ObjectId, Path]:
+    tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    store.fetch_state(worktree=worktree, remote=str(bare_remote))
+    destination = tmp_path / "export" / "state.bundle"
+    destination.parent.mkdir()
+    _fail_export_ref_deletion(
+        monkeypatch,
+        fail_bundle_create=False,
+        ref_deletion_failure=_RefDeletionFailure.RETURNS_INVALID_UTF8_STDERR,
+    )
     return tip, destination
 
 
@@ -3466,7 +3502,9 @@ def _arrange_a_failed_bundle_create_with_both_cleanup_steps_failing(
     store.fetch_state(worktree=worktree, remote=str(bare_remote))
     destination = tmp_path / "export" / "state.bundle"
     destination.parent.mkdir()
-    _fail_export_ref_deletion(monkeypatch, fail_bundle_create=True, ref_deletion_raises=True)
+    _fail_export_ref_deletion(
+        monkeypatch, fail_bundle_create=True, ref_deletion_failure=_RefDeletionFailure.RAISES
+    )
     _fail_temporary_unlink(monkeypatch, destination, attempted_unlinks)
     return tip, destination
 
@@ -3499,6 +3537,18 @@ def _arrange_a_failed_bundle_create_with_both_cleanup_steps_failing(
             destination_exists_after=False,
             destination_bytes_after=None,
             verify_bundle=False,
+            temp_leftover_expected=False,
+            postcheck=_verify_and_remove_the_leftover_export_ref,
+        ),
+        _CleanupFailureCase(
+            id="successful-publish-ref-cleanup-stderr-is-invalid-utf8",
+            arrange=_arrange_a_successful_publish_with_invalid_utf8_ref_cleanup_stderr,
+            error_match="could not remove the temporary export ref",
+            message_fragments=(store.EXPORT_BUNDLE_REF, "can't decode"),
+            cause_fragment=None,
+            destination_exists_after=True,
+            destination_bytes_after=None,
+            verify_bundle=True,
             temp_leftover_expected=False,
             postcheck=_verify_and_remove_the_leftover_export_ref,
         ),

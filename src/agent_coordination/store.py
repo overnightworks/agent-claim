@@ -1336,13 +1336,17 @@ def _delete_export_ref(worktree: Path) -> str | None:
     a broad catch is the honest design: nothing here is swallowed, the
     caught error is carried verbatim into the leftover description
     `_clear_export_artifacts` returns and, from there, into the raised
-    `ClaimError` and its `__cause__`."""
+    `ClaimError` and its `__cause__`. The nonzero-exit branch's own
+    `stderr.decode()` sits inside this same guard for that reason too (the
+    fourth 19.09.2026 gate REVISE): invalid UTF-8 in git's own stderr must
+    still reach the caller as a leftover description, not escape as an
+    unguarded `UnicodeDecodeError` ahead of the temporary file's cleanup."""
     try:
         result = _run_git(worktree, ["update-ref", "-d", EXPORT_BUNDLE_REF])
+        if result.exit_status != 0:
+            return result.stderr.decode().strip() or _UNKNOWN_GIT_FAILURE
     except Exception as error:
         return str(error)
-    if result.exit_status != 0:
-        return result.stderr.decode().strip() or _UNKNOWN_GIT_FAILURE
     return None
 
 
