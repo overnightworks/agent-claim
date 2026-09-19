@@ -3989,7 +3989,7 @@ def test_blocked_check_reports_a_foreign_dependency_and_the_out_of_order_warning
     )
     item = next(item for item in projected.items if item.number == 304)
 
-    error_check = issue_claim._blocked_check(item, None, REPOSITORY)
+    error_check = issue_claim._blocked_check(item, None, REPOSITORY, board.Storage.GITHUB)
     assert error_check == issue_claim.SliceCheck(
         "error",
         "blocked",
@@ -3997,9 +3997,34 @@ def test_blocked_check_reports_a_foreign_dependency_and_the_out_of_order_warning
         "pass --out-of-order REASON to claim it anyway",
         issue=304,
     )
-    warning_check = issue_claim._blocked_check(item, "reason", REPOSITORY)
+    warning_check = issue_claim._blocked_check(item, "reason", REPOSITORY, board.Storage.GITHUB)
     assert warning_check is not None
     assert warning_check.level == "warning"
+
+
+def test_blocked_check_labels_a_local_dependency_under_the_state_ref_pin() -> None:
+    """Issue #300 (Codex Terra review): a same-repository blocker prints
+    `board.item_label`'s own `aco-...` id under `storage = STATE_REF`, the
+    same as everywhere else that pin already changes narrative output --
+    never the bare `#n` GitHub uses."""
+    issue = board_issue(304, "Local blocked", agent_claim_body(MINIMAL_BLOCK_TOML))
+    dependencies = {304: (block_dependency(9, repository=REPOSITORY),)}
+    projected = projected_board(
+        (issue,),
+        (),
+        (),
+        (),
+        board.BoardConfig(),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+        dependencies=dependencies,
+    )
+    item = next(item for item in projected.items if item.number == 304)
+
+    check = issue_claim._blocked_check(item, None, REPOSITORY, board.Storage.STATE_REF)
+
+    assert check is not None
+    assert board.item_label(9, board.Storage.STATE_REF) in check.text
+    assert "#9" not in check.text
 
 
 @dataclass
@@ -9838,6 +9863,28 @@ def test_check_reads_blockers_from_the_forge_and_qualifies_foreign_ones(
     assert run_check(CHECKED_ISSUE) == 1
     assert capsys.readouterr().err == f"ISSUE #{CHECKED_ISSUE} blocked by #7, other/repo#9\n"
     assert client.requests == 2
+
+
+def test_issue_check_labels_a_local_blocker_under_the_state_ref_pin() -> None:
+    """Issue #300 (Codex Terra review): `_issue_check` reads the repository's
+    own `storage` pin for a local blocker exactly as `claim`'s
+    `_blocked_check` does -- a foreign one (`other/repo#9`) is unaffected,
+    since it is never local to this repository's own storage pin
+    (`board.open_blocker_label`)."""
+    client = FakeForge(
+        board_dependencies={CHECKED_ISSUE: (open_dependency(7), open_dependency(9, "other/repo"))}
+    )
+
+    outcome = issue_claim._issue_check(
+        client,
+        REPOSITORY,
+        agent_claim_body(MINIMAL_BLOCK_TOML),
+        CHECKED_ISSUE,
+        storage=board.Storage.STATE_REF,
+    )
+
+    local_label = board.item_label(7, board.Storage.STATE_REF)
+    assert outcome.line == f"ISSUE #{CHECKED_ISSUE} blocked by {local_label}, other/repo#9"
 
 
 def test_check_reads_a_pull_request_in_one_dispatch_landing_and_classification_request(

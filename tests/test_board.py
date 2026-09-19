@@ -300,6 +300,31 @@ def test_append_expectation_writes_the_card_fields() -> None:
             id="external-xlink-href",
         ),
         pytest.param(
+            "<svg><a/href=http://evil.example></a></svg>",
+            "must not reference an href outside the document",
+            id="external-href-after-slash",
+        ),
+        pytest.param(
+            '<svg><animate attributeName="href" to="http://evil.example"/></svg>',
+            "must not animate href to an external target",
+            id="smil-animated-href",
+        ),
+        pytest.param(
+            "<svg><animate attributeName=href to=http://evil.example/></svg>",
+            "must not animate href to an external target",
+            id="smil-animated-href-unquoted",
+        ),
+        pytest.param(
+            '<svg><animate attributeName="xlink:href" to="http://evil.example"/></svg>',
+            "must not animate href to an external target",
+            id="smil-animated-xlink-href",
+        ),
+        pytest.param(
+            '<svg><animate attributeName="href" values="#a;http://evil.example"/></svg>',
+            "must not animate href to an external target",
+            id="smil-animated-href-values-later-segment-external",
+        ),
+        pytest.param(
             "<svg><style>rect{fill:url(http://evil.example/x.png)}</style></svg>",
             "must not contain a url() reference",
             id="style-element-url",
@@ -364,6 +389,43 @@ def test_expectation_picture_is_refused_by_both_the_parser_and_the_writer(
     card = board.ExpectationCardFields(picture=picture)
     with pytest.raises(protocol.ClaimError, match=re.escape(match)):
         board.append_expectation(valid_body, "New question?", "yes", card=card)
+
+
+def test_expectation_picture_allows_an_internal_anchor_href_with_surrounding_spaces() -> None:
+    """`href = "#x"` (space around `=`) targets the same document -- the
+    external-href regex's final, unquoted-value alternative is a zero-width
+    lookahead, so a greedy `\\s*` must not be free to backtrack onto that
+    whitespace and misread it as an external value's first character (issue
+    #300 residual 5, #234's own rule)."""
+    picture = '<svg><a href = "#x"><circle cx="5" cy="5" r="4"/></a></svg>'
+    assert board._expectation_picture_defect(picture) is None
+
+    body = agent_claim_body(MINIMAL_BLOCK_TOML)
+    updated = board.append_expectation(
+        body, "New question?", "yes", card=board.ExpectationCardFields(picture=picture)
+    )
+    assert board.parse_body(updated).read_state is board.BodyReadState.VALID
+
+
+def test_expectation_picture_allows_an_unrelated_animation_to_an_external_url() -> None:
+    """`attributeName` and `to` are bound to the same SMIL element (issue
+    #300, Codex Terra review): an `<animate>` that retargets `href` to an
+    internal anchor and a *different* `<animate>` that points an unrelated
+    attribute (`x`) at an external URL are two separate, independently
+    harmless elements, not the href-hijack the rule refuses."""
+    picture = (
+        '<svg><animate attributeName="href" to="#ok"/>'
+        '<animate attributeName="x" to="http://evil.example"/></svg>'
+    )
+    assert board._expectation_picture_defect(picture) is None
+
+
+def test_expectation_picture_allows_an_animated_href_with_every_values_segment_internal() -> None:
+    """`values` lists every keyframe `;`-separated (issue #300 residual):
+    two internal anchors are as harmless as one, so a picture must not be
+    refused just because `values` contains a semicolon."""
+    picture = '<svg><animate attributeName="href" values="#a;#b"/></svg>'
+    assert board._expectation_picture_defect(picture) is None
 
 
 def test_append_expectation_refuses_an_overlong_question() -> None:
@@ -1342,6 +1404,88 @@ def test_board_shows_a_container_child_blocked_by_another_open_issue() -> None:
     ]
 
 
+def test_board_names_a_container_childs_blocker_by_the_state_ref_id_under_the_pin() -> None:
+    """The same open-children note (issue #300 residual 2, `_open_child_cell`)
+    prints `item_label`'s own id under `storage = "state-ref"` for both the
+    child and its blocker -- never the bare `#n` the `Storage.GITHUB` case
+    above still shows."""
+    container = board.Issue(
+        120,
+        "Container",
+        (),
+        "",
+        "2026-08-20T00:00:00Z",
+        "2026-08-20T00:00:00Z",
+        kind=board.ItemKind.CONTAINER,
+        children_closed=0,
+        children_total=1,
+    )
+    blocker = board_issue(130, "Blocker", complete_contract("Ship it."))
+    open_child, child_dependencies = blocked_issue(
+        121, "Open child", block_dependency(130), next_step="Ship it."
+    )
+
+    projected = projected_board(
+        (container, blocker, open_child),
+        (),
+        (),
+        (),
+        board.BoardConfig(storage=board.Storage.STATE_REF),
+        dependencies=child_dependencies,
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+        children={120: (board.ChildItem(121, board.ChildState.OPEN),)},
+    )
+    child_id = board.item_label(121, board.Storage.STATE_REF)
+    blocker_id = board.item_label(130, board.Storage.STATE_REF)
+    container_id = board.item_label(120, board.Storage.STATE_REF)
+
+    rendered = board.render(projected, storage=board.Storage.STATE_REF)
+
+    assert f"{container_id} 0/1 closed; open: {child_id} (blocked by {blocker_id})" in rendered
+    assert "#120" not in rendered
+    assert "#121" not in rendered
+    assert "#130" not in rendered
+
+
+@pytest.mark.parametrize(
+    ("storage", "blocker_label", "bare_blocker_number"),
+    [
+        pytest.param(board.Storage.GITHUB, "#9", None, id="github"),
+        pytest.param(
+            board.Storage.STATE_REF,
+            board.item_label(9, board.Storage.STATE_REF),
+            "#9",
+            id="state-ref",
+        ),
+    ],
+)
+def test_a_blocked_items_reason_and_blockers_column_print_the_id_under_the_pin(
+    storage: board.Storage, blocker_label: str, bare_blocker_number: str | None
+) -> None:
+    """`item.actionable_reason` (`_claim_or_completeness_reason`) and the row
+    table's `BLOCKERS` column (`board.render`) both name an open blocker by
+    `open_blocker_label`'s own `storage`-gated id (issue #300 residual 2,
+    #292's own rule) -- unchanged `#n` under the default `Storage.GITHUB`."""
+    blocked, dependencies = blocked_issue(10, "Blocked", block_dependency(9))
+    blocker = board_issue(9, "Blocker", complete_contract("Resolve it."))
+    projected = projected_board(
+        (blocker, blocked),
+        (),
+        (),
+        (),
+        board.BoardConfig(storage=storage),
+        dependencies=dependencies,
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+    )
+    item = next(item for item in projected.items if item.number == 10)
+
+    assert item.actionable_reason == f"blocked by {blocker_label}"
+    rendered = board.render(projected, storage=storage)
+    assert blocker_label in rendered
+    if bare_blocker_number is not None:
+        assert bare_blocker_number not in rendered
+
+
 def test_board_json_splits_a_container_childs_foreign_blocker() -> None:
     """`board --json`'s `container.open_children[].blocked_by` projects the
     same way `BoardItem.open_blockers` does (#150 A2): local ints, with the
@@ -1598,6 +1742,37 @@ def test_board_json_and_render_report_an_uncut_slice_entry() -> None:
         {"item": 160, "rows": [{"index": 1, "title": "Undispatched slice"}]}
     ]
     assert "UNCUT\n#160: rows 1 uncut" in board.render(projected)
+
+
+def test_render_names_an_uncut_slice_by_the_state_ref_id_under_the_pin() -> None:
+    """`UNCUT` prints `item_label`'s own id under `storage = "state-ref"`
+    (issue #300 residual 2), the same id `_uncut_line` names every other
+    item by -- never the bare `#n` `board.render` still shows under the
+    default `Storage.GITHUB` above."""
+    container = board.Issue(
+        160,
+        "Container",
+        (),
+        complete_contract("Cut it.", slice=slice_entries("Undispatched slice")),
+        "2026-08-20T00:00:00Z",
+        "2026-08-20T00:00:00Z",
+        kind=board.ItemKind.CONTAINER,
+        children_closed=0,
+        children_total=0,
+    )
+    projected = projected_board(
+        (container,),
+        (),
+        (),
+        (),
+        board.BoardConfig(storage=board.Storage.STATE_REF),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+    )
+
+    rendered = board.render(projected, storage=board.Storage.STATE_REF)
+
+    assert f"UNCUT\n{board.item_label(160, board.Storage.STATE_REF)}: rows 1 uncut" in rendered
+    assert "#160" not in rendered
 
 
 def test_board_json_and_render_name_several_uncut_rows_by_index() -> None:

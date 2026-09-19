@@ -194,9 +194,15 @@ def _expectation_cards(
     )
 
 
-def _lane_card(item: board.BoardItem, claimant: LaneClaimant, *, repository: str) -> LaneCard:
+def _lane_card(
+    item: board.BoardItem,
+    claimant: LaneClaimant,
+    *,
+    repository: str,
+    storage: board.Storage,
+) -> LaneCard:
     blocked_by = ", ".join(
-        board.open_blocker_label(reference, repository) for reference in item.open_blockers
+        board.open_blocker_label(reference, repository, storage) for reference in item.open_blockers
     )
     return LaneCard(
         item=item.number,
@@ -225,7 +231,11 @@ def _item_part_state(item: board.BoardItem) -> TopicPartState:
 
 
 def _topic_part(
-    child: board.ChildItem, items_by_number: Mapping[int, board.BoardItem], *, repository: str
+    child: board.ChildItem,
+    items_by_number: Mapping[int, board.BoardItem],
+    *,
+    repository: str,
+    storage: board.Storage,
 ) -> TopicPart:
     """`child` is always open here: `board.py`'s own `_container_progress`
     filters `ContainerProgress.open_children` to `ChildState.OPEN` before
@@ -235,20 +245,20 @@ def _topic_part(
     item = items_by_number.get(child.number)
     state = TopicPartState.OPEN if item is None else _item_part_state(item)
     blocked_by = ", ".join(
-        board.open_blocker_label(reference, repository) for reference in child.blocked_by
+        board.open_blocker_label(reference, repository, storage) for reference in child.blocked_by
     )
     return TopicPart(child.number, item.title if item else None, state, blocked_by or None)
 
 
-def _standalone_topic(item: board.BoardItem, *, repository: str) -> Topic:
+def _standalone_topic(item: board.BoardItem, *, repository: str, storage: board.Storage) -> Topic:
     blocked_by = ", ".join(
-        board.open_blocker_label(reference, repository) for reference in item.open_blockers
+        board.open_blocker_label(reference, repository, storage) for reference in item.open_blockers
     )
     part = TopicPart(item.number, item.title, _item_part_state(item), blocked_by or None)
     return Topic(item=item.number, title=item.title, closed=0, total=1, parts=(part,))
 
 
-def _topics(projected: board.Board) -> tuple[Topic, ...]:
+def _topics(projected: board.Board, *, storage: board.Storage) -> tuple[Topic, ...]:
     """Containers (with their currently open children -- `board.py` never
     exposes a closed child's number or title, so those count only toward
     `closed`/`total`), then standalone items, each its own single-part topic
@@ -259,7 +269,9 @@ def _topics(projected: board.Board) -> tuple[Topic, ...]:
     for item in projected.items:
         if item.container is not None:
             parts = tuple(
-                _topic_part(child, items_by_number, repository=projected.repository)
+                _topic_part(
+                    child, items_by_number, repository=projected.repository, storage=storage
+                )
                 for child in item.container.open_children
             )
             topics.append(
@@ -272,7 +284,7 @@ def _topics(projected: board.Board) -> tuple[Topic, ...]:
                 )
             )
         elif item.container_parent is None:
-            topics.append(_standalone_topic(item, repository=projected.repository))
+            topics.append(_standalone_topic(item, repository=projected.repository, storage=storage))
     return tuple(topics)
 
 
@@ -349,7 +361,12 @@ def build_page(projected: board.Board, sources: BoardSources) -> BoardPage:
         )
     )
     lanes = tuple(
-        _lane_card(item, sources.claimants[item.number], repository=projected.repository)
+        _lane_card(
+            item,
+            sources.claimants[item.number],
+            repository=projected.repository,
+            storage=sources.storage,
+        )
         for item in projected.items
         if item.number in sources.claimants
     )
@@ -363,7 +380,7 @@ def build_page(projected: board.Board, sources: BoardSources) -> BoardPage:
         state_tip=sources.state_tip,
         cards=cards,
         lanes=lanes,
-        topics=_topics(projected),
+        topics=_topics(projected, storage=sources.storage),
         landed=landed,
         landings_derivable=projected.landings_derivable,
         storage=sources.storage,

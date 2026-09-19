@@ -274,12 +274,19 @@ class IssueDependency:
     closed_at: datetime | None = None
 
 
-def open_blocker_label(reference: IssueReference, repository: str) -> str:
+def open_blocker_label(
+    reference: IssueReference, repository: str, storage: Storage = Storage.GITHUB
+) -> str:
     """How one entry of `BoardItem.open_blockers` (or `ChildItem.blocked_by`)
     is named against the board's own `repository`: a same-repository
-    blocker is its bare local number, `#n`; a foreign one is the qualified
-    `owner/repo#n` (`IssueReference.__str__`)."""
-    return f"#{reference.number}" if reference.repository == repository else str(reference)
+    blocker prints `item_label`'s own id under `storage` (issue #292,
+    Grok-Delta review of #300) -- unchanged `#n` under the default
+    `Storage.GITHUB`; a foreign one is always the qualified `owner/repo#n`
+    (`IssueReference.__str__`), since a foreign reference is never local to
+    this repository's own storage pin."""
+    if reference.repository != repository:
+        return str(reference)
+    return item_label(reference.number, storage)
 
 
 def _blocker_sort_key(reference: IssueReference, repository: str) -> tuple[int, str, int]:
@@ -931,9 +938,63 @@ def _expectation_example_defect(value: object) -> str | None:
 
 
 _EXPECTATION_PICTURE_EVENT_HANDLER_ATTRIBUTE = re.compile(r"[\s/]on[a-z]+\s*=", re.IGNORECASE)
+# `/` joins `[\s:]` as a separator so `<a/href=…>` (slash instead of a space
+# before the attribute) is still caught; the final alternative's class adds
+# `\s` so a greedy `\s*` that backtracks into the gap between `=` and a
+# quoted value (`href = "#x"`) cannot land on that whitespace and misread it
+# as an unquoted external value -- both #300 residuals of #234's own rule.
 _EXPECTATION_PICTURE_EXTERNAL_HREF = re.compile(
-    r'(?:^|[\s:])href\s*=\s*(?:"(?!#)|\'(?!#)|(?!["\'#]))', re.IGNORECASE
+    r'(?:^|[\s:/])href\s*=\s*(?:"(?!#)|\'(?!#)|(?![\s"\'#]))', re.IGNORECASE
 )
+# SMIL can retarget `href` without ever writing `href=` itself (issue #300,
+# residual of #234): `<animate attributeName="href" to="http://…">` swaps
+# the target after the document loads, and `xlink:href` is the same escape
+# under its namespaced spelling. Refused only when both attributes sit on the
+# same element (Codex Terra review of #300): scanning each `<...>` tag on its
+# own keeps an unrelated `attributeName`/`to` pair on a different element from
+# falsely refusing the picture. Both attributes accept SMIL's own quoting
+# forms -- double-quoted, single-quoted, or bare -- mirroring
+# `_EXPECTATION_PICTURE_EXTERNAL_HREF`'s own unquoted-value check above.
+_EXPECTATION_PICTURE_SMIL_HREF_ATTRIBUTE = re.compile(
+    r"attributename\s*=\s*(?:\"(?:xlink:)?href\"|'(?:xlink:)?href'|(?:xlink:)?href(?=[\s/>]))",
+    re.IGNORECASE,
+)
+# `values` lists a `;`-separated sequence of keyframes (SMIL's own syntax),
+# so a rule that only reads the first character after `=` misses a later
+# external segment such as `values="#a;http://evil.example"` (issue #300
+# residual, Codex delta). The regex only captures the raw attribute value in
+# each of SMIL's own quoting forms; `_expectation_picture_smil_external_target`
+# below splits it on `;` and refuses if any trimmed segment does not start
+# with `#`, so `to`/`from` (which never carry a `;`) are covered by the same
+# one-segment case.
+_EXPECTATION_PICTURE_SMIL_TARGET_ATTRIBUTE = re.compile(
+    r"""\b(?:to|from|values)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]*))""", re.IGNORECASE
+)
+_EXPECTATION_PICTURE_SVG_ELEMENT = re.compile(r"<[^<>]+>")
+
+
+def _expectation_picture_smil_external_target(element: str) -> bool:
+    """Whether `element` sets SMIL `to`, `from`, or `values` to any
+    `;`-separated segment that does not start with `#` (issue #300
+    residual): `values` can list several keyframes, so every segment is
+    checked, not only the value's first character."""
+    for match in _EXPECTATION_PICTURE_SMIL_TARGET_ATTRIBUTE.finditer(element):
+        raw = next(group for group in match.groups() if group is not None)
+        if any(not segment.strip().startswith("#") for segment in raw.split(";")):
+            return True
+    return False
+
+
+def _expectation_picture_smil_external_href(value: str) -> bool:
+    """Whether any single SVG element in `value` both retargets `href` (or
+    `xlink:href`) via SMIL's `attributeName` and points it outside the
+    document -- scanning element-by-element instead of across the whole
+    document (issue #300, Codex Terra review)."""
+    return any(
+        _EXPECTATION_PICTURE_SMIL_HREF_ATTRIBUTE.search(element)
+        and _expectation_picture_smil_external_target(element)
+        for element in _EXPECTATION_PICTURE_SVG_ELEMENT.findall(value)
+    )
 
 
 def _expectation_picture_content_refusals(value: str) -> tuple[tuple[bool, str], ...]:
@@ -953,6 +1014,10 @@ def _expectation_picture_content_refusals(value: str) -> tuple[tuple[bool, str],
         (
             bool(_EXPECTATION_PICTURE_EXTERNAL_HREF.search(value)),
             "must not reference an href outside the document",
+        ),
+        (
+            _expectation_picture_smil_external_href(value),
+            "must not animate href to an external target",
         ),
         ("url(" in lowered, "must not contain a url() reference"),
         ("<iframe" in lowered, "must not contain <iframe>"),
@@ -2088,6 +2153,7 @@ def _board_item(
             active_claim=active_claim,
             open_blockers=open_blockers,
             repository=context.repository,
+            storage=config.storage,
             contract=contract,
             contract_complete=parsed.contract_complete,
             projectionless_idea=projectionless_idea,
@@ -2468,7 +2534,7 @@ def render(board: Board, *, storage: Storage = Storage.GITHUB) -> str:
                 _claim_cell(item),
                 "yes" if item.actionable else f"no: {item.actionable_reason}",
                 ",".join(
-                    open_blocker_label(reference, board.repository)
+                    open_blocker_label(reference, board.repository, storage)
                     for reference in item.open_blockers
                 )
                 or "-",
@@ -2487,7 +2553,7 @@ def render(board: Board, *, storage: Storage = Storage.GITHUB) -> str:
     stale = ", ".join(item_label(item.number, storage) for item in board.stale) or "none"
     recovery = ", ".join(item_label(item.number, storage) for item in board.recovery) or "none"
     containers = "\n".join(_container_lines(board, storage)) or "none"
-    uncut = "\n".join(_uncut_line(finding) for finding in board.uncut) or "none"
+    uncut = "\n".join(_uncut_line(finding, storage) for finding in board.uncut) or "none"
     landings_note = "" if board.landings_derivable else f"\n{LANDINGS_NOT_DERIVABLE_LINE}"
     return (
         f"{table}\n\nREADY NOW\n{ready}\n\nSTALE\n{stale}\n\nRECOVERY ({RECOVERY_STEP})\n{recovery}"
@@ -2500,7 +2566,7 @@ def _open_child_cell(child: ChildItem, repository: str, storage: Storage) -> str
     if not child.blocked_by:
         return item_label(child.number, storage)
     blockers = ", ".join(
-        open_blocker_label(reference, repository) for reference in child.blocked_by
+        open_blocker_label(reference, repository, storage) for reference in child.blocked_by
     )
     return f"{item_label(child.number, storage)} (blocked by {blockers})"
 
@@ -2523,9 +2589,9 @@ def _container_lines(board: Board, storage: Storage) -> list[str]:
     ]
 
 
-def _uncut_line(finding: UncutSlices) -> str:
+def _uncut_line(finding: UncutSlices, storage: Storage) -> str:
     indices = ", ".join(str(row.index) for row in finding.rows)
-    return f"#{finding.item}: rows {indices} uncut"
+    return f"{item_label(finding.item, storage)}: rows {indices} uncut"
 
 
 def _contract_summary(contract: Contract) -> str:
@@ -2544,6 +2610,7 @@ class _ActionabilityFacts:
     active_claim: str | None
     open_blockers: tuple[IssueReference, ...]
     repository: str
+    storage: Storage
     contract: Contract
     contract_complete: bool
     projectionless_idea: bool
@@ -2567,7 +2634,8 @@ def _claim_or_completeness_reason(facts: _ActionabilityFacts) -> str | None:
         return "claimed"
     if facts.open_blockers:
         return "blocked by " + ", ".join(
-            open_blocker_label(reference, facts.repository) for reference in facts.open_blockers
+            open_blocker_label(reference, facts.repository, facts.storage)
+            for reference in facts.open_blockers
         )
     if not facts.contract_complete and not facts.projectionless_idea:
         missing = ", ".join(missing_or_empty_sections(facts.contract))

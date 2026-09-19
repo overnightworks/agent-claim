@@ -1421,17 +1421,33 @@ def _ruling_pull_hint(item: board.BoardItem) -> str | None:
     return f"ruled {item.ruling_landings} landings ago: refine again at the pull"
 
 
-def _next_action_command(action: board.WorkItemAction | board.CutSliceAction) -> str:
+def _next_action_item_argument(number: int, storage: board.Storage) -> str:
+    """The item reference `_parse_item_ref` accepts back as `_next_action_command`'s
+    printed `aco` invocation's positional argument: the bare number under
+    `Storage.GITHUB` -- unchanged, byte-identical to every command printed
+    before the state-ref pin existed -- and `board.item_label`'s own id under
+    `Storage.STATE_REF`, so a printed command is one a person can paste back
+    in (issue #292, residual of #300)."""
+    if storage is board.Storage.STATE_REF:
+        return board.item_label(number, storage)
+    return str(number)
+
+
+def _next_action_command(
+    action: board.WorkItemAction | board.CutSliceAction, storage: board.Storage
+) -> str:
     """The exact `aco` invocation `_next` prints and `_next --json` carries
     as `command` -- one owner so text and JSON never name a different
     command for the same action. `close_container` has none: there is no
     command to run, and neither grammar invents one."""
     if isinstance(action, board.WorkItemAction):
-        return f"aco claim {action.item.number} --scope <paths>"
-    return f'aco cut {action.container.number} --title "{action.cut_title}"'
+        item_argument = _next_action_item_argument(action.item.number, storage)
+        return f"aco claim {item_argument} --scope <paths>"
+    container_argument = _next_action_item_argument(action.container.number, storage)
+    return f'aco cut {container_argument} --title "{action.cut_title}"'
 
 
-def _next_action_payload(action: board.NextAction) -> dict[str, object]:
+def _next_action_payload(action: board.NextAction, storage: board.Storage) -> dict[str, object]:
     """The action-specific fields `_next_json` adds beyond `recovery`/`skipped`."""
     if isinstance(action, board.WorkItemAction):
         item = action.item
@@ -1441,7 +1457,7 @@ def _next_action_payload(action: board.NextAction) -> dict[str, object]:
             "score": item.score,
             "title": item.title,
             "next": item.next_step,
-            "command": _next_action_command(action),
+            "command": _next_action_command(action, storage),
             "ruling_landings": item.ruling_landings,
             "ruling_old": item.ruling_old,
         }
@@ -1456,7 +1472,7 @@ def _next_action_payload(action: board.NextAction) -> dict[str, object]:
             "title": action.container.title,
             "slice": action.next_step,
             "cut_title": action.cut_title,
-            "command": _next_action_command(action),
+            "command": _next_action_command(action, storage),
         }
     return {
         "action": "close_container",
@@ -1471,6 +1487,7 @@ def _next_json(
     action: board.NextAction | None,
     skipped: tuple[board.BoardItem, ...],
     recovery: tuple[board.BoardItem, ...],
+    storage: board.Storage,
 ) -> int:
     payload: dict[str, object] = {
         "action": None,
@@ -1488,7 +1505,7 @@ def _next_json(
         ],
     }
     if action is not None:
-        payload.update(_next_action_payload(action))
+        payload.update(_next_action_payload(action, storage))
     print(json.dumps(payload))
     return 0
 
@@ -1500,7 +1517,7 @@ def _next_action_lines(action: board.NextAction, storage: board.Storage) -> list
         lines = [
             f"{board.item_label(item.number, storage)} score {item.score}: {item.title}",
             f"Next: {item.next_step}",
-            f"Run: {_next_action_command(action)}",
+            f"Run: {_next_action_command(action, storage)}",
             "<paths> cannot be derived; take the files to claim from the item body.",
         ]
         hint = _ruling_pull_hint(item)
@@ -1511,7 +1528,7 @@ def _next_action_lines(action: board.NextAction, storage: board.Storage) -> list
     if isinstance(action, board.CutSliceAction):
         return [
             f"cut_slice {container_label}: {action.next_step}",
-            f"Next: {_next_action_command(action)}",
+            f"Next: {_next_action_command(action, storage)}",
         ]
     if action.next_step is not None:
         return [f"close_container {container_label}: {action.next_step}"]
@@ -1627,12 +1644,15 @@ def _out_of_order_check(
 
 
 def _blocked_check(
-    item: board.BoardItem | None, out_of_order_reason: str | None, repository: str
+    item: board.BoardItem | None,
+    out_of_order_reason: str | None,
+    repository: str,
+    storage: board.Storage,
 ) -> SliceCheck | None:
     if item is None or not item.open_blockers:
         return None
     blockers = ", ".join(
-        board.open_blocker_label(reference, repository) for reference in item.open_blockers
+        board.open_blocker_label(reference, repository, storage) for reference in item.open_blockers
     )
     return SliceCheck(
         "warning" if out_of_order_reason is not None else "error",
@@ -1719,6 +1739,7 @@ def _slice_rule_checks(
     issue: int,
     projected: board.Board,
     out_of_order_reason: str | None,
+    storage: board.Storage,
 ) -> tuple[SliceCheck, ...]:
     checks: list[SliceCheck] = []
     out_of_order = _out_of_order_check(projected, issue, out_of_order_reason)
@@ -1729,7 +1750,7 @@ def _slice_rule_checks(
         checks.append(
             SliceCheck("error", "container", f"#{issue} is a container; claim a child", issue=issue)
         )
-    blocked = _blocked_check(item, out_of_order_reason, lookup.repository)
+    blocked = _blocked_check(item, out_of_order_reason, lookup.repository, storage)
     if blocked is not None:
         checks.append(blocked)
     state, title, _body = _issue_reference_state(lookup.client, lookup.open_by_number, issue)
@@ -2090,7 +2111,9 @@ def _issue_check(
         return _refused_issue(number, shape_defects[0])
     blockers = board.open_dependency_blockers(client.list_board_dependencies(number), repository)
     if blockers:
-        named = ", ".join(board.open_blocker_label(blocker, repository) for blocker in blockers)
+        named = ", ".join(
+            board.open_blocker_label(blocker, repository, storage) for blocker in blockers
+        )
         return _refused_issue(number, f"blocked by {named}")
     return CheckOutcome(CheckKind.ISSUE, number, _issue_line(number, "body ok"))
 
@@ -3352,12 +3375,12 @@ def _cmd_next(parsed: argparse.Namespace, session: _ReadSession) -> int:
     chosen_container = _next_action_container_number(action)
     skipped = tuple(item for item in _unworkable(projected) if item.number != chosen_container)
     recovery = projected.recovery
+    storage = board.load_config(_resolve_toplevel() / board.CONFIG_PATH).storage
     if parsed.json:
         if action is None:
-            _next_json(None, skipped, recovery)
+            _next_json(None, skipped, recovery, storage)
             return 3
-        return _next_json(action, skipped, recovery)
-    storage = board.load_config(_resolve_toplevel() / board.CONFIG_PATH).storage
+        return _next_json(action, skipped, recovery, storage)
     if action is None:
         _next(None, skipped, recovery, storage)
         return 3
@@ -3412,6 +3435,7 @@ def _cmd_claim(parsed: argparse.Namespace, session: _WriteSession) -> int:
     checks: tuple[SliceCheck, ...] = ()
     target_issue: int | None = None
     replayed = None
+    storage = board.load_config(_resolve_toplevel() / board.CONFIG_PATH).storage
     if isinstance(requested.identity, protocol.IssueIdentity):
         target_issue = requested.identity.issue
         replayed = _matching_store_claim(observed, requested)
@@ -3434,6 +3458,7 @@ def _cmd_claim(parsed: argparse.Namespace, session: _WriteSession) -> int:
                 target_issue,
                 projected,
                 requested.out_of_order_reason,
+                storage,
             )
     if any(check.level == "error" for check in checks):
         _refuse_claim(parsed.json, target_issue, checks)
@@ -3461,7 +3486,7 @@ def _cmd_claim(parsed: argparse.Namespace, session: _WriteSession) -> int:
             touches=touches,
             checks=checks,
         )
-    print(f"CLAIMED {_claim_subject(claimed)}: {claimed.claim_id}")
+    print(f"CLAIMED {_claim_subject(claimed, storage)}: {claimed.claim_id}")
     print(_claim_cost_line(n, total, requested.scope, touches))
     return 0
 
@@ -3582,7 +3607,7 @@ def _print_release_result(report: ReleaseReport, *, as_json: bool) -> None:
         if hint is not None:
             print(hint, file=sys.stderr)
         return
-    print(f"RELEASED {_claim_subject(selected)}: {selected.claim_id}")
+    print(f"RELEASED {_claim_subject(selected, report.storage)}: {selected.claim_id}")
     if report.client is not None:
         if hint is not None:
             print(hint)
