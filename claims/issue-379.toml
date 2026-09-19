@@ -1,8 +1,0 @@
-claim_id = "b83ebc17bc2144189a8558b099ef5039"
-agent = "Claude head (coordinator)"
-role = "builder"
-base = "21d1a07f8f97199ec928a0364625726e8fdcc0f8"
-branch = "claude/issue-379-rulings-all"
-scope = ["specs/rulings.spec.md", "src/agent_coordination/board.py", "src/agent_coordination/cli.py", "tests/test_cli.py", "tests/test_state_board.py"]
-opened_commit = "290187e59c2b92b9fbaae0383dfbbd2eb1f4ab06"
-whole_reason = "card lane: command, spec and tests"
