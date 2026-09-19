@@ -100,6 +100,31 @@ fail-closed rather than guessing which paths it touches.
 
 - [ ] [PROT-27] `NotebookEdit` reads its target only from `notebook_path`, ignoring a decoy `path` key sitting beside it that this tool never actually sends.
 
+## `Bash`'s own command-text payload
+
+`Bash` carries no path key at all: its `command` text is scanned for a
+short, fixed list of write patterns -- a `>`/`>>` redirection (a heredoc
+target such as `cat > path <<EOF` included), `tee`, `sed -i`, `mv`, `cp`,
+`rm`, `git checkout --`, and `git restore` -- each occurrence naming a
+`(pattern, path)` pair, in the order the command names them (issue #380).
+`git checkout <branch>` and a plain `sed` without `-i` name no path at all,
+since neither writes a file. Unlike every other tool's own already-absolute
+payload path, a Bash pattern's own path is relative to the shell's own
+working directory: it resolves against the payload's own `cwd` field
+rather than the hook process's cwd, and PROT-09 does not apply to it at
+all. Every resolved path then runs the same Checkout, Default-Branch, and
+Claim-Scope gates a mutating tool's own path runs (PROT-11 no commit yet,
+PROT-12/PROT-13 not main, PROT-14 the checkout root, the store's own
+PROT-29/PROT-15/PROT-16/PROT-17, PROT-21/PROT-22 a covering claim), except
+a path outside every repository allows instead of PROT-10's deny, and a
+scope miss denies naming both the recognized pattern and the path rather
+than a bare `claim first`.
+
+- [ ] [PROT-30] A `command` naming none of these patterns -- or no string `command` at all -- allows without resolving identity, git, or the store.
+- [ ] [PROT-31] A recognized pattern's own relative path resolves against the payload's own `cwd`; with no `cwd` at all, that path allows outright.
+- [ ] [PROT-32] A recognized pattern's own path outside every git repository allows, unlike PROT-10's deny for every other mutating tool.
+- [ ] [PROT-33] A recognized pattern's own path outside the live claim's scope denies `<pattern> <path> outside claim scope`, naming both (see E-PROT-08).
+
 ## Forge-free
 
 - [ ] [PROT-28] `protect` never resolves an item forge: allow and deny alike are unaffected by `--repo` or a non-GitHub canonical remote.
@@ -113,7 +138,8 @@ fail-closed rather than guessing which paths it touches.
 - `protect` never writes a file: every denial and every allow leaves `$HOME` and the checkout untouched.
 - `protect` never reads working-tree dirtiness: a dirty checkout still allows a covered write, unlike `claim`'s own precondition.
 - `protect` never binds the resolved checkout's `HEAD` to a claim's own `base`: it judges the live claim's branch and scope alone.
-- `Bash`/`shell` and their other-provider equivalents never deny for a missing path: the hook payload carries no file path for a shell command, so `protect` cannot gate what it cannot see (README, "PreToolUse write gate").
+- `shell` and their other-provider equivalents never deny for a missing path: the hook payload carries no file path for those, so `protect` cannot gate what it cannot see (README, "PreToolUse write gate"). `Bash` (issue #380) is the one named exception: it judges its own `command` text, but only the fixed pattern list PROT-30 owns -- a `python -c ...` one-liner or an opaque script invocation stays invisible on purpose, so recognizing a pattern is a best-effort aid against forgetting the claim, never a security boundary.
+- `protect` never guesses a Bash-recognized relative path's `cwd` from the hook process's own cwd: a payload naming no `cwd` at all allows that one path outright (PROT-31) rather than risk denying legitimate work on a guess `protect` has no way to confirm -- the same "never guess a relative path" principle PROT-09 enforces for every other tool, applied here as an allow instead of a deny since Bash's own path is expected to be relative in the first place.
 
 ## Examples
 
@@ -192,4 +218,27 @@ Setup: bare-remote, bootstrapped, a linked worktree on `ada/issue-42`, already `
 $ echo '{"toolName": "Write", "toolInput": {"path": "src/widget.py"}}' | aco protect
 {"decision": "deny", "reason": "relative payload path"}
 exit 2
+```
+
+### E-PROT-08 -- a Bash write pattern outside claim scope denies naming both
+
+Setup: bare-remote, bootstrapped, a linked worktree on `ada/issue-42`, already `aco claim 42 --scope src`, cwd is `<worktree>`
+
+```console
+$ echo '{"toolName": "Bash", "toolInput": {"command": "sed -i \"s/a/b/\" docs/widget.md"}, "cwd": "<worktree>"}' | aco protect
+{"decision": "deny", "reason": "sed -i docs/widget.md outside claim scope"}
+exit 2
+```
+
+### E-PROT-09 -- a Bash command outside every repository, or naming no pattern, allows
+
+Setup: bare-remote, no live claim
+
+```console
+$ echo '{"toolName": "Bash", "toolInput": {"command": "rm /tmp/scratch.txt"}}' | aco protect
+{"decision": "allow"}
+exit 0
+$ echo '{"toolName": "Bash", "toolInput": {"command": "git diff"}}' | aco protect
+{"decision": "allow"}
+exit 0
 ```
