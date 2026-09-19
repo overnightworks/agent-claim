@@ -83,7 +83,7 @@ line per defect, and by a reader as the item's own reason (BODY-50..BODY-52).
 - [ ] [BODY-30] An entry whose `default` is not `yes`, `no` or `later` prints `body malformed: expectation[0].default: expectation[0].default must be yes, no, or later`, exit `1`.
 - [ ] [BODY-31] An entry whose `ruling` is not `yes`, `no` or `later` prints `body malformed: expectation[0].ruling: expectation[0].ruling must be yes, no, or later`, exit `1`.
 - [ ] [BODY-32] A ruled entry whose `ruled_on` is not a TOML local date prints `body malformed: expectation[0].ruled_on: expectation[0].ruled_on must be a TOML local date`, exit `1`.
-- [ ] [BODY-33] An entry key outside `text`, `default`, `ruling`, `ruled_on`, `question`, `example`, `picture` prints `unknown key expectation[0].<key>` on stderr, exit `1`.
+- [ ] [BODY-33] An entry key outside `text`, `default`, `ruling`, `ruled_on`, `question`, `example`, `picture` prints `body malformed: expectation[0].<key>: unknown key expectation[0].<key>` on stderr, exit `1`.
 
 ## The card fields `question`, `example`, `picture`
 
