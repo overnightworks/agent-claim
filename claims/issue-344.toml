@@ -1,0 +1,7 @@
+claim_id = "ccf850a8ee0b43cabc213670ca27f805"
+agent = "Claude head (coordinator)"
+role = "builder"
+base = "2c0a55ab28d6174849f3f564cb18170449deccf4"
+branch = "claude/issue-344-spec-protect-reset"
+scope = ["scripts/spec_coverage_ratchet.txt", "specs/protect.spec.md", "specs/reset.spec.md"]
+opened_commit = "6aebe3f5aa61ad873b9fdba3743bc2dfaeedbea5"
