@@ -20,7 +20,7 @@ point prints `ERROR: <sentence>` on stderr, exit `2`.
 | a live issue claim, lane branch resolves | BRIEF-01, BRIEF-02, BRIEF-11, BRIEF-05 | BRIEF-06, BRIEF-10 |
 | a live issue claim, lane branch gone | BRIEF-04 | BRIEF-06, BRIEF-10 |
 | no live issue claim | BRIEF-03 | BRIEF-06 |
-| `<item>` names no item at all | — | — |
+| `<item>` names no item at all | BRIEF-08 | BRIEF-08 |
 | a non-GitHub canonical remote | BRIEF-07 | BRIEF-07 |
 | `storage = "state-ref"` | BRIEF-09 | BRIEF-09 |
 
@@ -32,15 +32,16 @@ point prints `ERROR: <sentence>` on stderr, exit `2`.
 - [ ] [BRIEF-03] With no live issue claim, `CLAIM` prints exactly `no active claim`; `TIP` prints no value line at all; `TOUCHED` lists nothing (see E-BRIEF-02).
 - [ ] [BRIEF-04] With a live claim whose branch resolves neither locally nor as `origin/<branch>`, `TIP` prints `branch not found` and `TOUCHED` lists nothing (see E-BRIEF-03).
 - [ ] [BRIEF-05] With a live claim whose branch resolves, `TIP` prints that branch's own commit id, and `TOUCHED` lists one path per line from a `git diff --name-only <base>..<tip>` (see E-BRIEF-01).
+- [ ] [BRIEF-08] `<item>` naming no item at all prints one empty line for the missing body, then every section exactly as BRIEF-01..06 describe with no live claim -- never a refusal (see E-BRIEF-06).
 
 ## `--json`
 
 - [ ] [BRIEF-06] `aco brief <item> --json` prints one object `{"body", "claim", "tip", "touched"}`, `"claim"` `null` with no live claim (see E-BRIEF-04).
-- [ ] [BRIEF-10] A non-`null` `"claim"` object is `{"agent", "role", "branch", "base", "scope", "whole", "age"}`, `"whole"` `null` without one -- no `claim_id`, `resource`, or `overlaps` key (see E-BRIEF-04).
+- [ ] [BRIEF-10] A non-`null` `"claim"` object is `{"agent", "role", "branch", "base", "scope", "whole", "age"}`, `"whole"` `null` without one (see E-BRIEF-04).
 
 ## Forge resolution
 
-- [ ] [BRIEF-07] `aco brief <item>` on a canonical remote whose host has no forge adapter refuses `no forge adapter for host <host>`, exit `2`, before `discover_repository` is ever called (see E-BRIEF-05).
+- [ ] [BRIEF-07] `aco brief <item>` on a canonical remote whose host has no forge adapter refuses `no forge adapter for host <host>`, exit `2`, before any forge resolution (see E-BRIEF-05).
 - [ ] [BRIEF-09] Under `storage = "state-ref"`, `aco brief <item>` resolves the state-ref forge like `item show`/`edit`/`close`; `--repo` there refuses the same as those (PIN-04, PIN-05).
 
 ## Never

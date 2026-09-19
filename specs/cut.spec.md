@@ -9,8 +9,8 @@ This file owns the command's own target precondition, row selection,
 recovers. `specs/body-block.spec.md` owns the `[[slice]]` schema (BODY-43..
 BODY-49) and a malformed body's own defect sentences (BODY-01..BODY-52);
 `specs/storage-pin.spec.md` owns the id-argument grammar `<container>`
-accepts (PIN-08), the fresh child's own state-ref mint and CAS write
-(PIN-06, PIN-07, PIN-21), and `record.parent`'s own existence check
+accepts (PIN-08), the fresh child's own state-ref CAS write, the same path
+`item new` shares (PIN-21), and `record.parent`'s own existence check
 (PIN-16); `specs/ref-store-cas.spec.md` owns the stale-write sentence a
 raced state-ref write meets (CAS-20). This file cites those IDs rather than
 restating them. `<n>` is the container's own number, `<child>` the fresh or
@@ -50,42 +50,46 @@ with `--json` also `specs/release.spec.md`'s own `{"ok": false, "error":
 
 - [ ] [CUT-01] `aco cut <n> --title T` against an `<n>` that names no open issue on the board refuses `#<n> is not an open container`, exit `2`, before any write.
 - [ ] [CUT-02] The same against an open issue that is not a container refuses `#<n> is not a container`, exit `2`.
-- [ ] [CUT-03] The same against a container that is itself a child of another item refuses `#<n> is itself a child of <ref>; nested containers are not supported`, `<ref>` the parent's own reference, exit `2`.
+- [ ] [CUT-03] The same against a container that is itself a child of another item refuses `#<n> is itself a child of <ref>; nested containers are not supported`, exit `2`.
 
 ## The forge precondition
 
-- [ ] [CUT-04] `aco cut` refuses `this forge cannot <operation>; cut the slice by hand` for an unsupported `create_child`, `link_child`, or `update_item_body`, exit `2`, before the target issue is ever read.
+- [ ] [CUT-04] `aco cut` refuses `this forge cannot <operation>; cut the slice by hand` for an unsupported `create_child`, `link_child`, or `update_item_body`, exit `2`.
+
+## The body precondition
+
+- [ ] [CUT-05] `<n>`'s body failing `body --check` refuses `#<n> body malformed: <field>: <message>; cut needs a valid agent-claim block`, exit `2`.
 
 ## Row selection
 
-- [ ] [CUT-06] With no `--row`, `aco cut <n> --title T` links the first `[[slice]]` entry when the block carries one; `--row N` links entry `N` by its own `index` instead, whichever position it holds in the table.
+- [ ] [CUT-06] With no `--row`, `aco cut <n> --title T` links the first `[[slice]]` entry; `--row N` links entry `N` by its own `index` instead, whichever position it holds.
 - [ ] [CUT-07] A linked row whose own `title` differs from `--title` refuses `#<n>'s slice <idx> is titled '<row-title>'; --title must match it exactly`, exit `2`, before any write.
 - [ ] [CUT-08] `--row N` against a block with no `slice` key at all refuses `#<n> has no slice table; --row needs one to select a row from`, exit `2`.
-- [ ] [CUT-09] `--row N` naming no entry refuses `#<n> has no row N; cuttable rows: <comma-joined indices, or none>`, exit `2`, naming the row actually still cuttable rather than an unqualified "none left".
-- [ ] [CUT-10] A block with no `slice` key, or `slice = []`, links no row: the child gets none, the container's body is never rewritten, and the printed line carries no ` row <idx>` suffix (see E-CUT-04).
+- [ ] [CUT-09] `--row N` naming no entry refuses `#<n> has no row N; cuttable rows: <comma-joined indices, or none>`, exit `2` (see E-CUT-03).
+- [ ] [CUT-10] A block with no `slice` key, or `slice = []`, links no row: the child gets none, the container's body stays unwritten, the printed line carries no ` row <idx>` suffix (see E-CUT-04).
 
 ## Creating the child
 
 - [ ] [CUT-11] A successful cut prints `CUT #<n>[ row <idx>] -> #<child>`, the `row <idx>` clause present only when a row was linked, exit `0` (see E-CUT-02, E-CUT-04).
 - [ ] [CUT-12] `aco cut ... --json` prints `{"container": <n>, "row": <idx-or-null>, "child": <child>}`, `"adopted": true` appended only when CUT-13 applies (see E-CUT-02).
-- [ ] [CUT-25] The fresh child's body is one `Parent: #<n>` line, a blank line, `body --template`'s own unfilled `task` skeleton (BDY-04), plus `scope = [...]` from CUT-20/CUT-23 (see E-CUT-02, E-CUT-06).
+- [ ] [CUT-25] The fresh child's body is a `Parent: #<n>` line, a blank line, `body --template`'s unfilled `task` skeleton (BDY-04), plus `scope` from CUT-20/CUT-23 (see E-CUT-02, E-CUT-06).
 
 ## Adopting instead of duplicating
 
-- [ ] [CUT-13] An open issue titled exactly `--title` -- linked already, or a recovery orphan (CUT-16) -- is adopted, not created: `ADOPTED` replaces `CUT`, `"adopted": true` in `--json` (see E-CUT-05).
-- [ ] [CUT-14] A closed child already titled `--title`, with no open match, refuses `#<n> already has a closed child #<child> titled '<title>'; reopen it or remove the row by hand`, exit `2`, before any write.
+- [ ] [CUT-13] An open issue titled exactly `--title` -- linked already, or a recovery orphan (CUT-16) -- is adopted: `ADOPTED` replaces `CUT`, `"adopted": true` in `--json` (see E-CUT-05).
+- [ ] [CUT-14] A closed child already titled `--title`, with no open match, refuses `#<n> already has a closed child #<child> titled '<title>'; reopen it or remove the row by hand`, exit `2`.
 - [ ] [CUT-15] Two or more open matches refuses `#<n>'s row '<title>' matches more than one open issue (#a, #b); adopt the right one by hand and remove the row`, exit `2`, naming every match.
 - [ ] [CUT-16] An open issue sharing `--title` is adopted only in CUT-13's recovery shape -- never the container itself, idea-labelled, non-`task`, or naming a different `Parent:` (see E-CUT-05).
 
 ## Partial failure and recovery
 
-- [ ] [CUT-17] GitHub's own failed sub-issue relation write refuses `created #<child> but failed to record #<child> as a sub-issue of #<n>: <cause>; re-run the same cut -- it adopts the child`, exit `2`.
-- [ ] [CUT-18] A failed row-removal write, either storage, refuses `created #<child> but failed to remove row <idx> from #<n>'s agent-claim block: <cause>; re-run the same cut -- it adopts the child`, exit `2`.
-- [ ] [CUT-19] An identical re-run after CUT-17 or CUT-18 prints `ADOPTED` (CUT-13's own path) instead of minting a second child, then finishes the row removal (see E-CUT-06).
+- [ ] [CUT-17] GitHub's own failed sub-issue relation write refuses `created #<child> but failed to record #<child> as a sub-issue of #<n>: <cause>; re-run the same cut`, exit `2`.
+- [ ] [CUT-18] A failed row-removal write, either storage, refuses `created #<child> but failed to remove row <idx> from #<n>'s agent-claim block: <cause>; re-run the same cut`, exit `2`.
+- [ ] [CUT-19] An identical re-run after CUT-17 or CUT-18 prints `ADOPTED` (CUT-13) instead of minting a second child, then finishes the row removal when a row was linked (see E-CUT-06).
 
 ## `--scope` (issue #337)
 
-- [ ] [CUT-20] `--scope P` fills a linked row's own `scope` when that row carries none: the row is rewritten with it, and the fresh child's own top-level `scope` is that same value.
+- [ ] [CUT-20] `--scope P` with a linked row that carries none becomes the fresh child's own top-level `scope`; the row is removed along with the rest, never rewritten to carry it.
 - [ ] [CUT-21] `--scope P` against a linked row that already names one refuses `slice <idx> already names a scope; edit the container instead`, exit `2` -- the row is the one place to change it.
 - [ ] [CUT-22] With no `--scope`, a linked row that already names one leaves the child inheriting that scope verbatim; the row itself is unchanged before its removal.
 - [ ] [CUT-23] `--scope P` with no linked row at all (CUT-10) becomes the fresh child's own top-level `scope` directly, no row ever touched.
@@ -93,13 +97,13 @@ with `--json` also `specs/release.spec.md`'s own `{"ok": false, "error":
 
 ## `storage = "state-ref"`, the same command over one CAS write
 
-- [ ] [CUT-26] Removing a `[[slice]]` row under `storage = "state-ref"` is byte-exact outside it: fence lines, `now`/`next`/`done_when`, and remaining rows stay identical (see E-CUT-07).
-- [ ] [CUT-27] Under `storage = "state-ref"`, the fresh child's body carries both CUT-25's own `Parent:` prose and a `[record]` table whose `parent` names the container's own item id (PIN-16) (see E-CUT-07).
+- [ ] [CUT-26] Removing a `[[slice]]` row under `storage = "state-ref"` preserves every byte outside the block's interior; the interior re-renders canonically (BODY-07), not byte-for-byte (see E-CUT-07).
+- [ ] [CUT-27] Under `storage = "state-ref"`, the fresh child's body carries CUT-25's `Parent:` prose and a `[record]` table whose `parent` names the container's item id (PIN-16) (see E-CUT-07).
 
 ## Never
 
 - `aco cut` never creates a second child for a row already linked to an open issue: CUT-13's adoption always runs before a fresh child is ever considered.
-- `aco cut` never reaches CUT-17's own relation-write failure under `storage = "state-ref"`: creating a child there is one CAS write, so only CUT-18's row-removal step can ever fail.
+- `aco cut` never reaches CUT-17's own relation-write failure under `storage = "state-ref"`: the child's own mint is one CAS write that can fail before any child exists -- a plain re-run then starts over as a fresh cut, nothing to adopt -- and CUT-18's row-removal step can fail once the child exists.
 - `aco cut` never touches the container's own `now`, `next`, or `done_when` fields, or any `[[slice]]` row but the one linked: a row removal's own rewrite carries every other field forward unchanged (CUT-26).
 - `aco cut` never re-parents an issue by title alone: an orphan is adopted only through CUT-16's own recovery-shape check, never a bare string match.
 - `aco cut`'s own printed `CUT`/`ADOPTED` line and `--json` object are never the storage-aware `<label>` form (`specs/landing-grammar.spec.md`): `<n>` and `<child>` are always the bare number, under either storage pin.
