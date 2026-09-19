@@ -1,7 +1,0 @@
-claim_id = "620fbb7df9c04e82b8b10e1c1fd1b483"
-agent = "Claude head (coordinator)"
-role = "builder"
-base = "167d030b6cb1ddcea8f2d5591f0c08c7762dd867"
-branch = "claude/issue-326-spec-contracts"
-scope = ["specs", "scripts/spec_coverage_ratchet.txt", "scripts/check_root_layout.py"]
-opened_commit = "3286acc3ab596c31f8cdecabb2d55f29a9026c2f"
