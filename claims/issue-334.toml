@@ -1,0 +1,7 @@
+claim_id = "7d94a5b3196c4cc9be81774c000bdd31"
+agent = "Claude head (coordinator)"
+role = "builder"
+base = "45a45f6b499edf85b05ed27f9f80afa12c68a7bc"
+branch = "claude/issue-334-spec-landing"
+scope = ["specs/landing-grammar.spec.md", "scripts/spec_coverage_ratchet.txt"]
+opened_commit = "afe6f7c7a313ddff55707f85b5e8bf44bf54843b"
