@@ -1,0 +1,4 @@
+# Ledger for scripts/test_budget.py. Holds only "# budget: <why> [SPEC-IDs]" lines, one per
+# justified regression, added in the same change as the test growth it buys (issue #319). A
+# raise with no matching line here blocks --ci. Never a count baseline: no numbers are
+# recorded, and this file is never rewritten by a script -- only appended to by hand.

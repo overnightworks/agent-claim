@@ -1097,3 +1097,37 @@ writing anything -- `no forge adapter for host <host>` when the canonical
 remote's own URL names a host with no adapter yet, or `forge target ... does
 not match canonical remote ...` when it names a different repository on a
 host this adapter does serve (Erwartung 6, issue #176).
+
+## Gates
+
+Three scripts under `scripts/` (`test_budget.py`, `similar_methods.py`,
+`test_inventory.py`) run as CI jobs guarding `tests/`; each measures the
+change against the tree it lands on rather than a committed count baseline
+(issue #319). The base-selection rule is the same for all three: on a pull
+request, the merge-base of `HEAD` with `origin/$GITHUB_BASE_REF`; on a push
+to `main`, `HEAD^1`, the previous trunk tip; outside CI, `origin/main`.
+
+- `test_budget.py --ci` measures `tests/` size and duplication (lines,
+  parametrized share, clone lines, plus two dormant metrics reserved for a
+  per-module setup-wrapper or literal-sibling pattern this repository has not
+  named yet). A falling parametrized share or rising clone lines blocks
+  unless the same change adds a `# budget: <why> [SPEC-IDs]` line to
+  `scripts/test_budget_ratchet.txt`, naming the growth it buys — never to
+  make CI green on its own. Rising total lines only warns.
+- `similar_methods.py --ci` reports cross-file near-duplicate functions in
+  `src/` and `tests/` (Jaccard similarity ≥ 0.9 over a normalised AST token
+  stream); a pair absent from the base blocks. A pair accepted as a
+  deliberately identical shape (e.g. a `Protocol` stub) goes in
+  `scripts/similar_methods_exemptions.txt`, one `relpath:qualname — reason`
+  per line, never a marker in the flagged file.
+- `test_inventory.py --ci` guards a wholesale test-module rewrite: a module
+  counts as rewritten when `git diff --numstat` against the base removes at
+  least half its base line count. With no rewritten module in the diff, the
+  job skips with a one-line sentence. With one or more, every assert-literal
+  key the base version held that the head version dropped blocks unless it
+  is listed in `scripts/test_inventory_dropped.txt` (module path, literal
+  `repr()`, reason — tab separated), written by hand in the same change that
+  drops it.
+
+All three ledgers are exception lists a reviewer reads, never generated
+counts: they start empty and grow only when a change justifies an entry.

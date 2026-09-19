@@ -1,0 +1,4 @@
+# Ledger for scripts/test_inventory.py --ci. One "<module path>\t<literal repr()>\t<reason>"
+# per line (tab separated), naming an assert literal a test-module rewrite dropped on purpose
+# (issue #319). Empty today: no test module has been rewritten yet. Written by hand in the same
+# change as the rewrite that drops the literal.
