@@ -1,0 +1,8 @@
+claim_id = "f785ec1e00a4480d90b2426a32a88cc7"
+agent = "Claude head (coordinator)"
+role = "builder"
+base = "167d030b6cb1ddcea8f2d5591f0c08c7762dd867"
+branch = "claude/issue-319-gates"
+scope = ["scripts", ".github/workflows/ci.yml", "README.md"]
+opened_commit = "19c2c8635bc348f67bbe0cb4f534a9de4a9b7d5d"
+whole_reason = "three gate scripts under scripts/ with their ratchet files, the CI workflow and the README section"
