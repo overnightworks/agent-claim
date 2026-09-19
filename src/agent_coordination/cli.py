@@ -1644,12 +1644,15 @@ def _out_of_order_check(
 
 
 def _blocked_check(
-    item: board.BoardItem | None, out_of_order_reason: str | None, repository: str
+    item: board.BoardItem | None,
+    out_of_order_reason: str | None,
+    repository: str,
+    storage: board.Storage,
 ) -> SliceCheck | None:
     if item is None or not item.open_blockers:
         return None
     blockers = ", ".join(
-        board.open_blocker_label(reference, repository) for reference in item.open_blockers
+        board.open_blocker_label(reference, repository, storage) for reference in item.open_blockers
     )
     return SliceCheck(
         "warning" if out_of_order_reason is not None else "error",
@@ -1736,6 +1739,7 @@ def _slice_rule_checks(
     issue: int,
     projected: board.Board,
     out_of_order_reason: str | None,
+    storage: board.Storage,
 ) -> tuple[SliceCheck, ...]:
     checks: list[SliceCheck] = []
     out_of_order = _out_of_order_check(projected, issue, out_of_order_reason)
@@ -1746,7 +1750,7 @@ def _slice_rule_checks(
         checks.append(
             SliceCheck("error", "container", f"#{issue} is a container; claim a child", issue=issue)
         )
-    blocked = _blocked_check(item, out_of_order_reason, lookup.repository)
+    blocked = _blocked_check(item, out_of_order_reason, lookup.repository, storage)
     if blocked is not None:
         checks.append(blocked)
     state, title, _body = _issue_reference_state(lookup.client, lookup.open_by_number, issue)
@@ -2107,7 +2111,9 @@ def _issue_check(
         return _refused_issue(number, shape_defects[0])
     blockers = board.open_dependency_blockers(client.list_board_dependencies(number), repository)
     if blockers:
-        named = ", ".join(board.open_blocker_label(blocker, repository) for blocker in blockers)
+        named = ", ".join(
+            board.open_blocker_label(blocker, repository, storage) for blocker in blockers
+        )
         return _refused_issue(number, f"blocked by {named}")
     return CheckOutcome(CheckKind.ISSUE, number, _issue_line(number, "body ok"))
 
@@ -3429,6 +3435,7 @@ def _cmd_claim(parsed: argparse.Namespace, session: _WriteSession) -> int:
     checks: tuple[SliceCheck, ...] = ()
     target_issue: int | None = None
     replayed = None
+    storage = board.load_config(_resolve_toplevel() / board.CONFIG_PATH).storage
     if isinstance(requested.identity, protocol.IssueIdentity):
         target_issue = requested.identity.issue
         replayed = _matching_store_claim(observed, requested)
@@ -3451,6 +3458,7 @@ def _cmd_claim(parsed: argparse.Namespace, session: _WriteSession) -> int:
                 target_issue,
                 projected,
                 requested.out_of_order_reason,
+                storage,
             )
     if any(check.level == "error" for check in checks):
         _refuse_claim(parsed.json, target_issue, checks)
@@ -3478,7 +3486,6 @@ def _cmd_claim(parsed: argparse.Namespace, session: _WriteSession) -> int:
             touches=touches,
             checks=checks,
         )
-    storage = board.load_config(_resolve_toplevel() / board.CONFIG_PATH).storage
     print(f"CLAIMED {_claim_subject(claimed, storage)}: {claimed.claim_id}")
     print(_claim_cost_line(n, total, requested.scope, touches))
     return 0

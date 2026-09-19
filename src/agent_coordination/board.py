@@ -948,13 +948,33 @@ _EXPECTATION_PICTURE_EXTERNAL_HREF = re.compile(
 )
 # SMIL can retarget `href` without ever writing `href=` itself (issue #300,
 # residual of #234): `<animate attributeName="href" to="http://…">` swaps
-# the target after the document loads. Refused only when both attributes
-# name the same escape -- an unrelated `attributeName`/`to` pair elsewhere in
-# the document is not this attack.
+# the target after the document loads, and `xlink:href` is the same escape
+# under its namespaced spelling. Refused only when both attributes sit on the
+# same element (Codex Terra review of #300): scanning each `<...>` tag on its
+# own keeps an unrelated `attributeName`/`to` pair on a different element from
+# falsely refusing the picture. Both attributes accept SMIL's own quoting
+# forms -- double-quoted, single-quoted, or bare -- mirroring
+# `_EXPECTATION_PICTURE_EXTERNAL_HREF`'s own unquoted-value check above.
 _EXPECTATION_PICTURE_SMIL_HREF_ATTRIBUTE = re.compile(
-    r'attributename\s*=\s*["\']href["\']', re.IGNORECASE
+    r"attributename\s*=\s*(?:\"(?:xlink:)?href\"|'(?:xlink:)?href'|(?:xlink:)?href(?=[\s/>]))",
+    re.IGNORECASE,
 )
-_EXPECTATION_PICTURE_SMIL_EXTERNAL_TARGET = re.compile(r'\bto\s*=\s*["\']https?:', re.IGNORECASE)
+_EXPECTATION_PICTURE_SMIL_EXTERNAL_TARGET = re.compile(
+    r"""\b(?:to|from|values)\s*=\s*(?:"(?!#)|'(?!#)|(?![\s"'#]))""", re.IGNORECASE
+)
+_EXPECTATION_PICTURE_SVG_ELEMENT = re.compile(r"<[^<>]+>")
+
+
+def _expectation_picture_smil_external_href(value: str) -> bool:
+    """Whether any single SVG element in `value` both retargets `href` (or
+    `xlink:href`) via SMIL's `attributeName` and points it outside the
+    document -- scanning element-by-element instead of across the whole
+    document (issue #300, Codex Terra review)."""
+    return any(
+        _EXPECTATION_PICTURE_SMIL_HREF_ATTRIBUTE.search(element)
+        and _EXPECTATION_PICTURE_SMIL_EXTERNAL_TARGET.search(element)
+        for element in _EXPECTATION_PICTURE_SVG_ELEMENT.findall(value)
+    )
 
 
 def _expectation_picture_content_refusals(value: str) -> tuple[tuple[bool, str], ...]:
@@ -976,8 +996,7 @@ def _expectation_picture_content_refusals(value: str) -> tuple[tuple[bool, str],
             "must not reference an href outside the document",
         ),
         (
-            bool(_EXPECTATION_PICTURE_SMIL_HREF_ATTRIBUTE.search(value))
-            and bool(_EXPECTATION_PICTURE_SMIL_EXTERNAL_TARGET.search(value)),
+            _expectation_picture_smil_external_href(value),
             "must not animate href to an external target",
         ),
         ("url(" in lowered, "must not contain a url() reference"),

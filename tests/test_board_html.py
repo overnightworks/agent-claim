@@ -129,21 +129,25 @@ def test_render_matches_the_golden_page_byte_for_byte() -> None:
 
 def test_render_labels_cards_topics_and_lanes_with_state_ref_ids() -> None:
     """Issue #292 proof 3: under `storage = "state-ref"`, `board --html`
-    shows `aco-xxxxxx` -- never `#n` -- in every topic, lane, and card
-    heading (a card's `item-tag` carries the item label since issue #295);
-    the `github` golden page above stays byte-identical, so only this
-    storage's own rendering differs."""
+    shows `aco-xxxxxx` -- never `#n` -- in every topic, lane, card heading
+    (a card's `item-tag` carries the item label since issue #295), and a
+    blocked topic part's own `blocked by` reference (issue #300, Codex Terra
+    review: `BoardSources.storage` reaches `open_blocker_label` there too,
+    not just the item labels around it); the `github` golden page above
+    stays byte-identical, so only this storage's own rendering differs."""
     rendered = board_html.render(_fixture_page(storage=board.Storage.STATE_REF))
     open_child_id = items.format_item_id(101)  # the card's topic part
     container_id = items.format_item_id(100)  # the container topic
     claimed_item_id = items.format_item_id(102)  # the lane
+    blocker_id = items.format_item_id(50)  # #101's own blocker
 
     assert f"<strong>{container_id} Sammelitem</strong>" in rendered
-    assert f"<span>{open_child_id} Zugang klären (blocked by #50)</span>" in rendered
+    assert f"<span>{open_child_id} Zugang klären (blocked by {blocker_id})</span>" in rendered
     assert f"<h3>{claimed_item_id} Laufende Lane</h3>" in rendered
     assert f'<span class="item-tag">{open_child_id} Zugang klären</span>' in rendered
-    for number in (100, 101, 102):
+    for number in (50, 100, 101, 102):
         assert f">#{number} " not in rendered
+        assert f"#{number})" not in rendered
 
 
 def test_an_empty_board_renders_all_four_headings_with_nichts() -> None:

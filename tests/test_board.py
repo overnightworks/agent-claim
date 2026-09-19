@@ -310,6 +310,16 @@ def test_append_expectation_writes_the_card_fields() -> None:
             id="smil-animated-href",
         ),
         pytest.param(
+            "<svg><animate attributeName=href to=http://evil.example/></svg>",
+            "must not animate href to an external target",
+            id="smil-animated-href-unquoted",
+        ),
+        pytest.param(
+            '<svg><animate attributeName="xlink:href" to="http://evil.example"/></svg>',
+            "must not animate href to an external target",
+            id="smil-animated-xlink-href",
+        ),
+        pytest.param(
             "<svg><style>rect{fill:url(http://evil.example/x.png)}</style></svg>",
             "must not contain a url() reference",
             id="style-element-url",
@@ -390,6 +400,19 @@ def test_expectation_picture_allows_an_internal_anchor_href_with_surrounding_spa
         body, "New question?", "yes", card=board.ExpectationCardFields(picture=picture)
     )
     assert board.parse_body(updated).read_state is board.BodyReadState.VALID
+
+
+def test_expectation_picture_allows_an_unrelated_animation_to_an_external_url() -> None:
+    """`attributeName` and `to` are bound to the same SMIL element (issue
+    #300, Codex Terra review): an `<animate>` that retargets `href` to an
+    internal anchor and a *different* `<animate>` that points an unrelated
+    attribute (`x`) at an external URL are two separate, independently
+    harmless elements, not the href-hijack the rule refuses."""
+    picture = (
+        '<svg><animate attributeName="href" to="#ok"/>'
+        '<animate attributeName="x" to="http://evil.example"/></svg>'
+    )
+    assert board._expectation_picture_defect(picture) is None
 
 
 def test_append_expectation_refuses_an_overlong_question() -> None:
