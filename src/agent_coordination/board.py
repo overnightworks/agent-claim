@@ -2296,12 +2296,9 @@ def _pull_request_landing_rows(
         pull_request: _associated_issues((pull_request,), repository) - already_landed
         for pull_request in recent_merged_pull_requests
     }
-    landing_candidates = tuple(
-        pull_request for pull_request, claims in claims_by_pull_request.items() if claims
-    )
     rows: dict[int, LandingRow] = {}
     for pull_request in sorted(
-        landing_candidates,
+        (pull_request for pull_request, claims in claims_by_pull_request.items() if claims),
         key=lambda pull_request: (_merged_at(pull_request), pull_request.number),
     ):
         claimed = claims_by_pull_request[pull_request] - rows.keys()
@@ -2315,13 +2312,16 @@ def _pull_request_landing_rows(
 
 
 def _landing_row_tie_break_key(row: LandingRow) -> tuple[int, int, int]:
-    """The stable order two rows sharing `committed_at` fall back to (issue
-    #371): item number first, then evidence kind (a trunk trailer's row
-    before a pull request's -- the trailer path always wins the same item,
-    so this is unreachable today but keeps the key total rather than
-    coincidentally sufficient), then pull request number. `landing_rows`
-    sorts by this key first and by `committed_at` second, relying on
-    Python's stable sort to keep this order wherever timestamps tie."""
+    """The stable, ascending order two rows sharing `committed_at` fall back
+    to (issue #371): item number first, then evidence kind (a trunk
+    trailer's row before a pull request's -- the trailer path always wins
+    the same item, so this is unreachable today but keeps the key total
+    rather than coincidentally sufficient), then pull request number.
+    `landing_rows` negates every component below so its one
+    `sorted(..., reverse=True)` pass resolves `committed_at` genuinely
+    descending while this tie-break still comes out ascending -- avoiding
+    a second, sorted-fed-into-sorted pass (Sonar python:S7508, issue
+    #371)."""
     if isinstance(row.evidence, TrunkLandingEvidence):
         return (row.item, 0, 0)
     return (row.item, 1, row.evidence.number)
@@ -2341,9 +2341,10 @@ def landing_rows(
     convention before this repository trailer-tagged every landing),
     deduplicated against the trunk rows, trailer path first. Newest first,
     so a reader sees the most recent landing at the top -- two rows landed
-    at the same instant fall back to `_landing_row_tie_break_key`, a
-    Python-stable-sort second pass rather than a second field on the sort
-    key, so equal timestamps still resolve to one deterministic order."""
+    at the same instant fall back to `_landing_row_tie_break_key`, negated
+    into the same `sorted(..., reverse=True)` pass rather than a second,
+    sorted-fed-into-sorted pass, so equal timestamps still resolve to one
+    deterministic order."""
     trunk_rows = {
         entry.item: LandingRow(entry.item, entry.committed_at, TrunkLandingEvidence(entry.sha))
         for entry in trunk_landing_items
@@ -2353,11 +2354,13 @@ def landing_rows(
         if storage is Storage.GITHUB
         else ()
     )
-    tie_broken = sorted((*trunk_rows.values(), *pull_request_rows), key=_landing_row_tie_break_key)
     return tuple(
         sorted(
-            tie_broken,
-            key=lambda row: row.committed_at,
+            (*trunk_rows.values(), *pull_request_rows),
+            key=lambda row: (
+                row.committed_at,
+                *(-component for component in _landing_row_tie_break_key(row)),
+            ),
             reverse=True,
         )
     )
