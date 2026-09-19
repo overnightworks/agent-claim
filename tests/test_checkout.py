@@ -377,6 +377,26 @@ def test_git_output_directory_runs_git_dash_c_in_that_directory(tmp_path: Path) 
     )
 
 
+def test_git_output_denies_loud_on_a_non_standard_os_error_launching_git(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`run_captured` translates a missing executable and a timeout to their
+    own typed errors, but leaves every other OS-level launch failure --
+    permission denied, out of file descriptors, `-C` naming a non-directory
+    -- as a raw `OSError` (issue #314 gate G's follow-up). Every
+    `_git_output` caller judges a checkout for a security decision, so this
+    must fail closed with `ClaimError` too, never an uncaught traceback out
+    of `protect`'s hook boundary."""
+
+    def raises_os_error(command: list[str], **_kwargs: object) -> object:
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(process, "run_captured", raises_os_error)
+
+    with pytest.raises(ClaimError, match="git failed to launch: denied"):
+        checkout._git_output(["rev-parse", "--verify", "HEAD"])
+
+
 def _repo_with_linked_worktree(tmp_path: Path) -> tuple[Path, Path]:
     """A real repository with a linked, isolated worktree on a feature
     branch (issue #314) -- `main` is the shared checkout, `worktree` is what
@@ -401,6 +421,8 @@ def test_resolve_path_checkout_reads_the_linked_worktree_owning_a_directory(
         toplevel=worktree.resolve(),
         branch="codex/issue-1-widget",
         kind=checkout.CheckoutKind.LINKED_WORKTREE,
+        common_directory=(tmp_path / "repo" / ".git").resolve(),
+        has_commit=True,
     )
 
 
@@ -412,7 +434,11 @@ def test_resolve_path_checkout_reads_the_main_checkout_owning_a_directory(
     resolved = checkout.resolve_path_checkout(main)
 
     assert resolved == checkout.PathCheckout(
-        toplevel=main.resolve(), branch="main", kind=checkout.CheckoutKind.MAIN
+        toplevel=main.resolve(),
+        branch="main",
+        kind=checkout.CheckoutKind.MAIN,
+        common_directory=(main / ".git").resolve(),
+        has_commit=True,
     )
 
 
@@ -443,44 +469,48 @@ def test_resolve_path_checkout_denies_a_directory_outside_every_repository(
     assert checkout.resolve_path_checkout(outside) is None
 
 
-def test_refuse_shared_checkout_return_to_claim_names_no_branch_from_the_trunk(
+@pytest.mark.parametrize(
+    ("branch", "kind", "expected"),
+    [
+        (
+            "main",
+            checkout.CheckoutKind.LINKED_WORKTREE,
+            "build claims require an isolated non-main worktree branch; "
+            "run this command from this claim's own worktree, not the primary checkout",
+        ),
+        (
+            "codex/issue-211-worktree-repair-sentence",
+            checkout.CheckoutKind.MAIN,
+            "build claims require a linked isolated worktree checkout; "
+            "run this command from this claim's own worktree on "
+            "'codex/issue-211-worktree-repair-sentence', not the primary checkout",
+        ),
+    ],
+    ids=["trunk-branch-names-none", "known-branch-named"],
+)
+def test_refuse_shared_checkout_return_to_claim(
     monkeypatch: pytest.MonkeyPatch,
+    branch: str,
+    kind: checkout.CheckoutKind,
+    expected: str,
 ) -> None:
     """`rescope` uses `RETURN_TO_CLAIM` on an already path-resolved checkout
     (issue #314): its claim's worktree already exists, so recommending the
-    `git worktree add` recipe builds a second, foreign one. From the trunk
+    `git worktree add` recipe builds a second, foreign one. On the trunk
     branch no other branch is known here to name, so `RETURN_TO_CLAIM` points
-    back at the claim's own worktree without inventing one."""
-    values = {("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"): "refs/remotes/origin/main"}
-    monkeypatch.setattr(checkout, "_git_output", lambda arguments: values[tuple(arguments)])
-    path_checkout = checkout.PathCheckout(
-        toplevel=Path("/repo"), branch="main", kind=checkout.CheckoutKind.LINKED_WORKTREE
-    )
-
-    with pytest.raises(ClaimError) as error:
-        checkout._refuse_shared_checkout(
-            path_checkout, repair=checkout.WorktreeRepair.RETURN_TO_CLAIM
-        )
-
-    assert str(error.value) == (
-        "build claims require an isolated non-main worktree branch; "
-        "run this command from this claim's own worktree, not the primary checkout"
-    )
-
-
-def test_refuse_shared_checkout_return_to_claim_names_the_known_branch(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Checked out directly on a real branch inside the shared (non-linked)
-    checkout, that branch is already known -- it is the same branch the
-    caller resolved its identity from -- so `RETURN_TO_CLAIM` names it
-    instead of leaving the sentence branch-less."""
+    back at the claim's own worktree without inventing one; checked out
+    directly on a real branch inside the shared (non-linked) checkout, that
+    branch is already known -- it is the same branch the caller resolved its
+    identity from -- so `RETURN_TO_CLAIM` names it instead of leaving the
+    sentence branch-less."""
     values = {("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"): "refs/remotes/origin/main"}
     monkeypatch.setattr(checkout, "_git_output", lambda arguments: values[tuple(arguments)])
     path_checkout = checkout.PathCheckout(
         toplevel=Path("/repo"),
-        branch="codex/issue-211-worktree-repair-sentence",
-        kind=checkout.CheckoutKind.MAIN,
+        branch=branch,
+        kind=kind,
+        common_directory=Path("/repo/.git"),
+        has_commit=True,
     )
 
     with pytest.raises(ClaimError) as error:
@@ -488,11 +518,7 @@ def test_refuse_shared_checkout_return_to_claim_names_the_known_branch(
             path_checkout, repair=checkout.WorktreeRepair.RETURN_TO_CLAIM
         )
 
-    assert str(error.value) == (
-        "build claims require a linked isolated worktree checkout; "
-        "run this command from this claim's own worktree on "
-        "'codex/issue-211-worktree-repair-sentence', not the primary checkout"
-    )
+    assert str(error.value) == expected
 
 
 @pytest.mark.parametrize(

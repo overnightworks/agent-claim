@@ -2864,18 +2864,18 @@ def _hook_path(tool_input: dict[str, object], *, keys: tuple[str, ...]) -> str |
     return None
 
 
-def _protect_absolute_path(raw_path: str) -> Path:
-    """`raw_path` made absolute for git and filesystem resolution: every
-    provider `aco` supports sends an already-absolute `file_path`, so the
-    hook process's cwd matters only for the rare relative payload (issue
-    #314) -- never for which checkout owns an absolute one."""
-    candidate = Path(raw_path)
-    return candidate if candidate.is_absolute() else Path.cwd() / candidate
+RELATIVE_PAYLOAD_PATH_DENIAL = "relative payload path"
 
 
-def _protect_relative_path(raw_path: str, *, toplevel: Path) -> str | None:
+def _relative_scope_entry(absolute_path: str, *, toplevel: Path) -> str | None:
+    """`absolute_path` (already an absolute filesystem path -- a hook
+    payload path, or a `rescope --add`/`--drop` entry given that way) as a
+    canonical, repository-relative scope entry under `toplevel`, or `None`
+    when it resolves outside `toplevel` or is otherwise not a valid scope
+    entry. Shared by `protect` (issue #314) and `rescope`'s own absolute-path
+    handling (issue #314 delta, finding R1)."""
     try:
-        relative = _protect_absolute_path(raw_path).resolve().relative_to(toplevel).as_posix()
+        relative = Path(absolute_path).resolve().relative_to(toplevel).as_posix()
         return protocol._valid_scope([relative])[0]
     except (protocol.InvalidClaimMarkerError, OSError, ValueError):
         return None
@@ -2929,9 +2929,11 @@ def _protect_hook_paths(tool_name: str, payload: dict[str, object]) -> tuple[str
     return (single,) if single is not None else ()
 
 
-def _protect_claim_state_or_denial(
-    worktree: Path, canonical_remote: str
-) -> tuple[protocol.ClaimState | None, str | None]:
+_ProtectStateOutcome = tuple[protocol.ClaimState | None, str | None]
+_ProtectStateCache = dict[Path, _ProtectStateOutcome]
+
+
+def _protect_claim_state_or_denial(worktree: Path, canonical_remote: str) -> _ProtectStateOutcome:
     """`protect`'s live snapshot (issue #176, §1): one fetch, no positive
     cache (D2). A non-`None` second element names a denial reason for a
     store the hook cannot trust -- unreachable, auth, malformed tree,
@@ -2949,6 +2951,27 @@ def _protect_claim_state_or_denial(
     if state.tip is None:
         return None, f"cannot reach {store.STATE_REF}: {protocol.MISSING_STATE_REF}"
     return state, None
+
+
+def _protect_cached_claim_state_or_denial(
+    path_checkout: checkout.PathCheckout, *, state_cache: _ProtectStateCache
+) -> _ProtectStateOutcome:
+    """`_protect_claim_state_or_denial`, fetched at most once per repository
+    per hook invocation (issue #314 gate G5): several payload paths in one
+    `apply_patch` call can name the same repository through different
+    worktrees, and re-fetching for each would let each path be judged
+    against a different snapshot of a store that can move between them --
+    passing a rescope that narrowed coverage between fetches, for instance,
+    though no single live claim ever covered the whole patch. Cached by
+    `common_directory`, the one fact every worktree of one repository
+    shares, not by `toplevel`, which differs per worktree."""
+    cached = state_cache.get(path_checkout.common_directory)
+    if cached is not None:
+        return cached
+    canonical_remote = _canonical_remote_name(path_checkout.toplevel)
+    outcome = _protect_claim_state_or_denial(path_checkout.toplevel, canonical_remote)
+    state_cache[path_checkout.common_directory] = outcome
+    return outcome
 
 
 def _protect_overlapping_claim_exists(
@@ -2984,13 +3007,44 @@ def _protect_scope_denial(
     return "claim first"
 
 
-def _protect_path_denial(agent: str, raw_path: str, *, distinguish_scope: bool) -> str | None:
-    """The deny reason for one payload path's write, or `None` to allow --
-    resolved from the path's own checkout (issue #314), never from the hook
-    process's cwd, so the same payload path yields the same verdict from any
-    cwd: a path outside every repository denies "not in a repository"; a
-    path in the shared main checkout denies "not main"; a path in a linked
-    worktree is judged against that worktree's own live claim.
+def _protect_basic_checkout_denial(
+    raw_path: str,
+) -> tuple[checkout.PathCheckout | None, str | None]:
+    """The payload path's own resolved checkout, or an early denial reason
+    when the path itself, or the checkout it names, cannot even be weighed
+    against a live claim -- resolved from the path (issue #314), never from
+    the hook process's cwd, so the same payload path yields the same
+    verdict from any cwd: a relative payload path denies outright (finding
+    R2 -- every provider `aco` supports sends an already-absolute
+    `file_path`, so a relative one is untrustworthy and never guessed at by
+    joining it to the hook process's own cwd, exactly the signal issue #314
+    removes); a path outside every repository denies "not in a repository";
+    a checkout with no commit yet denies (gate G3 -- its branch name could
+    otherwise coincidentally match a still-live claim's); a path in the
+    shared main checkout, or in a checkout on the repository's default
+    branch at all (gate G4 -- a linked worktree can sit on that branch after
+    the repository's default branch changes), denies "not main"."""
+    if not Path(raw_path).is_absolute():
+        return None, RELATIVE_PAYLOAD_PATH_DENIAL
+    path_checkout = checkout.resolve_path_checkout(Path(raw_path).parent)
+    if path_checkout is None:
+        return None, "not in a repository"
+    if not path_checkout.has_commit:
+        return None, checkout.NO_COMMIT_CHECKOUT_REASON
+    if path_checkout.kind is checkout.CheckoutKind.MAIN or checkout.is_default_branch(
+        path_checkout.branch
+    ):
+        return None, "not main"
+    return path_checkout, None
+
+
+def _protect_path_denial(
+    agent: str, raw_path: str, *, distinguish_scope: bool, state_cache: _ProtectStateCache
+) -> str | None:
+    """The deny reason for one payload path's write, or `None` to allow. A
+    path that clears `_protect_basic_checkout_denial`'s gates is judged
+    against its own linked worktree's live claim, fetched at most once per
+    repository for this hook call (gate G5).
 
     `apply_patch` sets `distinguish_scope` (issue #252): with several paths
     in one call, the payload never told the agent which one was the problem,
@@ -3000,16 +3054,13 @@ def _protect_path_denial(agent: str, raw_path: str, *, distinguish_scope: bool) 
     keeps the simpler `claim first` either way, matching its own payload's
     inability to name any other path.
     """
-    path_checkout = checkout.resolve_path_checkout(_protect_absolute_path(raw_path).parent)
+    path_checkout, denial = _protect_basic_checkout_denial(raw_path)
     if path_checkout is None:
-        return "not in a repository"
-    if path_checkout.kind is checkout.CheckoutKind.MAIN:
-        return "not main"
-    relative = _protect_relative_path(raw_path, toplevel=path_checkout.toplevel)
+        return denial
+    relative = _relative_scope_entry(raw_path, toplevel=path_checkout.toplevel)
     if relative is None:
         return PATH_REQUIRED
-    canonical_remote = _canonical_remote_name(path_checkout.toplevel)
-    state, denial = _protect_claim_state_or_denial(path_checkout.toplevel, canonical_remote)
+    state, denial = _protect_cached_claim_state_or_denial(path_checkout, state_cache=state_cache)
     if state is None:
         return denial
     return _protect_scope_denial(
@@ -3027,14 +3078,19 @@ def _protect_write(tool_name: str, payload: dict[str, object]) -> int:
     repository or calls `gh` -- `--repo` is meaningless here and simply
     unused. Several paths in one `apply_patch` call may each sit in a
     different checkout (issue #314): each is judged in its own, and the
-    first denial wins."""
+    first denial wins. `state_cache` is this one hook call's own state
+    snapshot, shared by every path in the same repository (gate G5) --
+    never carried between calls, so every invocation still reads live."""
     raw_paths = _protect_hook_paths(tool_name, payload)
     if not raw_paths:
         return _hook_deny(PATH_REQUIRED)
     agent = checkout._resolved_agent(None)
     distinguish_scope = tool_name == APPLY_PATCH_TOOL_NAME
+    state_cache: _ProtectStateCache = {}
     for raw_path in raw_paths:
-        denial = _protect_path_denial(agent, raw_path, distinguish_scope=distinguish_scope)
+        denial = _protect_path_denial(
+            agent, raw_path, distinguish_scope=distinguish_scope, state_cache=state_cache
+        )
         if denial is not None:
             return _hook_deny(denial)
     return _hook_allow()
@@ -3119,16 +3175,67 @@ class _WriteSession:
     release_branch: str | None
 
 
-def _rescope_command(parsed: argparse.Namespace) -> protocol.RescopeRequest:
-    """`rescope`'s checkout, resolved from its own process cwd (issue #314):
-    the one legitimate location signal a command with no file-path argument
-    has, read through the same path-based resolver `protect` uses rather
-    than the ad hoc `git branch --show-current` this replaces, so it fails
-    the same way regardless of where else in the tree that separate call
-    might have looked."""
-    path_checkout = checkout.resolve_path_checkout(Path.cwd())
+def _rescope_location(add: list[str] | None, drop: list[str] | None) -> Path:
+    """The directory `rescope`'s checkout is resolved from (issue #314
+    delta, finding R1): the first `--add`/`--drop` entry that is already an
+    absolute path -- the one location signal a dispatcher running in a
+    foreign cwd (the head's own shared environment, editing a linked
+    worktree through a subagent) can give without knowing that cwd. A
+    relative entry carries no location of its own and is never joined to the
+    process's cwd to guess one -- finding R2's same principle, applied here
+    -- so `rescope` falls back to its own process cwd, its other legitimate
+    location signal, only when every given entry is relative or none is
+    given: unchanged from before this fix for that ordinary, undispatched
+    case."""
+    for raw_path in (*(add or ()), *(drop or ())):
+        if Path(raw_path).is_absolute():
+            return Path(raw_path).parent
+    return Path.cwd()
+
+
+def _rescope_scope_entries(
+    raw_paths: list[str] | None, *, toplevel: Path, flag: str
+) -> tuple[str, ...]:
+    """One `--add`/`--drop` list, canonicalized to repository-relative scope
+    entries: an absolute entry (`_rescope_location`'s own signal) is
+    resolved against `toplevel`; a relative entry is already the documented
+    repository-relative form and is validated as-is, never filesystem
+    joined."""
+    if not raw_paths:
+        return ()
+    canonical: list[str] = []
+    for raw_path in raw_paths:
+        if not Path(raw_path).is_absolute():
+            canonical.append(raw_path)
+            continue
+        relative = _relative_scope_entry(raw_path, toplevel=toplevel)
+        if relative is None:
+            raise protocol.ClaimUnavailableError(
+                f"{flag} path {raw_path!r} is outside the resolved checkout {toplevel}"
+            )
+        canonical.append(relative)
+    return protocol._valid_scope(canonical)
+
+
+def _rescope_checkout(parsed: argparse.Namespace) -> checkout.PathCheckout:
+    """`rescope`'s checkout, resolved from a path it is given whenever one
+    names a location (issue #314 delta, finding R1), read through the same
+    path-based resolver `protect` uses rather than the ad hoc
+    `git branch --show-current` this replaces, so it fails the same way
+    regardless of where else in the tree a bare cwd fallback might have
+    looked. A checkout with no commit yet denies here too (gate G3), the
+    same precondition `protect` enforces on its own resolved checkout."""
+    path_checkout = checkout.resolve_path_checkout(_rescope_location(parsed.add, parsed.drop))
     if path_checkout is None:
         raise protocol.ClaimUnavailableError("not in a repository")
+    if not path_checkout.has_commit:
+        raise protocol.ClaimUnavailableError(checkout.NO_COMMIT_CHECKOUT_REASON)
+    return path_checkout
+
+
+def _rescope_command(
+    parsed: argparse.Namespace, path_checkout: checkout.PathCheckout
+) -> protocol.RescopeRequest:
     branch = path_checkout.branch
     if not branch:
         raise protocol.ClaimUnavailableError(
@@ -3140,8 +3247,8 @@ def _rescope_command(parsed: argparse.Namespace) -> protocol.RescopeRequest:
     return protocol.RescopeRequest(
         identity=identity,
         agent=parsed.agent,
-        add=protocol._valid_scope(parsed.add) if parsed.add else (),
-        drop=protocol._valid_scope(parsed.drop) if parsed.drop else (),
+        add=_rescope_scope_entries(parsed.add, toplevel=path_checkout.toplevel, flag="--add"),
+        drop=_rescope_scope_entries(parsed.drop, toplevel=path_checkout.toplevel, flag="--drop"),
         claim_id=parsed.claim_id,
         branch=branch,
         whole_reason=_optional_whole_reason(parsed),
@@ -3474,8 +3581,11 @@ def _cmd_next(parsed: argparse.Namespace, session: _ReadSession) -> int:
 
 
 def _cmd_rescope(parsed: argparse.Namespace, _session: _WriteSession) -> None:
-    requested = _rescope_command(parsed)
-    worktree, canonical_remote, observed = _store_observation()
+    path_checkout = _rescope_checkout(parsed)
+    requested = _rescope_command(parsed, path_checkout)
+    worktree = path_checkout.toplevel
+    canonical_remote = _canonical_remote_name(worktree)
+    observed = store.fetch_state(worktree=worktree, remote=canonical_remote)
     _require_state_ref(observed)
     selected = _selected_store_claim(
         observed, requested.identity, requested.branch, requested.claim_id
@@ -3486,7 +3596,7 @@ def _cmd_rescope(parsed: argparse.Namespace, _session: _WriteSession) -> None:
             f"(holder={protocol._claimant_text(selected.agent, selected.role)!r}, "
             f"this session={protocol._claimant_text(requested.agent, selected.role)!r})"
         )
-    versioned = checkout.versioned_paths()
+    versioned = checkout.versioned_paths(directory=worktree)
     _reject_ungrounded_comma_scope(requested.add, versioned, flag="--add")
     combined = protocol._combined_scope(selected.scope, requested.add, requested.drop)
     _reject_wide_scope(combined, versioned, requested.whole_reason or selected.whole_reason)

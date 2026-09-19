@@ -11,6 +11,7 @@ from __future__ import annotations
 import io
 import json
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -77,12 +78,18 @@ def _protect_git_values(
     resolved_common_directory = common_directory or (work / ".git")
     return {
         ("branch", "--show-current"): branch,
+        ("rev-parse", "--verify", "HEAD"): BASE,
         _PATH_CHECKOUT_ARGUMENTS: "\n".join(
             (str(work.resolve()), str(resolved_git_directory), str(resolved_common_directory))
         ),
         # The canonical-remote comparison (issue #176, Erwartung 6) reads this
         # to confirm the fake forge target (REPOSITORY) matches it.
         ("config", "--get", "remote.origin.url"): f"git@github.com:{REPOSITORY}.git",
+        # `is_default_branch` (gate G4) reads this to resolve the
+        # repository's own default branch name; every fixture branch above
+        # but the explicit "not main" cases names a non-default branch, so
+        # a fixed "main" here never trips it by accident.
+        ("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"): "refs/remotes/origin/main",
     }
 
 
@@ -201,12 +208,14 @@ def test_protect_allowed_write_resolves_identity_then_git_then_store(
     assert (
         _protect_main(
             monkeypatch,
-            {"toolName": "write", "toolInput": {"path": "src/widget.py"}},
+            {"toolName": "write", "toolInput": {"path": str(work / "src/widget.py")}},
         )
         == 0
     )
     _assert_protect_decision(capsys, decision="allow")
-    assert calls == ["identity", "git", "git", "store"]
+    # Checkout resolution, the has-commit gate (G3), and the default-branch
+    # gate (G4) each read one more `_git_output` fact before the store.
+    assert calls == ["identity", "git", "git", "git", "git", "store"]
 
 
 @pytest.mark.parametrize(
@@ -256,7 +265,7 @@ def test_protect_grok_camelcase_allows_when_session_claim_covers_path(
     assert (
         _protect_main(
             monkeypatch,
-            {"toolName": tool_name, "toolInput": {path_key: "src/widget.py"}},
+            {"toolName": tool_name, "toolInput": {path_key: str(work / "src/widget.py")}},
         )
         == 0
     )
@@ -280,7 +289,7 @@ def test_protect_allows_a_lane_claim_covering_the_path(
     assert (
         _protect_main(
             monkeypatch,
-            {"toolName": "write", "toolInput": {"path": "src/widget.py"}},
+            {"toolName": "write", "toolInput": {"path": str(work / "src/widget.py")}},
         )
         == 0
     )
@@ -301,7 +310,7 @@ def test_protect_grok_camelcase_denies_write_without_this_session_claim(
     assert (
         _protect_main(
             monkeypatch,
-            {"toolName": "write", "toolInput": {"path": "src/widget.py"}},
+            {"toolName": "write", "toolInput": {"path": str(work / "src/widget.py")}},
         )
         == 2
     )
@@ -349,7 +358,7 @@ def test_protect_dirty_worktree_still_allows_covered_write(
     assert (
         _protect_main(
             monkeypatch,
-            {"toolName": "write", "toolInput": {"path": "src/widget.py"}},
+            {"toolName": "write", "toolInput": {"path": str(work / "src/widget.py")}},
         )
         == 0
     )
@@ -371,7 +380,7 @@ def test_protect_no_matching_claim_denies_claim_first(
     assert (
         _protect_main(
             monkeypatch,
-            {"toolName": "write", "toolInput": {"path": "src/widget.py"}},
+            {"toolName": "write", "toolInput": {"path": str(work / "src/widget.py")}},
         )
         == 2
     )
@@ -440,6 +449,8 @@ def test_protect_missing_identity_denies_without_github(
     assert (
         _protect_main(
             monkeypatch,
+            # Identity resolution fails before this path is ever read
+            # (`_forbid_git_fill` proves it), so it needs no real checkout.
             {"toolName": "write", "toolInput": {"path": "src/widget.py"}},
         )
         == 2
@@ -452,34 +463,40 @@ def test_protect_missing_identity_denies_without_github(
 
 
 @pytest.mark.parametrize(
-    "payload",
+    "payload_for_work",
     [
-        {
+        lambda work: {
             "toolName": "apply_patch",
             "toolInput": {
-                "command": _patch_command("*** Update File: src/widget.py", "@@", "-old", "+new")
+                "command": _patch_command(
+                    f"*** Update File: {work / 'src/widget.py'}", "@@", "-old", "+new"
+                )
             },
         },
-        {
+        lambda work: {
             "tool_name": "NotebookEdit",
             "tool_input": {
-                "notebook_path": "notebook.ipynb",
+                "notebook_path": str(work / "notebook.ipynb"),
                 "new_source": "print(1)",
                 "cell_type": "code",
                 "edit_mode": "replace",
             },
         },
     ],
+    ids=["apply_patch", "notebook_edit"],
 )
 def test_protect_extended_mutating_tools_deny_on_main_without_a_claim(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
-    payload: dict[str, object],
+    payload_for_work: Callable[[Path], dict[str, object]],
 ) -> None:
     """`apply_patch` (Codex) and `NotebookEdit` (Claude Code) joined the
     mutating table (issue #238): both are gated exactly like `Write`, denied
-    from the shared main checkout before a claim is even looked up."""
+    from the shared main checkout before a claim is even looked up. The
+    payload's own path must be absolute (issue #314 delta, finding R2), so
+    each case builds it from `work` -- not known until the test itself picks
+    a fresh `tmp_path` -- rather than at collection time."""
     _isolate_protect_home(monkeypatch, tmp_path)
     work = tmp_path / "work"
     _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
@@ -488,7 +505,7 @@ def test_protect_extended_mutating_tools_deny_on_main_without_a_claim(
     )
     _forbid_github_construction(monkeypatch)
 
-    assert _protect_main(monkeypatch, payload) == 2
+    assert _protect_main(monkeypatch, payload_for_work(work)) == 2
     _assert_protect_decision(capsys, decision="deny", reason="not main")
 
 
@@ -521,7 +538,7 @@ def test_protect_notebook_edit_reads_notebook_path(
         {
             "tool_name": "NotebookEdit",
             "tool_input": {
-                "notebook_path": notebook_path,
+                "notebook_path": str(work / notebook_path),
                 "new_source": "print(1)",
                 "cell_type": "code",
                 "edit_mode": "replace",
@@ -553,8 +570,8 @@ def test_protect_notebook_edit_ignores_a_decoy_path_key_it_never_sends(
         {
             "tool_name": "NotebookEdit",
             "tool_input": {
-                "path": "src/widget.py",
-                "notebook_path": "docs/widget.ipynb",
+                "path": str(work / "src/widget.py"),
+                "notebook_path": str(work / "docs/widget.ipynb"),
                 "new_source": "print(1)",
                 "cell_type": "code",
                 "edit_mode": "replace",
@@ -580,11 +597,11 @@ def test_protect_apply_patch_allows_when_every_touched_path_is_in_scope(
     _patch_protect_git(monkeypatch, work)
     _patch_protect_claim(monkeypatch)
     command = _patch_command(
-        "*** Update File: src/widget.py",
+        f"*** Update File: {work / 'src/widget.py'}",
         "@@",
         "-old",
         "+new",
-        "*** Add File: src/new_module.py",
+        f"*** Add File: {work / 'src/new_module.py'}",
         "+content",
     )
 
@@ -596,23 +613,23 @@ def test_protect_apply_patch_allows_when_every_touched_path_is_in_scope(
 
 
 @pytest.mark.parametrize(
-    ("lines", "outside_path"),
+    ("line_templates", "outside_path"),
     [
         (
             (
-                "*** Update File: src/widget.py",
+                "*** Update File: {work}/src/widget.py",
                 "@@",
                 "-old",
                 "+new",
-                "*** Add File: docs/widget.md",
+                "*** Add File: {work}/docs/widget.md",
                 "+content",
             ),
             "docs/widget.md",
         ),
         (
             (
-                "*** Update File: src/widget.py",
-                "*** Move to: docs/widget.py",
+                "*** Update File: {work}/src/widget.py",
+                "*** Move to: {work}/docs/widget.py",
                 "@@",
                 "-old",
                 "+new",
@@ -625,19 +642,22 @@ def test_protect_apply_patch_denies_naming_the_first_path_outside_scope(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
-    lines: tuple[str, ...],
+    line_templates: tuple[str, ...],
     outside_path: str,
 ) -> None:
     """A multi-file `apply_patch` call names the specific file outside the
     claim scope -- unlike a single-path write's generic `claim first` -- since
     the hook payload doesn't otherwise say which of several files was the
     problem (issue #252). Covers both a plain outside path and a `Move to:`
-    rename landing outside scope."""
+    rename landing outside scope. `line_templates` hold `{work}` -- the
+    checkout, not known until the test picks its own `tmp_path` -- rather
+    than a path already absolute (issue #314 delta, finding R2)."""
     _isolate_protect_home(monkeypatch, tmp_path)
     work = tmp_path / "work"
     _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
     _patch_protect_git(monkeypatch, work)
     _patch_protect_claim(monkeypatch)
+    lines = (line.format(work=work) for line in line_templates)
 
     assert (
         _protect_main(
@@ -666,9 +686,9 @@ def test_protect_apply_patch_denies_an_indented_header_smuggled_after_add_file(
     _patch_protect_git(monkeypatch, work)
     _patch_protect_claim(monkeypatch, scope=("README.md",))
     command = _patch_command(
-        "*** Add File: README.md",
+        f"*** Add File: {work / 'README.md'}",
         "+content",
-        "  *** Update File: docs/evil.md",
+        f"  *** Update File: {work / 'docs/evil.md'}",
         "@@",
         "-old",
         "+new",
@@ -696,7 +716,7 @@ def test_protect_apply_patch_denies_with_claim_first_when_no_session_claim_exist
     _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
     _patch_protect_git(monkeypatch, work)
     _patch_protect_claim(monkeypatch, agent="Codex Sol")
-    command = _patch_command("*** Update File: src/widget.py", "@@", "-old", "+new")
+    command = _patch_command(f"*** Update File: {work / 'src/widget.py'}", "@@", "-old", "+new")
 
     assert (
         _protect_main(monkeypatch, {"toolName": "apply_patch", "toolInput": {"command": command}})
@@ -747,7 +767,7 @@ def test_protect_primary_checkout_denies_not_main_without_github(
     assert (
         _protect_main(
             monkeypatch,
-            {"toolName": "write", "toolInput": {"path": "src/widget.py"}},
+            {"toolName": "write", "toolInput": {"path": str(work / "src/widget.py")}},
         )
         == 2
     )
@@ -792,7 +812,7 @@ def test_protect_wrong_branch_denies_claim_first(
     assert (
         _protect_main(
             monkeypatch,
-            {"toolName": "write", "toolInput": {"path": "src/widget.py"}},
+            {"toolName": "write", "toolInput": {"path": str(work / "src/widget.py")}},
         )
         == 2
     )
@@ -813,7 +833,7 @@ def test_protect_non_overlapping_scope_denies_claim_first(
     assert (
         _protect_main(
             monkeypatch,
-            {"toolName": "write", "toolInput": {"path": "src/widget.py"}},
+            {"toolName": "write", "toolInput": {"path": str(work / "src/widget.py")}},
         )
         == 2
     )
@@ -844,7 +864,7 @@ def test_protect_claim_error_from_write_path_denies_json_without_error_prefix(
     assert (
         _protect_main(
             monkeypatch,
-            {"toolName": "write", "toolInput": {"path": "src/widget.py"}},
+            {"toolName": "write", "toolInput": {"path": str(work / "src/widget.py")}},
         )
         == 2
     )
@@ -872,7 +892,7 @@ def test_protect_non_claim_error_from_write_path_denies_json_without_traceback(
     assert (
         _protect_main(
             monkeypatch,
-            {"toolName": "write", "toolInput": {"path": "src/widget.py"}},
+            {"toolName": "write", "toolInput": {"path": str(work / "src/widget.py")}},
         )
         == 2
     )
@@ -918,7 +938,7 @@ def test_protect_maps_every_store_error_to_cannot_reach_the_state_ref(
     assert (
         _protect_main(
             monkeypatch,
-            {"toolName": "write", "toolInput": {"path": "src/widget.py"}},
+            {"toolName": "write", "toolInput": {"path": str(work / "src/widget.py")}},
         )
         == 2
     )
@@ -946,7 +966,7 @@ def test_protect_apply_patch_maps_a_store_error_to_cannot_reach_the_state_ref(
         raise ClaimError("cannot fetch")
 
     monkeypatch.setattr(store, "fetch_state", fake_fetch_state)
-    command = _patch_command("*** Update File: src/widget.py", "@@", "-old", "+new")
+    command = _patch_command(f"*** Update File: {work / 'src/widget.py'}", "@@", "-old", "+new")
 
     assert (
         _protect_main(monkeypatch, {"toolName": "apply_patch", "toolInput": {"command": command}})
@@ -973,7 +993,7 @@ def test_protect_missing_state_ref_denies_cannot_reach(
     assert (
         _protect_main(
             monkeypatch,
-            {"toolName": "write", "toolInput": {"path": "src/widget.py"}},
+            {"toolName": "write", "toolInput": {"path": str(work / "src/widget.py")}},
         )
         == 2
     )
@@ -998,7 +1018,7 @@ def test_protect_allow_is_forge_free_against_a_non_github_remote(
     assert (
         _protect_main(
             monkeypatch,
-            {"toolName": "write", "toolInput": {"path": "src/widget.py"}},
+            {"toolName": "write", "toolInput": {"path": str(work / "src/widget.py")}},
         )
         == 0
     )
@@ -1019,7 +1039,7 @@ def test_protect_deny_is_forge_free_against_a_non_github_remote(
     assert (
         _protect_main(
             monkeypatch,
-            {"toolName": "write", "toolInput": {"path": "src/widget.py"}},
+            {"toolName": "write", "toolInput": {"path": str(work / "src/widget.py")}},
         )
         == 2
     )
@@ -1198,23 +1218,38 @@ def test_protect_apply_patch_judges_two_worktrees_separately_and_one_deny_wins(
     _assert_protect_decision(capsys, decision="deny", reason="claim first")
 
 
-def test_rescope_succeeds_from_the_claimed_worktree_regardless_of_the_main_checkouts_cwd(
+@pytest.mark.parametrize(
+    "cwd_kind", ["claimed_worktree", "foreign_tmp_dir", "foreign_main_checkout"]
+)
+def test_rescope_succeeds_from_every_cwd_when_the_add_path_locates_the_claim(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
+    cwd_kind: str,
 ) -> None:
-    """Issue #314's fourth proof: `rescope` resolves its checkout from its
-    own process cwd through the same path-based resolver `protect` uses --
-    run from the claimed worktree itself (a cwd "foreign" to the shared main
-    checkout, the setup's actual baseline), it succeeds exactly as it did
-    before this fix, proving the refactor did not regress the ordinary case.
-    """
+    """Issue #314's own fourth proof (finding R1): from the claimed worktree
+    itself, a plain repository-relative `--add` still resolves via cwd, its
+    fallback location signal, exactly as before this fix (the ordinary,
+    undispatched case). From a cwd foreign to the claimed worktree -- an
+    unrelated tmp directory outside every repository, or the shared main
+    checkout -- `rescope` still resolves that worktree and succeeds once the
+    `--add` path it is given is itself absolute: the one location signal a
+    dispatcher in the head's own shared environment (editing a linked
+    worktree through a subagent) can give without knowing that cwd."""
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
     _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Codex Sol"})
-    _main, worktree = _protect_real_repo_with_worktree(tmp_path)
-    monkeypatch.chdir(worktree)
+    main, worktree = _protect_real_repo_with_worktree(tmp_path)
+    if cwd_kind == "claimed_worktree":
+        cwd, add = worktree, "docs/widget.md"
+    elif cwd_kind == "foreign_main_checkout":
+        cwd, add = main, str(worktree / "docs" / "widget.md")
+    else:
+        cwd = tmp_path / "elsewhere"
+        cwd.mkdir()
+        add = str(worktree / "docs" / "widget.md")
+    monkeypatch.chdir(cwd)
     claimed = _protect_active_claim(
         "Codex Sol", scope=("src/widget.py",), branch="codex/issue-72-widget"
     )
@@ -1226,7 +1261,240 @@ def test_rescope_succeeds_from_the_claimed_worktree_regardless_of_the_main_check
         lambda *, worktree, remote, subject, intent: protocol.apply(state, intent),
     )
 
-    status = issue_claim.main(["rescope", "72", "--add", "docs/widget.md"])
+    status = issue_claim.main(["rescope", "72", "--add", add])
 
     assert status == 0
     assert capsys.readouterr().out == f"RESCOPED issue #72: {claimed.claim_id}\n"
+
+
+def test_protect_denies_a_relative_payload_path_even_from_the_claimed_worktree_cwd(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Finding R2: a relative payload path must never be guessed by joining
+    it to the hook process's own cwd -- not even in the one case where doing
+    so would happen to land on the right file (cwd already the claimed
+    worktree, the historical vulnerable shape this whole item closes).
+    Every provider `aco` supports sends an already-absolute `file_path`, so
+    a relative one is untrustworthy on its own and denies outright,
+    regardless of a live covering claim."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    _main, worktree = _protect_real_repo_with_worktree(tmp_path)
+    monkeypatch.chdir(worktree)
+    state = _protect_state_with_claim(
+        _protect_active_claim("Grok sess-1", branch="codex/issue-72-widget")
+    )
+    monkeypatch.setattr(store, "fetch_state", lambda *, worktree, remote: state)
+
+    assert (
+        _protect_main(monkeypatch, {"toolName": "write", "toolInput": {"path": "src/widget.py"}})
+        == 2
+    )
+    _assert_protect_decision(
+        capsys, decision="deny", reason=issue_claim.RELATIVE_PAYLOAD_PATH_DENIAL
+    )
+
+
+def _real_main_checkout_target(tmp_path: Path) -> Path:
+    """Finding R3's own proof target: a real main checkout's own file, no
+    fake `_git_output` involved."""
+    main, _worktree = _protect_real_repo_with_worktree(tmp_path)
+    return main / "README.md"
+
+
+def _real_worktree_on_default_branch_target(tmp_path: Path) -> Path:
+    """Gate G4's own proof target: a real linked worktree checked out on the
+    repository's own default branch -- possible once the main checkout
+    moves off it first (git refuses the same branch checked out twice), then
+    a worktree attaches the now-free branch directly rather than creating a
+    new one, the shape a repository's default-branch change can leave
+    behind."""
+    main = tmp_path / "repo"
+    main.mkdir()
+    _real_git(main, "init", "-q", "-b", "main")
+    _real_git(main, "config", "user.name", "Test")
+    _real_git(main, "config", "user.email", "test@example.com")
+    (main / "README.md").write_text("hello\n")
+    _real_git(main, "add", "README.md")
+    _real_git(main, "commit", "-q", "-m", "initial")
+    _real_git(main, "checkout", "-q", "-b", "codex/elsewhere")
+    worktree = tmp_path / "repo-worktrees" / "issue-1-on-default"
+    worktree.parent.mkdir(parents=True)
+    _real_git(main, "worktree", "add", "-q", str(worktree), "main")
+    return worktree / "README.md"
+
+
+@pytest.mark.parametrize(
+    "build_target",
+    [_real_main_checkout_target, _real_worktree_on_default_branch_target],
+    ids=["main-checkout", "linked-worktree-on-default-branch"],
+)
+def test_protect_denies_not_main_for_a_real_checkout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    build_target: Callable[[Path], Path],
+) -> None:
+    """Finding R3 and gate G4, against real checkouts rather than
+    `_patch_protect_git`'s mock: a payload path in the real shared main
+    checkout denies `not main` (R3 -- the previously required proof was
+    mocked, never exercising `git worktree add`/`git -C`); so does one in a
+    real linked worktree sitting on the repository's own default branch (G4
+    -- `resolve_path_checkout`'s structural MAIN/LINKED_WORKTREE split alone
+    stopped catching this once issue #314 dropped the old branch-name check,
+    so a live claim matching that worktree's agent/branch/scope would
+    otherwise be honoured there exactly as if it were a real lane)."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    target = build_target(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    _forbid_github_construction(monkeypatch)
+
+    assert (
+        _protect_main(monkeypatch, {"toolName": "write", "toolInput": {"path": str(target)}}) == 2
+    )
+    _assert_protect_decision(capsys, decision="deny", reason="not main")
+
+
+def test_protect_denies_a_checkout_with_no_commit_yet(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Gate G3: a freshly `git init`ed checkout with no commit yet -- an
+    unborn branch -- still names a real branch (`git branch --show-current`
+    reads the symbolic ref's target regardless of whether it resolves to a
+    commit), so without a successful-HEAD requirement its name could
+    coincidentally match a still-live claim's and be authorized despite
+    naming no real history."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    unborn = tmp_path / "unborn"
+    unborn.mkdir()
+    _real_git(unborn, "init", "-q", "-b", "codex/issue-72-widget")
+    monkeypatch.chdir(tmp_path)
+    _forbid_github_construction(monkeypatch)
+    target = unborn / "widget.py"
+
+    assert (
+        _protect_main(monkeypatch, {"toolName": "write", "toolInput": {"path": str(target)}}) == 2
+    )
+    _assert_protect_decision(capsys, decision="deny", reason=checkout.NO_COMMIT_CHECKOUT_REASON)
+
+
+def test_protect_apply_patch_fetches_store_state_once_per_repository(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Gate G5: two payload paths in one `apply_patch` call, each in its own
+    linked worktree of the same repository, are judged against one state
+    snapshot -- fetched once for the repository (observed via a counting
+    fake store, never by asserting mock call order), not once per path -- so
+    a rescope that narrows coverage between two per-path fetches can never
+    let each path pass against a different snapshot though no single live
+    claim ever covered the whole patch."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    _main, claimed_worktree = _protect_real_repo_with_worktree(tmp_path)
+    _main2, unclaimed_worktree = _protect_real_repo_with_worktree(tmp_path, slug="issue-90-other")
+    monkeypatch.chdir(tmp_path)
+    state = _protect_state_with_claim(
+        _protect_active_claim("Grok sess-1", branch="codex/issue-72-widget")
+    )
+    fetch_calls: list[Path] = []
+
+    def counting_fetch_state(*, worktree: Path, remote: str) -> protocol.ClaimState:
+        fetch_calls.append(worktree)
+        return state
+
+    monkeypatch.setattr(store, "fetch_state", counting_fetch_state)
+    command = _patch_command(
+        f"*** Update File: {claimed_worktree / 'src' / 'widget.py'}",
+        "@@",
+        "-old",
+        "+new",
+        f"*** Update File: {unclaimed_worktree / 'src' / 'other.py'}",
+        "@@",
+        "-old",
+        "+new",
+    )
+
+    assert (
+        _protect_main(monkeypatch, {"toolName": "apply_patch", "toolInput": {"command": command}})
+        == 2
+    )
+    _assert_protect_decision(capsys, decision="deny", reason="claim first")
+    assert len(fetch_calls) == 1
+
+
+def _rescope_args_add_path_outside_the_first_paths_checkout(tmp_path: Path) -> list[str]:
+    _main, worktree = _protect_real_repo_with_worktree(tmp_path)
+    _main2, other_worktree = _protect_real_repo_with_worktree(tmp_path, slug="issue-90-other")
+    return [
+        "rescope",
+        "72",
+        "--add",
+        str(worktree / "docs" / "widget.md"),
+        "--add",
+        str(other_worktree / "src" / "other.py"),
+    ]
+
+
+def _rescope_args_add_path_outside_any_repository(tmp_path: Path) -> list[str]:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    return ["rescope", "72", "--add", str(outside / "file.py")]
+
+
+def _rescope_args_add_path_in_an_unborn_checkout(tmp_path: Path) -> list[str]:
+    unborn = tmp_path / "unborn"
+    unborn.mkdir()
+    _real_git(unborn, "init", "-q", "-b", "codex/issue-72-widget")
+    return ["rescope", "72", "--add", str(unborn / "widget.py")]
+
+
+@pytest.mark.parametrize(
+    ("build_args", "expected_error_fragment"),
+    [
+        (
+            _rescope_args_add_path_outside_the_first_paths_checkout,
+            "is outside the resolved checkout",
+        ),
+        (_rescope_args_add_path_outside_any_repository, "not in a repository"),
+        (_rescope_args_add_path_in_an_unborn_checkout, checkout.NO_COMMIT_CHECKOUT_REASON),
+    ],
+    ids=["second-add-path-outside-checkout", "outside-any-repository", "checkout-has-no-commit"],
+)
+def test_rescope_denies_before_touching_the_store(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    build_args: Callable[[Path], list[str]],
+    expected_error_fragment: str,
+) -> None:
+    """`rescope`'s own new checkout-resolution paths (issue #314 delta): a
+    second `--add`/`--drop` path outside the first path's own checkout
+    (`_rescope_scope_entries`) refuses rather than silently mis-scoping; a
+    location outside every repository, and gate G3's no-commit checkout
+    (`_rescope_checkout`), both refuse before the store is ever touched."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Codex Sol"})
+    args = build_args(tmp_path)
+
+    status = issue_claim.main(args)
+
+    assert status == 2
+    assert expected_error_fragment in capsys.readouterr().err

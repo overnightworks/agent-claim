@@ -54,6 +54,7 @@ def _git_checkout(
     toplevel = "/repo"
     return {
         ("rev-parse", "HEAD"): head,
+        ("rev-parse", "--verify", "HEAD"): head,
         ("rev-parse", "--show-toplevel"): toplevel,
         ("branch", "--show-current"): branch,
         ("rev-parse", "--git-dir"): git_directory,
@@ -185,7 +186,6 @@ def arrange_scope_width(
         "_scope_directories",
         lambda paths: tuple(path for path in paths if path in directories),
     )
-    if versioned is not None:
-        monkeypatch.setattr(checkout, "versioned_paths", lambda: versioned)
+    monkeypatch.setattr(checkout, "versioned_paths", lambda **_kwargs: versioned or ())
     if validate_checkout:
         monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)

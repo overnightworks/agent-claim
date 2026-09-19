@@ -40,6 +40,15 @@ def _git_output(arguments: list[str], *, directory: Path | None = None) -> str:
         raise ClaimError(_GIT_MISSING_EXECUTABLE_ERROR) from error
     except process.ProcessTimedOutError as error:
         raise ClaimError(_GIT_TIMED_OUT_ERROR) from error
+    except OSError as error:
+        # `run_captured` translates a missing executable and a timeout to
+        # its own typed errors above, but leaves every other OS-level launch
+        # failure (permission denied, out of file descriptors, `-C` naming a
+        # non-directory, ...) as a raw `OSError` (issue #314 gate G's
+        # follow-up): every caller here judges a checkout for a security
+        # decision, so that must fail closed with a `ClaimError` too, never
+        # an uncaught traceback out of `protect`'s hook boundary.
+        raise ClaimError(f"git failed to launch: {error}") from error
     if result.exit_status != 0:
         detail = (
             result.stderr.decode().strip()
@@ -129,9 +138,14 @@ def parse_remote_location(url: str) -> RemoteLocation:
     raise ClaimError(f"remote url {url!r} names no recognized host")
 
 
-def versioned_paths() -> tuple[str, ...]:
+def versioned_paths(*, directory: Path | None = None) -> tuple[str, ...]:
+    """Every versioned path git tracks, from `directory` via `-C` when given
+    (issue #314: `rescope`'s own resolved checkout, never the calling
+    process's cwd) or the process's own checkout otherwise (`claim`'s own
+    precondition, unaffected by #314)."""
     try:
-        result = process.run_captured(["git", "ls-files", "-z", "--full-name"])
+        command = ["git", *(["-C", str(directory)] if directory is not None else [])]
+        result = process.run_captured([*command, "ls-files", "-z", "--full-name"])
     except process.ExecutableMissingError as error:
         raise ClaimError(_GIT_MISSING_EXECUTABLE_ERROR) from error
     except process.ProcessTimedOutError as error:
@@ -292,12 +306,25 @@ class PathCheckout:
     directory (issue #314) -- never from the calling process's own cwd, so
     the same directory yields the same checkout regardless of where the
     process runs. `protect` resolves this from a hook payload path's own
-    parent directory; `rescope` resolves it from its own process cwd, its
-    one legitimate location signal."""
+    parent directory; `rescope` resolves it from the first absolute path it
+    is given, falling back to its own process cwd when none is (its one
+    other legitimate location signal). `common_directory` is the one fact
+    shared by every worktree of the same repository -- the key a caller
+    fetching store state once per repository, not once per worktree, caches
+    on (issue #314 gate G5). `has_commit` is `False` for an unborn branch
+    (a symbolic `HEAD` naming a branch with no commit yet): a resolved
+    checkout with no commit must never itself authorize a write (issue #314
+    gate G3), since its branch name can coincidentally match a still-live
+    claim's."""
 
     toplevel: Path
     branch: str
     kind: CheckoutKind
+    common_directory: Path
+    has_commit: bool
+
+
+NO_COMMIT_CHECKOUT_REASON = "no commit on this branch"
 
 
 def resolve_path_checkout(directory: Path) -> PathCheckout | None:
@@ -329,7 +356,18 @@ def resolve_path_checkout(directory: Path) -> PathCheckout | None:
     except (ClaimError, ValueError):
         return None
     kind = CheckoutKind.MAIN if git_directory == common_directory else CheckoutKind.LINKED_WORKTREE
-    return PathCheckout(toplevel=Path(toplevel), branch=branch, kind=kind)
+    try:
+        _git_output(["rev-parse", "--verify", "HEAD"], directory=directory)
+        has_commit = True
+    except ClaimError:
+        has_commit = False
+    return PathCheckout(
+        toplevel=Path(toplevel),
+        branch=branch,
+        kind=kind,
+        common_directory=Path(common_directory),
+        has_commit=has_commit,
+    )
 
 
 def _refuse_shared_checkout(path_checkout: PathCheckout, *, repair: WorktreeRepair) -> None:

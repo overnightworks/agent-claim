@@ -5350,7 +5350,7 @@ def _stub_versioned_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         checkout,
         "versioned_paths",
-        lambda: (
+        lambda **_kwargs: (
             "LICENSE",
             "README.md",
             "pyproject.toml",
@@ -5413,7 +5413,7 @@ def _patch_status_cli(monkeypatch: pytest.MonkeyPatch, client: FakeForge) -> Non
     monkeypatch.setattr(
         checkout,
         "versioned_paths",
-        lambda: (
+        lambda **_kwargs: (
             "LICENSE",
             "README.md",
             "pyproject.toml",
@@ -6366,7 +6366,7 @@ def test_cli_claim_scope_keeps_a_comma_inside_one_path(
     monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
     monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
     monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
-    monkeypatch.setattr(checkout, "versioned_paths", lambda: ("docs/report,v2.md",))
+    monkeypatch.setattr(checkout, "versioned_paths", lambda **_kwargs: ("docs/report,v2.md",))
 
     claimed = issue_claim.main(
         [
@@ -6430,7 +6430,9 @@ def test_cli_claim_scope_comma_differs_from_repeated_scope_flags(
     monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
     monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
     monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
-    monkeypatch.setattr(checkout, "versioned_paths", lambda: ("docs/PRODUCT.md,src/widget.py",))
+    monkeypatch.setattr(
+        checkout, "versioned_paths", lambda **_kwargs: ("docs/PRODUCT.md,src/widget.py",)
+    )
 
     joined = issue_claim.main(
         [
@@ -6608,7 +6610,7 @@ def test_cli_rescope_add_keeps_a_comma_inside_one_path(
         checkout, "_git_output", lambda arguments, **_kwargs: git_values[tuple(arguments)]
     )
     monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
-    monkeypatch.setattr(checkout, "versioned_paths", lambda: ("reports/a,b.md",))
+    monkeypatch.setattr(checkout, "versioned_paths", lambda **_kwargs: ("reports/a,b.md",))
     _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Codex Sol"})
 
     status = issue_claim.main(
@@ -6647,7 +6649,7 @@ def test_cli_rescope_drop_matches_a_comma_path_as_one_whole_path(
         checkout, "_git_output", lambda arguments, **_kwargs: git_values[tuple(arguments)]
     )
     monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
-    monkeypatch.setattr(checkout, "versioned_paths", lambda: ("reports/a,b.md",))
+    monkeypatch.setattr(checkout, "versioned_paths", lambda **_kwargs: ("reports/a,b.md",))
     _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Codex Sol"})
 
     status = issue_claim.main(
@@ -6764,7 +6766,7 @@ def test_cli_rescope_drop_removes_a_comma_entry_the_claim_holds_though_no_file_m
         checkout, "_git_output", lambda arguments, **_kwargs: git_values[tuple(arguments)]
     )
     monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
-    monkeypatch.setattr(checkout, "versioned_paths", lambda: ("a.py", "b.py"))
+    monkeypatch.setattr(checkout, "versioned_paths", lambda **_kwargs: ("a.py", "b.py"))
     _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Codex Sol"})
 
     status = issue_claim.main(
@@ -10413,15 +10415,28 @@ def test_cli_lane_claim_rescope_and_release_are_forge_free_against_a_non_github_
     monkeypatch.setattr(
         checkout,
         "versioned_paths",
-        lambda: ("LICENSE", "README.md", "pyproject.toml", "src/agent_coordination/__init__.py"),
+        lambda **_kwargs: (
+            "LICENSE",
+            "README.md",
+            "pyproject.toml",
+            "src/agent_coordination/__init__.py",
+        ),
     )
     monkeypatch.setattr(issue_claim, "datetime", FixedDateTime)
     monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
     monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+    # `rescope` fetches and commits real store state against its resolved
+    # checkout's own toplevel (issue #314 delta, finding R1) -- unlike
+    # `claim`'s cwd-based store observation above, still unaffected by this
+    # fix, this fake toplevel must therefore be a real directory the test's
+    # own real `store.fetch_state`/`commit_transition` calls can `-C` into,
+    # not the placeholder `"/repo"` every other checkout fact below stays.
+    real_toplevel = str(Path.cwd())
     git_values = {
         ("branch", "--show-current"): "docs/lane-cleanup",
-        ("rev-parse", "--show-toplevel"): "/repo",
+        ("rev-parse", "--show-toplevel"): real_toplevel,
         ("rev-parse", "HEAD"): BASE,
+        ("rev-parse", "--verify", "HEAD"): BASE,
         ("rev-parse", "--git-dir"): "/repo/.git/worktrees/lane-cleanup",
         ("rev-parse", "--git-common-dir"): "/repo/.git",
         # `rescope`'s path-based checkout resolution (issue #314): the same
@@ -10433,7 +10448,7 @@ def test_cli_lane_claim_rescope_and_release_are_forge_free_against_a_non_github_
             "--show-toplevel",
             "--git-dir",
             "--git-common-dir",
-        ): "/repo\n/repo/.git/worktrees/lane-cleanup\n/repo/.git",
+        ): f"{real_toplevel}\n/repo/.git/worktrees/lane-cleanup\n/repo/.git",
         ("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"): "refs/remotes/origin/main",
     }
     monkeypatch.setattr(
