@@ -745,14 +745,20 @@ EXPECTED_RULINGS_LINES_BY_STORAGE = {
         _github_fake(), _EXPECTED_BOARD, storage=board.Storage.STATE_REF
     ),
 }
-# `state-ref` renders the identical board plus one honest line (issue #248,
-# Sonnet review blocking 3): the same content as `_EXPECTED_BOARD`, only
-# `landings_derivable` differs, so `replace` -- never a second hand-built
-# scenario -- proves the rendered difference is exactly that one line, on
-# top of the id-shaped pins `storage=STATE_REF` asks `render` for (issue
-# #292).
+# `state-ref` renders the identical scenario plus one honest line (issue
+# #248, Sonnet review blocking 3) -- but never `_EXPECTED_BOARD` itself
+# `replace`d: `item.actionable_reason` (issue #300 residual 2) is now baked
+# in at build time from `config.storage`, exactly like every other field a
+# real `state-ref` pin changes, so reusing the `Storage.GITHUB`-built board
+# under a different `render` call would silently keep its stale `#n`
+# blocker text. A fresh `_projected` call under `Storage.STATE_REF` bakes
+# that text correctly; `landings_derivable` still needs its own `replace`,
+# since `_github_fake`'s own capability (never `config.storage`) is what
+# `_projected` reads it from, and this fake reports GitHub's own capability
+# regardless of which storage its config carries.
 EXPECTED_STATE_REF_BOARD_TEXT = board.render(
-    replace(_EXPECTED_BOARD, landings_derivable=False), storage=board.Storage.STATE_REF
+    replace(_projected(_github_fake(), storage=board.Storage.STATE_REF), landings_derivable=False),
+    storage=board.Storage.STATE_REF,
 )
 EXPECTED_BOARD_TEXT_BY_STORAGE = {
     board.Storage.GITHUB: EXPECTED_BOARD_TEXT,
@@ -763,8 +769,8 @@ EXPECTED_BOARD_TEXT_BY_STORAGE = {
 # for `test_a_live_claim_is_in_flight_identically_on_both_adapters` below:
 # GitHub reaches `Stage.IN_FLIGHT` via `LIVE_CLAIM_OPEN_PULL_REQUEST`'s
 # matching branch, never via the state-ref-only capability fallback.
-# `state-ref`'s own expectation is that same board, `replace`d and rendered
-# the same way as `EXPECTED_STATE_REF_BOARD_TEXT` above, so the only
+# `state-ref`'s own expectation is a fresh build under `Storage.STATE_REF`
+# (same reasoning as `EXPECTED_STATE_REF_BOARD_TEXT` above), so the only
 # sanctioned differences stay the landings-capability line and the id-shaped
 # pins.
 _EXPECTED_BOARD_WITH_LIVE_CLAIM = _projected(
@@ -775,7 +781,14 @@ _EXPECTED_BOARD_WITH_LIVE_CLAIM = _projected(
 EXPECTED_BOARD_WITH_LIVE_CLAIM_TEXT_BY_STORAGE = {
     board.Storage.GITHUB: board.render(_EXPECTED_BOARD_WITH_LIVE_CLAIM),
     board.Storage.STATE_REF: board.render(
-        replace(_EXPECTED_BOARD_WITH_LIVE_CLAIM, landings_derivable=False),
+        replace(
+            _projected(
+                _github_fake(open_pull_requests=(LIVE_CLAIM_OPEN_PULL_REQUEST,)),
+                storage=board.Storage.STATE_REF,
+                claims=(LIVE_CLAIM,),
+            ),
+            landings_derivable=False,
+        ),
         storage=board.Storage.STATE_REF,
     ),
 }
@@ -1229,13 +1242,15 @@ class TestCliStateRefForge:
         bare_remote: Path,
         worktree: Path,
     ) -> None:
-        """Issue #292 proofs 1-2: `next`'s own pick, `rulings`' row header,
-        and `status`'s claimed-issue line print `aco-xxxxxx` under `storage
-        = "state-ref"` -- the same id `_parse_item_ref` already accepts
-        right back -- never `#n`. `board`'s own plain-text table
-        (`board.render`, owned by `board.py`) is not a file this lane
-        touches; it still prints `#n` under every storage (named gap,
-        issue #292 review)."""
+        """Issue #292 proofs 1-2: `next`'s own pick, its `Run:` command
+        (issue #300 residual 3), `rulings`' row header, and `status`'s
+        claimed-issue line print `aco-xxxxxx` under `storage = "state-ref"`
+        -- the same id `_parse_item_ref` already accepts right back -- never
+        `#n`. `board`'s own plain-text table (`board.render`, owned by
+        `board.py`) prints the same id-shaped pin too (issue #300 residual
+        2): `EXPECTED_STATE_REF_BOARD_TEXT` above proves it against this
+        module's own shared scenario, so this test does not repeat that
+        proof against a second one."""
         self._live_state_ref_checkout(
             monkeypatch, tmp_path, bare_remote, worktree, _rulable_item_files()
         )
@@ -1245,6 +1260,7 @@ class TestCliStateRefForge:
         next_out = capsys.readouterr().out
         assert RULABLE_ID in next_out
         assert f"#{RULABLE_NUMBER}" not in next_out
+        assert f"Run: aco claim {RULABLE_ID} --scope <paths>" in next_out
 
         rulings_status = issue_claim.main(["rulings"])
         assert rulings_status == 0
@@ -2193,10 +2209,11 @@ class TestCliStateRefForge:
 
         assert issue_claim.main(["next"]) == 0
         blocked_out = capsys.readouterr().out
-        # The item's own prefix is the state-ref id (issue #292); the
-        # blocker it names inside the reason stays board.py's own `#n`
-        # (`open_blocker_label`, out of this lane's scope).
-        assert f"{EDIT_TARGET_ID}: blocked by #{EDIT_BLOCKER_NUMBER}" in blocked_out
+        # The item's own prefix and the blocker it names inside the reason
+        # both print the state-ref id (issue #292, #300 residual 2:
+        # `open_blocker_label` now takes `storage`) -- never `#n`.
+        assert f"{EDIT_TARGET_ID}: blocked by {EDIT_BLOCKER_ID}" in blocked_out
+        assert f"#{EDIT_BLOCKER_NUMBER}" not in blocked_out
 
         freed_body = _state_ref_body(
             _EDIT_TARGET_PROJECTION, _record(title="Target", state="open", kind="task")
@@ -2556,11 +2573,9 @@ class TestCliStateRefForge:
             ],
             capsys,
         )
-        # `claim`'s own success line is outside issue #292's id-visible
-        # commands (`board`/`next`/`status`/`brief`/`rulings`/`release`/
-        # `item close`/`board --html`) -- a named residual, not a defect
-        # this lane introduces.
-        assert claim_out.splitlines()[0] == f"CLAIMED issue #{child_number}: state-ref-claim"
+        # `claim`'s own success line now prints the state-ref id too
+        # (issue #300 residual 1: `_claim_subject` takes `config.storage`).
+        assert claim_out.splitlines()[0] == f"CLAIMED issue {child_id}: state-ref-claim"
 
         assert f"CLAIMED issue {child_id}" in _run_ok(["status", child_id], capsys)
 
@@ -2579,10 +2594,10 @@ class TestCliStateRefForge:
             ],
             capsys,
         )
-        # `release`'s own `RELEASED ...` line is likewise outside the
-        # id-visible scope -- only its `freed:`/`next:` lines are, and an
-        # abandoned release prints neither.
-        assert release_out.strip() == f"RELEASED issue #{child_number}: state-ref-claim"
+        # `release`'s own `RELEASED ...` line prints the state-ref id too
+        # (issue #300 residual 1); an abandoned release prints neither
+        # `freed:` nor `next:`.
+        assert release_out.strip() == f"RELEASED issue {child_id}: state-ref-claim"
 
         assert _run_ok(["status", child_id], capsys).strip() == f"UNCLAIMED issue {child_id}"
 

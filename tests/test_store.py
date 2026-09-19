@@ -1590,6 +1590,122 @@ def test_commit_transition_item_write_lost_response_does_not_apply_twice(
     assert log.stdout.strip() == "2"
 
 
+def _linked_worktrees(main_repo: Path, tmp_path: Path, names: tuple[str, ...]) -> dict[str, Path]:
+    """One `git worktree add`-linked checkout per name, sharing `main_repo`'s
+    object database -- the same real-transport shape the ten-thread claim
+    contention test above uses, so a thread's git commands never race another
+    thread's inside one shared index."""
+    worktrees: dict[str, Path] = {}
+    for name in names:
+        linked = tmp_path / f"linked-{name}"
+        _git("worktree", "add", "-b", f"lane-{name}", str(linked), cwd=main_repo)
+        worktrees[name] = linked
+    return worktrees
+
+
+def test_commit_transition_two_threads_creating_different_item_ids_both_land(
+    tmp_path: Path, bare_remote: Path
+) -> None:
+    """Issue #279 Gate F2: the same two-racer shape as the ten-thread claim
+    contention test above, now proven for item writes -- two real threads, a
+    barrier, no sleeps. Distinct ids never contend, so both creates land
+    (the sequential version of this claim is
+    `test_commit_transition_two_writers_different_item_ids_both_land`)."""
+    main_repo = tmp_path / "main"
+    main_repo.mkdir()
+    _git("init", "-b", "main", cwd=main_repo)
+    (main_repo / "README").write_text("placeholder\n")
+    _git("add", "README", cwd=main_repo)
+    _git("commit", "-m", "initial", cwd=main_repo)
+    store.bootstrap(worktree=main_repo, remote=str(bare_remote))
+
+    item_ids = ("aco-000001", "aco-000002")
+    worktrees = _linked_worktrees(main_repo, tmp_path, item_ids)
+    barrier = threading.Barrier(len(item_ids))
+    errors: list[BaseException] = []
+
+    def create(item_id: str, linked_worktree: Path) -> None:
+        barrier.wait()
+        try:
+            store.commit_transition(
+                worktree=linked_worktree,
+                remote=str(bare_remote),
+                subject=f"create item {item_id}",
+                intent=_hashed_item_intent(
+                    linked_worktree, item_id=item_id, operation_id=f"op-{item_id}"
+                ),
+            )
+        except BaseException as error:
+            errors.append(error)
+
+    threads = [
+        threading.Thread(target=create, args=(item_id, linked))
+        for item_id, linked in worktrees.items()
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+        assert not thread.is_alive()
+
+    assert errors == []
+    state = store.fetch_state(worktree=main_repo, remote=str(bare_remote))
+    assert set(state.items) == set(item_ids)
+
+
+def test_commit_transition_two_threads_racing_the_same_item_id_lands_exactly_one(
+    tmp_path: Path, bare_remote: Path
+) -> None:
+    """Issue #279 Gate F2: two real threads race `ItemWriteIntent`'s
+    create-only CAS (`expected=None`) against the identical id -- exactly one
+    lands, and the loser refuses by the same 'already exists' sentence
+    `test_commit_transition_item_create_refuses_a_duplicate_id` proves
+    sequentially, never a silent overwrite of the winner's content."""
+    main_repo = tmp_path / "main"
+    main_repo.mkdir()
+    _git("init", "-b", "main", cwd=main_repo)
+    (main_repo / "README").write_text("placeholder\n")
+    _git("add", "README", cwd=main_repo)
+    _git("commit", "-m", "initial", cwd=main_repo)
+    store.bootstrap(worktree=main_repo, remote=str(bare_remote))
+
+    racer_contents = {"racer-a": b"from a\n", "racer-b": b"from b\n"}
+    worktrees = _linked_worktrees(main_repo, tmp_path, tuple(racer_contents))
+    barrier = threading.Barrier(len(racer_contents))
+    exceptions: dict[str, BaseException] = {}
+
+    def create(racer: str, linked_worktree: Path, content: bytes) -> None:
+        barrier.wait()
+        try:
+            store.commit_transition(
+                worktree=linked_worktree,
+                remote=str(bare_remote),
+                subject="create item aco-000001",
+                intent=_hashed_item_intent(
+                    linked_worktree, content=content, operation_id=f"op-{racer}"
+                ),
+            )
+        except BaseException as error:
+            exceptions[racer] = error
+
+    threads = [
+        threading.Thread(target=create, args=(racer, worktrees[racer], content))
+        for racer, content in racer_contents.items()
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+        assert not thread.is_alive()
+
+    assert len(exceptions) == 1
+    (loser_error,) = exceptions.values()
+    assert isinstance(loser_error, protocol.ClaimUnavailableError)
+    assert "already exists" in str(loser_error)
+    state = store.fetch_state(worktree=main_repo, remote=str(bare_remote))
+    assert set(state.items) == {"aco-000001"}
+
+
 # --- Incremental write/bulk read: git-invocation count is independent of ---
 # --- how many claims the state tree holds (issue #241) ---------------------
 
