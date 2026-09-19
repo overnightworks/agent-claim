@@ -34,16 +34,18 @@ from .protocol import ClaimUnavailableError, MalformedStateTreeError
 # key, so a rename of the file is the only way its id ever changes.
 ITEM_ID_PATTERN = re.compile(r"aco-[0-9a-f]{6}")
 ITEM_FILENAME_SUFFIX = ".md"
-# The one origin grammar (issue #316, parent #230): a lowercase forge name or
-# host/owner/repo path -- one or more `[a-z][a-z0-9-]*` segments joined by `.`
-# or `/` -- then `#` and the number that forge itself uses for the issue.
-# `--origin`'s argparse `type=` (`parse_origin`) and the persisted
-# `[record].origin` field (`board._record_relation_defects`) both validate
-# against this one pattern, so a stored malformed origin is exactly as
-# rejected as a malformed `--origin` flag. This is also the one owner
-# `aco pull <forge>#<n>` (#230 slice 5) will later split `record.origin`
-# back out through.
-ORIGIN_PATTERN = re.compile(r"[a-z][a-z0-9-]*(?:[./][a-z][a-z0-9-]*)*#[1-9]\d*")
+# The one origin grammar (issue #316, parent #230): a forge name or
+# host/owner/repo path -- one or more letter/digit/hyphen segments joined by
+# `.` or `/` -- then `#` and the number that forge itself uses for the
+# issue. Case-insensitive on the host/owner/repo part (issue #316 delta): a
+# hand-written v2 ref may carry the forge's own capitalization, e.g.
+# `github.com/OvernightWorks/x#1`. `--origin`'s argparse `type=`
+# (`parse_origin`) and the persisted `[record].origin` field
+# (`board._record_relation_defects`) both validate against this one pattern,
+# so a stored malformed origin is exactly as rejected as a malformed
+# `--origin` flag. This is also the one owner `aco pull <forge>#<n>` (#230
+# slice 5) will later split `record.origin` back out through.
+ORIGIN_PATTERN = re.compile(r"[a-z][a-z0-9-]*(?:[./][a-z][a-z0-9-]*)*#[1-9]\d*", re.IGNORECASE)
 # The one hint text for a malformed origin, shared by `parse_origin`'s
 # argparse refusal and `board._record_relation_defects`' record defect, so a
 # bad `--origin` flag and a bad stored `record.origin` read the same
