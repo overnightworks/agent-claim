@@ -20,12 +20,10 @@ from pathlib import Path
 from . import protocol, providers, terminal
 
 _CONFIG_VERSION = 3
-_PROVIDER_CONFIG_VERSION = 2
-_LEGACY_CONFIG_VERSION = 1
 _PROJECT_KEY_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
-_PROJECT_FIELDS = frozenset({"path", "session_id", "agent", "model"})
-_PROVIDER_PROJECT_FIELDS = _PROJECT_FIELDS | {"provider"}
-_LIVE_PROJECT_FIELDS = _PROVIDER_PROJECT_FIELDS | {"external_process"}
+_LIVE_PROJECT_FIELDS = frozenset(
+    {"path", "session_id", "agent", "model", "provider", "external_process"}
+)
 _LOGIN_OWNER = "agent-coordination/login-v1"
 _LOGIN_DESKTOP_NAME = "aco-workspace.desktop"
 _LOGIN_ATTEMPT_NAME = "login-attempt.json"
@@ -424,22 +422,21 @@ def load_config(config_path: Path) -> WorkspaceConfig:
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
         raise WorkspaceError(f"invalid workspace configuration {config_path}: {error}") from error
     version = raw.get("version")
-    supported_versions = {_LEGACY_CONFIG_VERSION, _PROVIDER_CONFIG_VERSION, _CONFIG_VERSION}
     if (
         set(raw) != {"version", "projects"}
         or type(version) is not int
-        or version not in supported_versions
+        or version != _CONFIG_VERSION
     ):
         raise WorkspaceError(
-            "workspace configuration must contain only version = 1, version = 2, "
-            "or version = 3 and projects"
+            f"workspace configuration {config_path} must contain only "
+            f"version = {_CONFIG_VERSION} and projects; found version {version!r}"
         )
     raw_projects = raw["projects"]
     if not isinstance(raw_projects, dict):
         raise WorkspaceError("workspace configuration projects must be a mapping")
     projects: dict[str, WorkspaceProject] = {}
     for key, record in raw_projects.items():
-        project = _project_from_config_record(key, record, version)
+        project = _project_from_config_record(key, record)
         projects[project.key] = project
     _validate_unique_projects(projects)
     return WorkspaceConfig(projects)
@@ -661,29 +658,17 @@ def _project(handoff: WorkspaceRegistration) -> WorkspaceProject:
     return WorkspaceProject(key, canonical, session_id, agent, model, provider)
 
 
-def _project_from_config_record(key: object, record: object, version: int) -> WorkspaceProject:
+def _project_from_config_record(key: object, record: object) -> WorkspaceProject:
     if not isinstance(key, str) or not isinstance(record, dict):
         raise WorkspaceError("workspace projects must use project keys and table records")
-    if version == _LEGACY_CONFIG_VERSION:
-        fields = _PROJECT_FIELDS
-    elif version == _PROVIDER_CONFIG_VERSION:
-        fields = _PROVIDER_PROJECT_FIELDS
-    else:
-        fields = _LIVE_PROJECT_FIELDS
-    required = {"path", "session_id", "agent"}
-    if version in {_PROVIDER_CONFIG_VERSION, _CONFIG_VERSION}:
-        required.add("provider")
-    if set(record) - fields or not required <= set(record):
+    required = {"path", "session_id", "agent", "provider"}
+    if set(record) - _LIVE_PROJECT_FIELDS or not required <= set(record):
         raise WorkspaceError(f"project {key!r} has unsupported or missing fields")
     directory = _canonical_config_directory(_string(record["path"], f"project {key!r} path"))
     session_id = _string(record["session_id"], f"project {key!r} session_id")
     agent = _string(record["agent"], f"project {key!r} agent")
     model = _optional_string(record.get("model"), f"project {key!r} model")
-    provider = (
-        providers.Provider.CODEX
-        if version == _LEGACY_CONFIG_VERSION
-        else _provider(record["provider"], f"project {key!r} provider")
-    )
+    provider = _provider(record["provider"], f"project {key!r} provider")
     project = _project(
         WorkspaceRegistration(
             key,
@@ -694,8 +679,6 @@ def _project_from_config_record(key: object, record: object, version: int) -> Wo
             provider=provider,
         )
     )
-    if version != _CONFIG_VERSION:
-        return project
     receipt = _external_process_from_record(record.get("external_process"), key)
     if receipt is None:
         return project
@@ -1005,7 +988,7 @@ def _login_time(value: datetime) -> str:
 
 
 def _write_config(config_path: Path, projects: Mapping[str, WorkspaceProject]) -> None:
-    records = ["version = 3", ""]
+    records = [f"version = {_CONFIG_VERSION}", ""]
     for key, project in projects.items():
         records.extend(
             (

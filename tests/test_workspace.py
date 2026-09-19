@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import uuid
 from collections.abc import Mapping
 from dataclasses import replace
@@ -453,7 +454,7 @@ def test_login_configuration_state_distinguishes_missing_malformed_empty_and_val
         is workspace.LoginConfigurationState.MALFORMED
     )
 
-    config_path.write_text("version = 2\nprojects = {}\n")
+    config_path.write_text("version = 3\nprojects = {}\n")
     assert (
         workspace.login_configuration_state(config_path) is workspace.LoginConfigurationState.EMPTY
     )
@@ -472,7 +473,7 @@ def test_login_configuration_state_distinguishes_missing_malformed_empty_and_val
 def test_login_enable_requires_a_registered_workspace(tmp_path: Path) -> None:
     config_path = tmp_path / "config" / "aco" / "workspace.toml"
     config_path.parent.mkdir(parents=True)
-    config_path.write_text("version = 2\nprojects = {}\n")
+    config_path.write_text("version = 3\nprojects = {}\n")
 
     with pytest.raises(workspace.WorkspaceError, match="no registered projects"):
         workspace.enable_login(
@@ -845,84 +846,64 @@ def test_default_config_path_prefers_xdg_configuration(tmp_path: Path) -> None:
     )
 
 
-def test_loading_a_legacy_mapping_defaults_its_provider_without_rewriting(tmp_path: Path) -> None:
-    config_path = tmp_path / "workspace.toml"
-    project_path = tmp_path / "project"
-    project_path.mkdir()
-    contents = (
-        f'version = 1\n[projects.alpha]\npath = "{project_path}"\n'
-        f'session_id = "{SESSION_ID}"\nagent = "restored head"\n'
-    )
-    config_path.write_text(contents)
-
-    project = workspace.load_config(config_path).projects["alpha"]
-    idempotent = workspace.register_project(
-        workspace.WorkspaceRegistration("alpha", project_path, SESSION_ID, "restored head"),
-        config_path,
-    )
-    fake = FakeTerminal(terminal.Target(terminal.TargetState.ABSENT))
-    outcomes = workspace.run_projects(
-        config_path,
-        environment={"XDG_RUNTIME_DIR": str(tmp_path)},
-        runtime_directory=tmp_path,
-        terminal_factory=lambda _socket: fake,
-    )
-
-    assert project.provider is providers.Provider.CODEX
-    assert idempotent is False
-    assert outcomes == (workspace.RunOutcome("alpha", workspace.RunState.STARTED),)
-    assert fake.created[0][3].command == ["codex", "resume", SESSION_ID]
-    assert config_path.read_text() == contents
-
-
-def test_registering_a_provider_adds_explicit_identity_to_a_legacy_mapping(tmp_path: Path) -> None:
-    config_path = tmp_path / "workspace.toml"
-    codex_path = tmp_path / "codex"
-    claude_path = tmp_path / "claude"
-    codex_path.mkdir()
-    claude_path.mkdir()
-    config_path.write_text(
-        f'version = 1\n[projects.codex]\npath = "{codex_path}"\n'
-        f'session_id = "{SESSION_ID}"\nagent = "Codex head"\nmodel = "gpt-5.3-codex"\n'
-    )
-
-    created = workspace.register_project(
-        workspace.WorkspaceRegistration(
-            "claude",
-            claude_path,
-            "123e4567-e89b-12d3-a456-426614174001",
-            "Claude head",
-            "sonnet",
-            provider=providers.Provider.CLAUDE,
-        ),
-        config_path,
-    )
-    projects = workspace.load_config(config_path).projects
-
-    assert created is True
-    assert config_path.read_text().startswith("version = 3\n")
-    assert projects["codex"].provider is providers.Provider.CODEX
-    assert projects["codex"].model == "gpt-5.3-codex"
-    assert projects["claude"].provider is providers.Provider.CLAUDE
-    assert projects["claude"].model == "sonnet"
-
-
-@pytest.mark.parametrize(
-    ("version", "provider", "message"),
-    [
-        (1, 'provider = "codex"\n', "unsupported or missing"),
-        (2, "", "unsupported or missing"),
-        (2, 'provider = "gemini"\n', "provider must be one of codex, claude, grok"),
-    ],
-)
-def test_load_config_refuses_mixed_or_unknown_provider_records(
-    tmp_path: Path, version: int, provider: str, message: str
-) -> None:
+@pytest.mark.parametrize("version", [1, 2])
+def test_load_config_refuses_an_older_configuration_version(tmp_path: Path, version: int) -> None:
     config_path = tmp_path / "workspace.toml"
     project_path = tmp_path / "project"
     project_path.mkdir()
     config_path.write_text(
         f'version = {version}\n[projects.alpha]\npath = "{project_path}"\n'
+        f'session_id = "{SESSION_ID}"\nagent = "restored head"\n'
+    )
+
+    with pytest.raises(
+        workspace.WorkspaceError,
+        match=f"{re.escape(str(config_path))}.*found version {version}",
+    ):
+        workspace.load_config(config_path)
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_registering_into_an_older_configuration_refuses_without_migrating(
+    tmp_path: Path, version: int
+) -> None:
+    config_path = tmp_path / "workspace.toml"
+    claude_path = tmp_path / "claude"
+    claude_path.mkdir()
+    config_path.write_text(
+        f'version = {version}\n[projects.codex]\npath = "{tmp_path}"\n'
+        f'session_id = "{SESSION_ID}"\nagent = "Codex head"\n'
+    )
+    registration = workspace.WorkspaceRegistration(
+        "claude",
+        claude_path,
+        "123e4567-e89b-12d3-a456-426614174001",
+        "Claude head",
+        provider=providers.Provider.CLAUDE,
+    )
+
+    with pytest.raises(
+        workspace.WorkspaceError,
+        match=f"{re.escape(str(config_path))}.*found version {version}",
+    ):
+        workspace.register_project(registration, config_path)
+
+
+@pytest.mark.parametrize(
+    ("provider", "message"),
+    [
+        ("", "unsupported or missing"),
+        ('provider = "gemini"\n', "provider must be one of codex, claude, grok"),
+    ],
+)
+def test_load_config_refuses_missing_or_unknown_provider_records(
+    tmp_path: Path, provider: str, message: str
+) -> None:
+    config_path = tmp_path / "workspace.toml"
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    config_path.write_text(
+        f'version = 3\n[projects.alpha]\npath = "{project_path}"\n'
         f'session_id = "{SESSION_ID}"\nagent = "head"\n{provider}'
     )
 
@@ -959,9 +940,9 @@ def test_provider_scopes_native_uuid_uniqueness_but_not_directory_ownership(tmp_
 def test_load_config_refuses_a_relative_project_directory(tmp_path: Path) -> None:
     config_path = tmp_path / "workspace.toml"
     config_path.write_text(
-        'version = 1\n[projects.alpha]\npath = "missing"\nsession_id = "'
+        'version = 3\n[projects.alpha]\npath = "missing"\nsession_id = "'
         + SESSION_ID
-        + '"\nagent = "head"\n'
+        + '"\nagent = "head"\nprovider = "codex"\n'
     )
 
     with pytest.raises(
@@ -975,23 +956,23 @@ def test_load_config_refuses_a_relative_project_directory(tmp_path: Path) -> Non
     ("contents", "message"),
     [
         ("version = [", "invalid workspace configuration"),
-        ("version = 4\nprojects = {}\n", "version = 1, version = 2, or version = 3"),
-        ("version = true\nprojects = {}\n", "version = 1, version = 2, or version = 3"),
-        ("version = false\nprojects = {}\n", "version = 1, version = 2, or version = 3"),
-        ("version = 1.0\nprojects = {}\n", "version = 1, version = 2, or version = 3"),
-        ("version = 2.0\nprojects = {}\n", "version = 1, version = 2, or version = 3"),
-        ("version = 1\nprojects = []\n", "projects must be a mapping"),
+        ("version = 4\nprojects = {}\n", "version = 3 and projects"),
+        ("version = true\nprojects = {}\n", "version = 3 and projects"),
+        ("version = false\nprojects = {}\n", "version = 3 and projects"),
+        ("version = 3.0\nprojects = {}\n", "version = 3 and projects"),
+        ("version = 3\nprojects = []\n", "projects must be a mapping"),
         (
-            'version = 1\n[projects.alpha]\npath = 3\nsession_id = "x"\nagent = "head"\n',
+            'version = 3\n[projects.alpha]\npath = 3\nsession_id = "x"\n'
+            'agent = "head"\nprovider = "codex"\n',
             "path must be a string",
         ),
         (
-            'version = 2\n[projects.alpha]\npath = "/tmp"\nsession_id = 3\n'
+            'version = 3\n[projects.alpha]\npath = "/tmp"\nsession_id = 3\n'
             'agent = "head"\nprovider = "gemini"\n',
             "session_id must be a string",
         ),
         (
-            'version = 1\n[projects.alpha]\npath = "/tmp"\nsession_id = "x"\n',
+            'version = 3\n[projects.alpha]\npath = "/tmp"\nsession_id = "x"\n',
             "unsupported or missing",
         ),
     ],
@@ -1016,7 +997,7 @@ def test_load_config_reports_missing_or_unreadable_configuration(tmp_path: Path)
 
 def test_load_config_refuses_a_non_table_project_record(tmp_path: Path) -> None:
     config_path = tmp_path / "workspace.toml"
-    config_path.write_text('version = 1\nprojects = { alpha = "not-a-table" }\n')
+    config_path.write_text('version = 3\nprojects = { alpha = "not-a-table" }\n')
 
     with pytest.raises(
         workspace.WorkspaceError, match="workspace projects must use project keys and table records"
@@ -1028,8 +1009,8 @@ def test_load_config_refuses_missing_or_noncanonical_project_directories(tmp_pat
     config_path = tmp_path / "workspace.toml"
     missing = tmp_path / "missing"
     config_path.write_text(
-        f'version = 1\n[projects.alpha]\npath = "{missing}"\n'
-        f'session_id = "{SESSION_ID}"\nagent = "head"\n'
+        f'version = 3\n[projects.alpha]\npath = "{missing}"\n'
+        f'session_id = "{SESSION_ID}"\nagent = "head"\nprovider = "codex"\n'
     )
 
     with pytest.raises(
@@ -1042,8 +1023,8 @@ def test_load_config_refuses_missing_or_noncanonical_project_directories(tmp_pat
     link = tmp_path / "project-link"
     link.symlink_to(directory)
     config_path.write_text(
-        f'version = 1\n[projects.alpha]\npath = "{link}"\n'
-        f'session_id = "{SESSION_ID}"\nagent = "head"\n'
+        f'version = 3\n[projects.alpha]\npath = "{link}"\n'
+        f'session_id = "{SESSION_ID}"\nagent = "head"\nprovider = "codex"\n'
     )
 
     with pytest.raises(
@@ -1069,9 +1050,10 @@ def test_load_config_refuses_duplicate_project_identity(
     beta.mkdir()
     directory = alpha if beta_path == "alpha" else beta
     config_path.write_text(
-        f'version = 1\n[projects.alpha]\npath = "{alpha}"\n'
-        f'session_id = "{SESSION_ID}"\nagent = "head"\n'
-        f'\n[projects.beta]\npath = "{directory}"\nsession_id = "{beta_session}"\nagent = "head"\n'
+        f'version = 3\n[projects.alpha]\npath = "{alpha}"\n'
+        f'session_id = "{SESSION_ID}"\nagent = "head"\nprovider = "codex"\n'
+        f'\n[projects.beta]\npath = "{directory}"\nsession_id = "{beta_session}"\n'
+        'agent = "head"\nprovider = "codex"\n'
     )
 
     with pytest.raises(workspace.WorkspaceError, match=message):
@@ -1141,15 +1123,15 @@ def test_register_leaves_no_configuration_behind_when_atomic_replace_fails(
     ] == []
 
 
-def test_failed_provider_migration_preserves_legacy_mapping(monkeypatch, tmp_path: Path) -> None:
+def test_failed_registration_preserves_the_existing_mapping(monkeypatch, tmp_path: Path) -> None:
     config_path = tmp_path / "workspace.toml"
     codex_path = tmp_path / "codex"
     claude_path = tmp_path / "claude"
     codex_path.mkdir()
     claude_path.mkdir()
     original = (
-        f'version = 1\n[projects.codex]\npath = "{codex_path}"\n'
-        f'session_id = "{SESSION_ID}"\nagent = "Codex head"\n'
+        f'version = 3\n[projects.codex]\npath = "{codex_path}"\n'
+        f'session_id = "{SESSION_ID}"\nagent = "Codex head"\nprovider = "codex"\n'
     )
     config_path.write_text(original)
 
@@ -1182,7 +1164,7 @@ def test_run_refuses_an_invalid_runtime_directory(
     tmp_path: Path, missing: bool, message: str
 ) -> None:
     config_path = tmp_path / "workspace.toml"
-    config_path.write_text("version = 1\nprojects = {}\n")
+    config_path.write_text("version = 3\nprojects = {}\n")
     selected_runtime = tmp_path / "missing" if missing else Path("relative")
 
     with pytest.raises(workspace.WorkspaceError, match=message):
@@ -1191,7 +1173,7 @@ def test_run_refuses_an_invalid_runtime_directory(
 
 def test_run_refuses_a_shared_or_symlinked_workspace_runtime(tmp_path: Path) -> None:
     config_path = tmp_path / "workspace.toml"
-    config_path.write_text("version = 1\nprojects = {}\n")
+    config_path.write_text("version = 3\nprojects = {}\n")
     shared_runtime = tmp_path / "shared-runtime"
     shared_runtime.mkdir(mode=0o755)
 
@@ -1222,8 +1204,8 @@ def test_run_refuses_an_unknown_selected_project(tmp_path: Path) -> None:
 def test_run_validates_the_complete_configuration_before_runtime(tmp_path: Path) -> None:
     config_path = tmp_path / "workspace.toml"
     config_path.write_text(
-        'version = 1\n[projects.alpha]\npath = "relative"\n'
-        f'session_id = "{SESSION_ID}"\nagent = "head"\n'
+        'version = 3\n[projects.alpha]\npath = "relative"\n'
+        f'session_id = "{SESSION_ID}"\nagent = "head"\nprovider = "codex"\n'
     )
 
     with pytest.raises(

@@ -65,13 +65,12 @@ from agent_coordination import (
     store,
 )
 from agent_coordination import cli as issue_claim
-from agent_coordination.cli import (
+from agent_coordination.cli import _status, _status_json
+from agent_coordination.protocol import (
     ClaimError,
     ClaimRequest,
     ClaimUnavailableError,
     IssueIdentity,
-    _status,
-    _status_json,
 )
 
 GitHubForge = github.GitHubForge
@@ -1922,6 +1921,42 @@ def test_claim_parser_description_names_what_refuses_first() -> None:
     assert "non-main branch" in issue_claim.CLAIM_DESCRIPTION
     assert "clean" in issue_claim.CLAIM_DESCRIPTION
     assert "repository-relative" in issue_claim.CLAIM_DESCRIPTION
+
+
+def test_help_lists_commands_in_their_stable_registration_order() -> None:
+    """`aco --help`'s command order is part of the CLI's own contract (issue
+    #372 R3): `_COMMAND_TABLE`'s dispatch-backed commands keep the table's
+    own order, and `status`/`body` -- which dispatch outside that table,
+    ahead of `_dispatch`'s own `_LazyForge` -- keep their original,
+    interleaved positions rather than trailing behind every table entry."""
+    parser = issue_claim._parser()
+    subparsers_action = next(
+        action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
+    )
+
+    assert list(subparsers_action.choices) == [
+        "bootstrap",
+        "reset",
+        "status",
+        "board",
+        "rulings",
+        "next",
+        "claim",
+        "release",
+        "rescope",
+        "cut",
+        "ask",
+        "rule",
+        "check",
+        "body",
+        "brief",
+        "item",
+        "protect",
+        "register",
+        "run",
+        "login",
+        "_run-at-login",
+    ]
 
 
 def _all_parser_help_texts(parser: argparse.ArgumentParser) -> tuple[str, ...]:
@@ -5600,7 +5635,7 @@ def _patch_release_session(
     branch: str | None = "lane-72",
     forbid_git: bool = False,
 ) -> None:
-    _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: agent})
+    _set_agent_identity_env(monkeypatch, {checkout.ACO_AGENT_ENV: agent})
     monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
     _patch_store_write(monkeypatch, *(_store_claim_from_request(claimed) for claimed in standing))
     if forbid_git:
@@ -6220,7 +6255,7 @@ def test_cli_release_override_fails_before_git_and_github(
     capsys: pytest.CaptureFixture[str],
     flags: tuple[str, ...],
 ) -> None:
-    _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Ada"})
+    _set_agent_identity_env(monkeypatch, {checkout.ACO_AGENT_ENV: "Ada"})
     _forbid_github_construction(monkeypatch)
 
     def unused(arguments: list[str], **_kwargs: object) -> str:
@@ -6241,7 +6276,7 @@ def test_cli_release_omitted_claim_id_fails_closed_on_detached_head(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Ada"})
+    _set_agent_identity_env(monkeypatch, {checkout.ACO_AGENT_ENV: "Ada"})
     _forbid_github_construction(monkeypatch)
     monkeypatch.setattr(checkout, "_git_output", lambda arguments, **_kwargs: "")
 
@@ -7403,7 +7438,7 @@ def test_cli_lane_claim_without_scope_refuses_by_name(
     """Issue #337 proof 3: lane mode has no item to derive a scope from, so
     `required=True`'s removal from `--scope` never reaches it -- omitting it
     still refuses, by name, and forge-free like every other lane claim."""
-    _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Ada"})
+    _set_agent_identity_env(monkeypatch, {checkout.ACO_AGENT_ENV: "Ada"})
     monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
     git_values = {("branch", "--show-current"): "docs/lane-cleanup"}
     monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
@@ -7863,7 +7898,7 @@ def test_cli_rescope_adds_a_path_without_matching_head_or_a_clean_tree(
         checkout, "_git_output", lambda arguments, **_kwargs: git_values[tuple(arguments)]
     )
     monkeypatch.setattr(checkout, "_scope_directories", lambda paths, **_kwargs: ())
-    _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Codex Sol"})
+    _set_agent_identity_env(monkeypatch, {checkout.ACO_AGENT_ENV: "Codex Sol"})
 
     status = issue_claim.main(
         [
@@ -7901,7 +7936,7 @@ def test_cli_rescope_add_keeps_a_comma_inside_one_path(
     )
     monkeypatch.setattr(checkout, "_scope_directories", lambda paths, **_kwargs: ())
     monkeypatch.setattr(checkout, "versioned_paths", lambda **_kwargs: ("reports/a,b.md",))
-    _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Codex Sol"})
+    _set_agent_identity_env(monkeypatch, {checkout.ACO_AGENT_ENV: "Codex Sol"})
 
     status = issue_claim.main(
         [
@@ -7940,7 +7975,7 @@ def test_cli_rescope_drop_matches_a_comma_path_as_one_whole_path(
     )
     monkeypatch.setattr(checkout, "_scope_directories", lambda paths, **_kwargs: ())
     monkeypatch.setattr(checkout, "versioned_paths", lambda **_kwargs: ("reports/a,b.md",))
-    _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Codex Sol"})
+    _set_agent_identity_env(monkeypatch, {checkout.ACO_AGENT_ENV: "Codex Sol"})
 
     status = issue_claim.main(
         [
@@ -7975,7 +8010,7 @@ def test_cli_rescope_add_refuses_a_comma_scope_that_matches_nothing_in_the_check
         checkout, "_git_output", lambda arguments, **_kwargs: git_values[tuple(arguments)]
     )
     monkeypatch.setattr(checkout, "_scope_directories", lambda paths, **_kwargs: ())
-    _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Codex Sol"})
+    _set_agent_identity_env(monkeypatch, {checkout.ACO_AGENT_ENV: "Codex Sol"})
 
     status = issue_claim.main(
         [
@@ -8016,7 +8051,7 @@ def test_cli_rescope_drop_of_a_value_not_in_scope_refuses_with_the_claims_own_re
         checkout, "_git_output", lambda arguments, **_kwargs: git_values[tuple(arguments)]
     )
     monkeypatch.setattr(checkout, "_scope_directories", lambda paths, **_kwargs: ())
-    _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Codex Sol"})
+    _set_agent_identity_env(monkeypatch, {checkout.ACO_AGENT_ENV: "Codex Sol"})
 
     status = issue_claim.main(
         [
@@ -8057,7 +8092,7 @@ def test_cli_rescope_drop_removes_a_comma_entry_the_claim_holds_though_no_file_m
     )
     monkeypatch.setattr(checkout, "_scope_directories", lambda paths, **_kwargs: ())
     monkeypatch.setattr(checkout, "versioned_paths", lambda **_kwargs: ("a.py", "b.py"))
-    _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Codex Sol"})
+    _set_agent_identity_env(monkeypatch, {checkout.ACO_AGENT_ENV: "Codex Sol"})
 
     status = issue_claim.main(
         [
@@ -8094,7 +8129,7 @@ def test_cli_rescope_json_prints_updated_scope_and_same_claim_id(
         checkout, "_git_output", lambda arguments, **_kwargs: git_values[tuple(arguments)]
     )
     monkeypatch.setattr(checkout, "_scope_directories", lambda paths, **_kwargs: ())
-    _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Ada"})
+    _set_agent_identity_env(monkeypatch, {checkout.ACO_AGENT_ENV: "Ada"})
 
     status = issue_claim.main(
         [
@@ -8144,7 +8179,7 @@ def test_cli_rescope_refuses_a_different_agent_than_the_claimant(
         checkout, "_git_output", lambda arguments, **_kwargs: git_values[tuple(arguments)]
     )
     monkeypatch.setattr(checkout, "_scope_directories", lambda paths, **_kwargs: ())
-    _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Grok 4.6"})
+    _set_agent_identity_env(monkeypatch, {checkout.ACO_AGENT_ENV: "Grok 4.6"})
 
     status = issue_claim.main(
         ["--repo", "example/agent-claim", "rescope", "72", "--add", "/repo/src/new.py"]
@@ -8173,7 +8208,7 @@ def test_cli_rescope_without_add_or_drop_is_an_error(
     monkeypatch.setattr(
         checkout, "_git_output", lambda arguments, **_kwargs: git_values[tuple(arguments)]
     )
-    _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Codex Sol"})
+    _set_agent_identity_env(monkeypatch, {checkout.ACO_AGENT_ENV: "Codex Sol"})
 
     status = issue_claim.main(["--repo", "example/agent-claim", "rescope", "72"])
     captured = capsys.readouterr()
@@ -8200,7 +8235,7 @@ def test_cli_rescope_refuses_primary_checkout(
     monkeypatch.setattr(
         checkout, "_git_output", lambda arguments, **_kwargs: git_values[tuple(arguments)]
     )
-    _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Codex Sol"})
+    _set_agent_identity_env(monkeypatch, {checkout.ACO_AGENT_ENV: "Codex Sol"})
 
     status = issue_claim.main(
         ["--repo", "example/agent-claim", "rescope", "72", "--add", "/repo/src/new.py"]
@@ -8569,7 +8604,7 @@ def _run_scope_width_command(
         monkeypatch.setattr(
             checkout, "_git_output", lambda arguments, **_kwargs: git_values[tuple(arguments)]
         )
-        _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Codex Sol"})
+        _set_agent_identity_env(monkeypatch, {checkout.ACO_AGENT_ENV: "Codex Sol"})
         arrange_scope_width(
             monkeypatch,
             client,
@@ -8579,7 +8614,7 @@ def _run_scope_width_command(
         )
         argv = ["--repo", "example/agent-claim", "rescope", "72", *argv_tail]
     elif command == "claim-lane":
-        _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Ada"})
+        _set_agent_identity_env(monkeypatch, {checkout.ACO_AGENT_ENV: "Ada"})
         git_values = {("branch", "--show-current"): "docs/lane-cleanup"}
         monkeypatch.setattr(
             checkout, "_git_output", lambda arguments, **_kwargs: git_values[tuple(arguments)]
@@ -12090,7 +12125,7 @@ def test_cli_rescope_refuses_a_missing_state_ref(
     monkeypatch.setattr(
         checkout, "_git_output", lambda arguments, **_kwargs: git_values[tuple(arguments)]
     )
-    _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Codex Sol"})
+    _set_agent_identity_env(monkeypatch, {checkout.ACO_AGENT_ENV: "Codex Sol"})
     _patch_store_write(monkeypatch, tip=None)
 
     status = issue_claim.main(

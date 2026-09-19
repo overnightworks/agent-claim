@@ -1,7 +1,11 @@
-"""Behavior of `agent_coordination.process`: native `/proc` inspection and
-the bounded subprocess boundary (`run_bounded`) it also owns. The GitHub
-adapter's own thin wrapper over that boundary (`github._bounded_command`) is
-covered in `tests/test_github.py`."""
+"""Behavior of `agent_coordination.process`: native `/proc` inspection, the
+bounded subprocess boundary (`run_bounded`) it also owns, and the one git
+launcher (`run_git`/`git_command`/`git_failure_detail`/
+`git_failure_detail_from_stderr`, issue #372) `checkout` and `store` each call
+rather than re-typing. The GitHub adapter's own thin
+wrapper over that boundary (`github._bounded_command`) is covered in
+`tests/test_github.py`; `checkout`'s and `store`'s own `ClaimError`
+translations of a failed git launch are covered in their own test modules."""
 
 from __future__ import annotations
 
@@ -13,6 +17,69 @@ from pathlib import Path
 import pytest
 
 from agent_coordination import process
+
+
+def test_git_command_prefixes_the_directory_flag_only_when_given(tmp_path: Path) -> None:
+    assert process.git_command(["status"]) == ["git", "status"]
+    assert process.git_command(["status"], directory=tmp_path) == [
+        "git",
+        "-C",
+        str(tmp_path),
+        "status",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stderr", "expected"),
+    [
+        (b"", b"fatal: not a git repository\n", "fatal: not a git repository"),
+        (b"a stray warning on stdout\n", b"", "a stray warning on stdout"),
+        (b"", b"", process.UNKNOWN_GIT_FAILURE),
+    ],
+)
+def test_git_failure_detail_reads_stderr_then_stdout_then_the_fixed_sentence(
+    stdout: bytes, stderr: bytes, expected: str
+) -> None:
+    result = process.CapturedResult(exit_status=1, stdout=stdout, stderr=stderr)
+
+    assert process.git_failure_detail(result) == expected
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stderr", "expected"),
+    [
+        (b"", b"fatal: not a git repository\n", "fatal: not a git repository"),
+        (b"a stray warning on stdout\n", b"", process.UNKNOWN_GIT_FAILURE),
+        (b"", b"", process.UNKNOWN_GIT_FAILURE),
+    ],
+)
+def test_git_failure_detail_from_stderr_never_reads_stdout(
+    stdout: bytes, stderr: bytes, expected: str
+) -> None:
+    """Unlike `git_failure_detail`, a command whose stdout carries nothing a
+    failure message should ever quote (`fetch`, `update-ref`, ...) must fall
+    back straight to `UNKNOWN_GIT_FAILURE` rather than a stray stdout line
+    (issue #372 R1)."""
+    result = process.CapturedResult(exit_status=1, stdout=stdout, stderr=stderr)
+
+    assert process.git_failure_detail_from_stderr(result) == expected
+
+
+def test_run_git_launches_the_directory_scoped_git_command(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    observed: list[list[str]] = []
+
+    def fake_run_captured(command: list[str], **_kwargs: object) -> process.CapturedResult:
+        observed.append(command)
+        return process.CapturedResult(exit_status=0, stdout=b"ok\n", stderr=b"")
+
+    monkeypatch.setattr(process, "run_captured", fake_run_captured)
+
+    result = process.run_git(["rev-parse", "HEAD"], directory=tmp_path)
+
+    assert observed == [["git", "-C", str(tmp_path), "rev-parse", "HEAD"]]
+    assert result.stdout == b"ok\n"
 
 
 def test_inspect_native_process_reads_a_bounded_live_receipt_without_persisting_argv(

@@ -41,9 +41,10 @@ homes the per-module copies should move into)
     ``k`` names that collapse to one key counts ``k - 1`` siblings -- the literal-only copies
     one parametrized test replaces. No aco-specific token group is named yet, so this also
     reads 0 until one is.
-(g) ``spec_ids`` -- reported, never gated. aco has no ``specs/`` tree or ``spec_coverage.py``
-    owner yet, so this stays dormant at 0 (frozenset()), the same dormancy
-    ``scripts/test_inventory.py`` documents for its own spec-ID section.
+(g) ``spec_ids`` -- reported, never gated. aco has a ``specs/`` tree but no
+    ``spec_coverage.py`` owner yet and no test docstring cites a spec ID, so this stays
+    dormant at 0 (frozenset()), the same dormancy ``scripts/test_inventory.py``
+    documents for its own spec-ID section.
 
 Target-relative rule (issue #319, base-selection concept agreed 2026-09-19)
 ----------------------------------------------------------------------------------------------
@@ -454,8 +455,9 @@ def _measure_module(module: ast.Module, rel: str, metrics: FileMetrics, units: l
 
 
 def _credited_spec_ids(root: Path, tree: str) -> frozenset[str]:
-    """The spec IDs *tree* credits. Dormant: aco has no ``specs/`` tree or
-    ``spec_coverage.py`` owner yet (see the module docstring), so this is always empty."""
+    """The spec IDs *tree* credits. Dormant: aco has no ``spec_coverage.py`` owner yet
+    (see the module docstring) and no test docstring cites a spec ID, so this is
+    always empty."""
     return frozenset()
 
 

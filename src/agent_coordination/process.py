@@ -26,6 +26,10 @@ _MAX_PROC_COMMAND_LINE_BYTES = 16 * 1024
 _MAX_NATIVE_PROCESS_SCAN = 1024
 _STAT_START_TIME_INDEX = 19
 
+# Fallback when a failed git invocation left nothing readable on either
+# stream (issue #372: one owner instead of a `checkout.py`/`store.py` copy).
+UNKNOWN_GIT_FAILURE = "unknown git failure"
+
 
 class NativeProcessState(StrEnum):
     LIVE = "live"
@@ -325,6 +329,44 @@ def run_captured(
     except subprocess.TimeoutExpired as error:
         raise ProcessTimedOutError from error
     return CapturedResult(completed.returncode, completed.stdout, completed.stderr)
+
+
+def git_command(arguments: list[str], *, directory: Path | None = None) -> list[str]:
+    """Build a `git arguments` command, `-C directory` prefixed when given --
+    the one argv shape `checkout` and `store` each assembled by hand
+    (issue #372), on two layers that may not import each other."""
+    return ["git", *(["-C", str(directory)] if directory is not None else []), *arguments]
+
+
+def run_git(arguments: list[str], *, directory: Path | None = None) -> CapturedResult:
+    """Launch `git arguments`, in `directory` when given via `-C`, capturing
+    stdout and stderr separately. Raises `ExecutableMissingError` or
+    `ProcessTimedOutError`; whether an unlisted `OSError` should also fail
+    closed is each caller's own call to make around this one, since callers
+    disagree (issue #372)."""
+    return run_captured(git_command(arguments, directory=directory))
+
+
+def git_failure_detail(result: CapturedResult) -> str:
+    """A finished `git` invocation's stderr, falling back to stdout, falling
+    back to `UNKNOWN_GIT_FAILURE` when neither stream carried anything.
+
+    For a command whose successful stdout is itself meaningful (`git log`,
+    `git ls-tree`, `git bundle create`, ...), a stray leftover on stdout from
+    a *failed* run is still the best available detail. Use
+    `git_failure_detail_from_stderr` instead for a command whose stdout never
+    carries the result -- `fetch`, `update-ref`, and the like -- where
+    falling back to it would report unrelated stdout content, not the
+    failure (issue #372 R1)."""
+    return result.stderr.decode().strip() or result.stdout.decode().strip() or UNKNOWN_GIT_FAILURE
+
+
+def git_failure_detail_from_stderr(result: CapturedResult) -> str:
+    """A finished `git` invocation's stderr alone, falling back to
+    `UNKNOWN_GIT_FAILURE` when it carried nothing -- stdout is never read,
+    unlike `git_failure_detail` (issue #372 R1); see that function's
+    docstring for which of the two modes a caller wants."""
+    return result.stderr.decode().strip() or UNKNOWN_GIT_FAILURE
 
 
 def inspect_native_process(pid: int, proc_root: Path = Path("/proc")) -> NativeProcess:

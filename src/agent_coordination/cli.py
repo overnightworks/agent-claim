@@ -34,23 +34,6 @@ from . import (
     workspace,
 )
 
-ACO_AGENT_ENV = checkout.ACO_AGENT_ENV
-CLAUDE_SESSION_ID_ENV = checkout.CLAUDE_SESSION_ID_ENV
-GROK_SESSION_ID_ENV = checkout.GROK_SESSION_ID_ENV
-ClaimError = protocol.ClaimError
-ClaimRequest = protocol.ClaimRequest
-ClaimUnavailableError = protocol.ClaimUnavailableError
-InvalidClaimMarkerError = protocol.InvalidClaimMarkerError
-IssueIdentity = protocol.IssueIdentity
-LaneIdentity = protocol.LaneIdentity
-ISSUELESS_LANE_BRANCH_PREFIXES = protocol.ISSUELESS_LANE_BRANCH_PREFIXES
-_git_output = checkout._git_output
-_resolved_agent = checkout._resolved_agent
-_timestamp = board._timestamp
-_validate_checkout = checkout._validate_checkout
-claims_conflict = protocol.claims_conflict
-claims_holding_path = protocol.claims_holding_path
-
 DEFAULT_CLAIM_ROLE = "builder"
 NEXT_PULL_DESCRIPTION = (
     "Pulling is not dispatching: an item whose expectations are still unruled is "
@@ -773,22 +756,16 @@ def _add_run_at_login_parser(commands: argparse._SubParsersAction) -> None:
     commands.add_parser("_run-at-login", help=argparse.SUPPRESS)
 
 
-_SUBPARSER_BUILDERS: tuple[Callable[[argparse._SubParsersAction], None], ...] = (
-    _add_bootstrap_parser,
-    _add_reset_parser,
-    _add_status_parser,
-    _add_board_parser,
-    _add_rulings_parser,
-    _add_next_parser,
-    _add_claim_parser,
-    _add_release_parser,
-    _add_rescope_parser,
-    _add_cut_parser,
-    _add_ask_parser,
-    _add_rule_parser,
-    _add_check_parser,
-    _add_body_parser,
-    _add_brief_parser,
+# `item`, `protect`, `register`, `run`, `login`, and `_run-at-login` never
+# own a `_CommandEntry` (issue #372): `item` fans out to its own four
+# subcommands ahead of `_COMMAND_TABLE`, `protect` and the workspace
+# commands are forge-free and never reach `_dispatch` at all. `status` and
+# `body` are the same story (`_read_status_body_or_dispatch`, ahead of
+# `_dispatch`'s own `_LazyForge`) but `aco --help` must still list all
+# eight in their original places, so `_subparser_build_order` below weaves
+# them back into position rather than appending them after every table
+# entry.
+_OTHER_SUBPARSER_BUILDERS: tuple[Callable[[argparse._SubParsersAction], None], ...] = (
     _add_item_parser,
     _add_protect_parser,
     _add_register_parser,
@@ -798,12 +775,38 @@ _SUBPARSER_BUILDERS: tuple[Callable[[argparse._SubParsersAction], None], ...] = 
 )
 
 
+def _subparser_build_order() -> tuple[Callable[[argparse._SubParsersAction], None], ...]:
+    """Every subcommand's parser builder, in the exact order `aco --help`
+    has always listed them (issue #372 R3): read from `_COMMAND_TABLE` only
+    here, at `_parser()`'s own call time, since that table is defined
+    further below in the file."""
+    table = _COMMAND_TABLE
+    return (
+        table["bootstrap"].add_parser,
+        table["reset"].add_parser,
+        _add_status_parser,
+        table["board"].add_parser,
+        table["rulings"].add_parser,
+        table["next"].add_parser,
+        table["claim"].add_parser,
+        table["release"].add_parser,
+        table["rescope"].add_parser,
+        table["cut"].add_parser,
+        table["ask"].add_parser,
+        table["rule"].add_parser,
+        table["check"].add_parser,
+        _add_body_parser,
+        table["brief"].add_parser,
+        *_OTHER_SUBPARSER_BUILDERS,
+    )
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="aco", description=__doc__)
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--repo", help="GitHub repository as OWNER/REPO")
     commands = parser.add_subparsers(dest="command", required=True)
-    for add_subparser in _SUBPARSER_BUILDERS:
+    for add_subparser in _subparser_build_order():
         add_subparser(commands)
     return parser
 
@@ -1245,7 +1248,7 @@ def _merged_pull_request_floor(issues: tuple[board.Issue, ...], now: datetime) -
     """
     if not issues:
         return now
-    return min(_timestamp(issue.created_at) for issue in issues)
+    return min(board._timestamp(issue.created_at) for issue in issues)
 
 
 # A container's children are their own `gh list_children` subprocess call;
@@ -5111,23 +5114,6 @@ def _cmd_ask(parsed: argparse.Namespace, session: _WriteSession) -> int:
     return 0
 
 
-_READ_HANDLERS: dict[str, Callable[[argparse.Namespace, _ReadSession], int | None]] = {
-    "check": _cmd_check,
-    "brief": _cmd_brief,
-    "board": _cmd_board,
-    "rulings": _cmd_rulings,
-    "next": _cmd_next,
-}
-_WRITE_HANDLERS: dict[str, Callable[[argparse.Namespace, _WriteSession], int | None]] = {
-    "rescope": _cmd_rescope,
-    "claim": _cmd_claim,
-    "release": _cmd_release,
-    "cut": _cmd_cut,
-    "ask": _cmd_ask,
-    "rule": _cmd_rule,
-}
-
-
 def _release_branch_for(parsed: argparse.Namespace) -> str | None:
     if parsed.coordinator_override:
         protocol._require_coordinator_override(parsed.role)
@@ -5385,25 +5371,67 @@ def _reset_state(parsed: argparse.Namespace) -> int:
     return 0
 
 
-_FORGE_FREE_COMMANDS: dict[str, Callable[[argparse.Namespace], int]] = {
-    "bootstrap": lambda _parsed: _bootstrap_state(),
-    "reset": _reset_state,
+class _CommandSession(StrEnum):
+    """The session kind `_dispatch` builds before a command's handler runs."""
+
+    READ = "read"
+    WRITE = "write"
+    FORGE_FREE = "forge_free"
+
+
+@dataclass(frozen=True)
+class _CommandEntry:
+    """One command's parser builder, session kind, and handler (issue #372:
+    one table instead of a `_SUBPARSER_BUILDERS`/`_READ_HANDLERS`/
+    `_WRITE_HANDLERS`/`_FORGE_FREE_COMMANDS` quartet keyed by the same
+    names)."""
+
+    add_parser: Callable[[argparse._SubParsersAction], None]
+    session: _CommandSession
+    handler: Callable[..., int | None]
+
+
+_COMMAND_TABLE: dict[str, _CommandEntry] = {
+    "bootstrap": _CommandEntry(
+        _add_bootstrap_parser, _CommandSession.FORGE_FREE, lambda _parsed: _bootstrap_state()
+    ),
+    "reset": _CommandEntry(_add_reset_parser, _CommandSession.FORGE_FREE, _reset_state),
+    "board": _CommandEntry(_add_board_parser, _CommandSession.READ, _cmd_board),
+    "rulings": _CommandEntry(_add_rulings_parser, _CommandSession.READ, _cmd_rulings),
+    "next": _CommandEntry(_add_next_parser, _CommandSession.READ, _cmd_next),
+    "claim": _CommandEntry(_add_claim_parser, _CommandSession.WRITE, _cmd_claim),
+    "release": _CommandEntry(_add_release_parser, _CommandSession.WRITE, _cmd_release),
+    "rescope": _CommandEntry(_add_rescope_parser, _CommandSession.WRITE, _cmd_rescope),
+    "cut": _CommandEntry(_add_cut_parser, _CommandSession.WRITE, _cmd_cut),
+    "ask": _CommandEntry(_add_ask_parser, _CommandSession.WRITE, _cmd_ask),
+    "rule": _CommandEntry(_add_rule_parser, _CommandSession.WRITE, _cmd_rule),
+    "check": _CommandEntry(_add_check_parser, _CommandSession.READ, _cmd_check),
+    "brief": _CommandEntry(_add_brief_parser, _CommandSession.READ, _cmd_brief),
 }
+
+
+def _dispatch_item(parsed: argparse.Namespace) -> int:
+    """`item`'s own four subcommands, pulled out of `_dispatch` (issue #372
+    S1) so their nesting stops counting against every other command's
+    cognitive complexity."""
+    if parsed.item_command == "new":
+        return _cmd_item_new(parsed)
+    if parsed.item_command == "edit":
+        return _cmd_item_edit(parsed)
+    if parsed.item_command == "close":
+        return _cmd_item_close(parsed)
+    return _cmd_item_show(parsed, _ReadSession(forge=_LazyForge(parsed.repo)))
 
 
 def _dispatch(parsed: argparse.Namespace) -> int:
     if parsed.command in {"claim", "release", "rescope"}:
         parsed.agent = checkout._resolved_agent(parsed.agent)
-    if parsed.command in _FORGE_FREE_COMMANDS:
-        return _FORGE_FREE_COMMANDS[parsed.command](parsed)
     if parsed.command == "item":
-        if parsed.item_command == "new":
-            return _cmd_item_new(parsed)
-        if parsed.item_command == "edit":
-            return _cmd_item_edit(parsed)
-        if parsed.item_command == "close":
-            return _cmd_item_close(parsed)
-        return _cmd_item_show(parsed, _ReadSession(forge=_LazyForge(parsed.repo)))
+        return _dispatch_item(parsed)
+    entry = _COMMAND_TABLE[parsed.command]
+    if entry.session is _CommandSession.FORGE_FREE:
+        result = entry.handler(parsed)
+        return 0 if result is None else result
     release_branch = _release_branch_for(parsed) if parsed.command == "release" else None
     forge_accessor = _LazyForge(parsed.repo)
     if parsed.command == "board" and parsed.serve:
@@ -5411,10 +5439,10 @@ def _dispatch(parsed: argparse.Namespace) -> int:
         # the writer session even though its own name reads like every
         # other `board` output mode.
         result = _cmd_board_serve(parsed, _WriteSession(forge=forge_accessor, release_branch=None))
-    elif parsed.command in _READ_HANDLERS:
-        result = _READ_HANDLERS[parsed.command](parsed, _ReadSession(forge=forge_accessor))
+    elif entry.session is _CommandSession.READ:
+        result = entry.handler(parsed, _ReadSession(forge=forge_accessor))
     else:
-        result = _WRITE_HANDLERS[parsed.command](
+        result = entry.handler(
             parsed, _WriteSession(forge=forge_accessor, release_branch=release_branch)
         )
     return 0 if result is None else result
@@ -5542,24 +5570,18 @@ def _read_status_body_or_dispatch(parsed: argparse.Namespace) -> int:
 
 
 def main(arguments: list[str] | None = None) -> int:
+    # One `ERROR:` site for parsing (`board.parse_item_reference` is an
+    # argparse `type=` whose own refusal is a `ClaimError`), a local
+    # workspace operation, and an ordinary dispatch (issue #372). `parsed`
+    # stays `None` through a parse-time refusal, so that path keeps printing
+    # the plain sentence alone, without a `--json` flag to read.
+    parsed: argparse.Namespace | None = None
     try:
-        # `board.parse_item_reference` is an argparse `type=`; its own refusal is
-        # `protocol.ClaimError`, not the `ValueError` argparse's own
-        # conversion-error handling catches, so it needs this same try here
-        # rather than reaching the parser unguarded.
         parsed = _parser().parse_args(arguments)
-    except protocol.ClaimError as error:
-        print(f"ERROR: {error}", file=sys.stderr)
-        return 2
-    if parsed.command in {"_run-at-login", "register", "run", "login"}:
-        try:
+        if parsed.command in {"_run-at-login", "register", "run", "login"}:
             return _local_operation(parsed)
-        except protocol.ClaimError as error:
-            print(f"ERROR: {error}", file=sys.stderr)
-            return 2
-    if parsed.command == "protect":
-        return _protect()
-    try:
+        if parsed.command == "protect":
+            return _protect()
         return _read_status_body_or_dispatch(parsed)
     except protocol.ClaimError as error:
         print(f"ERROR: {error}", file=sys.stderr)
