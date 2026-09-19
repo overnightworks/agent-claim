@@ -39,34 +39,15 @@ def _fixture_page(
     residual. `lane_blocked` defaults to `False` so the GitHub golden page
     stays untouched; only the state-ref proof below turns it on. The
     container (#100) also carries a top-level `size = "M"` (issue #357),
-    measured by three completed lane events into a real (non-weak)
-    estimate; a fourth, still-open lane on an item this fixture never lists
-    (#999) shows in the Messungen section as "1 Lanes ohne Ende" without
-    ever touching a size class."""
-    # Three measured `M` lanes on #100 (issue #357): a fourth, still-open
-    # claim on an item this fixture never lists (#999) proves "unfinished"
-    # counts without ever matching a size class -- `_joined_lane_event`
-    # only overrides `size`/`landed_at` for a number that resolves to one of
-    # this build's own open issues.
+    measured into a real (non-weak) estimate by its own one completed lane
+    plus two more completed `M` lanes on items this fixture never lists at
+    all (#997, #998) -- their size read back through `closed_item_sizes`
+    (R2's closed-item join) rather than from `container_issue`'s own body,
+    proving a class is never blind to an item that has since closed; a
+    fourth, still-open lane on another unlisted item (#999) shows in the
+    Messungen section as "1 Lanes ohne Ende" without ever touching a size
+    class."""
     lane_events = (
-        metrics.LaneEvent(
-            item="100",
-            size=None,
-            container=None,
-            claimed_at=datetime(2026, 8, 10, tzinfo=UTC),
-            released_at=datetime(2026, 8, 10, 4, tzinfo=UTC),
-            landed_at=None,
-            rescopes=0,
-        ),
-        metrics.LaneEvent(
-            item="100",
-            size=None,
-            container=None,
-            claimed_at=datetime(2026, 8, 12, tzinfo=UTC),
-            released_at=datetime(2026, 8, 12, 6, tzinfo=UTC),
-            landed_at=None,
-            rescopes=0,
-        ),
         metrics.LaneEvent(
             item="100",
             size=None,
@@ -75,6 +56,24 @@ def _fixture_page(
             released_at=datetime(2026, 8, 14, 5, tzinfo=UTC),
             landed_at=None,
             rescopes=1,
+        ),
+        metrics.LaneEvent(
+            item="997",
+            size=None,
+            container=None,
+            claimed_at=datetime(2026, 8, 10, tzinfo=UTC),
+            released_at=datetime(2026, 8, 10, 4, tzinfo=UTC),
+            landed_at=None,
+            rescopes=0,
+        ),
+        metrics.LaneEvent(
+            item="998",
+            size=None,
+            container=None,
+            claimed_at=datetime(2026, 8, 12, tzinfo=UTC),
+            released_at=datetime(2026, 8, 12, 6, tzinfo=UTC),
+            landed_at=None,
+            rescopes=0,
         ),
         metrics.LaneEvent(
             item="999",
@@ -148,6 +147,7 @@ def _fixture_page(
         dependencies=dependencies,
         now=datetime(2026, 8, 21, tzinfo=UTC),
         lane_events=lane_events,
+        closed_item_sizes={997: metrics.Size.MEDIUM, 998: metrics.Size.MEDIUM},
     )
     bodies = {
         issue.number: issue.body
@@ -170,7 +170,9 @@ def _fixture_page(
 
 
 def _empty_measurements() -> board.Measurements:
-    return board.Measurements(classes=(), unfinished=0, since=None, as_of=date(2026, 8, 21))
+    return board.Measurements(
+        classes=(), unfinished=0, unparsed=0, since=None, as_of=date(2026, 8, 21)
+    )
 
 
 def _empty_page(*, landings_derivable: bool = True) -> board_html.BoardPage:

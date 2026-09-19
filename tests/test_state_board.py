@@ -1870,7 +1870,7 @@ class TestCliStateRefForge:
                 store.commit_transition(
                     worktree=worktree,
                     remote=remote_url,
-                    subject="competing container write",
+                    subject=store.TransitionSubject("competing container write"),
                     intent=competing_intent,
                 )
             return result

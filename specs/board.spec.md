@@ -40,6 +40,7 @@ number, `<label>` an item as `specs/landing-grammar.spec.md` prints it.
 | `--html PATH` given, or omitted | — | — | BOARD-15 | — |
 | open expectation lines, cards | — | — | BOARD-18, BOARD-19, BOARD-21 | — |
 | a live claim on an item | — | — | BOARD-17 | — |
+| an item with a `size`, measured or not | BOARD-24, BOARD-25, BOARD-29, BOARD-30 | BOARD-26, BOARD-27, BOARD-31 | BOARD-18, BOARD-28 | — |
 | a fresh `--serve` start | — | — | — | BOARD-22, BOARD-23 |
 
 ## The shared forge precondition
@@ -60,23 +61,31 @@ does, before either reads a single issue -- cited there, not restated.
 - [ ] [BOARD-08] An item the forge reports no `kind` for, or a non-`container` `kind`, is left out of `CONTAINERS` even with child counts of its own (#309): never guessed at (see E-BOARD-03).
 - [ ] [BOARD-09] `UNCUT` lists one line per item with an undispatched `[[slice]]` row, `<label>: rows <indices> uncut`, or `none` when every slice table is either empty or fully cut.
 - [ ] [BOARD-10] The table and every section are followed by one closing line, `requests: <n>`, `<n>` the exact count of forge calls this run made (see E-BOARD-02).
+- [ ] [BOARD-24] `ESTIMATE` reads `~<n>h (<S|M|L>, n=<k>)` for a class with three or more measured lanes, `schwach` for fewer (including zero), and `keine Größe` for no `size` at all (see E-BOARD-02).
+- [ ] [BOARD-25] `MESSUNGEN` follows `UNCUT`: measured, `Messungen (Stand <date>, seit <date>)` then one line per class; else only `keine Messungen seit <date>` (see E-BOARD-02).
+- [ ] [BOARD-29] Each `MESSUNGEN` class line reads `<S|M|L>: n=<k>, median <h>h, p80 <h>h`, `(schwach)` appended under three, then `<first>..<last>` dates.
+- [ ] [BOARD-30] `MESSUNGEN` appends `<n> Lanes ohne Ende` when any claim is still open, and `<n> Commits ohne lesbaren Item-Trailer` when any transition commit could not be read.
 
 ## `--json`
 
-- [ ] [BOARD-11] The top-level object carries exactly `items`, `ready_now`, `stale`, `recovery`, `uncut`, `requests`, `landings_derivable` -- never a `repository` key (see E-BOARD-04).
+- [ ] [BOARD-11] The top-level object carries exactly `items`, `ready_now`, `stale`, `recovery`, `uncut`, `requests`, `landings_derivable`, `measurements` -- never a `repository` key (see E-BOARD-04).
 - [ ] [BOARD-12] `landings_derivable` is `false` for a board source that cannot list merged pull requests, `true` otherwise -- the one field `render`'s BOARD-06 line reports in text.
 - [ ] [BOARD-13] Each item's `open_blockers` is split into a same-repository `int` list plus a sibling `foreign_blockers` list of `"<repository>#<n>"` strings, never one mixed list.
 - [ ] [BOARD-14] An `uncut` row's own `scope` key is present, canonical and non-empty only when that row carries a `scope` of its own; a scopeless row's object carries no `scope` key at all, never `"scope": null`.
+- [ ] [BOARD-26] Each item's own object carries `size` (`"S"`/`"M"`/`"L"`, or `null` for an unsized item) and `estimate` (`null`, or `{"item", "size", "median_hours", "n", "weak"}`) alongside its other fields.
+- [ ] [BOARD-27] The top-level `measurements` object carries exactly `{"classes", "unfinished", "unparsed", "since", "as_of"}` (see E-BOARD-04).
+- [ ] [BOARD-31] Each `classes` entry carries `{"stats": {"size", "n", "median_hours", "p80_hours", "weak"}, "first_event_at", "last_event_at"}`; `since` is `null` only with no lane event read.
 
 ## `--html`
 
 - [ ] [BOARD-15] `--html` with no `PATH` writes the page to stdout; `--html PATH` writes it to that file and stdout stays empty (see E-BOARD-05).
 - [ ] [BOARD-16] `--html`, `--json`, and `--serve` are mutually exclusive: combining two refuses `aco board: error: argument <second>: not allowed with argument <first>`, exit `2`, before any read (see E-BOARD-06).
 - [ ] [BOARD-17] Lanes lists one card per live claim, `<label> <title>` heading, Agent/Branch/Alter always, and Now/Next/Blocked by/Done when only when the contract carries them (see E-BOARD-05).
-- [ ] [BOARD-18] The page carries exactly four `<h2>` sections in order: `Wartet auf dich <N>`, `Lanes <N>`, `Themen` (uncounted), `Landungen <N>` (see E-BOARD-05).
+- [ ] [BOARD-18] The page carries exactly five `<h2>` sections in order: `Wartet auf dich <N>`, `Lanes <N>`, `Themen` (uncounted), `Landungen <N>`, `Messungen` (uncounted, issue #357) (see E-BOARD-05).
 - [ ] [BOARD-19] An empty `Wartet auf dich`/`Lanes` list renders `<p class="empty">nichts</p>`; an empty `Themen` list renders `<li class="empty">nichts</li>`.
 - [ ] [BOARD-20] `Landungen` shows `<p class="empty">nicht ableitbar</p>` only once its list is empty and `landings_derivable` is `false` (LAND-46); a proven-empty list still shows plain `nichts`.
 - [ ] [BOARD-21] The static page (no `--serve`) shows each open card's three outcomes as copyable `aco rule <n> --line <k> --<outcome>` lines, never a live form.
+- [ ] [BOARD-28] `Messungen` renders BOARD-25's own first line as a `<p>`, every further line as one `<li>`; empty, it renders `<p class="empty">…</p>` instead, never an empty `<ul>`.
 
 ## `--serve`
 
@@ -115,9 +124,9 @@ container `2/3` closed with one open child `#12`
 
 ```console
 $ aco board
-SCORE  ISSUE  KIND             ...  ACTIONABLE     ...  TITLE
-...    #10    -                ...  no: claimed    ...  Ship #10.
-...    #11    container 2/3    ...  no: container; claim a child  ...  Container epic
+SCORE  ISSUE  KIND             ...  ACTIONABLE     ...  ESTIMATE      TITLE
+...    #10    -                ...  no: claimed    ...  keine Größe   Ship #10.
+...    #11    container 2/3    ...  no: container; claim a child  ...  keine Größe  Container epic
 
 READY NOW
 none
@@ -133,6 +142,9 @@ CONTAINERS
 
 UNCUT
 none
+
+MESSUNGEN
+keine Messungen seit <date>
 
 requests: 4
 exit 0
@@ -158,11 +170,11 @@ Setup: bare-remote, fake `gh`, one open issue `#10`
 
 ```console
 $ aco board --json
-{"items": [...], "ready_now": [...], "stale": [], "recovery": [], "uncut": [], "requests": 3, "landings_derivable": true}
+{"items": [...], "ready_now": [...], "stale": [], "recovery": [], "uncut": [], "requests": 3, "landings_derivable": true, "measurements": {"classes": [], "unfinished": 0, "unparsed": 0, "since": null, "as_of": "<date>"}}
 exit 0
 ```
 
-### E-BOARD-05 — `--html` to a file, and its four sections
+### E-BOARD-05 — `--html` to a file, and its five sections
 
 Setup: bare-remote, fake `gh`, one open issue `#10` with a live claim
 
@@ -174,6 +186,7 @@ $ grep -o '<h2 id="[a-z]*"' board.html
 <h2 id="lanes"
 <h2 id="topics"
 <h2 id="landed"
+<h2 id="measurements"
 exit 0
 ```
 

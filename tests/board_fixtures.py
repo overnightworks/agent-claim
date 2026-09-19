@@ -75,6 +75,8 @@ def projected_board(
     landings_derivable: bool = True,
     lane_events: tuple[metrics.LaneEvent, ...] = (),
     landed_at_by_item: Mapping[int, datetime] = MappingProxyType({}),
+    closed_item_sizes: Mapping[int, metrics.Size | None] = MappingProxyType({}),
+    unparsed_lifecycle_commits: int = 0,
 ) -> board.Board:
     """`board.build_board` for scenarios that do not turn on which repository is projected."""
     observed_at = now or datetime(2026, 8, 21, tzinfo=UTC)
@@ -95,6 +97,8 @@ def projected_board(
             landings_derivable=landings_derivable,
             lane_events=lane_events,
             landed_at_by_item=landed_at_by_item,
+            closed_item_sizes=closed_item_sizes,
+            unparsed_lifecycle_commits=unparsed_lifecycle_commits,
         )
     )
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 import tomllib
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
@@ -601,13 +601,16 @@ class Measurements:
     """The board's own measured-lane section (issue #357): `classes` is
     `metrics.MetricsReport.classes` plus each class's own date range,
     `unfinished` is `metrics.MetricsReport.incomplete` (a still-open claim,
-    counted but never measured), and `since` is the earliest lane event
-    this build read at all -- `None` only when there is none, the one case
-    the board's own "keine Messungen seit <Datum>" sentence reads a
-    render-time date instead."""
+    counted but never measured), `unparsed` is
+    `BoardBuildInputs.unparsed_lifecycle_commits` (a claim-shaped commit
+    `store.claim_lifecycle` could not read at all, issue #357 R1), and
+    `since` is the earliest lane event this build read at all -- `None`
+    only when there is none, the one case the board's own "keine Messungen
+    seit <Datum>" sentence reads a render-time date instead."""
 
     classes: tuple[SizeClassMeasurement, ...]
     unfinished: int
+    unparsed: int
     since: datetime | None
     as_of: date
 
@@ -996,7 +999,10 @@ def _block_scope_defects(data: dict[str, object]) -> list[ContractDefect]:
 
 
 def _block_size_defect(data: dict[str, object]) -> ContractDefect | None:
-    if "size" not in data or data["size"] in SIZE_VALUES:
+    if "size" not in data:
+        return None
+    value = data["size"]
+    if isinstance(value, str) and value in SIZE_VALUES:
         return None
     return ContractDefect("size", "size must be S, M, or L")
 
@@ -2491,6 +2497,21 @@ class BoardBuildInputs:
     # once by the caller from `checkout.trunk_landings` (a layer `board.py`
     # may never import) and handed in as plain data.
     landed_at_by_item: Mapping[int, datetime] = field(default_factory=dict)
+    # Every completed lane's own item's *current* size, for an item that is
+    # no longer among `issues` at all (issue #357 R2) -- closed, or vanished
+    # -- read once by the caller through the forge/state for exactly the
+    # numbers `lane_events` names outside `issues`, since a closed item's
+    # own current size is still readable there even though `build_board`
+    # never re-fetches its body itself. An open item's own size always
+    # comes from `issues`/`parsed_bodies` instead; this map is consulted
+    # only for a number that map does not carry.
+    closed_item_sizes: Mapping[int, metrics.Size | None] = field(default_factory=dict)
+    # Claim-shaped `refs/aco/state` commits `store.claim_lifecycle` could
+    # not parse (issue #357 R1): older history predating its `item:`
+    # trailer, or a foreign commit merely shaped like one -- counted here
+    # rather than silently dropped, and shown beside `Measurements.unfinished`
+    # in the board's own Messungen section.
+    unparsed_lifecycle_commits: int = 0
 
 
 def _item_number_or_none(value: str) -> int | None:
@@ -2503,13 +2524,15 @@ def _joined_lane_event(
     landed_at_by_item: Mapping[int, datetime],
 ) -> metrics.LaneEvent:
     """`event`, its `size` and `landed_at` filled in from this build's own
-    already-fetched data (issue #357): a historical claim's size is read
-    from its item's *current* size -- the only one a board build ever
-    fetches, since a closed item's body is never read -- and its landing
-    date from the trunk commit that named it, when one already did. A lane
-    claim (`docs/`/`fix/`, no issue number) never matches either mapping
-    and is returned unchanged, still counted by `metrics.measure` but never
-    sorted into a size class."""
+    already-fetched data (issue #357, closed items R2): a historical
+    claim's size is read from its item's *current* size, open or closed --
+    `size_by_number` is `build_board`'s own union of every open item's
+    parsed size and `inputs.closed_item_sizes` (read once through the
+    forge/state for exactly the numbers not among the open ones) -- and its
+    landing date from the trunk commit that named it, when one already did.
+    A lane claim (`docs/`/`fix/`, no issue number) never matches either
+    mapping and is returned unchanged, still counted by `metrics.measure`
+    but never sorted into a size class."""
     number = _item_number_or_none(event.item)
     if number is None:
         return event
@@ -2530,13 +2553,65 @@ def _class_measurement(
 
 
 def _measurements(
-    events: tuple[metrics.LaneEvent, ...], report: metrics.MetricsReport, observed_at: datetime
+    events: tuple[metrics.LaneEvent, ...],
+    report: metrics.MetricsReport,
+    observed_at: datetime,
+    *,
+    unparsed: int,
 ) -> Measurements:
     since = min((event.claimed_at for event in events), default=None)
     classes = tuple(_class_measurement(stats, events) for stats in report.classes)
     return Measurements(
-        classes=classes, unfinished=report.incomplete, since=since, as_of=observed_at.date()
+        classes=classes,
+        unfinished=report.incomplete,
+        unparsed=unparsed,
+        since=since,
+        as_of=observed_at.date(),
     )
+
+
+def _summed_lane_event(claims: Sequence[metrics.LaneEvent]) -> metrics.LaneEvent:
+    """One item's own completed claims, summed into a single measured lane
+    (issue #357 R2): their wall-clock durations added, never spanned or
+    averaged, so an item worked across several claims -- a builder, then a
+    fixer, each its own claim -- contributes exactly one sample to its size
+    class rather than `len(claims)` independent ones that would inflate `n`
+    and skew the median. `size`/`container`/`landed_at`/`item` are shared
+    across every claim of one item (`_joined_lane_event` already set them
+    from the same lookup), so the earliest claim's own values carry
+    through unchanged; only `claimed_at`/`released_at` become a synthetic
+    pair whose difference is the summed total, and `rescopes` sums too."""
+    first = min(claims, key=lambda claim: claim.claimed_at)
+    total_hours = sum(
+        (cast(datetime, claim.released_at) - claim.claimed_at).total_seconds() / 3600
+        for claim in claims
+    )
+    return replace(
+        first,
+        released_at=first.claimed_at + timedelta(hours=total_hours),
+        rescopes=sum(claim.rescopes for claim in claims),
+    )
+
+
+def _measurement_feed(events: tuple[metrics.LaneEvent, ...]) -> tuple[metrics.LaneEvent, ...]:
+    """`events`, prepared for `metrics.measure` (issue #357 R2): every
+    item's own completed claims summed into one lane by `_summed_lane_event`
+    -- still-open claims (`released_at is None`) pass through unchanged,
+    since each is already its own still-running lane and
+    `metrics.MetricsReport.incomplete` counts them without help from this
+    function. `_measurements` itself still reads the caller's original,
+    unsummed `events` for its own first/last measured-lane dates, so this
+    synthetic feed is consulted only for the class statistics and
+    per-item estimates `metrics.measure` computes."""
+    completed_by_item: dict[str, list[metrics.LaneEvent]] = {}
+    open_events: list[metrics.LaneEvent] = []
+    for event in events:
+        if event.released_at is None:
+            open_events.append(event)
+        else:
+            completed_by_item.setdefault(event.item, []).append(event)
+    summed = (_summed_lane_event(claims) for claims in completed_by_item.values())
+    return (*summed, *open_events)
 
 
 def build_board(inputs: BoardBuildInputs) -> Board:
@@ -2574,16 +2649,19 @@ def build_board(inputs: BoardBuildInputs) -> Board:
         for child in progress.open_children
     }
     size_by_number = {number: parsed.size for number, parsed in parsed_bodies.items()}
+    historical_size_by_number = {**inputs.closed_item_sizes, **size_by_number}
     joined_events = tuple(
-        _joined_lane_event(event, size_by_number, inputs.landed_at_by_item)
+        _joined_lane_event(event, historical_size_by_number, inputs.landed_at_by_item)
         for event in inputs.lane_events
     )
     open_items = tuple(
         metrics.OpenItem(item=str(issue.number), size=size_by_number[issue.number], container=None)
         for issue in issues
     )
-    report = metrics.measure(joined_events, open_items)
-    measurements = _measurements(joined_events, report, observed_at)
+    report = metrics.measure(_measurement_feed(joined_events), open_items)
+    measurements = _measurements(
+        joined_events, report, observed_at, unparsed=inputs.unparsed_lifecycle_commits
+    )
     estimate_by_number = {int(estimate.item): estimate for estimate in report.estimates}
     context = _BoardBuildContext(
         contracts=contracts,
@@ -3037,6 +3115,8 @@ def measurements_lines(measurements: Measurements) -> list[str]:
     lines.extend(_class_measurement_line(entry) for entry in measurements.classes)
     if measurements.unfinished:
         lines.append(f"{measurements.unfinished} Lanes ohne Ende")
+    if measurements.unparsed:
+        lines.append(f"{measurements.unparsed} Commits ohne lesbaren Item-Trailer")
     return lines
 
 

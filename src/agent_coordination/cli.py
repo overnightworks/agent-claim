@@ -1392,16 +1392,52 @@ class _ClaimHistory:
     """The store's own git-history reads one board build needs (issue #357):
     bundled into one parameter so `_board` stays under the five-argument
     ceiling instead of growing a `claim_ages`-shaped parameter every time
-    another history read joins it. `ages` and `lane_events` are always
-    read from the same already-fetched `ClaimState` (`_claim_history`
-    below), never from two different observations."""
+    another history read joins it. `ages`, `lane_events`, and
+    `unparsed_lifecycle_commits` are always read from the same
+    already-fetched `ClaimState` (`_claim_history` below), never from two
+    different observations."""
 
     ages: Mapping[str, datetime] = field(default_factory=dict)
     lane_events: tuple[metrics.LaneEvent, ...] = ()
+    # Claim-shaped `refs/aco/state` commits `store.claim_lifecycle` could not
+    # parse (issue #357 R1) -- older history predating the `item:` trailer,
+    # or a foreign commit merely shaped like one -- counted rather than
+    # silently dropped.
+    unparsed_lifecycle_commits: int = 0
+
+
+def _closed_item_numbers(
+    lane_events: tuple[metrics.LaneEvent, ...], open_numbers: frozenset[int]
+) -> frozenset[int]:
+    """Every numbered item `lane_events` names that is not among this board
+    build's own open issues (issue #357 R2) -- a completed lane whose item
+    has since closed, or one this walk can no longer resolve to a live
+    issue at all. A `docs/`/`fix/` lane claim's own `item` is never numeric
+    and is silently excluded, matching `board._item_number_or_none`."""
+    numbers = {int(event.item) for event in lane_events if event.item.isdigit()}
+    return frozenset(numbers - open_numbers)
+
+
+def _closed_item_sizes(
+    client: forge.ForgeReader, numbers: frozenset[int], storage: board.Storage
+) -> dict[int, metrics.Size | None]:
+    """Each closed (or vanished) item's own current size, read once per
+    number through the forge/state (issue #357 R2): a completed lane for a
+    since-closed item still belongs in its size class's own measured lanes
+    -- most lanes close their item on landing, so without this the size
+    classes `aco board` estimates from would stay almost always empty.
+    `ItemState.MISSING` (a deleted or renumbered item) and a bodyless
+    reference both read as no size, exactly like an open item that never
+    carried a `size` key."""
+    sizes: dict[int, metrics.Size | None] = {}
+    for number in numbers:
+        body = client.item_reference(number).body
+        sizes[number] = None if body is None else board.parse_body(body, storage=storage).size
+    return sizes
 
 
 def _board(
-    client: forge.BoardSource,
+    client: forge.ForgeReader,
     claims: tuple[protocol.ActiveClaim, ...],
     *,
     issues: tuple[board.Issue, ...] | None = None,
@@ -1414,6 +1450,11 @@ def _board(
     if issues is None:
         issues = client.list_open_board_issues()
     since = _merged_pull_request_floor(issues, now)
+    closed_item_sizes = _closed_item_sizes(
+        client,
+        _closed_item_numbers(history.lane_events, frozenset(issue.number for issue in issues)),
+        config.storage,
+    )
     # A container whose own summary already says 0 (or carries no summary at
     # all, `children_total is None`) can never own an open child either way:
     # `_container_progress` returns no progress at all without both numbers,
@@ -1476,6 +1517,8 @@ def _board(
                 requests=client.requests,
                 claim_ages=history.ages,
                 lane_events=history.lane_events,
+                unparsed_lifecycle_commits=history.unparsed_lifecycle_commits,
+                closed_item_sizes=closed_item_sizes,
                 landed_at_by_item=landed_at_by_item,
                 open_pull_requests_supported=(
                     client.capability(forge.ForgeOperation.LIST_OPEN_BOARD_PULL_REQUESTS)
@@ -2613,7 +2656,7 @@ class _StoreItemWriter:
         new_state = store.commit_transition(
             worktree=self.worktree,
             remote=self.canonical_remote,
-            subject=f"write item {item_id}",
+            subject=store.TransitionSubject(f"write item {item_id}"),
             intent=intent,
         )
         return new_state.items[item_id]
@@ -2957,14 +3000,14 @@ def _claim_ages(worktree: Path, state: protocol.ClaimState) -> dict[str, datetim
     return store.claim_ages(worktree=worktree, tip=state.tip, claims=state.claims.values())
 
 
-def _claim_lifecycle(worktree: Path, state: protocol.ClaimState) -> tuple[metrics.LaneEvent, ...]:
+def _claim_lifecycle(worktree: Path, state: protocol.ClaimState) -> store.ClaimLifecycle:
     """Every claim's own ref-history lifecycle in an already-fetched state
     (issue #357) -- one batched `store.claim_lifecycle` walk of `state.tip`'s
     history, mirroring `_claim_ages`'s own no-refetch seam: a fresh fetch of
     `refs/aco/state` never happens twice for the one board build that
     already read it."""
     if state.tip is None:
-        return ()
+        return store.ClaimLifecycle(events=(), unparsed=0)
     return store.claim_lifecycle(worktree=worktree, tip=state.tip)
 
 
@@ -2973,8 +3016,11 @@ def _claim_history(worktree: Path, state: protocol.ClaimState) -> _ClaimHistory:
     build needs, from one already-fetched state -- `board`, `rulings`,
     `next`, and `board --html`/`--serve` all read this rather than
     `_claim_ages` and `_claim_lifecycle` separately."""
+    lifecycle = _claim_lifecycle(worktree, state)
     return _ClaimHistory(
-        ages=_claim_ages(worktree, state), lane_events=_claim_lifecycle(worktree, state)
+        ages=_claim_ages(worktree, state),
+        lane_events=lifecycle.events,
+        unparsed_lifecycle_commits=lifecycle.unparsed,
     )
 
 
@@ -2993,12 +3039,19 @@ def _require_state_ref(state: protocol.ClaimState) -> None:
         raise protocol.ClaimError(protocol.MISSING_STATE_REF)
 
 
-def _transition_subject(action: str, identity: protocol.ClaimIdentity, branch: str) -> str:
-    """The commit message's first line (§1 "Commit message"): `claim issue 42`,
-    `rescope lane docs/lane-cleanup`, and so on."""
-    if isinstance(identity, protocol.LaneIdentity):
-        return f"{action} lane {branch}"
-    return f"{action} issue {identity.issue}"
+def _transition_subject(
+    action: str, identity: protocol.ClaimIdentity, branch: str
+) -> store.TransitionSubject:
+    """One claim-shaped transition's own `store.TransitionSubject` (§1
+    "Commit message"; issue #357 R1): `text` is `claim issue 42`, `rescope
+    lane docs/lane-cleanup`, and so on -- `action` plus `issue`/`lane` plus
+    `protocol.transition_item_identifier`'s own bare identifier; `item` is
+    that same identifier again, carried separately into the commit's own
+    `item:` trailer rather than reconstructed from `text` by
+    `claim_lifecycle`'s reader."""
+    kind = "lane" if isinstance(identity, protocol.LaneIdentity) else "issue"
+    item = protocol.transition_item_identifier(identity, branch)
+    return store.TransitionSubject(f"{action} {kind} {item}", item=item)
 
 
 def _claim_intent_from_request(

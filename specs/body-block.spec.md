@@ -35,6 +35,7 @@ line per defect, and by a reader as the item's own reason (BODY-50..BODY-52).
 | `[[slice]]` defective | BODY-43..BODY-48 | BODY-50 | BODY-52 |
 | `slice = []` | BODY-49 | — | — |
 | `scope` defective | BODY-53..BODY-56 | BODY-50 | BODY-52 |
+| `size` valid or defective | BODY-57..BODY-59 | BODY-50 (defective only) | BODY-52 (defective only) |
 | complete valid block | BODY-14 | — | — |
 
 ## Fence and surroundings
@@ -54,7 +55,7 @@ line per defect, and by a reader as the item's own reason (BODY-50..BODY-52).
 - [ ] [BODY-10] A block missing `now`, `next` or `done_when` prints one `body malformed: <key>: <key> is required` line per missing key on stderr, exit `1`.
 - [ ] [BODY-11] A block whose `now`, `next` or `done_when` is not a string prints `body malformed: <key>: <key> must be a string` on stderr, exit `1`.
 - [ ] [BODY-12] A block with all three projection keys present and empty is valid but unfilled: `aco body --check` prints `body incomplete: Now, Next, Done when` on stderr, exit `1`.
-- [ ] [BODY-13] A block carrying a top-level key outside `version`, `now`, `next`, `done_when`, `frozen_until`, `scope`, `expectation`, `slice` prints `body malformed: <key>: unknown top-level key <key>`, exit `1`.
+- [ ] [BODY-13] A top-level key outside `version`, `now`, `next`, `done_when`, `frozen_until`, `scope`, `size`, `expectation`, `slice` prints `body malformed: <key>: unknown top-level key <key>`, exit `1`.
 - [ ] [BODY-14] A block whose three projection keys are all non-empty and whose optional tables are valid prints `body ok` on stdout, exit `0`, with nothing on stderr (see E-BODY-01).
 
 ## `[record]`, the state-ref item identity
@@ -119,6 +120,12 @@ line per defect, and by a reader as the item's own reason (BODY-50..BODY-52).
 - [ ] [BODY-54] `scope = []` prints `body malformed: scope: scope must name at least one path`, exit `1`; an empty `[[slice]]` row `scope` prints the `slice[0].scope` form. Absent `scope` means unknown, never empty.
 - [ ] [BODY-55] A `scope = ["/etc/passwd"]` entry fails the same way `claim --scope` would: `body malformed: scope: claim scope must be repository-relative: '/etc/passwd'`.
 - [ ] [BODY-56] A valid `scope` renders sorted, deduplicated, ahead of the first `[[expectation]]`/`[[slice]]` table — else TOML binds a bare key to the prior table — so a re-read names the same canonical `scope`.
+
+## `size`, the item's own estimate class
+
+- [ ] [BODY-57] A block with no `size` key is valid: absence means "no estimate", never a default class, and `aco body --check` prints `body ok`, exit `0`.
+- [ ] [BODY-58] `size = "S"`, `"M"`, or `"L"` is valid: `aco body --check` prints `body ok`, exit `0`.
+- [ ] [BODY-59] A `size` outside `S`/`M`/`L` -- an invalid string, or a non-scalar value such as a list or a table -- prints `body malformed: size: size must be S, M, or L`, exit `1`, the same sentence either way.
 
 ## Never
 

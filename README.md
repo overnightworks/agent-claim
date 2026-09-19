@@ -509,14 +509,22 @@ from a claim's own scope or path count. The estimate comes from
 `store.claim_lifecycle`: one `git log --first-parent` walk of
 `refs/aco/state`'s own claim/rescope/release commits, read into each claim's
 `claimed_at`, `released_at` (`None` while still open — counted as an
-unfinished lane, never measured), and its rescope count. A claim's own item
-number matches it against that item's *current* size (a closed item's
-history stays unjoined, since a board build never re-fetches a closed
-body); `metrics.measure` (issue #308) then groups every completed claim's
-wall-clock duration (`released_at - claimed_at`, several claims per item
-summed) by size class and reports each class's median and 80th-percentile
-(nearest-rank) hours, plus `n` and whether `n` is below 3 ("weak" — the
-number is never withheld, only marked).
+unfinished lane, never measured), and its rescope count; a commit whose
+trailer this walk cannot read at all (older history, or a foreign commit
+merely shaped like a transition) is skipped and counted separately, never a
+crash. A claim's own item number matches it against that item's *current*
+size, open or closed — a board build already reads every open item's body
+for other reasons, and reads a closed or vanished item's own body once more
+through the forge/state for exactly the numbers a completed claim still
+names, since most lanes close their item on landing and a size class fed
+only from still-open items would stay almost always empty. `metrics.measure`
+(issue #308) then groups every item's own wall-clock duration by size
+class and reports each class's median and 80th-percentile (nearest-rank)
+hours, plus `n` and whether `n` is below 3 ("weak" — the number is never
+withheld, only marked); an item worked across several claims — a builder,
+then a fixer, each its own claim — is summed into one measured duration
+before it ever reaches a class, so it contributes exactly one sample, never
+one per claim.
 
 The board's own `ESTIMATE` cell is `~4h (M, n=5)` for a class with three or
 more measured lanes, `schwach` for a sized item whose class has fewer than
@@ -524,14 +532,15 @@ three (including zero), and `keine Größe` for an item with no `size` at
 all. A `Messungen (Stand <today>, seit <first event>)` section follows the
 table, one line per measured class (`n`, median, p80, weak, its own
 earliest/latest event date) plus, when any claim is still open, `<n> Lanes
-ohne Ende`; with nothing measured at all it reads `keine Messungen seit
-<today>` instead, and no item shows an estimate. `--json` carries the same
-two facts as `estimate` per item (`item`, `size`, `median_hours`, `n`,
-`weak`) and a top-level `measurements` object (`classes`, `unfinished`,
-`since`, `as_of`); `--html`/`--serve` show the identical numbers as a
-"Messungen" section and the estimate beside each item's own title. No new
-command reads or writes this: it is `board`'s own always-on projection,
-computed the same way regardless of storage pin.
+ohne Ende`, and when any commit's own trailer could not be read, `<n>
+Commits ohne lesbaren Item-Trailer`; with nothing measured at all it reads
+`keine Messungen seit <today>` instead, and no item shows an estimate.
+`--json` carries the same two facts as `estimate` per item (`item`, `size`,
+`median_hours`, `n`, `weak`) and a top-level `measurements` object
+(`classes`, `unfinished`, `unparsed`, `since`, `as_of`); `--html`/`--serve`
+show the identical numbers as a "Messungen" section and the estimate beside
+each item's own title. No new command reads or writes this: it is `board`'s
+own always-on projection, computed the same way regardless of storage pin.
 
 ### HTML board page
 
@@ -676,12 +685,14 @@ aco-xxxxxx` (`--json`: `{"item", "number", "oid"}`). It refuses under `storage =
 them") — a forge issue is edited on the forge, never through aco.
 
 `aco item edit ITEM --size S|M|L` (issue #357) is the one exception: it
-writes only the block's own top-level `size`, reads no stdin, and works
-under both storages — a `github`-stored item too — over the generic
-`ForgeWriter.update_item_body` port every storage already implements.
-Prints `EDITED #<n> size=<S|M|L>` (`--json`: `{"item", "size"}`). An invalid
-value (anything but `S`, `M`, or `L`) is refused by argparse before any
-write.
+patches only the block's own top-level `size` byte-for-byte, reads no stdin,
+and works under both storages — a `github`-stored item too — over the
+generic `ForgeWriter.update_item_body` port every storage already
+implements; under `storage = "state-ref"` that same port also bumps
+`record.updated_at` to now, exactly as every other `update_item_body` write
+does, so `--size` is never a byte-identical no-op there. Prints `EDITED #<n>
+size=<S|M|L>` (`--json`: `{"item", "size"}`). An invalid value (anything but
+`S`, `M`, or `L`) is refused by argparse before any write.
 
 `aco item close ITEM [--json]` closes a state-ref item: `state` moves to
 `"closed"` and `closed_at`/`updated_at` move to now, the item file itself and

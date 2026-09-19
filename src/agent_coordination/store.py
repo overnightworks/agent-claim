@@ -20,7 +20,6 @@ transition's already-committed parent tree still carries unchanged (issue
 from __future__ import annotations
 
 import os
-import re
 import sys
 import tarfile
 import tempfile
@@ -335,20 +334,18 @@ _CLAIM_LIFECYCLE_FIELD_COUNT = 3
 
 # The transition intents `_transition_message` ever labels `intent:` with
 # that this reader turns into a `ClaimLifecycle` (issue #357): `item_write`
-# commits (issue #279) carry no `claim_id` at all and are silently skipped.
+# commits (issue #279) carry no `claim_id`/`item` trailer at all and are
+# silently skipped, uncounted -- they were never claim history to begin with.
 _CLAIM_SHAPED_INTENTS = frozenset({"claim", "rescope", "release"})
 
-# `cli._transition_subject`'s own fixed grammar ("claim issue 42", "rescope
-# lane docs/x"), read back here rather than imported: this module is the
-# repository's "git transport only" boundary (`pyproject.toml`'s own
-# forbidden-import contract) and sits below `cli` in the Layers contract
-# either way, so the one producer of this text cannot be this reader's own
-# import -- the subject grammar is duplicated once, deliberately, the same
-# way `board.RECORD_TIMESTAMP_PATTERN` duplicates a shape `github.py` owns.
-_TRANSITION_SUBJECT_ISSUE_PATTERN = re.compile(
-    r"^(?:claim|rescope|release) issue (?P<issue>[1-9]\d*)$"
-)
-_TRANSITION_SUBJECT_LANE_PATTERN = re.compile(r"^(?:claim|rescope|release) lane (?P<lane>.+)$")
+# The three trailer lines `_transition_message` writes and this reader parses
+# back (issue #357 R1): one owned grammar, `protocol.transition_item_identifier`
+# for `item`'s own text, read here as plain `"<key>: "`-prefixed lines rather
+# than a second commit-message grammar guessed from the subject line -- the
+# subject stays human prose only, never parsed again.
+_TRAILER_ITEM = "item: "
+_TRAILER_CLAIM_ID = "claim_id: "
+_TRAILER_INTENT = "intent: "
 
 
 @dataclass(frozen=True)
@@ -359,49 +356,56 @@ class _RawTransition:
     committed_at: datetime
 
 
-def _transition_item(subject: str, sha: str) -> str:
-    issue_match = _TRANSITION_SUBJECT_ISSUE_PATTERN.match(subject)
-    if issue_match is not None:
-        return issue_match.group("issue")
-    lane_match = _TRANSITION_SUBJECT_LANE_PATTERN.match(subject)
-    if lane_match is not None:
-        return lane_match.group("lane")
-    raise ClaimError(f"commit {sha} names no item in its subject line: {subject!r}")
+@dataclass(frozen=True)
+class _TransitionOutcome:
+    """One commit's own read (issue #357 R1): a claim-shaped transition this
+    reader could fully parse (`transition`), or `unparsed=True` for a
+    claim-shaped commit whose trailer block is missing `item:`/`claim_id:` --
+    older history predating this trailer, or a foreign commit merely shaped
+    like one. Neither is set for a commit this reader was never going to
+    count at all (an `item_write`, a bootstrap commit, anything else
+    `_transition_message` never produced)."""
+
+    transition: _RawTransition | None
+    unparsed: bool = False
 
 
-def _parsed_transition(sha: str, raw_date: str, raw_body: str) -> _RawTransition | None:
-    """One commit's `_RawTransition`, or `None` for a commit this reader
-    skips -- a bootstrap commit, an item write, or anything else
-    `_transition_message` never produced. Trusts `_transition_message`'s
-    own fixed trailer order (issue #176 §1, widened #279): a claim-shaped
-    intent always carries exactly one `claim_id:` trailer, read back by a
-    plain line scan rather than a second commit-message grammar."""
+def _trailer_value(lines: list[str], prefix: str) -> str | None:
+    return next((line.removeprefix(prefix) for line in lines if line.startswith(prefix)), None)
+
+
+def _parsed_transition(sha: str, raw_date: str, raw_body: str) -> _TransitionOutcome:
+    """One commit's `_TransitionOutcome`: a fully parsed claim-shaped
+    transition, an uncounted skip (not claim-shaped at all), or a counted
+    `unparsed` skip (claim-shaped but missing its own trailer block) --
+    never a crash (issue #357 R1): a malformed or foreign commit in
+    `refs/aco/state`'s history must never take down the whole walk."""
     lines = raw_body.splitlines()
-    if not lines:
-        return None
-    intent = next(
-        (line.removeprefix("intent: ") for line in lines if line.startswith("intent: ")), None
-    )
+    intent = _trailer_value(lines, _TRAILER_INTENT)
     if intent not in _CLAIM_SHAPED_INTENTS:
-        return None
-    claim_id = next(
-        (line.removeprefix("claim_id: ") for line in lines if line.startswith("claim_id: ")), None
-    )
-    if claim_id is None:
-        raise ClaimError(f"commit {sha} carries a {intent} transition with no claim_id trailer")
+        return _TransitionOutcome(transition=None)
+    claim_id = _trailer_value(lines, _TRAILER_CLAIM_ID)
+    item = _trailer_value(lines, _TRAILER_ITEM)
+    if claim_id is None or item is None:
+        return _TransitionOutcome(transition=None, unparsed=True)
     try:
         committed_at = datetime.fromisoformat(raw_date).astimezone(UTC)
     except ValueError as error:
         raise ClaimError(f"git returned a malformed committer date for {sha}") from error
-    return _RawTransition(
-        claim_id=claim_id,
-        item=_transition_item(lines[0], sha),
-        intent=intent,
-        committed_at=committed_at,
+    return _TransitionOutcome(
+        transition=_RawTransition(
+            claim_id=claim_id, item=item, intent=intent, committed_at=committed_at
+        )
     )
 
 
-def _claim_lifecycle_transitions(worktree: Path, tip: ObjectId) -> tuple[_RawTransition, ...]:
+def _claim_lifecycle_transitions(
+    worktree: Path, tip: ObjectId
+) -> tuple[tuple[_RawTransition, ...], int]:
+    """Every fully parsed claim-shaped transition on `tip`'s first-parent
+    history, plus how many claim-shaped commits this walk could not parse
+    (issue #357 R1) -- the raw counterpart `claim_lifecycle` turns into a
+    `ClaimLifecycle`."""
     result = _run_git(
         worktree,
         [
@@ -417,18 +421,21 @@ def _claim_lifecycle_transitions(worktree: Path, tip: ObjectId) -> tuple[_RawTra
         raise ClaimError(f"cannot read the commit history of {tip}")
     raw = result.stdout.decode()
     if not raw:
-        return ()
+        return (), 0
     fields = raw.split("\x00")
     if fields[-1] != "" or len(fields) % _CLAIM_LIFECYCLE_FIELD_COUNT != 1:
         raise ClaimError("git returned a malformed state-ref transition log")
     fields = fields[:-1]
     transitions: list[_RawTransition] = []
+    unparsed = 0
     for index in range(0, len(fields), _CLAIM_LIFECYCLE_FIELD_COUNT):
         sha, raw_date, raw_body = fields[index : index + _CLAIM_LIFECYCLE_FIELD_COUNT]
-        parsed = _parsed_transition(sha, raw_date, raw_body)
-        if parsed is not None:
-            transitions.append(parsed)
-    return tuple(transitions)
+        outcome = _parsed_transition(sha, raw_date, raw_body)
+        if outcome.transition is not None:
+            transitions.append(outcome.transition)
+        elif outcome.unparsed:
+            unparsed += 1
+    return tuple(transitions), unparsed
 
 
 @dataclass
@@ -443,7 +450,21 @@ class _LifecycleAccumulator:
     rescoped: int = 0
 
 
-def claim_lifecycle(*, worktree: Path, tip: ObjectId) -> tuple[metrics.LaneEvent, ...]:
+@dataclass(frozen=True)
+class ClaimLifecycle:
+    """`claim_lifecycle`'s own result (issue #357 R1): every claim this walk
+    could read, plus how many claim-shaped transition commits it could not --
+    a commit whose `intent:` trailer names `claim`/`rescope`/`release` but is
+    missing the trailer block's own `item:`/`claim_id:` line (older history
+    predating this trailer, or a foreign commit merely shaped like one) is
+    skipped rather than raised, and counted here instead of silently
+    vanishing."""
+
+    events: tuple[metrics.LaneEvent, ...]
+    unparsed: int
+
+
+def claim_lifecycle(*, worktree: Path, tip: ObjectId) -> ClaimLifecycle:
     """Every claim's own lifecycle on `refs/aco/state`'s first-parent
     history up to `tip` (issue #357), read in one `git log` walk: a claim's
     `claimed_at`/`released_at` are its own claim/release commit's committer
@@ -456,9 +477,9 @@ def claim_lifecycle(*, worktree: Path, tip: ObjectId) -> tuple[metrics.LaneEvent
     the last reset" is excluded for free by this first-parent walk, never a
     date compared against here.
 
-    Returns `metrics.LaneEvent`s with `size` and `landed_at` both `None`:
-    this module reads no item content and no trunk landings at all (the
-    "claim-state store is git transport only" contract; `checkout` and
+    Its `events` carry `metrics.LaneEvent`s with `size` and `landed_at` both
+    `None`: this module reads no item content and no trunk landings at all
+    (the "claim-state store is git transport only" contract; `checkout` and
     `store` are sibling layers, neither importing the other) -- joining an
     item's current size and its trunk-landing date onto these is
     `board.py`'s own composition, the one place both are already read for
@@ -467,9 +488,10 @@ def claim_lifecycle(*, worktree: Path, tip: ObjectId) -> tuple[metrics.LaneEvent
     caller's own `metrics.measure` already reports it through
     `MetricsReport.incomplete`.
     """
+    transitions, unparsed = _claim_lifecycle_transitions(worktree, tip)
     accumulators: dict[str, _LifecycleAccumulator] = {}
     order: list[str] = []
-    for transition in _claim_lifecycle_transitions(worktree, tip):
+    for transition in transitions:
         if transition.intent == "claim":
             accumulators[transition.claim_id] = _LifecycleAccumulator(
                 item=transition.item, claimed_at=transition.committed_at
@@ -485,7 +507,7 @@ def claim_lifecycle(*, worktree: Path, tip: ObjectId) -> tuple[metrics.LaneEvent
             accumulator.rescoped += 1
         else:
             accumulator.released_at = transition.committed_at
-    return tuple(
+    events = tuple(
         metrics.LaneEvent(
             item=accumulators[claim_id].item,
             size=None,
@@ -497,6 +519,7 @@ def claim_lifecycle(*, worktree: Path, tip: ObjectId) -> tuple[metrics.LaneEvent
         )
         for claim_id in order
     )
+    return ClaimLifecycle(events=events, unparsed=unparsed)
 
 
 def _ls_remote_state(worktree: Path, remote: str) -> ObjectId | None:
@@ -1261,13 +1284,34 @@ def _write_incremental_state_tree(
     return _mktree(worktree, top_entries)
 
 
-def _transition_message(subject: str, intent: ClaimTransitionIntent) -> str:
+@dataclass(frozen=True)
+class TransitionSubject:
+    """One transition's own commit-message identity (issue #357 R1): `text`
+    is the human-facing subject line (`cli._transition_subject`'s own
+    `"claim issue 42"`/`"write item aco-xxxxxx"` prose) and `item` is, for a
+    claim-shaped transition, the bare identifier
+    (`protocol.transition_item_identifier`) that becomes the commit's own
+    machine-readable `item:` trailer -- `None` for an item write, which
+    carries no such trailer at all. Paired into one value since every
+    caller already builds both from the same identity/branch at once,
+    keeping `commit_transition` under the five-argument ceiling.
+    """
+
+    text: str
+    item: str | None = None
+
+
+def _transition_message(subject: TransitionSubject, intent: ClaimTransitionIntent) -> str:
     """The commit message trailer for one transition (§1 "Commit message";
     widened for item writes, issue #279; widened again for atomic landings,
-    issue #359): every intent carries `operation_id`, the one field
-    `_find_operation_id`'s replay search reads back; a claim-shaped intent
-    also names its `claim_id`, an item write its `item_id` instead, and a
-    landing -- the one intent that is both -- names both.
+    issue #359; `item:`, issue #357 R1): every intent carries
+    `operation_id`, the one field `_find_operation_id`'s replay search
+    reads back; a claim-shaped intent also names its `claim_id` and its own
+    `item` (`subject.item`, the one owned grammar `claim_lifecycle`'s
+    reader parses back), an item write its `item_id` instead and no
+    `item:` line at all, and a landing -- the one intent that is both --
+    names `item_id` and `claim_id` together, plus its own `item:` line
+    (`claim_lifecycle` walks a landing exactly like a release).
     """
     if isinstance(intent, LandingIntent):
         subject_field = f"item_id: {intent.item_id}\nclaim_id: {intent.claim_id}"
@@ -1275,10 +1319,12 @@ def _transition_message(subject: str, intent: ClaimTransitionIntent) -> str:
         subject_field = f"item_id: {intent.item_id}"
     else:
         subject_field = f"claim_id: {intent.claim_id}"
+    item_line = f"item: {subject.item}\n" if subject.item is not None else ""
     return (
-        f"{subject}\n\n"
+        f"{subject.text}\n\n"
         f"operation_id: {intent.operation_id}\n"
         f"{subject_field}\n"
+        f"{item_line}"
         f"intent: {_INTENT_LABELS[type(intent)]}\n"
     )
 
@@ -1286,7 +1332,7 @@ def _transition_message(subject: str, intent: ClaimTransitionIntent) -> str:
 def commit_transition(
     *,
     worktree: Path,
-    subject: str,
+    subject: TransitionSubject,
     intent: ClaimTransitionIntent,
     remote: str = DEFAULT_CANONICAL_REMOTE,
     transport: PushTransport | None = None,
@@ -1294,6 +1340,12 @@ def commit_transition(
     """Fetch, apply, and push one claim/rescope/release/item-write/landing
     transition (issue #176, slice C2; item writes, issue #279; atomic
     landings, issue #359): the production caller of `protocol.apply`.
+    `subject.item` -- the caller's own
+    `protocol.transition_item_identifier(identity, branch)` for a
+    claim-shaped intent (a landing included), `None` for an item write --
+    becomes the commit's own `item:` trailer (issue #357 R1), the one
+    machine-readable field `claim_lifecycle` reads back rather than
+    reconstructing an item from the human-facing `subject.text` line.
 
     Unlike `push_tree`'s fixed bootstrap tree, a transition's result depends
     on the state it is applied to, so every retry attempt re-fetches and
