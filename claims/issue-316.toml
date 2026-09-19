@@ -3,5 +3,6 @@ agent = "Claude head (coordinator)"
 role = "builder"
 base = "167d030b6cb1ddcea8f2d5591f0c08c7762dd867"
 branch = "claude/issue-316-item-origin"
-scope = ["src/agent_coordination/items.py", "src/agent_coordination/state_board.py", "tests/test_state_board.py"]
+scope = ["src/agent_coordination/items.py", "src/agent_coordination/state_board.py", "tests/test_state_board.py", "src/agent_coordination/cli.py", "tests/test_cli.py"]
 opened_commit = "c70f68cc4146dd5a22e3836f06671e804b957cef"
+whole_reason = "one flag (item new --origin) across the record codec, the adapter, the cli subparser and their tests"
