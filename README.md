@@ -107,11 +107,11 @@ instead of issues.
 ```bash
 git init --bare -b main /srv/aco/repo.git
 git clone /srv/aco/repo.git repo && cd repo
-git remote set-head origin main
 mkdir .agent-claim
 printf 'storage = "state-ref"\n' > .agent-claim/board.toml
 git add -f .agent-claim/board.toml && git commit -m "pin state-ref storage"
-git push origin main
+git push -u origin main
+git remote set-head origin main
 aco bootstrap
 ```
 
