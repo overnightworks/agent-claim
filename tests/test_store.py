@@ -1717,6 +1717,31 @@ def test_claim_lifecycle_counts_a_malformed_committer_date_as_unparsed(
     assert lifecycle == store.ClaimLifecycle(events=(), unparsed=1)
 
 
+def test_claim_lifecycle_treats_a_non_ascii_trailer_key_as_a_foreign_commit(
+    monkeypatch: pytest.MonkeyPatch, bare_remote: Path, worktree: Path
+) -> None:
+    """Issue #357 S6353: a trailer key is ASCII-only by contract, so a line
+    whose key carries a non-ASCII word character (here `é`) never
+    matches `_TRAILER_LINE_PATTERN` -- the whole terminal paragraph then
+    fails `_terminal_trailer_block`'s every-line check and the commit reads
+    as foreign, the same as any commit predating the trailer convention,
+    not as a claim-shaped commit with an extra unrecognized key."""
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    _committed_claim(bare_remote, worktree, issue=1)
+    state = store.fetch_state(worktree=worktree, remote=str(bare_remote))
+    assert state.tip is not None
+    body = "claim issue 1\n\nintent: claim\nclaim_id: c1\nitem: 1\nnoté: stray\n"
+    _fake_git_log_result(
+        monkeypatch,
+        exit_status=0,
+        stdout=f"deadbeef\x002024-01-01T00:00:00+00:00\x00{body}\x00".encode(),
+    )
+
+    lifecycle = store.claim_lifecycle(worktree=worktree, tip=state.tip)
+
+    assert lifecycle == store.ClaimLifecycle(events=(), unparsed=0)
+
+
 def test_commit_transition_and_fetch_state_round_trip_a_claim_with_a_resource(
     bare_remote: Path, worktree: Path
 ) -> None:
@@ -1886,11 +1911,12 @@ def test_commit_transition_same_key_second_racer_names_the_holder(
     )
 
     intent = _issue_claim_intent(42, agent="Grace", claim_id="a2", operation_id="op-2")
+    subject = store.ClaimTransitionSubject("claim issue 42", item="42")
     with pytest.raises(protocol.ClaimUnavailableError, match="is claimed by Ada"):
         store.commit_transition(
             worktree=worktree,
             remote=str(bare_remote),
-            subject=store.ClaimTransitionSubject("claim issue 42", item="42"),
+            subject=subject,
             intent=intent,
         )
 
@@ -1906,11 +1932,12 @@ def test_commit_transition_a_different_key_loser_that_exhausts_retries_names_a_s
     transport = _AlwaysRejectingTransport()
 
     intent = _issue_claim_intent(42)
+    subject = store.ClaimTransitionSubject("claim issue 42", item="42")
     with pytest.raises(protocol.ClaimUnavailableError, match="rejected 32 pushes") as raised:
         store.commit_transition(
             worktree=worktree,
             remote=str(bare_remote),
-            subject=store.ClaimTransitionSubject("claim issue 42", item="42"),
+            subject=subject,
             intent=intent,
             transport=transport,
         )
@@ -1928,11 +1955,12 @@ def test_commit_transition_a_different_key_loser_that_exhausts_retries_names_a_r
     transport = _AlwaysRacingTransport()
 
     intent = _issue_claim_intent(42)
+    subject = store.ClaimTransitionSubject("claim issue 42", item="42")
     with pytest.raises(protocol.ClaimUnavailableError, match="moved 32 times") as raised:
         store.commit_transition(
             worktree=worktree,
             remote=str(bare_remote),
-            subject=store.ClaimTransitionSubject("claim issue 42", item="42"),
+            subject=subject,
             intent=intent,
             transport=transport,
         )
@@ -1951,11 +1979,12 @@ def test_commit_transition_exhaustion_names_the_true_mix_when_the_ref_moves_once
     transport = _MovesOnceThenSticksTransport()
 
     intent = _issue_claim_intent(42)
+    subject = store.ClaimTransitionSubject("claim issue 42", item="42")
     with pytest.raises(protocol.ClaimUnavailableError, match="moved 1 time") as raised:
         store.commit_transition(
             worktree=worktree,
             remote=str(bare_remote),
-            subject=store.ClaimTransitionSubject("claim issue 42", item="42"),
+            subject=subject,
             intent=intent,
             transport=transport,
         )
@@ -2131,12 +2160,13 @@ def test_commit_transition_item_create_refuses_a_duplicate_id(
     )
 
     duplicate_intent = _hashed_item_intent(worktree, content=b"second\n", operation_id="op-2")
+    duplicate_subject = store.TransitionSubject("create item aco-000001 again")
 
     with pytest.raises(protocol.ClaimUnavailableError, match="already exists"):
         store.commit_transition(
             worktree=worktree,
             remote=str(bare_remote),
-            subject=store.TransitionSubject("create item aco-000001 again"),
+            subject=duplicate_subject,
             intent=duplicate_intent,
         )
 
@@ -2156,12 +2186,13 @@ def test_commit_transition_item_edit_refuses_a_stale_expected_oid_without_clobbe
     stale_intent = _hashed_item_intent(
         worktree, expected=stale_expected, content=b"second\n", operation_id="op-2"
     )
+    edit_subject = store.TransitionSubject("edit item aco-000001")
 
     with pytest.raises(protocol.ClaimUnavailableError, match="written since it was read"):
         store.commit_transition(
             worktree=worktree,
             remote=str(bare_remote),
-            subject=store.TransitionSubject("edit item aco-000001"),
+            subject=edit_subject,
             intent=stale_intent,
         )
 
@@ -3424,11 +3455,12 @@ def test_commit_transition_refuses_a_missing_state_ref(worktree: Path, tmp_path:
     _git("init", "--bare", "-b", "main", cwd=empty_remote)
 
     intent = _claim_intent()
+    subject = store.ClaimTransitionSubject("claim issue 42", item="42")
     with pytest.raises(protocol.ClaimError, match="does not exist yet"):
         store.commit_transition(
             worktree=worktree,
             remote=str(empty_remote),
-            subject=store.ClaimTransitionSubject("claim issue 42", item="42"),
+            subject=subject,
             intent=intent,
         )
 

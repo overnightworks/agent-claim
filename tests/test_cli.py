@@ -5430,11 +5430,12 @@ def test_landing_intent_refuses_a_stale_item_oid_without_writing_anything(
         operation_id="land-op-10-stale",
     )
 
+    subject = store.ClaimTransitionSubject("release issue 10", item="10")
     with pytest.raises(protocol.ClaimUnavailableError, match="was written since it was read"):
         store.commit_transition(
             worktree=worktree,
             remote=str(bare_remote),
-            subject=store.ClaimTransitionSubject("release issue 10", item="10"),
+            subject=subject,
             intent=intent,
         )
 

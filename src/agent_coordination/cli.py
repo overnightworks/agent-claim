@@ -2792,6 +2792,9 @@ def _cmd_item_edit(parsed: argparse.Namespace) -> int:
     return 0
 
 
+ITEM_EDIT_SIZE_COMMAND = "item edit --size"
+
+
 def _cmd_item_edit_size(parsed: argparse.Namespace) -> int:
     """`aco item edit ITEM --size S|M|L` (issue #357): the one item-size
     write, over the generic `ForgeWriter.update_item_body` both `github`
@@ -2801,11 +2804,13 @@ def _cmd_item_edit_size(parsed: argparse.Namespace) -> int:
     `state-ref`-only table BODY-15 refuses under `github`) and leaves every
     other byte untouched."""
     client = _LazyForge(parsed.repo).writer()
-    _require_update_item_body(client, command="item edit --size")
+    _require_update_item_body(client, command=ITEM_EDIT_SIZE_COMMAND)
     number = parsed.item
-    body = _item_body_or_refuse(client, number, command="item edit --size")
+    body = _item_body_or_refuse(client, number, command=ITEM_EDIT_SIZE_COMMAND)
     storage = _board_config(_resolve_toplevel()).storage
-    located = _located_block_or_refuse(number, body, command="item edit --size", storage=storage)
+    located = _located_block_or_refuse(
+        number, body, command=ITEM_EDIT_SIZE_COMMAND, storage=storage
+    )
     new_data = {**located.data, "size": parsed.size}
     client.update_item_body(number, board.replace_agent_claim_block(body, located, new_data))
     _print_item_edit_size_result(number, parsed.size, as_json=parsed.json)

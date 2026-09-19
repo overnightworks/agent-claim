@@ -361,7 +361,10 @@ _CLAIM_LIFECYCLE_FIELD_COUNT = 3
 # `_transition_message`'s output, read here as `key: value` pairs rather
 # than a second commit-message grammar scanned across the whole body --
 # a human subject line can never accidentally shape a false match this way.
-_TRAILER_LINE_PATTERN = re.compile(r"^([A-Za-z][A-Za-z0-9_]*): (.+)$")
+# `re.ASCII` keeps `\w` matching only `[A-Za-z0-9_]`, the same ASCII-only key
+# alphabet the class it replaces enforced -- a trailer key is never expected
+# to carry a non-ASCII word character.
+_TRAILER_LINE_PATTERN = re.compile(r"^([A-Za-z]\w*): (.+)$", re.ASCII)
 _TRAILER_KEY_INTENT = "intent"
 _TRAILER_KEY_CLAIM_ID = "claim_id"
 _TRAILER_KEY_ITEM = "item"
