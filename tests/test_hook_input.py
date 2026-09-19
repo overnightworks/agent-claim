@@ -252,3 +252,129 @@ def test_hook_patch_paths_ignores_a_trailing_carriage_return_like_codex(text: st
 )
 def test_hook_patch_paths_returns_empty_for_unrecognized_text(text: str) -> None:
     assert hook_input.hook_patch_paths(text) == ()
+
+
+@pytest.mark.parametrize(
+    ("command", "pairs"),
+    [
+        pytest.param(
+            "cat > src/x.py <<EOF\ncontent\nEOF",
+            ((hook_input.PATTERN_REDIRECT_OVERWRITE, "src/x.py"),),
+            id="overwrite-redirect-with-a-heredoc-body",
+        ),
+        pytest.param(
+            "echo hi >> docs/log.txt",
+            ((hook_input.PATTERN_REDIRECT_APPEND, "docs/log.txt"),),
+            id="append-redirect",
+        ),
+        pytest.param(
+            "tee -a docs/log.txt",
+            ((hook_input.PATTERN_TEE, "docs/log.txt"),),
+            id="tee-skips-its-own-flag",
+        ),
+        pytest.param(
+            "echo hi >",
+            (),
+            id="a-trailing-redirect-operator-names-no-target",
+        ),
+        pytest.param(
+            "sed -i",
+            (),
+            id="sed-in-place-with-neither-a-script-nor-a-path",
+        ),
+        pytest.param(
+            "sed -i 's/a/b/'",
+            (),
+            id="sed-in-place-with-a-script-but-no-path",
+        ),
+        pytest.param(
+            "sed -i 's/a/b/' tests/t.py",
+            ((hook_input.PATTERN_SED_IN_PLACE, "tests/t.py"),),
+            id="sed-in-place-skips-its-own-script",
+        ),
+        pytest.param(
+            "sed -i.bak 's/a/b/' tests/t.py",
+            ((hook_input.PATTERN_SED_IN_PLACE, "tests/t.py"),),
+            id="sed-in-place-with-a-backup-suffix",
+        ),
+        pytest.param(
+            "sed -n 's/a/b/p' tests/t.py",
+            (),
+            id="sed-without-in-place-names-no-pattern",
+        ),
+        pytest.param(
+            "mv src/a.py src/b.py",
+            ((hook_input.PATTERN_MOVE, "src/a.py"), (hook_input.PATTERN_MOVE, "src/b.py")),
+            id="mv-names-both-its-source-and-its-destination",
+        ),
+        pytest.param(
+            "cp -r src/a.py src/b.py",
+            ((hook_input.PATTERN_COPY, "src/a.py"), (hook_input.PATTERN_COPY, "src/b.py")),
+            id="cp-skips-its-own-flag",
+        ),
+        pytest.param(
+            "rm -rf tests/t.py",
+            ((hook_input.PATTERN_REMOVE, "tests/t.py"),),
+            id="rm-skips-its-own-flag",
+        ),
+        pytest.param(
+            "git checkout -- src/x.py",
+            ((hook_input.PATTERN_GIT_CHECKOUT, "src/x.py"),),
+            id="git-checkout-double-dash",
+        ),
+        pytest.param(
+            "git checkout main",
+            (),
+            id="git-checkout-without-double-dash-names-no-path",
+        ),
+        pytest.param(
+            "git restore src/x.py",
+            ((hook_input.PATTERN_GIT_RESTORE, "src/x.py"),),
+            id="git-restore",
+        ),
+        pytest.param(
+            "grep foo bar.py | sed -i 's/a/b/' baz.py",
+            ((hook_input.PATTERN_SED_IN_PLACE, "baz.py"),),
+            id="a-pipeline-still-recognizes-its-own-write-stage",
+        ),
+        pytest.param(
+            "rm a.py; mv b.py c.py",
+            (
+                (hook_input.PATTERN_REMOVE, "a.py"),
+                (hook_input.PATTERN_MOVE, "b.py"),
+                (hook_input.PATTERN_MOVE, "c.py"),
+            ),
+            id="semicolon-separates-two-simple-commands",
+        ),
+        pytest.param(
+            "echo start\nrm docs/foo.py\necho done",
+            ((hook_input.PATTERN_REMOVE, "docs/foo.py"),),
+            id="a-multiline-command-is-one-statement-per-physical-line",
+        ),
+        pytest.param(
+            "git status",
+            (),
+            id="a-read-only-git-subcommand-names-no-pattern",
+        ),
+        pytest.param(
+            "grep foo bar.py",
+            (),
+            id="a-command-with-no-recognized-pattern-at-all",
+        ),
+        pytest.param(
+            "python -c \"open('x', 'w').write('y')\"",
+            (),
+            id="an-opaque-script-invocation-stays-invisible-on-purpose",
+        ),
+        pytest.param(
+            "echo 'unterminated",
+            (),
+            id="unbalanced-quoting-cannot-even-be-tokenized",
+        ),
+        pytest.param("", (), id="an-empty-command"),
+    ],
+)
+def test_hook_command_paths_recognizes_every_write_pattern(
+    command: str, pairs: tuple[tuple[str, str], ...]
+) -> None:
+    assert hook_input.hook_command_paths(command) == pairs

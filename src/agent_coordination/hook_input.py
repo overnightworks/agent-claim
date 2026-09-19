@@ -1,12 +1,14 @@
-"""Parses Codex's `apply_patch` patch-text grammar so `protect` can check
-every file path a patch touches. Pure text parsing -- no filesystem,
-process, network, or coordination knowledge -- kept out of `cli` (issue
-#252) so the Codex patch grammar has one small, independently testable
+"""Parses two hook-payload command grammars so `protect` can check every
+file path they touch: Codex's `apply_patch` patch text, and a Bash
+`command`'s own write patterns (issue #380). Pure text parsing -- no
+filesystem, process, network, or coordination knowledge -- kept out of
+`cli` (issue #252) so each grammar has one small, independently testable
 owner rather than growing inside `protect`'s already large module.
 """
 
 from __future__ import annotations
 
+import shlex
 from enum import Enum, auto
 
 _ENVIRONMENT_ID_PREFIX = "*** Environment ID: "
@@ -191,3 +193,206 @@ def hook_patch_paths(text: str) -> tuple[str, ...]:
         state, move_to_available = outcome
 
     return tuple(paths) if state is _PatchState.ENDED else ()
+
+
+# A Bash `command`'s own recognized write patterns (issue #380): a
+# redirection, or one of a short list of file-mutating commands, each
+# naming the pattern text `protect`'s denial sentence quotes. `PATTERN_MOVE`
+# and `PATTERN_COPY` double as the token that names the command itself
+# (`mv`, `cp`), since both already read the same either way.
+PATTERN_REDIRECT_OVERWRITE = ">"
+PATTERN_REDIRECT_APPEND = ">>"
+PATTERN_TEE = "tee"
+PATTERN_SED_IN_PLACE = "sed -i"
+PATTERN_MOVE = "mv"
+PATTERN_COPY = "cp"
+PATTERN_REMOVE = "rm"
+PATTERN_GIT_CHECKOUT = "git checkout --"
+PATTERN_GIT_RESTORE = "git restore"
+
+# Newline is a command separator exactly like `;` (a multi-line Bash
+# `command` is one statement per physical line), but `shlex` treats it as
+# plain whitespace by default and drops it entirely -- moving it out of
+# `whitespace` and into `punctuation_chars` below is what turns it back
+# into a token this grammar can see and split on.
+_SHELL_PUNCTUATION = "();<>|&\n"
+_COMMAND_SEPARATORS = frozenset({";", "&&", "||", "|"})
+_FLAG_PREFIX = "-"
+# `sed -i <script> <path>`: at least the script and one path.
+_SED_SCRIPT_AND_PATH_COUNT = 2
+
+
+def _tokenize_command(command: str) -> tuple[str, ...]:
+    """`command` split the way a POSIX shell would see its own words and
+    operators (`;`, `&&`, `||`, `|`, `>`, `>>`, `<<`, ...), each operator its
+    own token rather than glued to the word beside it (a non-empty
+    `punctuation_chars` already implies word-splitting on whitespace, so
+    `whitespace_split` needs no separate setting). Unbalanced quoting -- a
+    command `protect` cannot even tokenize safely -- yields no tokens at all
+    rather than a best-effort guess."""
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=_SHELL_PUNCTUATION)
+    lexer.whitespace = lexer.whitespace.replace("\n", "")
+    try:
+        return tuple(lexer)
+    except ValueError:
+        return ()
+
+
+def _is_command_separator(token: str) -> bool:
+    """A `;`/`&&`/`||`/`|` token, or a run of one or more newline tokens
+    (blank lines between statements merge into one token; `token != ""`
+    keeps an empty string, which `shlex` never emits, from vacuously
+    matching)."""
+    return token in _COMMAND_SEPARATORS or (token != "" and set(token) == {"\n"})
+
+
+def _is_flag(token: str) -> bool:
+    return token.startswith(_FLAG_PREFIX)
+
+
+def _command_end(tokens: tuple[str, ...], start: int) -> int:
+    """The index just past the simple command starting at `start` -- its
+    next command separator, or the end of `tokens`."""
+    end = start
+    while end < len(tokens) and not _is_command_separator(tokens[end]):
+        end += 1
+    return end
+
+
+def _non_flag_arguments(tokens: tuple[str, ...], start: int, end: int) -> tuple[str, ...]:
+    return tuple(token for token in tokens[start:end] if not _is_flag(token))
+
+
+def _match_redirect(tokens: tuple[str, ...], index: int) -> tuple[str, tuple[str, ...], int] | None:
+    """A `>`/`>>` token immediately followed by its own target -- the one
+    pattern that can appear anywhere in a simple command, not only at its
+    start (`cat > path`, a heredoc's own `cat > path <<EOF` included)."""
+    token = tokens[index]
+    if token not in (PATTERN_REDIRECT_OVERWRITE, PATTERN_REDIRECT_APPEND):
+        return None
+    if index + 1 >= len(tokens):
+        return None
+    return token, (tokens[index + 1],), index + 2
+
+
+def _match_tee(tokens: tuple[str, ...], start: int, end: int) -> tuple[str, tuple[str, ...]] | None:
+    if tokens[start] != PATTERN_TEE:
+        return None
+    return PATTERN_TEE, _non_flag_arguments(tokens, start + 1, end)
+
+
+def _match_move_or_copy(
+    tokens: tuple[str, ...], start: int, end: int
+) -> tuple[str, tuple[str, ...]] | None:
+    if tokens[start] not in (PATTERN_MOVE, PATTERN_COPY):
+        return None
+    return tokens[start], _non_flag_arguments(tokens, start + 1, end)
+
+
+def _match_remove(
+    tokens: tuple[str, ...], start: int, end: int
+) -> tuple[str, tuple[str, ...]] | None:
+    if tokens[start] != PATTERN_REMOVE:
+        return None
+    return PATTERN_REMOVE, _non_flag_arguments(tokens, start + 1, end)
+
+
+def _match_sed_in_place(
+    tokens: tuple[str, ...], start: int, end: int
+) -> tuple[str, tuple[str, ...]] | None:
+    """`sed -i` (or `-i<suffix>`, e.g. `-i.bak`): the first non-flag
+    argument is `sed`'s own script, never a path, so only the ones after it
+    are files. `sed` without `-i` reads and writes nothing (it prints to
+    stdout), so it names no pattern at all."""
+    if tokens[start] != "sed":
+        return None
+    arguments = tokens[start + 1 : end]
+    if not any(_is_flag(token) and token.startswith("-i") for token in arguments):
+        return None
+    scripts_and_paths = [token for token in arguments if not _is_flag(token)]
+    if len(scripts_and_paths) < _SED_SCRIPT_AND_PATH_COUNT:
+        return None
+    return PATTERN_SED_IN_PLACE, tuple(scripts_and_paths[1:])
+
+
+def _match_git_checkout(
+    tokens: tuple[str, ...], start: int, end: int
+) -> tuple[str, tuple[str, ...]] | None:
+    """`git checkout -- <path>...`, the only `checkout` form that overwrites
+    a working-tree path; `git checkout <branch>` names no path at all."""
+    if tokens[start : start + 3] != ("git", "checkout", "--"):
+        return None
+    return PATTERN_GIT_CHECKOUT, tokens[start + 3 : end]
+
+
+def _match_git_restore(
+    tokens: tuple[str, ...], start: int, end: int
+) -> tuple[str, tuple[str, ...]] | None:
+    if tokens[start : start + 2] != ("git", "restore"):
+        return None
+    return PATTERN_GIT_RESTORE, _non_flag_arguments(tokens, start + 2, end)
+
+
+_COMMAND_MATCHERS = (
+    _match_tee,
+    _match_move_or_copy,
+    _match_remove,
+    _match_sed_in_place,
+    _match_git_checkout,
+    _match_git_restore,
+)
+
+
+def _first_command_match(
+    tokens: tuple[str, ...], start: int, end: int
+) -> tuple[str, tuple[str, ...]] | None:
+    for matcher in _COMMAND_MATCHERS:
+        matched = matcher(tokens, start, end)
+        if matched is not None:
+            return matched
+    return None
+
+
+def hook_command_paths(command: str) -> tuple[tuple[str, str], ...]:
+    """Every `(pattern, path)` pair a Bash `command`'s own recognized write
+    patterns name, in the order they appear: a `>`/`>>` redirection
+    (including a heredoc target such as `cat > path <<EOF`), `tee`,
+    `sed -i`, `mv`, `cp`, `rm`, `git checkout --`, and `git restore`. A path
+    is whatever token the command's own grammar puts there -- absolute or
+    relative, real or not; `protect` resolves and judges it, this function
+    only recognizes the pattern shape (issue #380).
+
+    A command naming none of these patterns -- or one `shlex` cannot
+    tokenize as a shell command at all -- yields no pairs, the same as a
+    command `protect` allows outright: recognizing a write pattern here is
+    a best-effort aid against forgetting the claim, never a security
+    boundary. A `python -c ...` one-liner or an opaque script invocation
+    stays invisible on purpose (this file's own module docstring; the
+    `## Never` section of `specs/protect.spec.md`).
+    """
+    tokens = _tokenize_command(command)
+    pairs: list[tuple[str, str]] = []
+    index = 0
+    at_command_start = True
+    while index < len(tokens):
+        token = tokens[index]
+        if _is_command_separator(token):
+            at_command_start = True
+            index += 1
+            continue
+        if at_command_start:
+            end = _command_end(tokens, index)
+            matched = _first_command_match(tokens, index, end)
+            at_command_start = False
+            if matched is not None:
+                pattern, paths = matched
+                pairs.extend((pattern, path) for path in paths)
+                index = end
+                continue
+        redirect = _match_redirect(tokens, index)
+        if redirect is None:
+            index += 1
+            continue
+        pattern, paths, index = redirect
+        pairs.append((pattern, paths[0]))
+    return tuple(pairs)
