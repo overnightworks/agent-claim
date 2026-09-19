@@ -39,6 +39,7 @@ matching line.
 | valid `Work-Item:` + closing reference | — | LAND-04 | LAND-29, LAND-49 | LAND-41 |
 | valid `No-Item:` + lane claim | — | LAND-05 | LAND-37 | — |
 | no classification / no trailer | — | LAND-06, LAND-58 | LAND-32, LAND-52 | — |
+| contradictory trunk trailer (both, or repeated `No-Item:`) | — (lands nothing, LAND-42) | LAND-60 | LAND-61 | — |
 | classification line inside a fenced block | — | LAND-07 | — | — |
 | two classification lines | — | LAND-08 | LAND-32 | — |
 | two `Work-Item:` lines | — | LAND-09 | LAND-32 | — |
@@ -75,6 +76,8 @@ matching line.
 - [ ] [LAND-48] `aco check <sha>` reads `<sha>`'s own trailer: `Work-Item:` prints `<sha> declares Work-Item: #<n>`, `No-Item:` prints `<sha> declares No-Item: <kind>`, exit `0`.
 - [ ] [LAND-57] A `<sha>` outside the walked first-parent trunk refuses `<sha> is not on the first-parent trunk`, exit `1`.
 - [ ] [LAND-58] A trunk `<sha>` carrying neither trailer refuses `<sha> carries no \`Work-Item:\` or \`No-Item:\` trailer`, exit `1`.
+- [ ] [LAND-60] A trunk `<sha>` whose trailer block is contradictory -- both `Work-Item:` and `No-Item:`, or `No-Item:` repeated -- makes `check <sha>` refuse `REFUSED: <sha> <that defect sentence>`, exit `1`.
+- [ ] [LAND-61] That same contradictory `<sha>` makes `release --merged <sha>` refuse `ERROR: <sha> <that defect sentence>`, exit `2`, before any write.
 
 ## The pull request body's own grammar
 
@@ -161,7 +164,7 @@ sentence>`, not restated.
 ## Never
 
 - A trunk commit's own `No-Item:` trailer never marks any issue `code-landed`; only a `Work-Item:` trailer does.
-- A trunk commit's contradictory trailer block — both `Work-Item:` and `No-Item:`, or `No-Item:` repeated — is never read as a landing and never refuses any command; it simply lands nothing, the same as a commit that carries neither.
+- A trunk commit's contradictory trailer block — both `Work-Item:` and `No-Item:`, or `No-Item:` repeated — is never read as a landing by the trunk trailer walk itself (LAND-42): it lands nothing there, the same as a commit that carries neither. `check <sha>` and `release --merged <sha>` (issue #359, LAND-60/LAND-61) read that same commit directly, and do refuse it by name — never letting `Work-Item:` win by ordering.
 - A `Work-Item:` reference sitting in a commit's ordinary message prose, outside its own trailer block, is never read as a landing.
 - The trunk walk never follows a side branch: only the first-parent line a merge or squash commit sits on counts, and it never reads a hardcoded `origin` — only the repository's own configured canonical remote.
 - `check`/`release --merged` never read a body's `Advances #n` line as a declaration or a closing reference: a dispatched slice is its own item, and only its own pull request closes it.
@@ -259,4 +262,34 @@ Setup: bare-remote, `main` carrying a commit whose trailer reads `Work-Item: #20
 $ aco check <sha>
 <sha> declares Work-Item: #20
 exit 0
+```
+
+### E-LAND-56 — `release --merged` with no issue number under state-ref refuses
+
+Setup: bare-remote, `storage = "state-ref"`, a live issue-less lane claim
+
+```console
+$ aco release --merged
+2> ERROR: --merged under storage = state-ref requires an issue number; an issue-less lane has no item to close
+exit 2
+```
+
+### E-LAND-60 — a contradictory trunk trailer refuses `check <sha>`
+
+Setup: bare-remote, `main` carrying a commit whose trailer reads `Work-Item: #20` and `No-Item: docs`
+
+```console
+$ aco check <sha>
+2> REFUSED: <sha> carries both `Work-Item:` and `No-Item:` trailers; a landed commit is one or the other
+exit 1
+```
+
+### E-LAND-61 — the same contradictory trailer refuses `release --merged <sha>`
+
+Setup: bare-remote, `storage = "state-ref"`, item `#20` open and claimed, `main` carrying a commit whose trailer reads `Work-Item: #20` and `No-Item: docs`
+
+```console
+$ aco release 20 --merged <sha>
+2> ERROR: <sha> carries both `Work-Item:` and `No-Item:` trailers; a landed commit is one or the other
+exit 2
 ```

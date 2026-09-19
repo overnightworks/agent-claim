@@ -390,5 +390,11 @@ def test_apply_landing_intent_refuses(
 
 
 def test_apply_landing_intent_refuses_against_a_missing_state_ref() -> None:
+    """A `LandingIntent` needs a real state-ref tip to close its item and
+    release its claim against -- `protocol.EMPTY_STATE` (`tip is None`, no
+    bootstrap yet) refuses before either half runs, the same precondition
+    every other transition shape enforces."""
+    assert protocol.EMPTY_STATE.tip is None
+
     with pytest.raises(protocol.ClaimError, match="does not exist yet"):
         protocol.apply(protocol.EMPTY_STATE, _landing_intent())

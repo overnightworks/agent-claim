@@ -17,7 +17,13 @@ from pathlib import Path
 
 import pytest
 from board_fixtures import BASE, request
-from cli_fixtures import _fallback_git_output, _git_checkout, _real_git
+from cli_fixtures import (
+    _fallback_git_output,
+    _git_checkout,
+    _push_repository_trunk,
+    _real_git,
+    _real_repository_with_bare_remote,
+)
 
 from agent_coordination import board, checkout, process, protocol
 from agent_coordination import cli as issue_claim
@@ -1023,20 +1029,10 @@ def _trunk_history_repository(tmp_path: Path) -> Path:
     block. A `sidebranch` ref never joins that first-parent line. One
     history serves every one of the five proofs at once, since building a
     real git repository per proof would only repeat the same setup."""
-    remote = tmp_path / "remote.git"
-    remote.mkdir()
-    _real_git(remote, "init", "-q", "--bare", "-b", "main")
-
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _real_git(repo, "init", "-q", "-b", "main")
-    _real_git(repo, "config", "user.name", "Test")
-    _real_git(repo, "config", "user.email", "test@example.com")
-    _real_git(repo, "config", "commit.gpgsign", "false")
+    repo, _remote = _real_repository_with_bare_remote(tmp_path, remote_name="hub")
     (repo / "base.txt").write_text("base\n")
     _real_git(repo, "add", "base.txt")
     _real_git(repo, "commit", "-q", "-m", "initial")
-    _real_git(repo, "remote", "add", "hub", str(remote))
 
     # A merge commit whose own message carries the trailer block.
     _real_git(repo, "checkout", "-q", "-b", "feature")
@@ -1084,8 +1080,7 @@ def _trunk_history_repository(tmp_path: Path) -> Path:
     _real_git(repo, "commit", "-q", "-m", "side change", "-m", "Work-Item: #99")
     _real_git(repo, "checkout", "-q", "main")
 
-    _real_git(repo, "push", "-q", "hub", "main")
-    _real_git(repo, "remote", "set-head", "hub", "main")
+    _push_repository_trunk(repo, "hub")
     return repo
 
 

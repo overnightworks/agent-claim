@@ -2419,17 +2419,34 @@ def _release_outcome(merged: int | None, abandoned: str | None) -> protocol.Rele
     )
 
 
+@dataclass(frozen=True)
+class _MergedLandingClose:
+    """The still-open issue `_verify_merged_release` found and the pull
+    request that landed it (issue #359 R1): naming both, rather than
+    closing on the spot, so `_cmd_release` can call `close_landed_item`
+    itself once the claim is resolved and the claimant already authorized --
+    an unauthorized or mismatched-claim `--merged` release then never
+    reaches a forge write, or even this read, at all."""
+
+    issue: int
+    pull_request: int
+
+
 def _verify_merged_release(
     client: github.GitHubForge,
     repository: str,
     identity: protocol.ClaimIdentity,
     merged: protocol.MergedRelease,
-) -> None:
-    """Refuse a `--merged` release the landing itself does not support; for
-    an issue whose work item is still open, close it through the forge
-    writer instead of refusing (issue #359 Card 1) -- `state_board.py`'s
-    own `LandingIntent` path is `storage = state-ref`'s equivalent, so this
-    only ever runs under `storage = github` (see `_cmd_release`)."""
+) -> _MergedLandingClose | None:
+    """Refuse a `--merged` release the landing itself does not support, and
+    report -- without yet closing anything -- whether the named work item is
+    still open and needs to be (issue #359 Card 1/R1): `_cmd_release` calls
+    this only after the claim is already resolved and the claimant already
+    authorized, and performs the actual close itself afterward, so a defect
+    or a transient forge failure there never runs ahead of authorization
+    and never lands on an unauthorized attempt. `state_board.py`'s own
+    `LandingIntent` path is `storage = state-ref`'s equivalent, so this only
+    ever runs under `storage = github` (see `_cmd_release`)."""
     detail = client.landing(merged.pull_request)
     if not detail.merged:
         raise protocol.ClaimUnavailableError(f"pull request #{detail.number} is not merged")
@@ -2450,7 +2467,7 @@ def _verify_merged_release(
                 f"pull request #{detail.number} names {classification.item}; "
                 "an issue-less lane needs a No-Item line"
             )
-        return
+        return None
     item = board.IssueReference(repository, identity.issue)
     if not isinstance(classification, board.WorkItemClassification) or classification.item != item:
         raise protocol.ClaimUnavailableError(
@@ -2458,11 +2475,12 @@ def _verify_merged_release(
         )
     reference = _fetch_issue_reference(client, identity.issue)
     if reference.state is forge.ItemState.OPEN:
-        client.close_landed_item(identity.issue, pull_request=detail.number)
-    elif reference.state is not forge.ItemState.CLOSED:
+        return _MergedLandingClose(identity.issue, detail.number)
+    if reference.state is not forge.ItemState.CLOSED:
         raise protocol.ClaimUnavailableError(
             f"work item #{identity.issue} is {reference.state.value}, not closed"
         )
+    return None
 
 
 def _canonical_remote_name(toplevel: Path) -> str:
@@ -4184,20 +4202,28 @@ def _cmd_release(parsed: argparse.Namespace, session: _WriteSession) -> None:
         return
     merged = None if parsed.merged is None else _github_pull_request_number(parsed.merged)
     outcome = _release_outcome(merged, parsed.abandoned)
-    client: github.GitHubForge | None = None
-    if isinstance(outcome, protocol.MergedRelease):
-        # Only a merged release verifies its landing pull request against the
-        # forge (issue #245); an abandoned release -- lane or issue -- never
-        # calls `session.forge()`, so it never resolves a repository or
-        # invokes `gh`. `storage` is already proven `github` here (the
-        # `state-ref` branch above returned), so this cast is honest, not a
-        # suppression: `_LazyForge.__call__` builds exactly a
-        # `github.GitHubForge` for every other storage pin.
-        client = cast(github.GitHubForge, session.forge())
-        _verify_merged_release(client, client.repository.path, identity, outcome)
     worktree, canonical_remote, observed = _store_observation()
     _require_state_ref(observed)
     resolved = _resolve_release_claimant(parsed, observed, identity, session.release_branch)
+    client: github.GitHubForge | None = None
+    if isinstance(outcome, protocol.MergedRelease):
+        # Authorization above gates every forge read and write here (issue
+        # #359 R1): an unauthorized or mismatched-claim `--merged` release
+        # never reaches the forge at all, so it can neither verify, comment
+        # on, nor close a pull request's issue. `storage` is already proven
+        # `github` here (the `state-ref` branch above returned), so this
+        # cast is honest, not a suppression: `_LazyForge.__call__` builds
+        # exactly a `github.GitHubForge` for every other storage pin.
+        client = cast(github.GitHubForge, session.forge())
+        pending_close = _verify_merged_release(client, client.repository.path, identity, outcome)
+        if pending_close is not None:
+            # Runs before the release transition below (issue #359 R1): a
+            # close failure here -- a transient forge error, most often --
+            # leaves this function raising before `store.commit_transition`
+            # ever runs, so the claim it would have released stays exactly
+            # as live as it was, and `main`'s own `ClaimError` handler
+            # prints the failure as the one sentence the operator sees.
+            client.close_landed_item(pending_close.issue, pull_request=pending_close.pull_request)
     intent = protocol.ReleaseIntent(
         claim_id=resolved.selected.claim_id,
         agent=parsed.agent,

@@ -43,7 +43,9 @@ from cli_fixtures import (
     _forbid_github_construction,
     _forbid_protect_git_github_and_identity,
     _git_checkout,
+    _push_repository_trunk,
     _real_git,
+    _real_repository_with_bare_remote,
     _set_agent_identity_env,
     arrange_scope_width,
     stub_board_config_tracked,
@@ -4901,19 +4903,10 @@ def _landing_repository(tmp_path: Path) -> Path:
     <sha|empty>`/`check <sha>` (LAND-47/LAND-48/LAND-52) to walk. `feature`
     never joins the first-parent line itself (only its merge commit does),
     giving the off-trunk refusal proof a real sha to reject."""
-    remote = tmp_path / "remote.git"
-    remote.mkdir()
-    _real_git(remote, "init", "-q", "--bare", "-b", "main")
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _real_git(repo, "init", "-q", "-b", "main")
-    _real_git(repo, "config", "user.name", "Test")
-    _real_git(repo, "config", "user.email", "test@example.com")
-    _real_git(repo, "config", "commit.gpgsign", "false")
+    repo, _remote = _real_repository_with_bare_remote(tmp_path)
     (repo / "base.txt").write_text("base\n")
     _real_git(repo, "add", "base.txt")
     _real_git(repo, "commit", "-q", "-m", "initial")
-    _real_git(repo, "remote", "add", "origin", str(remote))
 
     _real_git(repo, "checkout", "-q", "-b", "feature")
     (repo / "feature.txt").write_text("feature\n")
@@ -4948,8 +4941,7 @@ def _landing_repository(tmp_path: Path) -> Path:
     _real_git(repo, "checkout", "-q", "main")
     _real_git(repo, "merge", "-q", "--ff-only", "docslane")
 
-    _real_git(repo, "push", "-q", "origin", "main")
-    _real_git(repo, "remote", "set-head", "origin", "main")
+    _push_repository_trunk(repo, "origin")
     return repo
 
 
@@ -5038,6 +5030,22 @@ def test_release_merged_closes_and_releases_atomically_under_the_state_ref_pin(
     assert len(remaining) == len(_LANDING_ITEM_NUMBERS) - 1
 
 
+def test_release_merged_refuses_a_trunk_item_the_state_ref_has_no_entry_for(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Issue #359/CI: the squash commit's trailer names both `#11` and
+    `#12` (LAND-02), but `_landing_scenario` seeds the state ref with only
+    `#11`'s own item -- `release --merged` for `#12` refuses by name,
+    before any claim or write, rather than crashing on a decode miss."""
+    repo, client = _landing_scenario(monkeypatch, tmp_path)
+    sha = _real_git(repo, "rev-parse", "main~1").stdout.strip()
+
+    status = issue_claim.main(["release", "12", "--agent", "Codex Sol", "--merged", sha])
+
+    assert status == 2
+    assert capsys.readouterr().err == f"ERROR: #12 does not exist in {client.repository.path}\n"
+
+
 @pytest.mark.parametrize(
     ("landing_ref", "reason"),
     [
@@ -5068,6 +5076,265 @@ def test_release_merged_refuses_a_landing_it_cannot_verify_under_the_state_ref_p
     assert client.item_reference(10).state is forge.ItemState.OPEN
     remaining = store.fetch_state(worktree=Path("."), remote="origin").claims
     assert protocol.claim_key(protocol.IssueIdentity(10), "") in remaining
+
+
+# --- Real `file://` state-ref proofs (issue #359 R3) ------------------------
+#
+# Every test above this point patches `store.fetch_state`/`commit_transition`
+# with `_FakeStore` (`_landing_scenario`): it proves this module's own CLI
+# wiring -- argument selection, the trunk walk, the printed report -- agrees
+# with `protocol.apply`, but `protocol.apply` is exactly what `_FakeStore`
+# calls too, so it can never prove one real git commit, a real CAS refusal,
+# a real moved-ref race, or a real replay refusal. The tests below run
+# `store.fetch_state`/`commit_transition` for real against a real bare
+# `file://` remote (`_use_real_store`, below in the `reset` section, applies
+# module-wide from here on) and assert on the ref/tree state a real clone
+# would see, never on a fake's own bookkeeping.
+
+
+def _real_landing_scenario(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, numbers: tuple[int, ...] = (10,)
+) -> tuple[Path, Path]:
+    """The real counterpart of `_landing_scenario`: the same real trunk
+    history (`_landing_repository`), but `refs/aco/state` is real too, on
+    the very same bare remote -- `store.fetch_state`/`commit_transition` run
+    unfaked, and `_state_ref_forge` is never stubbed, so `release --merged`
+    below drives the exact git commits and CAS its own atomicity claim is
+    about."""
+    _write_state_ref_pin(tmp_path)
+    _use_real_store(monkeypatch)
+    monkeypatch.setattr(checkout, "trunk_landings", _LIVE_TRUNK_LANDINGS)
+    repo = _landing_repository(tmp_path)
+    remote = tmp_path / "remote.git"
+    store.bootstrap(worktree=repo, remote=str(remote))
+    for number in numbers:
+        _seed_real_claim_and_item(
+            repo,
+            remote,
+            issue=number,
+            claim_id=f"claim-{number}",
+            content=_landing_item_body(f"Item {number}").encode(),
+        )
+    monkeypatch.chdir(repo)
+    return repo, remote
+
+
+def _seed_real_claim_and_item(
+    worktree: Path, remote: Path, *, issue: int, claim_id: str, content: bytes
+) -> tuple[protocol.ActiveClaim, protocol.ObjectId]:
+    """Lands a real claim and a real item blob for `issue` in two ordinary
+    transitions, so an atomicity proof below can land a third -- one
+    `protocol.LandingIntent` -- and check that it, unlike these two, closes
+    the item and releases the claim in the very same commit."""
+    claim_state = store.commit_transition(
+        worktree=worktree,
+        remote=str(remote),
+        subject=f"claim issue {issue}",
+        intent=protocol.ClaimIntent(
+            identity=protocol.IssueIdentity(issue),
+            agent="Codex Sol",
+            role="builder",
+            base=protocol.ObjectId("c" * 40),
+            branch=f"codex/issue-{issue}-claims",
+            scope=("src",),
+            claim_id=protocol.ClaimId(claim_id),
+            operation_id=f"claim-op-{issue}",
+        ),
+    )
+    claim = next(
+        value
+        for value in claim_state.claims.values()
+        if value.identity == protocol.IssueIdentity(issue)
+    )
+    item_id = items.format_item_id(issue)
+    new_oid = store.hash_blob(worktree, content)
+    item_state = store.commit_transition(
+        worktree=worktree,
+        remote=str(remote),
+        subject=f"seed item {item_id}",
+        intent=protocol.ItemWriteIntent(
+            item_id=item_id, expected=None, new_oid=new_oid, operation_id=f"item-op-{issue}"
+        ),
+    )
+    return claim, item_state.items[item_id]
+
+
+def _state_ref_paths(repo: Path, tip: str) -> set[str]:
+    return set(_real_git(repo, "ls-tree", "-r", "--name-only", tip).stdout.splitlines())
+
+
+def _state_ref_blob(repo: Path, tip: str, path: str) -> str:
+    return _real_git(repo, "show", f"{tip}:{path}").stdout
+
+
+def _state_ref_tip(repo: Path, remote: Path) -> str:
+    return _real_git(repo, "ls-remote", str(remote), store.STATE_REF).stdout.split()[0]
+
+
+def test_release_merged_under_state_ref_commits_once_then_refuses_a_replay_as_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """Issue #359 R3: a real `file://` proof of Beweis 1 -- one landing is
+    exactly one new commit on `refs/aco/state` whose tree closes the item
+    and drops the claim -- and of the replay case `_FakeStore` cannot see: a
+    second `release` against the now-closed item refuses by name, through
+    the real `state_board.StateRefBoard` re-read from the real ref, and
+    moves the ref not at all."""
+    repo, remote = _real_landing_scenario(monkeypatch, tmp_path, numbers=(10,))
+    sha = _real_git(repo, "rev-parse", "main~2").stdout.strip()
+    item_id = items.format_item_id(10)
+    tip_before = _state_ref_tip(repo, remote)
+    assert "claims/issue-10.toml" in _state_ref_paths(repo, tip_before)
+    count_before = int(_real_git(repo, "rev-list", "--count", tip_before).stdout.strip())
+
+    status = issue_claim.main(
+        ["release", "10", "--agent", "Codex Sol", "--claim-id", "claim-10", "--merged", sha]
+    )
+
+    assert status == 0
+    tip_after = _state_ref_tip(repo, remote)
+    count_after = int(_real_git(repo, "rev-list", "--count", tip_after).stdout.strip())
+    assert count_after == count_before + 1
+    assert _real_git(repo, "rev-parse", f"{tip_after}^").stdout.strip() == tip_before
+    paths_after = _state_ref_paths(repo, tip_after)
+    assert "claims/issue-10.toml" not in paths_after
+    assert f"items/{item_id}.md" in paths_after
+    closed_body = board.parse_body(
+        _state_ref_blob(repo, tip_after, f"items/{item_id}.md"), storage=board.Storage.STATE_REF
+    )
+    assert closed_body.record is not None
+    closed_record = items.parse_item_record(item_id, closed_body.record)
+    assert closed_record.state is items.RecordState.CLOSED
+    capsys.readouterr()
+
+    replay_status = issue_claim.main(
+        ["release", "10", "--agent", "Codex Sol", "--claim-id", "claim-10", "--merged", sha]
+    )
+
+    assert replay_status == 2
+    assert capsys.readouterr().err.startswith("ERROR: #10 is already closed (closed on ")
+    assert _state_ref_tip(repo, remote) == tip_after
+
+
+class _RaceOnceTransport:
+    """A `store.PushTransport` that lets one unrelated writer land on
+    `refs/aco/state` between this transition's own read and its first real
+    push attempt (issue #359 R3): a genuine second `git push`, not a
+    monkeypatched rejection, so the ordinary `commit_transition` retry loop
+    meets a real non-fast-forward rejection and must actually refetch and
+    reapply -- proof that no half-state (neither the racer's write nor this
+    transition's own) is ever left applied only in part."""
+
+    def __init__(self, worktree: Path, remote: Path) -> None:
+        self._worktree = worktree
+        self._remote = remote
+        self._raced = False
+        self._real = store.GitPushTransport()
+        self.racer_commit: str | None = None
+
+    def push(self, *, worktree: Path, remote: str, ref: str, new_oid: protocol.ObjectId) -> None:
+        if not self._raced:
+            self._raced = True
+            current = _state_ref_tip(self._worktree, self._remote)
+            tree = _real_git(self._worktree, "rev-parse", f"{current}^{{tree}}").stdout.strip()
+            racer = _real_git(
+                self._worktree, "commit-tree", tree, "-p", current, "-m", "unrelated racer"
+            ).stdout.strip()
+            _real_git(self._worktree, "push", str(self._remote), f"{racer}:{store.STATE_REF}")
+            self.racer_commit = racer
+        self._real.push(worktree=worktree, remote=remote, ref=ref, new_oid=new_oid)
+
+
+def test_landing_intent_survives_an_unrelated_ref_move_with_no_half_state(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Issue #359 R3: an unrelated writer lands on `refs/aco/state` between
+    this transition's own fetch and its first push attempt -- the real,
+    non-fast-forward rejection `commit_transition`'s retry loop exists for.
+    The retry refetches, reapplies on top of the racer's own commit, and
+    lands exactly one more commit: neither the racer's write nor this
+    transition's is ever left half-applied."""
+    worktree, bare_remote = _reset_repository(tmp_path)
+    _use_real_store(monkeypatch)
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    claim, open_oid = _seed_real_claim_and_item(
+        worktree, bare_remote, issue=10, claim_id="claim-10", content=b"open\n"
+    )
+    item_id = items.format_item_id(10)
+    closed_oid = store.hash_blob(worktree, b"closed\n")
+    racer = _RaceOnceTransport(worktree, bare_remote)
+
+    new_state = store.commit_transition(
+        worktree=worktree,
+        remote=str(bare_remote),
+        subject="release issue 10",
+        intent=protocol.LandingIntent(
+            item_id=item_id,
+            item_expected=open_oid,
+            item_new_oid=closed_oid,
+            claim_id=claim.claim_id,
+            agent="Codex Sol",
+            role="builder",
+            outcome=protocol.LandedRelease(commit=protocol.ObjectId("d" * 40)),
+            operation_id="land-op-10",
+        ),
+        transport=racer,
+    )
+
+    assert racer.racer_commit is not None
+    assert new_state.items[item_id] == closed_oid
+    assert protocol.claim_key(protocol.IssueIdentity(10), "") not in new_state.claims
+    assert new_state.tip is not None
+    # The retry rebuilt directly on the racer's own commit -- no commit from
+    # the rejected first attempt sits between them.
+    parent = _real_git(worktree, "rev-parse", f"{new_state.tip}^").stdout.strip()
+    assert parent == racer.racer_commit
+    refetched = store.fetch_state(worktree=worktree, remote=str(bare_remote))
+    assert refetched.items[item_id] == closed_oid
+    assert protocol.claim_key(protocol.IssueIdentity(10), "") not in refetched.claims
+
+
+def test_landing_intent_refuses_a_stale_item_oid_without_writing_anything(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Issue #359 R3: a `LandingIntent` built from a stale `item_expected`
+    (someone else edited the item after this caller's own read) refuses by
+    name, the same CAS discipline `ItemWriteIntent` already proves, and
+    writes nothing -- the claim stays live and the item stays open on the
+    real ref, not just in a fake's own state."""
+    worktree, bare_remote = _reset_repository(tmp_path)
+    _use_real_store(monkeypatch)
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    claim, open_oid = _seed_real_claim_and_item(
+        worktree, bare_remote, issue=10, claim_id="claim-10", content=b"open\n"
+    )
+    item_id = items.format_item_id(10)
+    stale_oid = store.hash_blob(worktree, b"some other content\n")
+    tip_before = _state_ref_tip(worktree, bare_remote)
+
+    with pytest.raises(protocol.ClaimUnavailableError, match="was written since it was read"):
+        store.commit_transition(
+            worktree=worktree,
+            remote=str(bare_remote),
+            subject="release issue 10",
+            intent=protocol.LandingIntent(
+                item_id=item_id,
+                item_expected=stale_oid,
+                item_new_oid=store.hash_blob(worktree, b"closed\n"),
+                claim_id=claim.claim_id,
+                agent="Codex Sol",
+                role="builder",
+                outcome=protocol.LandedRelease(commit=protocol.ObjectId("d" * 40)),
+                operation_id="land-op-10-stale",
+            ),
+        )
+
+    assert _state_ref_tip(worktree, bare_remote) == tip_before
+    unchanged = store.fetch_state(worktree=worktree, remote=str(bare_remote))
+    assert unchanged.items[item_id] == open_oid
+    assert protocol.claim_key(protocol.IssueIdentity(10), "") in unchanged.claims
 
 
 def test_release_merged_under_the_state_ref_pin_requires_an_issue(
@@ -10187,6 +10454,187 @@ def test_release_merged_refuses_a_lane_whose_pull_request_names_an_item(
     )
 
 
+def test_release_merged_refuses_a_work_item_neither_open_nor_closed(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`_verify_merged_release`'s third `reference.state` branch: the named
+    work item vanished between the pull request's own classification and
+    this read (a real race, not reachable through the already-covered open/
+    closed cases), so the release refuses rather than guessing either
+    outcome."""
+    merged_release_client(monkeypatch, body="Work-Item: #72\n\nCloses #72")
+    _stub_issue_reference(monkeypatch, {WORK_ITEM_ISSUE: (forge.ItemState.MISSING, "", "")})
+
+    assert issue_claim.main(["--repo", REPOSITORY, "release", "72", "--merged", "12"]) == 2
+    assert capsys.readouterr().err == (
+        f"ERROR: work item #{WORK_ITEM_ISSUE} is missing, not closed\n"
+    )
+    assert store.fetch_state(worktree=Path("."), remote="origin").claims
+
+
+def test_release_merged_refuses_a_non_numeric_pull_request_under_github(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`_github_pull_request_number`'s own guard (issue #359): `--merged`
+    under `storage = "github"` (the default here -- no board.toml pins
+    state-ref) takes only a bare pull request number, never the sha grammar
+    that pin's own `<sha|empty>` form reads; refuses before touching git,
+    the store, or the forge at all -- so the store this session never
+    resolved stays at its own untouched default."""
+    status = issue_claim.main(
+        ["release", "72", "--agent", "Codex Sol", "--claim-id", "claim-72", "--merged", "sha123"]
+    )
+
+    assert status == 2
+    assert capsys.readouterr().err == (
+        "ERROR: --merged requires a pull request number under storage = github\n"
+    )
+    assert store.fetch_state(worktree=Path("."), remote="origin").claims == {}
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        pytest.param(("72", "--agent", "Other"), id="mismatched-claimant"),
+        pytest.param(("72", "--claim-id", "no-such-claim"), id="no-matching-claim"),
+        pytest.param(("999", "--agent", "Ada"), id="no-claim-on-this-issue"),
+    ],
+)
+def test_release_merged_unauthorized_makes_no_forge_call_close_or_comment(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    args: tuple[str, ...],
+) -> None:
+    """Issue #359 R1: authorization gates every forge read and write on a
+    `--merged` release -- a mismatched claimant, an explicit claim id that
+    matches nothing, or an issue with no live claim at all never reaches the
+    forge, so it can neither verify the pull request, comment on its issue,
+    nor close it; the forge is never asked in the first place
+    (`client.requests == 0`)."""
+    client = merged_release_client(monkeypatch, body="Work-Item: #72\n\nCloses #72")
+
+    status = issue_claim.main(["--repo", REPOSITORY, "release", *args, "--merged", "12"])
+
+    assert status == 2
+    assert "ERROR:" in capsys.readouterr().err
+    assert client.requests == 0
+    assert client.closed_issues == set()
+    assert client.landing_comments == {}
+    assert store.fetch_state(worktree=Path("."), remote="origin").claims
+
+
+def test_release_merged_close_failure_preserves_the_claim_and_prints_a_sentence(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #359 R1: a close failure (a transient forge error, most often)
+    runs before the release transition -- it leaves the claim exactly as
+    live as it was, reported as the one sentence `main`'s own `ClaimError`
+    handler already prints, never a partially released claim with a
+    still-open, uncommented issue."""
+    client = merged_release_client(monkeypatch, body="Work-Item: #72\n\nCloses #72")
+
+    def failing_close(number: int, *, pull_request: int) -> None:
+        raise forge.ForgeTransientError("gh: connection reset")
+
+    monkeypatch.setattr(client, "close_landed_item", failing_close)
+
+    status = issue_claim.main(["--repo", REPOSITORY, "release", "72", "--merged", "12"])
+
+    assert status == 2
+    assert capsys.readouterr().err == "ERROR: gh: connection reset\n"
+    assert store.fetch_state(worktree=Path("."), remote="origin").claims
+    assert client.closed_issues == set()
+
+
+_CONTRADICTORY_TRAILERS = (
+    pytest.param("Work-Item: #20\nNo-Item: docs", id="both"),
+    pytest.param("No-Item: docs\nNo-Item: fix", id="repeated-no-item"),
+)
+
+
+def _contradictory_trailer_repository(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, trailer: str
+) -> Path:
+    """A real trunk repository (issue #359, LAND-60/61) whose one commit
+    carries a contradictory trailer block: shared arrangement for both
+    `check <sha>`'s and `release --merged <sha>`'s own refusal proofs, which
+    read the identical classification."""
+    monkeypatch.setattr(checkout, "trunk_landings", _LIVE_TRUNK_LANDINGS)
+    repo, _remote = _real_repository_with_bare_remote(tmp_path)
+    (repo / "work.txt").write_text("work\n")
+    _real_git(repo, "add", "work.txt")
+    _real_git(repo, "commit", "-q", "-m", "contradictory landing", "-m", trailer)
+    _push_repository_trunk(repo, "origin")
+    monkeypatch.chdir(repo)
+    return repo
+
+
+@pytest.mark.parametrize("trailer", _CONTRADICTORY_TRAILERS)
+def test_check_sha_refuses_a_contradictory_trailer(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    trailer: str,
+) -> None:
+    """Issue #359, LAND-60: a trunk commit whose trailer block names both
+    `Work-Item:` and `No-Item:`, or repeats `No-Item:`, refuses through
+    `check <sha>` by the classification's own defect message -- never
+    letting `Work-Item:` win by ordering, and never silently landing
+    nothing the way `aco board`'s own trunk-trailer reading does (LAND-42)."""
+    repo = _contradictory_trailer_repository(monkeypatch, tmp_path, trailer)
+    sha = _real_git(repo, "rev-parse", "main").stdout.strip()
+
+    status = issue_claim.main(["check", sha])
+
+    assert status == 1
+    err = capsys.readouterr().err
+    assert err.startswith(f"REFUSED: {sha} carries")
+    assert "one is required" not in err
+
+
+@pytest.mark.parametrize("trailer", _CONTRADICTORY_TRAILERS)
+def test_release_merged_by_sha_refuses_a_contradictory_trailer(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    trailer: str,
+) -> None:
+    """Issue #359, LAND-61/CI: `release --merged <sha>` under state-ref
+    reads the exact same classification `check <sha>` does (LAND-60) and
+    refuses the same contradictory trailer by the same defect sentence,
+    exit `2`, before any write -- `_landed_commit_by_sha`'s own
+    `ClassificationDefect` branch."""
+    _write_state_ref_pin(tmp_path)
+    repo = _contradictory_trailer_repository(monkeypatch, tmp_path, trailer)
+    sha = _real_git(repo, "rev-parse", "main").stdout.strip()
+
+    status = issue_claim.main(["release", "20", "--agent", "Codex Sol", "--merged", sha])
+
+    assert status == 2
+    err = capsys.readouterr().err
+    assert err.startswith(f"ERROR: {sha} carries")
+
+
+def test_release_merged_empty_refuses_when_no_trunk_commit_names_the_item(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Issue #359, LAND-47/CI: the empty `--merged` form under state-ref
+    refuses by name when no trunk commit's own trailer names this item at
+    all -- `_newest_landed_commit`'s own raise, reached before any claim or
+    forge read, so every standing claim `_landing_scenario` seeded is still
+    exactly as live afterward."""
+    _landing_scenario(monkeypatch, tmp_path)
+
+    status = issue_claim.main(["release", "99", "--agent", "Codex Sol", "--merged"])
+
+    assert status == 2
+    assert capsys.readouterr().err == (
+        "ERROR: no trunk commit carries a Work-Item: trailer naming #99\n"
+    )
+    remaining = store.fetch_state(worktree=Path("."), remote="origin").claims
+    assert len(remaining) == len(_LANDING_ITEM_NUMBERS)
+
+
 def test_release_abandoned_records_why_the_lane_stopped(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -10662,15 +11110,7 @@ def _check_trunk_repository(tmp_path: Path) -> Path:
     naming `#20`, and one trailer-classified `No-Item: docs` -- the three
     classifications `check <sha>` reads from a commit's own trailer block,
     the same grammar `check <pr>` reads from a pull request body with."""
-    remote = tmp_path / "remote.git"
-    remote.mkdir()
-    _real_git(remote, "init", "-q", "--bare", "-b", "main")
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _real_git(repo, "init", "-q", "-b", "main")
-    _real_git(repo, "config", "user.name", "Test")
-    _real_git(repo, "config", "user.email", "test@example.com")
-    _real_git(repo, "config", "commit.gpgsign", "false")
+    repo, _remote = _real_repository_with_bare_remote(tmp_path)
     (repo / "base.txt").write_text("base\n")
     _real_git(repo, "add", "base.txt")
     _real_git(repo, "commit", "-q", "-m", "initial")
@@ -10680,9 +11120,7 @@ def _check_trunk_repository(tmp_path: Path) -> Path:
     (repo / "docs.txt").write_text("docs\n")
     _real_git(repo, "add", "docs.txt")
     _real_git(repo, "commit", "-q", "-m", "docs change", "-m", "No-Item: docs")
-    _real_git(repo, "remote", "add", "origin", str(remote))
-    _real_git(repo, "push", "-q", "origin", "main")
-    _real_git(repo, "remote", "set-head", "origin", "main")
+    _push_repository_trunk(repo, "origin")
     return repo
 
 
@@ -10697,21 +11135,33 @@ def _check_sha(
     return repo, lambda ref: _real_git(repo, "rev-parse", ref).stdout.strip()
 
 
-def test_check_sha_declares_a_work_item_trailer(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+@pytest.mark.parametrize(
+    ("landing_ref", "declaration"),
+    [
+        pytest.param("main~1", "Work-Item: #20", id="work-item"),
+        pytest.param("main", "No-Item: docs", id="no-item"),
+    ],
+)
+def test_check_sha_declares_its_trailer(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    landing_ref: str,
+    declaration: str,
 ) -> None:
-    """Issue #359, LAND-48 (Beweis 3): a commit whose own trailer block
-    names `Work-Item: #20` prints the same declaration shape `check <pr>`
-    does, needing no forge at all -- a trunk commit's trailer is local."""
+    """Issue #359, LAND-48 (Beweis 3) / CI: a commit whose own trailer block
+    names `Work-Item:` or `No-Item:` prints the same declaration shape
+    `check <pr>` does, needing no forge at all -- a trunk commit's trailer
+    is local -- through `_trunk_classification_text`'s own two branches."""
     _repo, sha_of = _check_sha(monkeypatch, tmp_path)
 
-    status = issue_claim.main(["check", sha_of("main~1")])
+    status = issue_claim.main(["check", sha_of(landing_ref)])
 
     assert status == 0
-    assert capsys.readouterr().out == f"{sha_of('main~1')} declares Work-Item: #20\n"
+    assert capsys.readouterr().out == f"{sha_of(landing_ref)} declares {declaration}\n"
 
 
-def test_check_sha_declares_a_no_item_trailer(
+def test_check_sha_json_declares_a_classified_commit_as_ok(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
     _repo, sha_of = _check_sha(monkeypatch, tmp_path)
