@@ -137,6 +137,10 @@ class Topic:
     closed: int
     total: int
     parts: tuple[TopicPart, ...]
+    # The item's own board cell (issue #357, `board.estimate_cell`) -- a
+    # container topic shows its own row's size/estimate, never a rollup of
+    # its children's, matching `aco board`'s per-item column.
+    estimate: str
 
 
 @dataclass(frozen=True)
@@ -178,6 +182,10 @@ class BoardPage:
     topics: tuple[Topic, ...]
     landed: tuple[LandedItem, ...]
     landings_derivable: bool
+    # The board's own measured-lane section (issue #357), rendered through
+    # `board.measurements_lines` -- the one text `aco board` and this page
+    # both read, so the two never drift into separately worded sentences.
+    measurements: board.Measurements
     storage: board.Storage = board.Storage.GITHUB
 
 
@@ -280,7 +288,14 @@ def _standalone_topic(item: board.BoardItem, *, repository: str, storage: board.
         board.open_blocker_label(reference, repository, storage) for reference in item.open_blockers
     )
     part = TopicPart(item.number, item.title, _item_part_state(item), blocked_by or None)
-    return Topic(item=item.number, title=item.title, closed=0, total=1, parts=(part,))
+    return Topic(
+        item=item.number,
+        title=item.title,
+        closed=0,
+        total=1,
+        parts=(part,),
+        estimate=board.estimate_cell(item),
+    )
 
 
 def _topics(projected: board.Board, *, storage: board.Storage) -> tuple[Topic, ...]:
@@ -306,6 +321,7 @@ def _topics(projected: board.Board, *, storage: board.Storage) -> tuple[Topic, .
                     closed=item.container.closed,
                     total=item.container.total,
                     parts=parts,
+                    estimate=board.estimate_cell(item),
                 )
             )
         elif item.container_parent is None:
@@ -425,6 +441,7 @@ def build_page(projected: board.Board, sources: BoardSources) -> BoardPage:
         topics=_topics(projected, storage=sources.storage),
         landed=landed,
         landings_derivable=projected.landings_derivable,
+        measurements=projected.measurements,
         storage=sources.storage,
     )
 
@@ -572,7 +589,10 @@ def _render_topic(topic: Topic, *, storage: board.Storage) -> str:
       <li>
         <details>
           <summary>
-            <span class="t-name"><strong>{label} {html.escape(topic.title)}</strong></span>
+            <span class="t-name">
+              <strong>{label} {html.escape(topic.title)}</strong>
+              <span class="t-estimate">{html.escape(topic.estimate)}</span>
+            </span>
             <span class="t-progress">
               <span class="bar" role="img" aria-label="{topic.closed} of {topic.total} done">
                 <i style="width:{share}%"></i>
@@ -610,6 +630,23 @@ def _render_landed_section(page: BoardPage) -> str:
         return _EMPTY_PARAGRAPH
     rows = "".join(_render_landed(entry, storage=page.storage) for entry in page.landed)
     return f'<ul class="landed">{rows}</ul>'
+
+
+def _render_measurements_section(page: BoardPage) -> str:
+    """`board.measurements_lines`, rendered whole (issue #357 gate B1): the
+    text section joins every line with no line dropped, so this section
+    must too -- `unfinished`/`unparsed` are their own trailing lines
+    (`measurements_lines`) that stand regardless of whether any size class
+    was itself measured, and hiding them behind the `not classes` branch
+    silently dropped a nonzero `unparsed`/`unfinished` count whenever no
+    class had a measured lane at all."""
+    lines = board.measurements_lines(page.measurements)
+    heading_class = "" if page.measurements.classes else ' class="empty"'
+    heading = f"<p{heading_class}>{html.escape(lines[0])}</p>"
+    if len(lines) == 1:
+        return heading
+    rows = "".join(f"<li>{html.escape(line)}</li>" for line in lines[1:])
+    return f'{heading}<ul class="measurements">{rows}</ul>'
 
 
 def render(page: BoardPage, *, served: ServedRuleForm | None = None) -> str:
@@ -651,6 +688,7 @@ def render(page: BoardPage, *, served: ServedRuleForm | None = None) -> str:
         ),
         landed_count=len(page.landed),
         landed=_render_landed_section(page),
+        measurements=_render_measurements_section(page),
     )
 
 
@@ -797,6 +835,7 @@ summary:focus-visible {{
 .topics summary::-webkit-details-marker {{ display: none; }}
 .topics summary:hover .t-name strong {{ color: var(--accent); }}
 .t-name strong::after {{ content: " +"; color: var(--muted); font-weight: 400; }}
+.t-estimate {{ color: var(--muted); font: 0.82rem var(--mono); margin-left: 0.4em; }}
 .topics details[open] .t-name strong::after {{ content: " \\2212"; }}
 .t-progress {{
   display: grid; grid-template-columns: minmax(0, 1fr) 3.4em; gap: 12px; align-items: center;
@@ -845,6 +884,12 @@ summary:focus-visible {{
 .landed li {{ padding: 8px 0; border-top: 1px solid var(--rule); font-size: 0.92rem; }}
 .landed li:last-child {{ border-bottom: 1px solid var(--rule); }}
 
+.measurements {{ list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }}
+.measurements li {{
+  padding: 8px 0; border-top: 1px solid var(--rule); font: 0.86rem var(--mono);
+}}
+.measurements li:last-child {{ border-bottom: 1px solid var(--rule); }}
+
 @media (max-width: 560px) {{
   .facts div {{ grid-template-columns: minmax(0, 1fr); gap: 0; }}
   .parts li {{ grid-template-columns: 10px minmax(0, 1fr); }}
@@ -877,6 +922,11 @@ summary:focus-visible {{
   <section aria-labelledby="landed">
     <h2 id="landed">Landungen <small>{landed_count}</small></h2>
     {landed}
+  </section>
+
+  <section aria-labelledby="measurements">
+    <h2 id="measurements">Messungen</h2>
+    {measurements}
   </section>
 </main>
 <script>

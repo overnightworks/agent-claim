@@ -32,7 +32,7 @@ from board_fixtures import (
     slice_entries,
 )
 
-from agent_coordination import board, protocol
+from agent_coordination import board, metrics, protocol
 from agent_coordination.protocol import ClaimError, ClaimRequest
 
 # A real expectation sentence from this repository's own issue #230 (#240's
@@ -2495,6 +2495,59 @@ def test_parse_body_refuses_an_invalid_slice_scope(
     assert expected_message_part in defect.message
 
 
+@pytest.mark.parametrize("size", ["S", "M", "L"])
+def test_parse_body_reads_a_valid_size(size: str) -> None:
+    """Issue #357: `size` is a plain top-level block field -- valid under
+    every storage, never nested under `[record]` (a `state-ref`-only table,
+    BODY-15), since a GitHub-stored item has no such table at all."""
+    parsed = board.parse_body(agent_claim_body(f'{MINIMAL_BLOCK_TOML}size = "{size}"\n'))
+
+    assert parsed.read_state is board.BodyReadState.VALID
+    assert parsed.size is metrics.Size(size)
+
+
+def test_parse_body_reads_no_size_as_none() -> None:
+    parsed = board.parse_body(agent_claim_body(MINIMAL_BLOCK_TOML))
+
+    assert parsed.read_state is board.BodyReadState.VALID
+    assert parsed.size is None
+
+
+def test_parse_body_refuses_an_invalid_size() -> None:
+    parsed = board.parse_body(agent_claim_body(f'{MINIMAL_BLOCK_TOML}size = "XL"\n'))
+
+    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert parsed.contract.defects[0] == board.ContractDefect("size", "size must be S, M, or L")
+
+
+def test_parse_body_refuses_a_non_scalar_size_without_crashing() -> None:
+    """A list or table `size` value must never reach the `in SIZE_VALUES`
+    membership test unchecked (issue #357 G1): a type check ahead of it
+    reports the same defect sentence instead of raising `TypeError`."""
+    parsed = board.parse_body(agent_claim_body(f'{MINIMAL_BLOCK_TOML}size = ["M"]\n'))
+
+    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert parsed.contract.defects[0] == board.ContractDefect("size", "size must be S, M, or L")
+
+
+def test_render_block_places_size_before_expectation_and_slice_tables() -> None:
+    data = {
+        "version": 1,
+        "now": "N",
+        "next": "X",
+        "done_when": "D",
+        "expectation": [{"text": "E", "default": "later"}],
+        "slice": [{"index": 1, "title": "Row"}],
+        "size": "M",
+    }
+
+    rendered = board.render_block(data)
+
+    assert rendered.index("size =") < rendered.index("[[expectation]]")
+    assert rendered.index("size =") < rendered.index("[[slice]]")
+    assert 'size = "M"' in rendered
+
+
 def test_parse_body_refuses_scope_as_an_unknown_expectation_key() -> None:
     """`scope` is a field of the block's top level and of `[[slice]]` rows
     only -- an `[[expectation]]` entry never grew it, so writing one there
@@ -3214,3 +3267,420 @@ def test_trunk_commit_classification_refuses_a_contradictory_trailer_block(
     by ordering."""
     defect = board.trunk_commit_classification(work_item_values, no_item_values)
     assert isinstance(defect, board.ClassificationDefect)
+
+
+# --- Board estimates and measurements (issue #357) --------------------------
+
+
+def _lane_event(
+    item: str,
+    *,
+    claimed_at: datetime,
+    released_at: datetime | None,
+    rescopes: int = 0,
+) -> metrics.LaneEvent:
+    """A raw `store.claim_lifecycle`-shaped event: `size`/`landed_at` start
+    `None`, exactly as that reader leaves them -- `build_board`'s own join
+    (`_joined_lane_event`) fills `size` from the matching open item's own
+    current size, never from this fixture."""
+    return metrics.LaneEvent(
+        item=item,
+        size=None,
+        container=None,
+        claimed_at=claimed_at,
+        released_at=released_at,
+        landed_at=None,
+        rescopes=rescopes,
+    )
+
+
+def _sized_item(number: int, size: str | None) -> board.Issue:
+    entries = {} if size is None else {"size": size}
+    return board_issue(number, f"Item {number}", complete_contract("Do it.", **entries))
+
+
+def test_build_board_reports_no_size_as_the_keine_groesse_cell() -> None:
+    projected = projected_board(
+        (_sized_item(200, None),),
+        (),
+        (),
+        (),
+        board.BoardConfig(),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+    )
+
+    item = projected.items[0]
+    assert item.size is None
+    assert item.estimate is None
+    assert board.estimate_cell(item) == board.NO_SIZE_CELL
+
+
+@pytest.mark.parametrize("measured_lanes", [0, 2], ids=["zero-lanes", "two-lanes"])
+def test_build_board_reports_a_weak_estimate_below_three_measured_lanes(
+    measured_lanes: int,
+) -> None:
+    lane_events = tuple(
+        _lane_event(
+            "201",
+            claimed_at=datetime(2026, 8, 10 + index, tzinfo=UTC),
+            released_at=datetime(2026, 8, 10 + index, 4, tzinfo=UTC),
+        )
+        for index in range(measured_lanes)
+    )
+    projected = projected_board(
+        (_sized_item(201, "M"),),
+        (),
+        (),
+        (),
+        board.BoardConfig(),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+        lane_events=lane_events,
+    )
+
+    item = projected.items[0]
+    assert item.size is metrics.Size.MEDIUM
+    if measured_lanes:
+        assert item.estimate is not None
+        assert item.estimate.weak is True
+    else:
+        assert item.estimate is None
+    assert board.estimate_cell(item) == board.WEAK_ESTIMATE_CELL
+
+
+def test_build_board_reports_a_measured_estimate_with_median_and_count() -> None:
+    """Three distinct items' own single completed claim each contribute
+    exactly one measured sample to the `M` class (issue #357 R2): `n` counts
+    items, never `len(claims)` from one item claimed and released three
+    times."""
+    lane_events = tuple(
+        _lane_event(
+            str(number),
+            claimed_at=datetime(2026, 8, 10 + index, tzinfo=UTC),
+            released_at=datetime(2026, 8, 10 + index, hours, tzinfo=UTC),
+        )
+        for index, (number, hours) in enumerate([(202, 4), (209, 5), (210, 6)])
+    )
+    projected = projected_board(
+        (_sized_item(202, "M"), _sized_item(209, "M"), _sized_item(210, "M")),
+        (),
+        (),
+        (),
+        board.BoardConfig(),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+        lane_events=lane_events,
+    )
+
+    item = next(entry for entry in projected.items if entry.number == 202)
+    assert item.estimate == metrics.Estimate(
+        item="202", size=metrics.Size.MEDIUM, median_hours=5, n=3, weak=False
+    )
+    assert board.estimate_cell(item) == "~5h (M, n=3)"
+
+
+def test_build_board_leaves_a_lane_claims_own_event_unjoined_to_any_size_class() -> None:
+    """A `docs/`/`fix/` lane claim's own lifecycle event carries no issue
+    number at all (issue #357 R2): `_joined_lane_event` returns it
+    unchanged rather than joining it against `size_by_number`/
+    `landed_at_by_item`, so it can never be sorted into a size class --
+    mixing one into an otherwise-clean `M` measurement leaves that class's
+    own `n` exactly at the number of real issue-shaped events."""
+    lane_events = (
+        *(
+            _lane_event(
+                str(number),
+                claimed_at=datetime(2026, 8, 10 + index, tzinfo=UTC),
+                released_at=datetime(2026, 8, 10 + index, hours, tzinfo=UTC),
+            )
+            for index, (number, hours) in enumerate([(211, 4), (212, 5), (216, 6)])
+        ),
+        _lane_event(
+            "docs/lane-cleanup",
+            claimed_at=datetime(2026, 8, 10, tzinfo=UTC),
+            released_at=datetime(2026, 8, 10, 2, tzinfo=UTC),
+        ),
+    )
+    projected = projected_board(
+        (_sized_item(211, "M"), _sized_item(212, "M"), _sized_item(216, "M")),
+        (),
+        (),
+        (),
+        board.BoardConfig(),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+        lane_events=lane_events,
+    )
+
+    (m_class,) = (
+        entry for entry in projected.measurements.classes if entry.stats.size is metrics.Size.MEDIUM
+    )
+    assert m_class.stats.n == 3
+
+
+def test_build_board_sums_multiple_claims_of_one_item_into_one_sample() -> None:
+    """One item claimed, released, and reclaimed -- a builder then a fixer --
+    contributes exactly one measured sample, its wall-clock durations added
+    (issue #357 R2): never two independent samples that would double-count
+    `n` and average away the real total."""
+    lane_events = (
+        _lane_event(
+            "215",
+            claimed_at=datetime(2026, 8, 10, tzinfo=UTC),
+            released_at=datetime(2026, 8, 10, 3, tzinfo=UTC),
+        ),
+        _lane_event(
+            "215",
+            claimed_at=datetime(2026, 8, 12, tzinfo=UTC),
+            released_at=datetime(2026, 8, 12, 2, tzinfo=UTC),
+        ),
+    )
+    projected = projected_board(
+        (_sized_item(215, "M"),),
+        (),
+        (),
+        (),
+        board.BoardConfig(),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+        lane_events=lane_events,
+    )
+
+    item = projected.items[0]
+    assert item.estimate is not None
+    assert item.estimate.n == 1
+    assert item.estimate.median_hours == 5
+    assert item.estimate.weak is True
+
+
+def test_build_board_measurements_section_reports_classes_dates_and_unfinished() -> None:
+    completed = tuple(
+        _lane_event(
+            str(number),
+            claimed_at=datetime(2026, 8, 10 + index, tzinfo=UTC),
+            released_at=datetime(2026, 8, 10 + index, hours, tzinfo=UTC),
+        )
+        for index, (number, hours) in enumerate([(203, 4), (211, 5), (212, 6)])
+    )
+    unfinished = (
+        _lane_event("204", claimed_at=datetime(2026, 8, 20, tzinfo=UTC), released_at=None),
+    )
+    projected = projected_board(
+        (_sized_item(203, "M"), _sized_item(211, "M"), _sized_item(212, "M")),
+        (),
+        (),
+        (),
+        board.BoardConfig(),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+        lane_events=completed + unfinished,
+    )
+
+    measurements = projected.measurements
+    assert measurements.unfinished == 1
+    assert measurements.since == datetime(2026, 8, 10, tzinfo=UTC)
+    assert measurements.as_of == date(2026, 8, 21)
+    assert len(measurements.classes) == 1
+    entry = measurements.classes[0]
+    assert entry.stats.size is metrics.Size.MEDIUM
+    assert entry.stats.n == 3
+    assert entry.first_event_at == datetime(2026, 8, 10, tzinfo=UTC)
+    assert entry.last_event_at == datetime(2026, 8, 12, 6, tzinfo=UTC)
+
+
+def test_render_shows_no_measurements_line_when_nothing_is_measured() -> None:
+    projected = projected_board(
+        (_sized_item(205, "M"),),
+        (),
+        (),
+        (),
+        board.BoardConfig(),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+    )
+
+    rendered = board.render(projected)
+
+    assert "keine Messungen seit 2026-08-21" in rendered
+    assert "Messungen (Stand" not in rendered
+
+
+def test_board_json_carries_estimate_and_measurements() -> None:
+    lane_events = tuple(
+        _lane_event(
+            str(number),
+            claimed_at=datetime(2026, 8, 10 + index, tzinfo=UTC),
+            released_at=datetime(2026, 8, 10 + index, hours, tzinfo=UTC),
+        )
+        for index, (number, hours) in enumerate([(206, 4), (213, 5), (214, 6)])
+    )
+    projected = projected_board(
+        (_sized_item(206, "M"), _sized_item(213, "M"), _sized_item(214, "M")),
+        (),
+        (),
+        (),
+        board.BoardConfig(),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+        lane_events=lane_events,
+    )
+
+    payload = json.loads(board.board_json(projected))
+    item = next(entry for entry in payload["items"] if entry["number"] == 206)
+    assert item["size"] == "M"
+    assert item["estimate"] == {
+        "item": "206",
+        "size": "M",
+        "median_hours": 5,
+        "n": 3,
+        "weak": False,
+    }
+    measurements = payload["measurements"]
+    assert measurements["unfinished"] == 0
+    assert measurements["unparsed"] == 0
+    assert measurements["since"] == "2026-08-10T00:00:00+00:00"
+    assert measurements["as_of"] == "2026-08-21"
+    assert measurements["classes"] == [
+        {
+            "stats": {"size": "M", "n": 3, "median_hours": 5, "p80_hours": 6, "weak": False},
+            "first_event_at": "2026-08-10T00:00:00+00:00",
+            "last_event_at": "2026-08-12T06:00:00+00:00",
+        }
+    ]
+
+
+def test_build_board_counts_a_closed_items_own_completed_lane_into_its_size_class() -> None:
+    """A completed lane whose item is no longer among the board's own open
+    `issues` still joins its size class through `closed_item_sizes` (issue
+    #357 R2) -- the caller's own once-read lookup for exactly the numbers a
+    lane names outside the open set -- so a class is never blind to every
+    item that actually closed."""
+    lane_events = tuple(
+        _lane_event(
+            str(number),
+            claimed_at=datetime(2026, 8, 10 + index, tzinfo=UTC),
+            released_at=datetime(2026, 8, 10 + index, hours, tzinfo=UTC),
+        )
+        for index, (number, hours) in enumerate([(220, 4), (221, 5), (222, 6)])
+    )
+    projected = projected_board(
+        (_sized_item(220, "M"),),
+        (),
+        (),
+        (),
+        board.BoardConfig(),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+        lane_events=lane_events,
+        closed_item_sizes={221: metrics.Size.MEDIUM, 222: metrics.Size.MEDIUM},
+    )
+
+    item = projected.items[0]
+    assert item.estimate == metrics.Estimate(
+        item="220", size=metrics.Size.MEDIUM, median_hours=5, n=3, weak=False
+    )
+
+
+def test_render_shows_the_unparsed_lifecycle_commit_count() -> None:
+    """A claim-shaped `refs/aco/state` commit `store.claim_lifecycle` could
+    not read is counted, never silently dropped (issue #357 R1)."""
+    projected = projected_board(
+        (_sized_item(223, "M"),),
+        (),
+        (),
+        (),
+        board.BoardConfig(),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+        lane_events=(
+            _lane_event(
+                "223",
+                claimed_at=datetime(2026, 8, 10, tzinfo=UTC),
+                released_at=datetime(2026, 8, 10, 4, tzinfo=UTC),
+            ),
+        ),
+        unparsed_lifecycle_commits=2,
+    )
+
+    assert projected.measurements.unparsed == 2
+    rendered = board.render(projected)
+    assert "2 Commits ohne lesbaren Item-Trailer" in rendered
+
+
+def test_render_shows_the_unparsed_count_even_with_no_measured_class() -> None:
+    """`unparsed` never hides behind `classes` being empty (BOARD-30, issue
+    #357 R2): a board with no measured lane at all still surfaces every
+    unparsed commit, alongside the "keine Messungen" sentence rather than
+    silently instead of it."""
+    projected = projected_board(
+        (_sized_item(224, "M"),),
+        (),
+        (),
+        (),
+        board.BoardConfig(),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+        unparsed_lifecycle_commits=3,
+    )
+
+    assert projected.measurements.classes == ()
+    assert projected.measurements.unparsed == 3
+    lines = board.measurements_lines(projected.measurements)
+    assert lines[0] == "keine Messungen seit 2026-08-21"
+    assert "3 Commits ohne lesbaren Item-Trailer" in lines
+    rendered = board.render(projected)
+    assert "keine Messungen seit 2026-08-21" in rendered
+    assert "3 Commits ohne lesbaren Item-Trailer" in rendered
+
+
+def test_estimate_changes_only_when_its_own_size_classs_measured_lanes_change() -> None:
+    """Proof 4 (issue #357), parametrized without git: two open items, `M`
+    and `L`. Adding measured `L` lanes never moves the `M` item's estimate;
+    only adding measured `M` lanes does."""
+    items = (_sized_item(207, "M"), _sized_item(208, "L"))
+    baseline_m_lanes = tuple(
+        _lane_event(
+            "207",
+            claimed_at=datetime(2026, 8, 10 + index, tzinfo=UTC),
+            released_at=datetime(2026, 8, 10 + index, hours, tzinfo=UTC),
+        )
+        for index, hours in enumerate((4, 5, 6))
+    )
+    l_lanes = tuple(
+        _lane_event(
+            "208",
+            claimed_at=datetime(2026, 8, 1 + index, tzinfo=UTC),
+            released_at=datetime(2026, 8, 1 + index, hours, tzinfo=UTC),
+        )
+        for index, hours in enumerate((14, 16, 18))
+    )
+
+    without_l = projected_board(
+        items,
+        (),
+        (),
+        (),
+        board.BoardConfig(),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+        lane_events=baseline_m_lanes,
+    )
+    with_l = projected_board(
+        items,
+        (),
+        (),
+        (),
+        board.BoardConfig(),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+        lane_events=baseline_m_lanes + l_lanes,
+    )
+    m_estimate = next(item for item in without_l.items if item.number == 207).estimate
+    assert m_estimate == next(item for item in with_l.items if item.number == 207).estimate
+
+    more_m_lanes = (
+        *baseline_m_lanes,
+        _lane_event(
+            "207",
+            claimed_at=datetime(2026, 8, 15, tzinfo=UTC),
+            released_at=datetime(2026, 8, 15, 20, tzinfo=UTC),
+        ),
+    )
+    with_more_m = projected_board(
+        items,
+        (),
+        (),
+        (),
+        board.BoardConfig(),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+        lane_events=more_m_lanes,
+    )
+    assert next(item for item in with_more_m.items if item.number == 207).estimate != m_estimate

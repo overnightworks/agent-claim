@@ -11,7 +11,7 @@ from collections.abc import Mapping
 from datetime import UTC, date, datetime
 from types import MappingProxyType
 
-from agent_coordination import board, protocol
+from agent_coordination import board, metrics, protocol
 from agent_coordination.protocol import ClaimRequest
 
 BASE = "a" * 40
@@ -73,6 +73,10 @@ def projected_board(
     dependencies: Mapping[int, tuple[board.IssueDependency, ...]] = MappingProxyType({}),
     open_pull_requests_supported: bool = True,
     landings_derivable: bool = True,
+    lane_events: tuple[metrics.LaneEvent, ...] = (),
+    landed_at_by_item: Mapping[int, datetime] = MappingProxyType({}),
+    closed_item_sizes: Mapping[int, metrics.Size | None] = MappingProxyType({}),
+    unparsed_lifecycle_commits: int = 0,
 ) -> board.Board:
     """`board.build_board` for scenarios that do not turn on which repository is projected."""
     observed_at = now or datetime(2026, 8, 21, tzinfo=UTC)
@@ -91,6 +95,10 @@ def projected_board(
             claim_ages={claim.claim_id: observed_at for claim in claims},
             open_pull_requests_supported=open_pull_requests_supported,
             landings_derivable=landings_derivable,
+            lane_events=lane_events,
+            landed_at_by_item=landed_at_by_item,
+            closed_item_sizes=closed_item_sizes,
+            unparsed_lifecycle_commits=unparsed_lifecycle_commits,
         )
     )
 

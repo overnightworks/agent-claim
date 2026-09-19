@@ -9,7 +9,7 @@ import sys
 import uuid
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, date, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -25,6 +25,7 @@ from . import (
     github,
     hook_input,
     items,
+    metrics,
     protocol,
     providers,
     state_board,
@@ -684,6 +685,11 @@ def _add_item_parser(commands: argparse._SubParsersAction) -> None:
         action="append",
         help="a repository-relative path; repeat --scope for more than one path",
     )
+    new.add_argument(
+        "--size",
+        choices=tuple(metrics.Size),
+        help="this item's size class, for the board's own measured estimate; default none",
+    )
     new.add_argument("--json", action="store_true", help=JSON_HELP)
     show = item_commands.add_parser(
         "show", help="print one item's header and its stored body byte-exact"
@@ -697,6 +703,11 @@ def _add_item_parser(commands: argparse._SubParsersAction) -> None:
     )
     edit.add_argument(
         "item", type=board.parse_item_reference, help=f"the item to edit, {ITEM_REF_HELP}"
+    )
+    edit.add_argument(
+        "--size",
+        choices=tuple(metrics.Size),
+        help="set only this item's size class (any storage); skips the stdin body read",
     )
     edit.add_argument("--json", action="store_true", help=JSON_HELP)
     close = item_commands.add_parser(
@@ -1184,7 +1195,11 @@ def _release_landing(
     dependencies = _validated_dependencies(issues, _fetch_dependencies(client, candidates))
     freed = () if landed is None else _freed_item_numbers(dependencies, landed)
     projected = _board(
-        client, claims, issues=issues, claim_ages=claim_ages, dependencies=dependencies
+        client,
+        claims,
+        issues=issues,
+        history=_ClaimHistory(ages=claim_ages),
+        dependencies=dependencies,
     ).board
     action = board.next_action(projected)
     parent_closable = (
@@ -1372,19 +1387,74 @@ class _BoardFetch:
     recent_merged_pull_requests: tuple[board.PullRequest, ...]
 
 
+@dataclass(frozen=True)
+class _ClaimHistory:
+    """The store's own git-history reads one board build needs (issue #357):
+    bundled into one parameter so `_board` stays under the five-argument
+    ceiling instead of growing a `claim_ages`-shaped parameter every time
+    another history read joins it. `ages`, `lane_events`, and
+    `unparsed_lifecycle_commits` are always read from the same
+    already-fetched `ClaimState` (`_claim_history` below), never from two
+    different observations."""
+
+    ages: Mapping[str, datetime] = field(default_factory=dict)
+    lane_events: tuple[metrics.LaneEvent, ...] = ()
+    # Claim-shaped `refs/aco/state` commits `store.claim_lifecycle` could not
+    # parse (issue #357 R1) -- older history predating the `item:` trailer,
+    # or a foreign commit merely shaped like one -- counted rather than
+    # silently dropped.
+    unparsed_lifecycle_commits: int = 0
+
+
+def _closed_item_numbers(
+    lane_events: tuple[metrics.LaneEvent, ...], open_numbers: frozenset[int]
+) -> frozenset[int]:
+    """Every numbered item `lane_events` names that is not among this board
+    build's own open issues (issue #357 R2) -- a completed lane whose item
+    has since closed, or one this walk can no longer resolve to a live
+    issue at all. A `docs/`/`fix/` lane claim's own `item` is never numeric
+    and is silently excluded, matching `board._item_number_or_none`."""
+    numbers = {int(event.item) for event in lane_events if event.item.isdigit()}
+    return frozenset(numbers - open_numbers)
+
+
+def _closed_item_sizes(
+    client: forge.ForgeReader, numbers: frozenset[int], storage: board.Storage
+) -> dict[int, metrics.Size | None]:
+    """Each closed (or vanished) item's own current size, read once per
+    number through the forge/state (issue #357 R2): a completed lane for a
+    since-closed item still belongs in its size class's own measured lanes
+    -- most lanes close their item on landing, so without this the size
+    classes `aco board` estimates from would stay almost always empty.
+    `ItemState.MISSING` (a deleted or renumbered item) and a bodyless
+    reference both read as no size, exactly like an open item that never
+    carried a `size` key."""
+    sizes: dict[int, metrics.Size | None] = {}
+    for number in numbers:
+        body = client.item_reference(number).body
+        sizes[number] = None if body is None else board.parse_body(body, storage=storage).size
+    return sizes
+
+
 def _board(
-    client: forge.BoardSource,
+    client: forge.ForgeReader,
     claims: tuple[protocol.ActiveClaim, ...],
     *,
     issues: tuple[board.Issue, ...] | None = None,
-    claim_ages: Mapping[str, datetime] | None = None,
+    history: _ClaimHistory | None = None,
     dependencies: dict[int, tuple[board.IssueDependency, ...]] | None = None,
 ) -> _BoardFetch:
+    history = history or _ClaimHistory()
     now = datetime.now(UTC)
     config = _load_board_config(client, _resolve_toplevel())
     if issues is None:
         issues = client.list_open_board_issues()
     since = _merged_pull_request_floor(issues, now)
+    closed_item_sizes = _closed_item_sizes(
+        client,
+        _closed_item_numbers(history.lane_events, frozenset(issue.number for issue in issues)),
+        config.storage,
+    )
     # A container whose own summary already says 0 (or carries no summary at
     # all, `children_total is None`) can never own an open child either way:
     # `_container_progress` returns no progress at all without both numbers,
@@ -1422,6 +1492,12 @@ def _board(
             ),
         )
     trunk_landings = checkout.trunk_landings(config.canonical_remote, TRUNK_LANDING_DEPTH)
+    landed_at_by_item = {
+        number: landing.committed_at
+        for landing in trunk_landings
+        if isinstance(landing.classification, board.TrunkWorkItemClassification)
+        for number in landing.classification.numbers
+    }
     return _BoardFetch(
         board.build_board(
             board.BoardBuildInputs(
@@ -1439,7 +1515,11 @@ def _board(
                 children=children,
                 dependencies=dependencies,
                 requests=client.requests,
-                claim_ages=claim_ages or {},
+                claim_ages=history.ages,
+                lane_events=history.lane_events,
+                unparsed_lifecycle_commits=history.unparsed_lifecycle_commits,
+                closed_item_sizes=closed_item_sizes,
+                landed_at_by_item=landed_at_by_item,
                 open_pull_requests_supported=(
                     client.capability(forge.ForgeOperation.LIST_OPEN_BOARD_PULL_REQUESTS)
                     is not forge.Capability.UNSUPPORTED
@@ -2576,7 +2656,7 @@ class _StoreItemWriter:
         new_state = store.commit_transition(
             worktree=self.worktree,
             remote=self.canonical_remote,
-            subject=f"write item {item_id}",
+            subject=store.TransitionSubject(f"write item {item_id}"),
             intent=intent,
         )
         return new_state.items[item_id]
@@ -2651,6 +2731,7 @@ def _cmd_item_new(parsed: argparse.Namespace) -> int:
         else board.BLOCK_CHILD_SKELETON
     )
     body = _block_body_with_scope(skeleton, _requested_body_scope(parsed.scope))
+    body = _block_body_with_size(body, parsed.size)
     item_id = client.create_item(
         title=parsed.title, body=body, kind=kind, parent=parsed.parent, origin=parsed.origin
     )
@@ -2669,9 +2750,11 @@ ITEM_EDIT_GITHUB_REFUSAL = "forge issues are edited on the forge; aco never gove
 
 
 def _cmd_item_edit(parsed: argparse.Namespace) -> int:
-    """`aco item edit ITEM` (issue #287): the state-ref item's own body,
-    replaced from stdin only -- refused before any write when the piped
-    body carries no valid `agent-claim` block (`body --check`'s own
+    """`aco item edit ITEM` (issue #287; `--size`, issue #357): with
+    `--size`, a narrow write of only this item's size class
+    (`_cmd_item_edit_size`, both storages); without it, the state-ref item's
+    own body, replaced from stdin only -- refused before any write when the
+    piped body carries no valid `agent-claim` block (`body --check`'s own
     sentences, `_body_shape_defects`). The CAS `expected` oid is this
     process's own already-read snapshot (`StateRefBoard.update_item_body`'s
     `current.oid`, set once at `_state_ref_forge` construction): a second
@@ -2686,6 +2769,8 @@ def _cmd_item_edit(parsed: argparse.Namespace) -> int:
     and calls `_state_ref_forge` directly for the same reason (`create_item`/
     `update_item_body` are not part of the generic `ForgeWriter` port every
     other write command narrows to)."""
+    if parsed.size is not None:
+        return _cmd_item_edit_size(parsed)
     toplevel = _resolve_toplevel()
     config = _board_config(toplevel)
     if config.storage is not board.Storage.STATE_REF:
@@ -2705,6 +2790,38 @@ def _cmd_item_edit(parsed: argparse.Namespace) -> int:
         items.format_item_id(number), number, client.item_oid(number), as_json=parsed.json
     )
     return 0
+
+
+ITEM_EDIT_SIZE_COMMAND = "item edit --size"
+
+
+def _cmd_item_edit_size(parsed: argparse.Namespace) -> int:
+    """`aco item edit ITEM --size S|M|L` (issue #357): the one item-size
+    write, over the generic `ForgeWriter.update_item_body` both `github`
+    and `state-ref` already implement -- unlike the whole-body `item edit`
+    above, this works under `storage = "github"` too, since it patches only
+    the block's own top-level `size` key (never `[record]`, a
+    `state-ref`-only table BODY-15 refuses under `github`) and leaves every
+    other byte untouched."""
+    client = _LazyForge(parsed.repo).writer()
+    _require_update_item_body(client, command=ITEM_EDIT_SIZE_COMMAND)
+    number = parsed.item
+    body = _item_body_or_refuse(client, number, command=ITEM_EDIT_SIZE_COMMAND)
+    storage = _board_config(_resolve_toplevel()).storage
+    located = _located_block_or_refuse(
+        number, body, command=ITEM_EDIT_SIZE_COMMAND, storage=storage
+    )
+    new_data = {**located.data, "size": parsed.size}
+    client.update_item_body(number, board.replace_agent_claim_block(body, located, new_data))
+    _print_item_edit_size_result(number, parsed.size, as_json=parsed.json)
+    return 0
+
+
+def _print_item_edit_size_result(number: int, size: str, *, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps({"item": number, "size": size}))
+    else:
+        print(f"EDITED #{number} size={size}")
 
 
 def _print_item_edit_result(
@@ -2888,6 +3005,30 @@ def _claim_ages(worktree: Path, state: protocol.ClaimState) -> dict[str, datetim
     return store.claim_ages(worktree=worktree, tip=state.tip, claims=state.claims.values())
 
 
+def _claim_lifecycle(worktree: Path, state: protocol.ClaimState) -> store.ClaimLifecycle:
+    """Every claim's own ref-history lifecycle in an already-fetched state
+    (issue #357) -- one batched `store.claim_lifecycle` walk of `state.tip`'s
+    history, mirroring `_claim_ages`'s own no-refetch seam: a fresh fetch of
+    `refs/aco/state` never happens twice for the one board build that
+    already read it."""
+    if state.tip is None:
+        return store.ClaimLifecycle(events=(), unparsed=0)
+    return store.claim_lifecycle(worktree=worktree, tip=state.tip)
+
+
+def _claim_history(worktree: Path, state: protocol.ClaimState) -> _ClaimHistory:
+    """`_board`'s own bundle of the two store history reads a full board
+    build needs, from one already-fetched state -- `board`, `rulings`,
+    `next`, and `board --html`/`--serve` all read this rather than
+    `_claim_ages` and `_claim_lifecycle` separately."""
+    lifecycle = _claim_lifecycle(worktree, state)
+    return _ClaimHistory(
+        ages=_claim_ages(worktree, state),
+        lane_events=lifecycle.events,
+        unparsed_lifecycle_commits=lifecycle.unparsed,
+    )
+
+
 def _store_observation() -> tuple[Path, str, protocol.ClaimState]:
     """One fetch of `refs/aco/state` for a store command -- forge-free by
     itself (issue #245). A command that also needs a forge resolves and
@@ -2903,12 +3044,19 @@ def _require_state_ref(state: protocol.ClaimState) -> None:
         raise protocol.ClaimError(protocol.MISSING_STATE_REF)
 
 
-def _transition_subject(action: str, identity: protocol.ClaimIdentity, branch: str) -> str:
-    """The commit message's first line (§1 "Commit message"): `claim issue 42`,
-    `rescope lane docs/lane-cleanup`, and so on."""
-    if isinstance(identity, protocol.LaneIdentity):
-        return f"{action} lane {branch}"
-    return f"{action} issue {identity.issue}"
+def _transition_subject(
+    action: str, identity: protocol.ClaimIdentity, branch: str
+) -> store.ClaimTransitionSubject:
+    """One claim-shaped transition's own `store.ClaimTransitionSubject` (§1
+    "Commit message"; issue #357 R2): `text` is `claim issue 42`, `rescope
+    lane docs/lane-cleanup`, and so on -- `action` plus `issue`/`lane` plus
+    `protocol.transition_item_identifier`'s own bare identifier; `item` is
+    that same identifier again, carried separately into the commit's own
+    mandatory `item:` trailer rather than reconstructed from `text` by
+    `claim_lifecycle`'s reader."""
+    kind = "lane" if isinstance(identity, protocol.LaneIdentity) else "issue"
+    item = protocol.transition_item_identifier(identity, branch)
+    return store.ClaimTransitionSubject(f"{action} {kind} {item}", item=item)
 
 
 def _claim_intent_from_request(
@@ -3777,7 +3925,7 @@ def _observed_board(
         session.forge(),
         live_claims,
         issues=issues,
-        claim_ages=_claim_ages(worktree, observed),
+        history=_claim_history(worktree, observed),
     )
     return _ObservedBoard(fetch.board, live_claims)
 
@@ -3810,7 +3958,7 @@ def _board_html_page(
         client,
         tuple(observed.claims.values()),
         issues=issues,
-        claim_ages=_claim_ages(worktree, observed),
+        history=_claim_history(worktree, observed),
     )
     bodies = {issue.number: issue.body for issue in issues}
     config = _board_config(_resolve_toplevel())
@@ -4082,7 +4230,7 @@ def _claim_target_checks(
         client,
         tuple(observed.claims.values()),
         issues=tuple(open_by_number.values()),
-        claim_ages=_claim_ages(context.worktree, observed),
+        history=_ClaimHistory(ages=_claim_ages(context.worktree, observed)),
     ).board
     checks = _slice_rule_checks(
         BoardReferenceLookup(client, client.repository.path, open_by_number),
@@ -4536,6 +4684,18 @@ def _block_body_with_scope(body: str, scope: tuple[str, ...] | None) -> str:
         return body
     located = board.locate_agent_claim_block(body)
     new_data = {**located.data, "scope": list(scope)}
+    return board.replace_agent_claim_block(body, located, new_data)
+
+
+def _block_body_with_size(body: str, size: str | None) -> str:
+    """`body`'s `agent-claim` block, with a top-level `size = "S"|"M"|"L"`
+    written in (issue #357) -- the same write path `_block_body_with_scope`
+    uses, so `item new --size` never grows a second body writer. `body`
+    unchanged when `size` is `None`."""
+    if size is None:
+        return body
+    located = board.locate_agent_claim_block(body)
+    new_data = {**located.data, "size": size}
     return board.replace_agent_claim_block(body, located, new_data)
 
 
