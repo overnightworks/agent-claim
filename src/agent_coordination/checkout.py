@@ -130,6 +130,23 @@ def versioned_paths() -> tuple[str, ...]:
     return tuple(dict.fromkeys(path for path in result.stdout.decode().split("\0") if path))
 
 
+def path_is_tracked(path: str) -> bool:
+    """Whether `path` (repo-relative, forward slashes) is tracked in git's
+    index right now (issue #315) -- absent, untracked, and ignored all read
+    as `False`, since `git ls-files` never matches a path it does not
+    track. A dedicated call, not `path in versioned_paths()`: that
+    listing's exact membership and count are a different concern (scope-width
+    math over every tracked file), so a test fixing one axis never has to
+    carry the other."""
+    try:
+        result = process.run_captured(["git", "ls-files", "--error-unmatch", "--", path])
+    except process.ExecutableMissingError as error:
+        raise ClaimError("git is required for issue claims") from error
+    except process.ProcessTimedOutError as error:
+        raise ClaimError("git timed out while validating the build checkout") from error
+    return result.exit_status == 0
+
+
 def paths_under_scope(paths: tuple[str, ...], scope: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(
         dict.fromkeys(

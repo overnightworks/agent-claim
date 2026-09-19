@@ -31,6 +31,15 @@ from agent_coordination import cli as issue_claim
 from agent_coordination.protocol import ClaimError
 
 
+@pytest.fixture(autouse=True)
+def _stub_board_config_tracked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every `protect` test reads a tracked `board.toml` by default (issue
+    #315): `_isolate_protect_home`'s `work` directory is never a real git
+    checkout, so a real `git ls-files` check would otherwise always read
+    "not tracked" here. A test proving the refusal itself overrides this."""
+    monkeypatch.setattr(checkout, "path_is_tracked", lambda _path: True)
+
+
 def _isolate_protect_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[Path, Path]:
     home = tmp_path / "home"
     work = tmp_path / "work"

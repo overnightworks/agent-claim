@@ -5345,6 +5345,15 @@ def _stub_versioned_paths(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _stub_board_config_tracked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every CLI test reads a tracked `board.toml` by default (issue #315):
+    the untracked/ignored refusal is its own axis from `versioned_paths()`'s
+    scope-width listing above, so a scope-width fixture fixing one never has
+    to carry the other. A test proving the refusal itself overrides this."""
+    monkeypatch.setattr(checkout, "path_is_tracked", lambda _path: True)
+
+
+@pytest.fixture(autouse=True)
 def _stub_canonical_remote(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every CLI store command refuses a forge-target / canonical-remote
     mismatch (issue #176 done-when 6). Tests talk to `--repo example/agent-claim`
@@ -10421,6 +10430,36 @@ def test_cli_board_refuses_a_non_github_canonical_remote_by_host(
     captured = capsys.readouterr()
     assert status == 2
     assert captured.err == "ERROR: no forge adapter for host file\n"
+
+
+_UNTRACKED_BOARD_CONFIG_ERROR = (
+    "ERROR: .agent-claim/board.toml is not tracked in this checkout, so its "
+    "storage pin cannot be trusted: git add -f .agent-claim/board.toml\n"
+)
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        pytest.param(["bootstrap"], id="bootstrap"),
+        pytest.param(["board"], id="board"),
+    ],
+)
+def test_untracked_board_config_refuses_every_store_command_by_name(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], arguments: list[str]
+) -> None:
+    """Issue #315: an absent, untracked, or ignored `.agent-claim/board.toml`
+    no longer reads as `storage = "github"`'s silent default -- `bootstrap`
+    (which never resolves a forge) and `board` (which does, through
+    `_LazyForge`) both refuse by the same sentence, naming the repair,
+    before either does any other work."""
+    monkeypatch.setattr(checkout, "path_is_tracked", lambda _path: False)
+
+    status = issue_claim.main(arguments)
+
+    captured = capsys.readouterr()
+    assert status == 2
+    assert captured.err == _UNTRACKED_BOARD_CONFIG_ERROR
 
 
 def _scratch_lane_repository(tmp_path: Path) -> tuple[Path, str, str]:

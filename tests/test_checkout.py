@@ -467,6 +467,9 @@ def test_versioned_paths_reads_nul_terminated_ls_files_without_stripping(
     [
         pytest.param(_LIVE_VERSIONED_PATHS, id="versioned-paths"),
         pytest.param(checkout.origin_remote_url, id="origin-remote-url"),
+        pytest.param(
+            lambda: checkout.path_is_tracked(".agent-claim/board.toml"), id="path-is-tracked"
+        ),
     ],
 )
 @pytest.mark.parametrize(
@@ -488,9 +491,10 @@ def test_checkout_git_calls_fail_loud_when_git_is_missing_or_times_out(
     raised: Exception,
     match: str,
 ) -> None:
-    """`versioned_paths` and `origin_remote_url` -- both direct `subprocess.run`
-    callers (`_git_output` backs the latter) -- must translate a missing
-    executable or a timeout to the same `ClaimError` text."""
+    """`versioned_paths`, `origin_remote_url`, and `path_is_tracked` -- all
+    direct `subprocess.run` callers (`_git_output` backs `origin_remote_url`)
+    -- must translate a missing executable or a timeout to the same
+    `ClaimError` text."""
     # `_stub_canonical_remote` (autouse) replaces `checkout.remote_url` with a
     # fixed string so every other store-command test skips a real git call;
     # `origin_remote_url` looks that name up dynamically, so this test must
@@ -516,6 +520,31 @@ def test_versioned_paths_fails_loud_on_a_nonzero_git_exit(
     monkeypatch.setattr(subprocess, "run", failed)
     with pytest.raises(ClaimError, match="fatal: not a git repository"):
         _LIVE_VERSIONED_PATHS()
+
+
+@pytest.mark.parametrize(
+    ("exit_status", "expected"),
+    [
+        pytest.param(0, True, id="tracked"),
+        pytest.param(1, False, id="untracked-or-ignored"),
+    ],
+)
+def test_path_is_tracked_reads_the_git_ls_files_exit_status(
+    monkeypatch: pytest.MonkeyPatch, exit_status: int, expected: bool
+) -> None:
+    """`git ls-files --error-unmatch` exits 0 for a path git tracks and 1
+    for any path it does not -- absent, merely untracked, and ignored alike
+    (issue #315): the caller never has to tell those apart."""
+    observed: list[list[str]] = []
+
+    def run(arguments, **_kwargs):
+        observed.append(arguments)
+        return subprocess.CompletedProcess(arguments, exit_status, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(subprocess, "run", run)
+
+    assert checkout.path_is_tracked(".agent-claim/board.toml") is expected
+    assert observed == [["git", "ls-files", "--error-unmatch", "--", ".agent-claim/board.toml"]]
 
 
 def _fake_trunk_log_record(*fields: str) -> str:
