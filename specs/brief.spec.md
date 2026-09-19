@@ -63,7 +63,7 @@ shared collection point prints `ERROR: <sentence>` on stderr, exit `2`.
 
 - `aco brief` never refuses for an `<item>` naming no item at all: the forge's own `MISSING` reference carries no body, so `aco brief` prints one empty first line and proceeds through every other section exactly as BRIEF-01..06 describe (see E-BRIEF-06).
 - `aco brief` never matches a lane claim, only a live issue claim on the same number -- an unrelated lane branch claimed by someone else never appears in its `CLAIM` section.
-- `aco brief` never writes: it is a pure composition of three existing reads (the item's body, the store's live claims, and one local `git diff`), never a new data source and never a transition against the state ref.
+- `aco brief` never writes: it is a pure composition of the item's body, the store's live claims, and one local `git diff` -- plus, only with `--step`, the tracked brief configuration -- never a new data source and never a transition against the state ref.
 - `aco brief`'s claim line is never `aco status`'s own `CLAIMED`/`CONFLICT` line (CLAIM-01): it carries no verb, no identity prefix, no `claim=` field, and orders `branch=` before `base=`, the reverse of `status`'s own order.
 - `aco brief --json`'s claim object is never `aco status --json`'s own claim object (STAT-07, STAT-09): no `claim_id`, `resource`, `resource_value`, `overlaps`, or `old` key.
 - [ ] [BRIEF-16] Without `--step`, `.agent-claim/brief.toml`'s presence or content changes nothing: `brief` prints exactly BRIEF-01..06's sections either way (see E-BRIEF-10).
