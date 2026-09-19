@@ -89,6 +89,7 @@ _STATE_TOP_LEVEL_NAMES = frozenset(
     {SCHEMA_TOML_FILENAME, CLAIMS_DIRECTORY, IDS_DIRECTORY, RESOURCES_DIRECTORY, ITEMS_DIRECTORY}
 )
 
+
 @dataclass(frozen=True)
 class _TransitionKind:
     """One transition intent type's own registration (issue #357 R2): the

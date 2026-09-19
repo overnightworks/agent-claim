@@ -5223,7 +5223,7 @@ def _seed_real_claim_and_item(
     claim_state = store.commit_transition(
         worktree=worktree,
         remote=str(remote),
-        subject=f"claim issue {issue}",
+        subject=store.ClaimTransitionSubject(f"claim issue {issue}", item=str(issue)),
         intent=protocol.ClaimIntent(
             identity=protocol.IssueIdentity(issue),
             agent="Codex Sol",
@@ -5245,7 +5245,7 @@ def _seed_real_claim_and_item(
     item_state = store.commit_transition(
         worktree=worktree,
         remote=str(remote),
-        subject=f"seed item {item_id}",
+        subject=store.TransitionSubject(f"seed item {item_id}"),
         intent=protocol.ItemWriteIntent(
             item_id=item_id, expected=None, new_oid=new_oid, operation_id=f"item-op-{issue}"
         ),
@@ -5363,7 +5363,7 @@ def test_landing_intent_survives_an_unrelated_ref_move_with_no_half_state(
     new_state = store.commit_transition(
         worktree=worktree,
         remote=str(bare_remote),
-        subject="release issue 10",
+        subject=store.ClaimTransitionSubject("release issue 10", item="10"),
         intent=protocol.LandingIntent(
             item_id=item_id,
             item_expected=open_oid,
@@ -5434,7 +5434,7 @@ def test_landing_intent_refuses_a_stale_item_oid_without_writing_anything(
         store.commit_transition(
             worktree=worktree,
             remote=str(bare_remote),
-            subject="release issue 10",
+            subject=store.ClaimTransitionSubject("release issue 10", item="10"),
             intent=intent,
         )
 
