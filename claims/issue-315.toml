@@ -1,0 +1,7 @@
+claim_id = "f2c6b5a38a3b426b858896a0af7299ea"
+agent = "Claude head (coordinator)"
+role = "builder"
+base = "167d030b6cb1ddcea8f2d5591f0c08c7762dd867"
+branch = "claude/issue-315-board-toml-tracked"
+scope = ["src/agent_coordination/board.py", "tests/test_board.py", "tests/test_state_board.py"]
+opened_commit = "128a9ef6f06bc69a75372d551a48f6667eb56b04"
