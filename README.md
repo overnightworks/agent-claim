@@ -209,7 +209,23 @@ that matches no versioned file is refused before the claim is written, naming
 the one-path-per-flag rule -- the signature of a comma-joined value passed by
 habit, which would otherwise store a path that guards nothing; a real
 comma-bearing filename, and any comma-free path not created yet, still claim
-cleanly. `rescope --add` applies the same refusal to its own values; `--drop`
+cleanly. Issue mode's `--scope` is optional (issue #337): omitted, `claim`
+takes the item's own top-level `scope = [...]` from its body, refusing by
+name (`item names no scope; pass --scope`) when the body carries none; given,
+it must name the same set the body does — same paths in a different order
+are accepted, a differing set refuses (`claim scope differs from the item's
+scope; correct the item first`), and a body with no scope of its own puts
+nothing to differ from, so the given value is simply taken. A live claim
+already on the issue may be a replayed, interrupted retry: its own stored
+scope is taken outright, without ever reading the body again, so a retry
+never refuses merely because `--scope` was dropped or the body changed since
+the original claim. `item new --scope PATH` (repeatable) writes that same
+field when the item is created, and `cut --scope PATH` fills a still-scopeless
+linked slice row with it (refusing `slice N already names a scope; edit the
+container instead` when the row already has one) -- either way the cut
+child's own top-level scope becomes exactly the row's. Lane mode has no item
+to derive from, so it still requires `--scope`. `rescope --add` applies the
+comma-grounding refusal above to its own values; `--drop`
 never does, since a value the live claim already holds is a fact about the
 claim, not a typo about the checkout, and dropping a value the claim does not
 hold is already refused by its own truer reason. A scope is wide when
@@ -551,12 +567,16 @@ request (#230 slice 6) — naming the offline path instead: land with
 `item close` plus `release --abandoned "landed as <sha>"`.
 
 `aco item new --title TITLE [--kind task|feature|container] [--parent ITEM]
-[--origin FORGE#N]` creates a fresh item straight in `refs/aco/state` — a
-task/feature skeleton (`--kind container` writes the container skeleton
-instead) plus a `[record]` naming its kind and, with `--parent`, its parent —
-through the same one CAS write `cut`'s own `create_child` performs, and
-prints exactly one line, the minted id (`--json`: `{"item": "aco-xxxxxx",
-"number": n}`). It refuses under `storage = "github"` by name ("items live on
+[--origin FORGE#N] [--scope PATH]` creates a fresh item straight in
+`refs/aco/state` — a task/feature skeleton (`--kind container` writes the
+container skeleton instead) plus a `[record]` naming its kind and, with
+`--parent`, its parent — through the same one CAS write `cut`'s own
+`create_child` performs, and prints exactly one line, the minted id
+(`--json`: `{"item": "aco-xxxxxx", "number": n}`). `--scope PATH` (repeatable,
+issue #337) writes the block's own top-level `scope = [...]` -- the same
+grammar `claim --scope` validates against, canonicalized the same way -- so
+`claim <item>` can derive its scope straight from a freshly created item. It
+refuses under `storage = "github"` by name ("items live on
 the forge; open the issue there") — aco is pulled from the forge, never
 governs it, so it never opens a GitHub issue itself. `--origin FORGE#N`
 (issue #316, e.g. `gitlab#514`) binds the fresh item to a foreign forge's
@@ -998,7 +1018,10 @@ child's body opens with a `Parent: #<container>` line (#260 — the signal a
 repeat `cut` reads back to adopt its own orphan, never another container's)
 ahead of `board.BLOCK_CHILD_SKELETON` — every projection key present and
 empty — so it is named `body incomplete: Now, Next, Done when` (invisible to
-`next`, refused by `claim`) until the head fills it in.
+`next`, refused by `claim`) until the head fills it in. `--scope PATH`
+(repeatable, issue #337) fills the linked row's own scope when it names
+none, refusing by name when it already does; either way that scope becomes
+the fresh child's own top-level scope.
 
 `cut` without `--row` links the first `[[slice]]` entry when one exists and
 otherwise creates an untied child (#151): a container with no `slice` key at

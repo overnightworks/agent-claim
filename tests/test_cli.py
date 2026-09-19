@@ -4734,12 +4734,17 @@ def test_selected_store_claim_refuses_a_lane_identity_without_a_branch() -> None
         issue_claim._selected_store_claim(protocol.EMPTY_STATE, identity, "", None)
 
 
-def test_claim_still_requires_scope() -> None:
-    parser = issue_claim._parser()
-    with pytest.raises(SystemExit) as exited:
-        parser.parse_args(["claim", "42", "--agent", "Ada", "--role", "builder"])
+def test_claim_scope_is_optional_at_the_argparse_layer_for_issue_mode() -> None:
+    """Issue #337: `required=True` is gone from `--scope` -- issue mode
+    derives it from the item body when omitted, so argparse itself must
+    accept the omission; `_cmd_claim`'s own runtime checks (lane mode still
+    requiring it, issue mode refusing a body with no scope) are proven
+    separately, against `main`."""
+    parsed = issue_claim._parser().parse_args(
+        ["claim", "42", "--agent", "Ada", "--role", "builder"]
+    )
 
-    assert exited.value.code == 2
+    assert parsed.scope is None
 
 
 def test_cli_claim_role_argparse_default_unchanged_and_release_omits_role() -> None:
@@ -6123,6 +6128,169 @@ def test_cli_claim_without_json_prints_the_claimed_line(
         "CLAIMED issue #72: cli-claim\n"
         "1 of 4 versioned files (25%); overlaps no other open claims\n"
     )
+
+
+def _arranged_claim_client(monkeypatch: pytest.MonkeyPatch) -> FakeForge:
+    """The GitHub-storage `claim` arrangement every scope-derivation proof
+    below shares (issue #337): a fake forge, a no-op checkout validator, a
+    fixed versioned-file listing via `_git_checkout`, and a fresh in-memory
+    store -- the same six lines `test_cli_claim_without_json_prints_the_claimed_line`
+    repeats inline, factored so each derivation case states only what makes
+    it different."""
+    client = FakeForge()
+    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
+    monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
+    monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+    git_values = _git_checkout()
+    monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
+    _patch_store_write(monkeypatch)
+    return client
+
+
+def _claim_argv(*flags: str) -> list[str]:
+    return [
+        "--repo",
+        "example/agent-claim",
+        "claim",
+        "72",
+        "--agent",
+        "Codex Sol",
+        "--role",
+        "builder",
+        "--base",
+        BASE,
+        "--branch",
+        "codex/issue-72",
+        "--claim-id",
+        "cli-claim",
+        *flags,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("item_scope", "requested_scope_flags", "expected_status", "expected_scope_or_error"),
+    [
+        pytest.param(
+            ["src/work.py"], (), 0, ["src/work.py"], id="omitted-takes-the-items-own-scope"
+        ),
+        pytest.param(
+            None,
+            (),
+            2,
+            issue_claim.CLAIM_SCOPE_MISSING,
+            id="omitted-with-no-body-scope-refuses-by-name",
+        ),
+        pytest.param(
+            ["src/work.py"],
+            ("--scope", "src/other.py"),
+            2,
+            issue_claim.CLAIM_SCOPE_MISMATCH,
+            id="a-differing-explicit-scope-refuses-by-name",
+        ),
+        pytest.param(
+            ["a.py", "b.py"],
+            ("--scope", "b.py", "--scope", "a.py"),
+            0,
+            ["a.py", "b.py"],
+            id="the-same-set-in-a-different-order-is-accepted",
+        ),
+    ],
+)
+def test_cli_claim_scope_derivation_against_the_items_own_body(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    item_scope: list[str] | None,
+    requested_scope_flags: tuple[str, ...],
+    expected_status: int,
+    expected_scope_or_error: list[str] | str,
+) -> None:
+    """Issue #337 proof 3: issue-mode `--scope` derivation and validation
+    against the item's own body -- omitted takes it, refusing by name when
+    the body carries none; an explicit value must name the same canonical
+    set (#331's own `protocol._valid_scope`), refusing by name when it
+    differs and accepting the same set typed in a different order."""
+    client = _arranged_claim_client(monkeypatch)
+    body = (
+        complete_contract("Ship it.")
+        if item_scope is None
+        else complete_contract("Ship it.", scope=item_scope)
+    )
+    # `--scope` omitted derives through `item_reference` (`_item_scope`); an
+    # explicit `--scope` is checked against `list_open_board_issues` instead
+    # (reusing the slice-rule checks' own fetch) -- both are the item's same
+    # body here, so either arrangement reads the one scope under test.
+    client.issue_references[72] = forge.ItemReference(forge.ItemState.OPEN, "Work", body)
+    client.board_issues = (board_issue(72, "Work", body),)
+
+    status = issue_claim.main(_claim_argv(*requested_scope_flags, "--json"))
+
+    assert status == expected_status
+    if expected_status == 0:
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["scope"] == expected_scope_or_error
+        return
+    assert capsys.readouterr().err == f"ERROR: {expected_scope_or_error}\n"
+    assert store.fetch_state(worktree=Path("."), remote="origin").claims == {}
+
+
+def test_cli_claim_replay_without_scope_takes_the_live_claims_own_stored_scope(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #337 proof 3: a live claim already on this identity is a
+    replayed, interrupted request even when the retry omits `--scope` -- its
+    own stored scope is taken outright, with no item-body read at all (the
+    fake forge carries none for #72), so a retry never refuses merely
+    because `--scope` was dropped, or the body changed, since the original
+    claim was opened."""
+    existing = request("live-claim", "Ada", issue=72, branch="codex/issue-72", scope=("src",))
+    client = FakeForge()
+    _patch_status_cli(monkeypatch, client)
+    _patch_store_write(monkeypatch, _store_claim_from_request(existing))
+    monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
+    monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+
+    claimed = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "claim",
+            "72",
+            "--agent",
+            "Ada",
+            "--role",
+            "builder",
+            "--base",
+            BASE,
+            "--branch",
+            "codex/issue-72",
+            "--claim-id",
+            "live-claim",
+            "--json",
+        ]
+    )
+
+    assert claimed == 0
+    replay = json.loads(capsys.readouterr().out)
+    assert replay["scope"] == ["src"]
+    assert client.issue_reference_lookups == []
+
+
+def test_cli_lane_claim_without_scope_refuses_by_name(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #337 proof 3: lane mode has no item to derive a scope from, so
+    `required=True`'s removal from `--scope` never reaches it -- omitting it
+    still refuses, by name, and forge-free like every other lane claim."""
+    _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Ada"})
+    monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
+    git_values = {("branch", "--show-current"): "docs/lane-cleanup"}
+    monkeypatch.setattr(checkout, "_git_output", lambda arguments: git_values[tuple(arguments)])
+    _forbid_forge_resolution(monkeypatch)
+
+    status = issue_claim.main(["claim", "--base", BASE, "--branch", "docs/lane-cleanup"])
+
+    assert status == 2
+    assert capsys.readouterr().err == f"ERROR: {issue_claim.LANE_CLAIM_SCOPE_REQUIRED}\n"
 
 
 def test_cli_claim_replay_reports_the_matching_live_claim_after_an_interrupted_response(

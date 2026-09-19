@@ -9,7 +9,7 @@ import sys
 import uuid
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, date, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -224,17 +224,33 @@ def _claim_cost_line(
     return f"{n} of {total} versioned files ({percent}%); {_touch_summary(own_scope, touches)}"
 
 
+def _resolved_claim_branch(arguments: argparse.Namespace) -> str:
+    """`claim`'s own branch: `--branch` when given, else the current
+    checkout branch -- the one resolution `_request` and `_cmd_claim` (issue
+    #337, which needs it before `_request` builds a full request) both bind
+    to, so it stays a single owner rather than two copies of the same git
+    call and validation."""
+    branch = (
+        checkout._git_output(["branch", "--show-current"])
+        if arguments.branch is None
+        else arguments.branch
+    )
+    return protocol._valid_branch({"branch": branch})
+
+
 def _request(arguments: argparse.Namespace) -> protocol.ClaimRequest:
+    """The validated `ClaimRequest` `claim` submits, `arguments.scope`
+    bound as-is when given. Omitted -- issue mode only (issue #337); lane
+    mode still refuses it, `_cmd_claim`'s own first check -- it binds the
+    empty tuple instead of raising: `_cmd_claim` replaces it with the
+    item's own body scope, or a live claim's stored scope on replay, before
+    this request's scope ever reaches a wide-scope check or a write."""
     agent = protocol._outbound_text(checkout._resolved_agent(arguments.agent), "agent", maximum=128)
     role = protocol._outbound_text(arguments.role, "role", maximum=64)
     base = checkout._git_output(["rev-parse", "HEAD"]) if arguments.base is None else arguments.base
     if protocol.COMMIT_PATTERN.fullmatch(base) is None:
         raise protocol.ClaimError("base must be a full lowercase commit SHA")
-    if arguments.branch is None:
-        branch = checkout._git_output(["branch", "--show-current"])
-    else:
-        branch = arguments.branch
-    branch = protocol._valid_branch({"branch": branch})
+    branch = _resolved_claim_branch(arguments)
     issue = _optional_issue_number(arguments.issue)
     identity = _resolved_identity(issue, branch)
     claim_id = arguments.claim_id or uuid.uuid4().hex
@@ -249,7 +265,7 @@ def _request(arguments: argparse.Namespace) -> protocol.ClaimRequest:
         role=role,
         base=base,
         branch=branch,
-        scope=protocol._valid_scope(arguments.scope),
+        scope=() if arguments.scope is None else protocol._valid_scope(arguments.scope),
         claim_id=claim_id,
         out_of_order_reason=arguments.out_of_order,
         whole_reason=whole_reason,
@@ -391,8 +407,11 @@ def _add_claim_parser(commands: argparse._SubParsersAction) -> None:
     claim.add_argument(
         "--scope",
         action="append",
-        required=True,
-        help="a repository-relative path; repeat --scope for more than one path",
+        help=(
+            "a repository-relative path; repeat --scope for more than one path; issue mode "
+            "takes it from the item's own body when omitted, and refuses a value whose set "
+            "differs from it; lane mode always requires it"
+        ),
     )
     claim.add_argument(
         "--claim-id",
@@ -500,6 +519,14 @@ def _add_cut_parser(commands: argparse._SubParsersAction) -> None:
         type=int,
         metavar="N",
         help="the slice table's # column value to cut; default is the first cuttable row",
+    )
+    cut.add_argument(
+        "--scope",
+        action="append",
+        help=(
+            "a repository-relative path; repeat --scope for more than one path; fills the "
+            "cut slice's own row scope when it has none, and becomes the child's scope"
+        ),
     )
     cut.add_argument("--json", action="store_true", help=JSON_HELP)
 
@@ -634,6 +661,11 @@ def _add_item_parser(commands: argparse._SubParsersAction) -> None:
         type=items.parse_origin,
         metavar="FORGE#N",
         help="bind this lane to a foreign forge issue, e.g. gitlab#514",
+    )
+    new.add_argument(
+        "--scope",
+        action="append",
+        help="a repository-relative path; repeat --scope for more than one path",
     )
     new.add_argument("--json", action="store_true", help=JSON_HELP)
     show = item_commands.add_parser(
@@ -2469,8 +2501,9 @@ def _cmd_item_new(parsed: argparse.Namespace) -> int:
         if kind is board.ItemKind.CONTAINER
         else board.BLOCK_CHILD_SKELETON
     )
+    body = _block_body_with_scope(skeleton, _requested_body_scope(parsed.scope))
     item_id = client.create_item(
-        title=parsed.title, body=skeleton, kind=kind, parent=parsed.parent, origin=parsed.origin
+        title=parsed.title, body=body, kind=kind, parent=parsed.parent, origin=parsed.origin
     )
     _print_item_new_result(item_id, items.item_number(item_id), as_json=parsed.json)
     return 0
@@ -3652,8 +3685,77 @@ def _cmd_rescope(parsed: argparse.Namespace, _session: _WriteSession) -> None:
     print(f"RESCOPED {_claim_subject(rescoped)}: {rescoped.claim_id}")
 
 
+LANE_CLAIM_SCOPE_REQUIRED = "lane claim requires --scope; a lane names no item to derive it from"
+CLAIM_SCOPE_MISSING = "item names no scope; pass --scope"
+CLAIM_SCOPE_MISMATCH = "claim scope differs from the item's scope; correct the item first"
+
+
+def _item_scope(
+    client: forge.ForgeReader, number: int, *, storage: board.Storage
+) -> tuple[str, ...] | None:
+    """The item's own top-level `scope = [...]` (issue #337), read through
+    the one body reader `ask`/`rule` already share (`_item_body_or_refuse`)
+    and projected by `board.parse_body` -- so a state-ref and a GitHub item
+    are read exactly alike, and a malformed body simply carries no scope
+    rather than failing `claim` with an unrelated defect message."""
+    body = _item_body_or_refuse(client, number, command="claim")
+    return board.parse_body(body, storage=storage).scope
+
+
+def _derived_issue_scope(
+    identity: protocol.IssueIdentity, branch: str, session: _WriteSession
+) -> tuple[str, ...]:
+    """`claim`'s own scope when `--scope` was omitted in issue mode (issue
+    #337): a live claim already on this identity is a replayed, interrupted
+    request, so its own stored scope is taken outright -- no body re-read,
+    so a replay never refuses over a body that changed, or lost its scope,
+    since the original claim was opened. Otherwise the item's own body
+    `scope = [...]` is the source of truth, refused by name when the body
+    names none. Observes the store itself, once -- reached only by the
+    handful of `claim` invocations that actually omit `--scope`, so every
+    other claim still costs `_cmd_claim`'s own single, later observation."""
+    _worktree, _canonical_remote, observed = _store_observation()
+    _require_state_ref(observed)
+    existing_live = observed.claims.get(protocol.claim_key(identity, branch))
+    if existing_live is not None:
+        return existing_live.scope
+    storage = _board_config(_resolve_toplevel()).storage
+    item_scope = _item_scope(session.forge(), identity.issue, storage=storage)
+    if item_scope is None:
+        raise protocol.ClaimUnavailableError(CLAIM_SCOPE_MISSING)
+    return item_scope
+
+
+def _reject_scope_mismatch(
+    open_by_number: Mapping[int, board.Issue],
+    target_issue: int,
+    scope: tuple[str, ...],
+    storage: board.Storage,
+) -> None:
+    """Refuses an explicit `--scope` whose canonical set differs from the
+    target item's own body scope (issue #337) -- reusing the board issues
+    `_cmd_claim` already fetched for its slice-rule checks, so this costs no
+    second forge read. A target item outside the fetched open list, or one
+    with no `scope` field of its own, has nothing to differ from and is
+    silently accepted, exactly as before this field existed."""
+    issue = open_by_number.get(target_issue)
+    if issue is None:
+        return
+    item_scope = board.parse_body(issue.body, storage=storage).scope
+    if item_scope is not None and item_scope != scope:
+        raise protocol.ClaimUnavailableError(CLAIM_SCOPE_MISMATCH)
+
+
 def _cmd_claim(parsed: argparse.Namespace, session: _WriteSession) -> int:
     requested = _request(parsed)
+    if isinstance(requested.identity, protocol.LaneIdentity):
+        if not requested.scope:
+            raise protocol.ClaimUnavailableError(LANE_CLAIM_SCOPE_REQUIRED)
+    elif not requested.scope:
+        requested = replace(
+            requested,
+            scope=_derived_issue_scope(requested.identity, requested.branch, session),
+        )
     versioned = checkout.versioned_paths()
     _reject_ungrounded_comma_scope(requested.scope, versioned, flag="--scope")
     n, total, share = _reject_wide_scope(requested.scope, versioned, requested.whole_reason)
@@ -3674,6 +3776,7 @@ def _cmd_claim(parsed: argparse.Namespace, session: _WriteSession) -> int:
             client = session.forge()
             open_issues = client.list_open_board_issues()
             open_by_number = {issue.number: issue for issue in open_issues}
+            _reject_scope_mismatch(open_by_number, target_issue, requested.scope, storage)
             projected = _board(
                 client,
                 tuple(observed.claims.values()),
@@ -3911,13 +4014,37 @@ def _body_with_parent(skeleton: str, parent: int | None) -> str:
     return skeleton if parent is None else f"Parent: #{parent}\n\n{skeleton}"
 
 
-def _cut_child_body(container: int) -> str:
+def _requested_body_scope(raw: list[str] | None) -> tuple[str, ...] | None:
+    """A repeated `--scope` flag's canonical value, or `None` when it was
+    never given -- `item new` and `cut` (issue #337) both take an optional
+    `--scope`, so this is the one place either turns the raw flag list into
+    the same canonical form `protocol._valid_scope` produces for `claim`."""
+    return None if raw is None else protocol._valid_scope(raw)
+
+
+def _block_body_with_scope(body: str, scope: tuple[str, ...] | None) -> str:
+    """`body`'s `agent-claim` block, with a top-level `scope = [...]`
+    written in (issue #337) -- the same write path `board.render_block`'s
+    other callers use (`locate_agent_claim_block` then
+    `replace_agent_claim_block`), so `item new --scope` and `cut --scope`
+    never grow a second body-scope writer. `body` unchanged when `scope` is
+    `None`."""
+    if scope is None:
+        return body
+    located = board.locate_agent_claim_block(body)
+    new_data = {**located.data, "scope": list(scope)}
+    return board.replace_agent_claim_block(body, located, new_data)
+
+
+def _cut_child_body(container: int, scope: tuple[str, ...] | None = None) -> str:
     """The body `cut` writes for a fresh child: one `Parent: #<container>`
-    line ahead of `board.BLOCK_CHILD_SKELETON`. A repeat `cut` after a
-    partial failure reads this line back (`_orphan_names_container`) to
-    tell `container`'s own orphan apart from an unrelated open issue that
+    line ahead of `board.BLOCK_CHILD_SKELETON`, plus the cut slice's own
+    top-level `scope = [...]` (issue #337) when the cut carries one -- the
+    linked row's own scope, or a filled `--scope`. A repeat `cut` after a
+    partial failure reads the parent line back (`_orphan_names_container`)
+    to tell `container`'s own orphan apart from an unrelated open issue that
     merely shares the row's title (#260)."""
-    return _body_with_parent(board.BLOCK_CHILD_SKELETON, container)
+    return _block_body_with_scope(_body_with_parent(board.BLOCK_CHILD_SKELETON, container), scope)
 
 
 def _orphan_names_container(body: str, container: int) -> bool:
@@ -3997,7 +4124,13 @@ def _block_slice_entries(data: Mapping[str, object]) -> list[dict[str, object]]:
 
 
 def _slice_row(entry: dict[str, object]) -> board.SliceRow:
-    return board.SliceRow(cast(int, entry["index"]), cast(str, entry["title"]))
+    """One `[[slice]]` entry as `cut` sees it. `entry`'s own `scope` (issue
+    #337), when it carries one, already passed `protocol._valid_scope` at
+    `_located_block_or_refuse`'s own `parse_body` gate -- a body that failed
+    that check never reaches here -- so this is the one canonicalizing pass,
+    not a second validation of an already-checked value."""
+    scope = protocol._valid_scope(entry["scope"]) if "scope" in entry else None
+    return board.SliceRow(cast(int, entry["index"]), cast(str, entry["title"]), scope)
 
 
 def _cut_link(
@@ -4050,6 +4183,23 @@ def _located_block_or_refuse(
     return board.locate_agent_claim_block(body)
 
 
+def _cut_row_scope(
+    link: board.SliceRow | None, requested: tuple[str, ...] | None
+) -> tuple[str, ...] | None:
+    """The scope `cut`'s fresh child inherits (issue #337): the linked
+    row's own scope when it already has one -- `--scope` then refuses by
+    name, since the row is the one place to change it -- else `--scope`
+    fills the (still empty) row and becomes the child's scope; with no
+    linked row at all, `--scope` becomes the child's scope directly."""
+    if link is not None and link.scope is not None:
+        if requested is not None:
+            raise protocol.ClaimUnavailableError(
+                f"slice {link.index} already names a scope; edit the container instead"
+            )
+        return link.scope
+    return requested
+
+
 def _cut_slice(
     client: forge.ForgeWriter,
     target: board.Issue,
@@ -4062,6 +4212,7 @@ def _cut_slice(
     link = _cut_link(number, located.data, parsed.row)
     if link is not None:
         _require_matching_title(number, link, parsed.title)
+    child_scope = _cut_row_scope(link, _requested_body_scope(parsed.scope))
     adopted = _adoptable_child(client, number, parsed.title, idea_label)
     try:
         child = (
@@ -4070,7 +4221,7 @@ def _cut_slice(
             else client.create_child(
                 parent=number,
                 title=parsed.title,
-                body=_cut_child_body(number),
+                body=_cut_child_body(number, child_scope),
                 kind=board.ItemKind.TASK,
             )
         )

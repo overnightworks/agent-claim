@@ -133,8 +133,8 @@ runner's own values; `<agent>` and `<role>` are the claimant's.
 
 ## The item's own scope
 
-- [ ] [CLAIM-53] Issue-mode `aco claim 42` without `--scope` takes the item's own `scope` into the record and prints the same `CLAIMED issue #42` line as an explicit scope would.
-- [ ] [CLAIM-54] A `--scope` set differing from the item's own `scope` refuses `item scope differs from --scope; correct the item first`, exit `2`, so no reader claims a false disjointness.
+- [ ] [CLAIM-53] Issue-mode `aco claim 42` without `--scope` takes the item's own `scope` into the record and prints the same `CLAIMED issue #42` line as an explicit scope would; the same set given in a different order is accepted too, and a live claim already on #42 takes its own stored scope outright, without reading the body again.
+- [ ] [CLAIM-54] A `--scope` set differing from the item's own `scope` refuses `claim scope differs from the item's scope; correct the item first`, exit `2`, so no reader claims a false disjointness.
 - [ ] [CLAIM-55] An item naming no `scope` refuses issue-mode `aco claim 42` without `--scope` with `item names no scope; pass --scope`, exit `2`.
 
 ## Never
