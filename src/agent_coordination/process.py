@@ -349,8 +349,24 @@ def run_git(arguments: list[str], *, directory: Path | None = None) -> CapturedR
 
 def git_failure_detail(result: CapturedResult) -> str:
     """A finished `git` invocation's stderr, falling back to stdout, falling
-    back to `UNKNOWN_GIT_FAILURE` when neither stream carried anything."""
+    back to `UNKNOWN_GIT_FAILURE` when neither stream carried anything.
+
+    For a command whose successful stdout is itself meaningful (`git log`,
+    `git ls-tree`, `git bundle create`, ...), a stray leftover on stdout from
+    a *failed* run is still the best available detail. Use
+    `git_failure_detail_from_stderr` instead for a command whose stdout never
+    carries the result -- `fetch`, `update-ref`, and the like -- where
+    falling back to it would report unrelated stdout content, not the
+    failure (issue #372 R1)."""
     return result.stderr.decode().strip() or result.stdout.decode().strip() or UNKNOWN_GIT_FAILURE
+
+
+def git_failure_detail_from_stderr(result: CapturedResult) -> str:
+    """A finished `git` invocation's stderr alone, falling back to
+    `UNKNOWN_GIT_FAILURE` when it carried nothing -- stdout is never read,
+    unlike `git_failure_detail` (issue #372 R1); see that function's
+    docstring for which of the two modes a caller wants."""
+    return result.stderr.decode().strip() or UNKNOWN_GIT_FAILURE
 
 
 def inspect_native_process(pid: int, proc_root: Path = Path("/proc")) -> NativeProcess:

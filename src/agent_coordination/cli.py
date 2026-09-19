@@ -756,11 +756,16 @@ def _add_run_at_login_parser(commands: argparse._SubParsersAction) -> None:
     commands.add_parser("_run-at-login", help=argparse.SUPPRESS)
 
 
-# The commands `_COMMAND_TABLE` below does not cover (issue #372): each is
-# forge-free or specially routed ahead of it, or never forge-backed at all.
+# `item`, `protect`, `register`, `run`, `login`, and `_run-at-login` never
+# own a `_CommandEntry` (issue #372): `item` fans out to its own four
+# subcommands ahead of `_COMMAND_TABLE`, `protect` and the workspace
+# commands are forge-free and never reach `_dispatch` at all. `status` and
+# `body` are the same story (`_read_status_body_or_dispatch`, ahead of
+# `_dispatch`'s own `_LazyForge`) but `aco --help` must still list all
+# eight in their original places, so `_subparser_build_order` below weaves
+# them back into position rather than appending them after every table
+# entry.
 _OTHER_SUBPARSER_BUILDERS: tuple[Callable[[argparse._SubParsersAction], None], ...] = (
-    _add_status_parser,
-    _add_body_parser,
     _add_item_parser,
     _add_protect_parser,
     _add_register_parser,
@@ -770,14 +775,38 @@ _OTHER_SUBPARSER_BUILDERS: tuple[Callable[[argparse._SubParsersAction], None], .
 )
 
 
+def _subparser_build_order() -> tuple[Callable[[argparse._SubParsersAction], None], ...]:
+    """Every subcommand's parser builder, in the exact order `aco --help`
+    has always listed them (issue #372 R3): read from `_COMMAND_TABLE` only
+    here, at `_parser()`'s own call time, since that table is defined
+    further below in the file."""
+    table = _COMMAND_TABLE
+    return (
+        table["bootstrap"].add_parser,
+        table["reset"].add_parser,
+        _add_status_parser,
+        table["board"].add_parser,
+        table["rulings"].add_parser,
+        table["next"].add_parser,
+        table["claim"].add_parser,
+        table["release"].add_parser,
+        table["rescope"].add_parser,
+        table["cut"].add_parser,
+        table["ask"].add_parser,
+        table["rule"].add_parser,
+        table["check"].add_parser,
+        _add_body_parser,
+        table["brief"].add_parser,
+        *_OTHER_SUBPARSER_BUILDERS,
+    )
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="aco", description=__doc__)
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--repo", help="GitHub repository as OWNER/REPO")
     commands = parser.add_subparsers(dest="command", required=True)
-    for entry in _COMMAND_TABLE.values():
-        entry.add_parser(commands)
-    for add_subparser in _OTHER_SUBPARSER_BUILDERS:
+    for add_subparser in _subparser_build_order():
         add_subparser(commands)
     return parser
 
@@ -5381,17 +5410,24 @@ _COMMAND_TABLE: dict[str, _CommandEntry] = {
 }
 
 
+def _dispatch_item(parsed: argparse.Namespace) -> int:
+    """`item`'s own four subcommands, pulled out of `_dispatch` (issue #372
+    S1) so their nesting stops counting against every other command's
+    cognitive complexity."""
+    if parsed.item_command == "new":
+        return _cmd_item_new(parsed)
+    if parsed.item_command == "edit":
+        return _cmd_item_edit(parsed)
+    if parsed.item_command == "close":
+        return _cmd_item_close(parsed)
+    return _cmd_item_show(parsed, _ReadSession(forge=_LazyForge(parsed.repo)))
+
+
 def _dispatch(parsed: argparse.Namespace) -> int:
     if parsed.command in {"claim", "release", "rescope"}:
         parsed.agent = checkout._resolved_agent(parsed.agent)
     if parsed.command == "item":
-        if parsed.item_command == "new":
-            return _cmd_item_new(parsed)
-        if parsed.item_command == "edit":
-            return _cmd_item_edit(parsed)
-        if parsed.item_command == "close":
-            return _cmd_item_close(parsed)
-        return _cmd_item_show(parsed, _ReadSession(forge=_LazyForge(parsed.repo)))
+        return _dispatch_item(parsed)
     entry = _COMMAND_TABLE[parsed.command]
     if entry.session is _CommandSession.FORGE_FREE:
         result = entry.handler(parsed)

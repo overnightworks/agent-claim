@@ -1923,6 +1923,42 @@ def test_claim_parser_description_names_what_refuses_first() -> None:
     assert "repository-relative" in issue_claim.CLAIM_DESCRIPTION
 
 
+def test_help_lists_commands_in_their_stable_registration_order() -> None:
+    """`aco --help`'s command order is part of the CLI's own contract (issue
+    #372 R3): `_COMMAND_TABLE`'s dispatch-backed commands keep the table's
+    own order, and `status`/`body` -- which dispatch outside that table,
+    ahead of `_dispatch`'s own `_LazyForge` -- keep their original,
+    interleaved positions rather than trailing behind every table entry."""
+    parser = issue_claim._parser()
+    subparsers_action = next(
+        action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
+    )
+
+    assert list(subparsers_action.choices) == [
+        "bootstrap",
+        "reset",
+        "status",
+        "board",
+        "rulings",
+        "next",
+        "claim",
+        "release",
+        "rescope",
+        "cut",
+        "ask",
+        "rule",
+        "check",
+        "body",
+        "brief",
+        "item",
+        "protect",
+        "register",
+        "run",
+        "login",
+        "_run-at-login",
+    ]
+
+
 def _all_parser_help_texts(parser: argparse.ArgumentParser) -> tuple[str, ...]:
     texts = [parser.format_help()]
     for action in parser._actions:

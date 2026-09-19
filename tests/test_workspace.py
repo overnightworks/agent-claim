@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import uuid
 from collections.abc import Mapping
 from dataclasses import replace
@@ -845,45 +846,47 @@ def test_default_config_path_prefers_xdg_configuration(tmp_path: Path) -> None:
     )
 
 
-def test_load_config_refuses_an_older_configuration_version(tmp_path: Path) -> None:
+@pytest.mark.parametrize("version", [1, 2])
+def test_load_config_refuses_an_older_configuration_version(tmp_path: Path, version: int) -> None:
     config_path = tmp_path / "workspace.toml"
     project_path = tmp_path / "project"
     project_path.mkdir()
     config_path.write_text(
-        f'version = 1\n[projects.alpha]\npath = "{project_path}"\n'
+        f'version = {version}\n[projects.alpha]\npath = "{project_path}"\n'
         f'session_id = "{SESSION_ID}"\nagent = "restored head"\n'
     )
 
     with pytest.raises(
-        workspace.WorkspaceError, match="must contain only version = 3 and projects"
+        workspace.WorkspaceError,
+        match=f"{re.escape(str(config_path))}.*found version {version}",
     ):
         workspace.load_config(config_path)
 
 
+@pytest.mark.parametrize("version", [1, 2])
 def test_registering_into_an_older_configuration_refuses_without_migrating(
-    tmp_path: Path,
+    tmp_path: Path, version: int
 ) -> None:
     config_path = tmp_path / "workspace.toml"
     claude_path = tmp_path / "claude"
     claude_path.mkdir()
     config_path.write_text(
-        f'version = 1\n[projects.codex]\npath = "{tmp_path}"\n'
+        f'version = {version}\n[projects.codex]\npath = "{tmp_path}"\n'
         f'session_id = "{SESSION_ID}"\nagent = "Codex head"\n'
+    )
+    registration = workspace.WorkspaceRegistration(
+        "claude",
+        claude_path,
+        "123e4567-e89b-12d3-a456-426614174001",
+        "Claude head",
+        provider=providers.Provider.CLAUDE,
     )
 
     with pytest.raises(
-        workspace.WorkspaceError, match="must contain only version = 3 and projects"
+        workspace.WorkspaceError,
+        match=f"{re.escape(str(config_path))}.*found version {version}",
     ):
-        workspace.register_project(
-            workspace.WorkspaceRegistration(
-                "claude",
-                claude_path,
-                "123e4567-e89b-12d3-a456-426614174001",
-                "Claude head",
-                provider=providers.Provider.CLAUDE,
-            ),
-            config_path,
-        )
+        workspace.register_project(registration, config_path)
 
 
 @pytest.mark.parametrize(

@@ -428,7 +428,8 @@ def load_config(config_path: Path) -> WorkspaceConfig:
         or version != _CONFIG_VERSION
     ):
         raise WorkspaceError(
-            f"workspace configuration must contain only version = {_CONFIG_VERSION} and projects"
+            f"workspace configuration {config_path} must contain only "
+            f"version = {_CONFIG_VERSION} and projects; found version {version!r}"
         )
     raw_projects = raw["projects"]
     if not isinstance(raw_projects, dict):

@@ -1,7 +1,8 @@
 """Behavior of `agent_coordination.process`: native `/proc` inspection, the
 bounded subprocess boundary (`run_bounded`) it also owns, and the one git
-launcher (`run_git`/`git_command`/`git_failure_detail`, issue #372) `checkout`
-and `store` each call rather than re-typing. The GitHub adapter's own thin
+launcher (`run_git`/`git_command`/`git_failure_detail`/
+`git_failure_detail_from_stderr`, issue #372) `checkout` and `store` each call
+rather than re-typing. The GitHub adapter's own thin
 wrapper over that boundary (`github._bounded_command`) is covered in
 `tests/test_github.py`; `checkout`'s and `store`'s own `ClaimError`
 translations of a failed git launch are covered in their own test modules."""
@@ -42,6 +43,26 @@ def test_git_failure_detail_reads_stderr_then_stdout_then_the_fixed_sentence(
     result = process.CapturedResult(exit_status=1, stdout=stdout, stderr=stderr)
 
     assert process.git_failure_detail(result) == expected
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stderr", "expected"),
+    [
+        (b"", b"fatal: not a git repository\n", "fatal: not a git repository"),
+        (b"a stray warning on stdout\n", b"", process.UNKNOWN_GIT_FAILURE),
+        (b"", b"", process.UNKNOWN_GIT_FAILURE),
+    ],
+)
+def test_git_failure_detail_from_stderr_never_reads_stdout(
+    stdout: bytes, stderr: bytes, expected: str
+) -> None:
+    """Unlike `git_failure_detail`, a command whose stdout carries nothing a
+    failure message should ever quote (`fetch`, `update-ref`, ...) must fall
+    back straight to `UNKNOWN_GIT_FAILURE` rather than a stray stdout line
+    (issue #372 R1)."""
+    result = process.CapturedResult(exit_status=1, stdout=stdout, stderr=stderr)
+
+    assert process.git_failure_detail_from_stderr(result) == expected
 
 
 def test_run_git_launches_the_directory_scoped_git_command(

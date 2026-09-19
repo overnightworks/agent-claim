@@ -1071,6 +1071,23 @@ def test_fetch_to_fetch_head_fails_loud_when_the_ref_is_missing(
         store._fetch_to_fetch_head(worktree, str(bare_remote))
 
 
+def test_fetch_to_fetch_head_never_quotes_a_stray_stdout_line(
+    monkeypatch: pytest.MonkeyPatch, worktree: Path
+) -> None:
+    """A failed `git fetch` never writes its result to stdout, so a stray
+    line there on a stderr-empty failure must not be mistaken for the
+    failure detail (issue #372 R1): `_fetch_to_fetch_head` reads
+    `process.git_failure_detail_from_stderr`, not `git_failure_detail`."""
+
+    def fake_run_captured(*_args: object, **_kwargs: object) -> process.CapturedResult:
+        return process.CapturedResult(exit_status=1, stdout=b"advertised refs\n", stderr=b"")
+
+    monkeypatch.setattr(store.process, "run_captured", fake_run_captured)
+
+    with pytest.raises(protocol.ClaimError, match=process.UNKNOWN_GIT_FAILURE):
+        store._fetch_to_fetch_head(worktree, "irrelevant-remote")
+
+
 def test_anchor_fetched_tip_fails_loud_on_an_unresolvable_tip(worktree: Path) -> None:
     with pytest.raises(protocol.ClaimError, match="cannot anchor fetched tip"):
         store._anchor_fetched_tip(worktree, _PLACEHOLDER_TIP)
