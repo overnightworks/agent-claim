@@ -1,8 +1,0 @@
-claim_id = "b5720e9f66b64db3aef431f1fc4c6ce5"
-agent = "Claude head (coordinator)"
-role = "builder"
-base = "e347d7876896533eac129b6bbef5289616ca7b1c"
-branch = "claude/issue-372-ownership-cleanup"
-scope = ["scripts", "src/agent_coordination/checkout.py", "src/agent_coordination/cli.py", "src/agent_coordination/process.py", "src/agent_coordination/store.py", "src/agent_coordination/workspace.py", "tests"]
-opened_commit = "7199d6f74b5e5f4f825561090fdcd29ef91567c0"
-whole_reason = "one ballast bundle across four owners and their tests"
