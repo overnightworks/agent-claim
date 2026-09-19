@@ -359,11 +359,9 @@ _CLOSE_PARENT_PROJECTION = _Projection("Land every slice.", "keiner", "All slice
 _CLOSE_CHILD_PROJECTION = _Projection("Ship the slice.", "Land it.", "Slice is done.")
 
 
-def _close_parent_scenario_item_files(*, parent_state: str = "open") -> dict[str, bytes]:
-    closed_at = "2026-09-16T00:00:00Z" if parent_state == "closed" else None
+def _close_parent_scenario_item_files() -> dict[str, bytes]:
     parent_body = _state_ref_body(
-        _CLOSE_PARENT_PROJECTION,
-        _record(title="Parent", state=parent_state, kind="container", closed_at=closed_at),
+        _CLOSE_PARENT_PROJECTION, _record(title="Parent", state="open", kind="container")
     )
     child_body = _state_ref_body(
         _CLOSE_CHILD_PROJECTION,
@@ -2701,14 +2699,15 @@ class TestCliStateRefForge:
         """Issue #348 review (G2): a parent already closed by some other
         landing before this close even runs is never named freshly
         closable -- a childless, uncut container that is not open must not
-        surface the hint, since a second close would only refuse."""
+        surface the hint, since a second close would only refuse. The
+        parent's own close runs through the real command, not a seeded
+        `state = "closed"` record -- the same command-path proof every
+        other closed-item scenario in this module gives."""
         self._live_state_ref_checkout(
-            monkeypatch,
-            tmp_path,
-            bare_remote,
-            worktree,
-            _close_parent_scenario_item_files(parent_state="closed"),
+            monkeypatch, tmp_path, bare_remote, worktree, _close_parent_scenario_item_files()
         )
+        assert issue_claim.main(["item", "close", str(CLOSE_PARENT_NUMBER)]) == 0
+        capsys.readouterr()
 
         status = issue_claim.main(["item", "close", str(CLOSE_CHILD_NUMBER)])
 

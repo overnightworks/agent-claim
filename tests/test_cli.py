@@ -4088,6 +4088,9 @@ def test_next_close_names_every_zero_cost_action_regardless_of_rank(
     assert payload["close"] == [71, 72]
 
 
+_RECOVERY_SHARED_SCOPE = "b"
+
+
 def test_next_parallel_set_never_lets_a_recovery_item_occupy_or_candidate(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
@@ -4102,9 +4105,11 @@ def test_next_parallel_set_never_lets_a_recovery_item_occupy_or_candidate(
         70, "Top ranked work", complete_contract("Ship it.", scope=["a"]), labels=("security",)
     )
     landed_but_open = board_issue(
-        71, "Landed but open", complete_contract("Close it.", scope=["b"])
+        71, "Landed but open", complete_contract("Close it.", scope=[_RECOVERY_SHARED_SCOPE])
     )
-    free_item = board_issue(72, "Free item", complete_contract("Ship it too.", scope=["b"]))
+    free_item = board_issue(
+        72, "Free item", complete_contract("Ship it too.", scope=[_RECOVERY_SHARED_SCOPE])
+    )
     client = _configured_board_client(
         monkeypatch, tmp_path, open_issues=(top_ranked, landed_but_open, free_item)
     )
@@ -4132,7 +4137,7 @@ def test_next_parallel_set_never_lets_a_recovery_item_occupy_or_candidate(
     payload = json.loads(capsys.readouterr().out)
     assert payload["parallel"] == {
         "first_scope_unknown": False,
-        "candidates": [{"number": 72, "scope": ["b"]}],
+        "candidates": [{"number": 72, "scope": [_RECOVERY_SHARED_SCOPE]}],
         "scope_unknown": [],
     }
     assert payload["close"] == [71]
