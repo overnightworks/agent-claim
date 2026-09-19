@@ -3196,7 +3196,16 @@ class TestCliStateRefForge:
         ruled_out = _run_ok(["rule", container_id, "--line", "1", "--yes"], capsys)
         assert ruled_out.strip() == f"RULED #{container_number} line 1 yes; 0 line(s) still open"
 
-        assert _run_ok(["rulings"], capsys).strip() == "No open expectation lines."
+        # `container_id`'s only expectation line is now ruled, so `rulings`
+        # lists the item fully ruled rather than printing the empty
+        # sentence (issue #379). Read `ruled_on` back from the CLI's own
+        # `--json` line rather than the wall clock, so the assertion cannot
+        # flake across a UTC midnight between the `rule` call above and here.
+        assert _run_ok(["rulings"], capsys).strip() == (
+            f"{container_id} 0/1: A week without a forge\n  1 ruled yes "
+            f"{json.loads(_run_ok(['rulings', '--json'], capsys))[0]['lines'][0]['ruled_on']}"
+            f": {asked_text}"
+        )
 
         child_state = json.loads(_run_ok(["item", "show", child_id, "--json"], capsys))["state"]
         assert child_state == "closed"

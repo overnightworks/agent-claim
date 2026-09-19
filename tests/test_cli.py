@@ -1090,6 +1090,7 @@ def test_rulings_lists_open_expectations_by_board_priority_then_open_count(
         "#10 2/3: Earlier security tie",
         "#40 2/3: More open security work",
         "#60 1/1: Lower-priority product work",
+        "#70 0/1: Fully ruled security work",
     ]
 
 
@@ -1118,6 +1119,9 @@ def test_rulings_reads_expectation_progress_from_the_block_not_stale_prose(
 def test_rulings_renders_text_json_and_empty_success(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
+    """Issue #379: a fully-ruled item is listed too (`0/2`, both lines), the
+    `--json` line carries `ruling`/`ruled_on` instead of `state`, and the
+    empty sentence fires only once no listed item carries any line."""
     open_issue = rulings_issue(
         10,
         "Open expectation",
@@ -1125,15 +1129,16 @@ def test_rulings_renders_text_json_and_empty_success(
         total_lines=2,
     )
     client = _configured_board_client(monkeypatch, tmp_path, open_issues=(open_issue,))
+    rulings_command = ["--repo", "example/agent-claim", "rulings"]
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "rulings"]) == 0
+    assert issue_claim.main(rulings_command) == 0
     assert capsys.readouterr().out == (
         "#10 1/2: Open expectation\n"
         "  1 open: Open decision 0.\n"
         f"  2 ruled yes {RULED_ON.isoformat()}: Settled decision 0.\n"
     )
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "rulings", "--json"]) == 0
+    assert issue_claim.main([*rulings_command, "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == [
         {
             "number": 10,
@@ -1141,33 +1146,62 @@ def test_rulings_renders_text_json_and_empty_success(
             "open": 1,
             "total": 2,
             "lines": [
-                {"index": 1, "text": "Open decision 0.", "state": "open"},
+                {"index": 1, "text": "Open decision 0.", "ruling": None, "ruled_on": None},
                 {
                     "index": 2,
                     "text": "Settled decision 0.",
-                    "state": f"ruled yes {RULED_ON.isoformat()}",
+                    "ruling": "yes",
+                    "ruled_on": RULED_ON.isoformat(),
                 },
             ],
         }
     ]
 
-    monkeypatch.setattr(
-        client,
-        "list_open_board_issues",
-        lambda: (
-            rulings_issue(
-                11,
-                "Fully ruled",
-                open_lines=0,
-                total_lines=1,
-            ),
-        ),
+    fully_ruled_issue = rulings_issue(
+        11,
+        "Fully ruled",
+        open_lines=0,
+        total_lines=2,
+    )
+    monkeypatch.setattr(client, "list_open_board_issues", lambda: (fully_ruled_issue,))
+
+    assert issue_claim.main(rulings_command) == 0
+    assert capsys.readouterr().out == (
+        "#11 0/2: Fully ruled\n"
+        f"  1 ruled yes {RULED_ON.isoformat()}: Settled decision 0.\n"
+        f"  2 ruled yes {RULED_ON.isoformat()}: Settled decision 1.\n"
     )
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "rulings"]) == 0
-    assert capsys.readouterr().out == "No open expectation lines.\n"
+    assert issue_claim.main([*rulings_command, "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == [
+        {
+            "number": 11,
+            "title": "Fully ruled",
+            "open": 0,
+            "total": 2,
+            "lines": [
+                {
+                    "index": 1,
+                    "text": "Settled decision 0.",
+                    "ruling": "yes",
+                    "ruled_on": RULED_ON.isoformat(),
+                },
+                {
+                    "index": 2,
+                    "text": "Settled decision 1.",
+                    "ruling": "yes",
+                    "ruled_on": RULED_ON.isoformat(),
+                },
+            ],
+        }
+    ]
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "rulings", "--json"]) == 0
+    monkeypatch.setattr(client, "list_open_board_issues", lambda: ())
+
+    assert issue_claim.main(rulings_command) == 0
+    assert capsys.readouterr().out == "No expectation lines.\n"
+
+    assert issue_claim.main([*rulings_command, "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == []
 
 
@@ -1206,7 +1240,8 @@ def test_rulings_json_carries_question_example_and_picture(
                 {
                     "index": 1,
                     "text": "Open decision.",
-                    "state": "open",
+                    "ruling": None,
+                    "ruled_on": None,
                     "question": "Ship it?",
                     "example": "Release on Friday.",
                     "picture": picture,

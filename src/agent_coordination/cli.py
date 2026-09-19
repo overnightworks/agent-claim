@@ -349,7 +349,7 @@ def _add_board_parser(commands: argparse._SubParsersAction) -> None:
 
 def _add_rulings_parser(commands: argparse._SubParsersAction) -> None:
     rulings_command = commands.add_parser(
-        "rulings", help="list open expectation lines without writes"
+        "rulings", help="list expectation lines, open and ruled, without writes"
     )
     rulings_command.add_argument("--json", action="store_true", help=JSON_HELP)
 
@@ -1537,9 +1537,11 @@ class _RulingsRow:
 def _rulings_rows(
     projected: board.Board, bodies: Mapping[int, str], *, storage: board.Storage
 ) -> tuple[_RulingsRow, ...]:
-    """Every open board item that still carries an open expectation line,
-    board-ranked then by fewer open lines then issue number (unchanged from
-    before #240), each paired with its lines read fresh from `bodies` --
+    """Every open board item that carries at least one `[[expectation]]`
+    line, fully ruled ones included (issue #379) -- items with an open line
+    first, board-ranked then by fewer open lines then issue number
+    (unchanged from before #240), then the fully ruled items in that same
+    order. Each row is paired with its lines read fresh from `bodies` --
     `projected.items` itself carries only the open/total counters. `storage`
     is forwarded to `expectation_lines` unchanged (issue #248): a state-ref
     body's `[record]` table must read as a known key, not a malformed one."""
@@ -1547,9 +1549,14 @@ def _rulings_rows(
         (
             (item, item.expectation_progress)
             for item in projected.items
-            if item.expectation_progress.open > 0
+            if item.expectation_progress.total > 0
         ),
-        key=lambda entry: (*board.board_rank(entry[0])[:2], entry[1].open, entry[0].number),
+        key=lambda entry: (
+            0 if entry[1].open > 0 else 1,
+            *board.board_rank(entry[0])[:2],
+            entry[1].open,
+            entry[0].number,
+        ),
     )
     return tuple(
         _RulingsRow(
@@ -1563,7 +1570,8 @@ def _rulings_line_json(line: board.ExpectationLine) -> dict[str, object]:
     payload: dict[str, object] = {
         "index": line.index,
         "text": line.text,
-        "state": board.expectation_line_state(line),
+        "ruling": line.ruling,
+        "ruled_on": line.ruled_on.isoformat() if line.ruled_on is not None else None,
     }
     payload.update(
         (key, value)
@@ -1609,7 +1617,7 @@ def _rulings(
         )
         return
     if not rows:
-        print("No open expectation lines.")
+        print("No expectation lines.")
         return
     print("\n".join(_rulings_row_text(row, storage) for row in rows))
 
