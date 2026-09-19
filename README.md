@@ -12,8 +12,8 @@ A capability belongs in `aco` only if it clears three tests (ruling
 holds what an agent would forget or cannot know alone -- who holds what, what
 a landing freed, what's disjoint; and no native tool does it better -- git,
 `gh`, and GitLab own commits, branches, pull requests, and issue text. What
-fails is ballast: unbuilt, or removed once it fails. Every command works the
-same offline, on GitHub, or GitLab. Workspace-recovery (`register`, `run`,
+fails is ballast: unbuilt, or removed once it fails. aco is meant for every
+repository: GitHub today, forges next. Workspace-recovery (`register`, `run`,
 `login`) stays: it restores the operator's project heads after a restart.
 
 ## Install and maintain
