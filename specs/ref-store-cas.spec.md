@@ -114,21 +114,21 @@ tree's structural shape before that content is ever parsed.
 - [ ] [CAS-37] A `status` age read whose `git log --first-parent` walk fails refuses `cannot read the commit history of <tip>`.
 - [ ] [CAS-38] A commit in that history whose committer date `git` cannot parse refuses `git returned a malformed committer date for <sha>`.
 
-## `aco reset` (ruled, not built -- #298)
+## `aco reset`
 
-Operator-ruled 15.09.2026/16.09.2026: reset is the one recovery path, with
-a mandatory export and no silent data loss. Not yet built; every criterion
-below is proposed wording from #298's own ruling, ratcheted with owner
-`# #298`.
+`aco reset` (issue #298, operator-ruled 15.09.2026/16.09.2026) is the one
+recovery path over a broken or rewritten `refs/aco/state`: a mandatory
+export, no silent data loss, and a live claim always refuses it outright,
+`--confirm` or not.
 
-- [ ] [CAS-39] `aco reset` without `--confirm` prints five `would:` lines (export, remote deletion, local deletion, worktree stamps, bootstrap), exit `0`, and touches nothing.
-- [ ] [CAS-40] `aco reset --confirm` against a repository with any live claim refuses, naming every live claim, before anything is exported or deleted.
-- [ ] [CAS-41] `aco reset --confirm` writes a `git bundle`-verifiable export named `aco-state-<repo>-<date>-<short-sha>.bundle` under `--export-dir` before any deletion.
-- [ ] [CAS-42] `aco reset --confirm` against an export path that already carries that bundle's name refuses by name, before anything is exported or deleted.
-- [ ] [CAS-43] `aco reset --confirm` deletes `refs/aco/state` on the remote with `--force-with-lease` matched to the tip it read; a ref moved since that read refuses the deletion, nothing local touched.
-- [ ] [CAS-44] `aco reset --confirm` deletes this repository's own lineage stamp and `refs/worktree/aco/state` anchor in every reachable worktree before it bootstraps fresh, so CAS-11 never trips there.
-- [ ] [CAS-45] `aco reset --confirm --no-export` skips the bundle and performs every other CAS-40..44 step exactly as `--confirm` alone does.
-- [ ] [CAS-46] A bundle CAS-41 wrote, restored into a fresh repository (`git bundle unbundle`/`fetch`), reproduces the exact claim state `aco status` showed before the reset.
+- [ ] [CAS-39] `aco reset` without `--confirm` prints five `would: ` lines -- export, delete-remote, delete-local, clear-stamps, bootstrap -- exit `0`, and touches nothing.
+- [ ] [CAS-40] `aco reset`, confirmed or not, against a repository with any live claim refuses before anything else runs, printing the same claim lines `status` prints, exit `2`.
+- [ ] [CAS-41] `aco reset --confirm`, when the ref exists on the remote, exports its tip to a `git bundle`-verifiable `aco-state-<repo>-<date>-<12-hex>.bundle` under `--export-dir` before any deletion.
+- [ ] [CAS-42] `aco reset --confirm` against an export path that already carries that bundle's name refuses `<path> already exists; refusing to overwrite an export`, before anything is deleted.
+- [ ] [CAS-43] `aco reset --confirm` deletes `refs/aco/state` on the remote with `--force-with-lease` matched to the tip it read; a rejected or stale-leased push refuses and leaves the local ref untouched.
+- [ ] [CAS-44] `aco reset --confirm` deletes this repository's own lineage stamp and `refs/worktree/aco/state` anchor in every reachable worktree, before it bootstraps fresh, so CAS-11 never trips there.
+- [ ] [CAS-45] `aco reset --confirm --no-export` skips the bundle -- printing `skipped export (--no-export): refs/aco/state at <tip> not saved` -- and does every other CAS-40..44 step exactly as `--confirm` alone.
+- [ ] [CAS-46] A bundle CAS-41 wrote, restored via `git fetch <bundle> refs/worktree/aco/reset-export:refs/aco/state`, reproduces the claim state `aco status` showed before the reset.
 
 ## Never
 
@@ -143,7 +143,10 @@ below is proposed wording from #298's own ruling, ratcheted with owner
 bare repository with `main` at one commit, a git identity, `origin/HEAD`, a
 tracked `.agent-claim/board.toml` naming no `storage` key (the default
 `github` pin, `specs/storage-pin.spec.md` PIN-01/PIN-02), and `ACO_AGENT` set
-to `Ada`; `<remote>`, `<tmp>`, and `<home>` are the runner's own paths.
+to `Ada`; `<remote>`, `<tmp>`, and `<home>` are the runner's own paths, and
+`<bundle>` is the export path `aco reset` itself prints (its own filename
+embeds the repository directory name, the date, and the tip's first 12 hex
+characters, CAS-41).
 
 ### E-CAS-01 — bootstrap, idempotent, and its own commit trailer
 
@@ -196,4 +199,25 @@ Setup: bare-remote, bootstrapped, a competing writer lands one push to `refs/aco
 $ aco claim 42 --scope README.md
 2> ERROR: refs/aco/state moved 1 time while retrying, then rejected 31 pushes to origin without the ref moving after it last moved: another writer landed first, then a stale lock or missing push rights took over -- check origin's refs/aco/state.lock (delete it if stale) and push permissions; retrying the command only helps once that clears
 exit 2
+```
+
+### E-CAS-05 — reset: a dry run changes nothing, `--confirm` exports and bootstraps fresh
+
+Setup: bare-remote, bootstrapped, no live claim
+
+```console
+$ aco reset --export-dir <tmp>
+would: export refs/aco/state at <tip> to <bundle> (restore with: git fetch <bundle> refs/worktree/aco/reset-export:refs/aco/state)
+would: delete refs/aco/state on origin (lease <tip>)
+would: no local refs/aco/state to delete
+would: clear lineage stamps and fetch anchors in 1 worktree
+would: bootstrap a fresh empty state
+exit 0
+$ aco reset --confirm --export-dir <tmp>
+exported refs/aco/state at <tip> to <bundle> (restore with: git fetch <bundle> refs/worktree/aco/reset-export:refs/aco/state)
+deleted refs/aco/state on origin (lease <tip>)
+no local refs/aco/state to delete
+cleared lineage stamps and fetch anchors in 1 worktree
+bootstrapped a fresh empty state at <sha>
+exit 0
 ```
