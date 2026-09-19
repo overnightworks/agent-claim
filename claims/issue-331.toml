@@ -3,6 +3,6 @@ agent = "Claude head (coordinator)"
 role = "builder"
 base = "90194b253fdb02d89d41f6f74ed416ce380a67db"
 branch = "claude/issue-331-scope-grammar"
-scope = ["src/agent_coordination/protocol.py", "src/agent_coordination/board.py", "tests/test_protocol.py", "tests/test_board.py", "README.md"]
+scope = ["src/agent_coordination/protocol.py", "src/agent_coordination/board.py", "tests/test_protocol.py", "tests/test_board.py", "README.md", "specs/body-block.spec.md", "scripts/spec_coverage_ratchet.txt"]
 opened_commit = "4f75a09fbac0a482d2f519e4998ba5ce4ef8259c"
 whole_reason = "one optional field (scope) across the body codec, its path owner, their two test modules and the README"
