@@ -604,6 +604,43 @@ def test_fetch_state_canonicalizes_a_stored_unsorted_scope_without_rewriting_the
     assert "issue-42" not in released.claims
 
 
+def test_fetch_state_rejects_a_stored_scope_entry_valid_scope_refuses(
+    bare_remote: Path, worktree: Path
+) -> None:
+    """The other half of `_claim_toml_scope`'s canonicalization (issue #331
+    REVISE finding 1): a stored scope only reads as a legacy record when
+    `_valid_scope` itself would still accept it, just unsorted -- content
+    it would refuse from a fresh request (here an absolute path) fails
+    loud on read too, named by the claim key, never silently passed
+    through."""
+    schema_blob = _blob(worktree, b"version = 2\n")
+    sha = "c" * 40
+    claim_content = (
+        'claim_id = "a1"\n'
+        'agent = "Ada"\n'
+        'role = "builder"\n'
+        f'base = "{sha}"\n'
+        'branch = "claude/issue-42-cut"\n'
+        'scope = ["/etc/passwd"]\n'
+        f'opened_commit = "{sha}"\n'
+    )
+    claim_blob = _blob(worktree, claim_content.encode())
+    claims_tree = _raw_tree(worktree, [("100644", "blob", claim_blob, "issue-42.toml")])
+    _push_raw_state_tree(
+        bare_remote,
+        worktree,
+        [
+            ("100644", "blob", schema_blob, "schema.toml"),
+            ("040000", "tree", claims_tree, store.CLAIMS_DIRECTORY),
+        ],
+    )
+
+    with pytest.raises(
+        protocol.MalformedStateTreeError, match=r"claim file issue-42\.toml .* has an invalid scope"
+    ):
+        store.fetch_state(worktree=worktree, remote=str(bare_remote))
+
+
 def test_fetch_state_rejects_a_non_toml_entry_in_resources(
     bare_remote: Path, worktree: Path
 ) -> None:
