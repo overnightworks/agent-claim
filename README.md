@@ -150,6 +150,9 @@ classes. An interrupted run remains visibly unfinished; a failed project does no
 hide later configured projects. The record contains no provider UUID, workspace
 path, agent, model, configuration, environment, command line, or raw error.
 
+The exact claim-record fields and refusal literals this section and the next
+summarize are owned by `specs/claim-record.spec.md`.
+
 Omitted `--base`/`--branch` on `claim` bind the current checkout; explicit
 values must match it. `release --branch` is the one exception: it selects the
 claim by that branch name without requiring the checkout to be on it (see
@@ -766,6 +769,9 @@ stores that reference in `record.origin`, `item show` prints it, and `claim`
 works on the item exactly as on any other.
 
 ## The work-item body contract
+
+The exact block grammar, defect sentences, and verdicts this section
+summarizes are owned by `specs/body-block.spec.md`.
 
 `board`, `next`, issue-mode `claim`, `cut`, `rulings`, and the parent-body
 part of `check` read a work item's `Now`/`Next`/`Done when`, freeze,
