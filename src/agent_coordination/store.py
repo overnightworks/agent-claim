@@ -1327,38 +1327,37 @@ def _delete_export_ref(worktree: Path) -> str | None:
     is a documented no-op (`git-update-ref`(1)), so a `tip` that never
     reached `update-ref` in the first place costs nothing here.
 
-    Catches `Exception` broadly rather than `ClaimError` (issue #298, the
-    third 19.09.2026 gate REVISE): `_run_git` only wraps
-    `ExecutableMissingError`/`ProcessTimedOutError` into `ClaimError`, so a
-    raw `OSError` from `process.run_captured`'s own `subprocess.run` (a
-    descriptor exhausted, a decode failure) would otherwise escape before
-    the temporary file's own cleanup below ever runs. This is the one place
-    a broad catch is the honest design: nothing here is swallowed, the
-    caught error is carried verbatim into the leftover description
-    `_clear_export_artifacts` returns and, from there, into the raised
-    `ClaimError` and its `__cause__`. The nonzero-exit branch's own
-    `stderr.decode()` sits inside this same guard for that reason too (the
-    fourth 19.09.2026 gate REVISE): invalid UTF-8 in git's own stderr must
-    still reach the caller as a leftover description, not escape as an
-    unguarded `UnicodeDecodeError` ahead of the temporary file's cleanup."""
+    Catches `(ClaimError, OSError, ValueError)` rather than only
+    `ClaimError` (issue #298, the third and sixth 19.09.2026 gate REVISEs):
+    `_run_git` only wraps `ExecutableMissingError`/`ProcessTimedOutError`
+    into `ClaimError`, so a raw `OSError` from `process.run_captured`'s own
+    `subprocess.run` (a descriptor exhausted) would otherwise escape before
+    the temporary file's own cleanup below ever runs, and the nonzero-exit
+    branch's own `stderr.decode()` below can raise `UnicodeDecodeError` --
+    a `ValueError` subclass -- on invalid UTF-8 in git's own stderr. This is
+    the concrete failure family that can actually reach this call, not a
+    stand-in for "anything": nothing here is swallowed, the caught error is
+    carried verbatim into the leftover description `_clear_export_artifacts`
+    returns and, from there, into the raised `ClaimError` and its
+    `__cause__`."""
     try:
         result = _run_git(worktree, ["update-ref", "-d", EXPORT_BUNDLE_REF])
         if result.exit_status != 0:
             return result.stderr.decode().strip() or _UNKNOWN_GIT_FAILURE
-    except Exception as error:
+    except (ClaimError, OSError, ValueError) as error:
         return str(error)
     return None
 
 
 def _clear_export_artifacts(*, worktree: Path, temporary: Path) -> tuple[str, ...]:
     """Remove the temporary export ref and the temporary file, each
-    attempted independently of whether the other fails and of what kind of
-    exception it raises (issue #298, the second and third 19.09.2026 gate
-    REVISEs): a broken `git` invocation while clearing `EXPORT_BUNDLE_REF`
-    must never skip the temporary file's removal, and a filesystem failure
-    removing the temporary file must never skip clearing the ref, whether
-    that failure is the `OSError` `Path.unlink` documents or something
-    broader. Returns a description of every artifact that could not be
+    attempted independently of whether the other fails (issue #298, the
+    second, third and sixth 19.09.2026 gate REVISEs): a broken `git`
+    invocation while clearing `EXPORT_BUNDLE_REF` -- the
+    `(ClaimError, OSError, ValueError)` family `_delete_export_ref`
+    documents -- must never skip the temporary file's removal, and an
+    `OSError` removing the temporary file must never skip clearing the
+    ref. Returns a description of every artifact that could not be
     removed, or an empty tuple once both are confirmed gone."""
     leftovers: list[str] = []
     ref_failure = _delete_export_ref(worktree)
@@ -1366,7 +1365,7 @@ def _clear_export_artifacts(*, worktree: Path, temporary: Path) -> tuple[str, ..
         leftovers.append(f"the temporary export ref {EXPORT_BUNDLE_REF} ({ref_failure})")
     try:
         temporary.unlink()
-    except Exception as error:
+    except OSError as error:
         leftovers.append(f"the now-redundant temporary file {temporary} ({error})")
     return tuple(leftovers)
 
