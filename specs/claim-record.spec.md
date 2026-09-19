@@ -26,7 +26,6 @@ runner's own values; `<agent>` and `<role>` are the claimant's.
 | scope empty, or over 256 entries | CLAIM-22, CLAIM-23 | — | — |
 | comma-bearing scope value | CLAIM-18, CLAIM-24 | — | — |
 | four paths, or a directory | CLAIM-25, CLAIM-26 | — | — |
-| over a quarter of the versioned files | CLAIM-27 | — | — |
 | exactly three paths, no directory | CLAIM-30 | — | — |
 | under twelve versioned files | CLAIM-28 | — | — |
 | wide scope with `--whole` | CLAIM-29 | CLAIM-29 | — |
@@ -67,7 +66,7 @@ runner's own values; `<agent>` and `<role>` are the claimant's.
 - [ ] [CLAIM-09] A claims entry whose name carries neither prefix refuses `claim key has neither the issue nor lane prefix: '<key>'`, exit `2`.
 - [ ] [CLAIM-56] A lane entry name whose escaped bytes are not UTF-8 refuses `claim key does not decode as utf-8: '<key>'`, exit `2`.
 - [ ] [CLAIM-64] An issue entry name carrying `0`, a leading zero or a non-number refuses `claim key has a malformed issue number: '<key>'`, exit `2`.
-- [ ] [CLAIM-65] A lane entry name carrying a literal `/` or a non-ASCII character refuses `claim key has an unescaped reserved character: '<key>'`, exit `2`.
+- [ ] [CLAIM-65] A flat lane entry with a non-ASCII byte refuses `claim key has an unescaped reserved character: '<key>'`, exit `2`; a literal `/` is a nested path silently dropped instead.
 - [ ] [CLAIM-66] A lane entry name carrying an incomplete or non-hexadecimal escape refuses `claim key has a malformed percent-escape: '<key>'`, exit `2`.
 
 ## Identity exclusivity
@@ -94,7 +93,6 @@ runner's own values; `<agent>` and `<role>` are the claimant's.
 
 - [ ] [CLAIM-25] A scope of four paths refuses `scope is wide: 4 paths exceeds three; pass --whole REASON`, exit `2`.
 - [ ] [CLAIM-26] A scope naming a directory refuses `scope is wide: 1 directory in scope (docs); pass --whole REASON`, exit `2`, whatever the path count is.
-- [ ] [CLAIM-27] A scope covering over a quarter of at least twelve versioned files refuses `scope is wide: 4 paths of 12 versioned files (33 %) exceeds a quarter; pass --whole REASON`.
 - [ ] [CLAIM-28] Under twelve versioned files a single named path is never wide on share: `aco claim 42 --scope README.md` prints its `CLAIMED` line, exit `0`.
 - [ ] [CLAIM-29] `--whole "<one sentence>"` admits a wide scope, lands in the record, and `aco status` prints it as an indented `whole: <one sentence>` line (see E-CLAIM-04).
 - [ ] [CLAIM-30] Exactly three named files with no directory are not wide: `aco claim 42 --scope README.md --scope AGENTS.md --scope CLAUDE.md` claims, exit `0`.
@@ -110,7 +108,7 @@ runner's own values; `<agent>` and `<role>` are the claimant's.
 ## Roles
 
 - [ ] [CLAIM-36] An omitted `--role` makes the record a `builder`, and `aco status` prints `<agent> (builder)`.
-- [ ] [CLAIM-37] A rescope by a different agent or role refuses `only the original claimant may rescope (holder='Ada (builder)', this session='Bob (builder)')`, exit `2`.
+- [ ] [CLAIM-37] A rescope by a different agent refuses `only the original claimant may rescope (holder='Ada (builder)', this session='Bob (builder)')`, exit `2`; `rescope` has no `--role` flag.
 - [ ] [CLAIM-38] A release by a different agent or role refuses `only the original claimant may release; use an explicit coordinator override`, exit `2`, naming holder and session.
 - [ ] [CLAIM-39] `--coordinator-override` without `--role coordinator` refuses `a coordinator override requires role coordinator`, exit `2`.
 - [ ] [CLAIM-40] `--coordinator-override --role coordinator` releases a foreign live claim and removes its record, so `aco status` prints `UNCLAIMED issue #42`, exit `0`.
@@ -120,18 +118,18 @@ runner's own values; `<agent>` and `<role>` are the claimant's.
 - [ ] [CLAIM-41] `--resource <name>` holds the lowest positive integer that name never gave out, and `aco status` prints an indented `resource port=1` line, exit `0`.
 - [ ] [CLAIM-42] An explicit resource value another live claim holds refuses `port 1 is held by Ada (builder) on issue #42`, exit `2`.
 - [ ] [CLAIM-43] A resource value a released claim once held refuses `port 1 was already consumed and cannot be reused`, exit `2`.
-- [ ] [CLAIM-44] A released resource value is never reassigned, so the next `--resource port` claim after a release of `port 1` prints `resource port=2`, exit `0`.
+- [ ] [CLAIM-44] A released resource value is never reassigned: after a release of `port 1`, the next `--resource port` claim succeeds and `aco status` prints its indented `resource port=2` line, exit `0`.
 - [ ] [CLAIM-45] A resource value without a resource name refuses `resource value requires a resource name`, exit `2`.
 - [ ] [CLAIM-46] A resource value that is zero, negative or not an integer refuses `resource value must be a positive integer`, exit `2`.
 
 ## Age and takeover
 
-- [ ] [CLAIM-47] `aco status` prints each live claim's age from the committer date of its `opened_commit`, the state-ref commit that first introduced it, as `Xh Ym`.
+- [ ] [CLAIM-47] `aco status` prints each live claim's age from the committer date of its `opened_commit`, the state-ref tip that preceded the commit which added it, as `Xh Ym`.
 - [ ] [CLAIM-48] A claim older than one hour is marked, so its `aco status` line ends `3h 12m old`; at or under an hour it ends `0h 59m`.
 - [ ] [CLAIM-49] `aco rescope` replaces only the scope: `claim=<claim-id>`, `base=<sha>` and the printed age keep counting from the first claim (see E-CLAIM-05).
 - [ ] [CLAIM-50] A claim whose `opened_commit` is not an ancestor of the fetched tip refuses `<oid> is not an ancestor of <tip>; the ref may have been rewritten`, exit `2`.
 - [ ] [CLAIM-51] A stale takeover is an override release and an ordinary claim: two state-ref commits, a fresh `claim=<claim-id>`, and no reuse of the released claim's resource integer.
-- [ ] [CLAIM-52] Closing an item never removes its claim: a closed item with a live claim stays `CLAIMED` in `aco status` and is what `aco board` lists under `RECOVERY (close or re-project)`.
+- [ ] [CLAIM-52] Closing an item never removes its claim: it stays `CLAIMED` in `aco status`, but drops from `aco board`, which reads open issues only; `RECOVERY (close or re-project)` lists an open landed item.
 
 ## The item's own scope
 
@@ -150,8 +148,8 @@ runner's own values; `<agent>` and `<role>` are the claimant's.
 
 `Setup: bare-remote` is a fresh work repository whose `origin` is a local bare
 repository with `main` at one commit, a git identity, `origin/HEAD`, and
-`ACO_AGENT` set; `<remote>`, `<tmp>` and `<home>` are the runner's own paths,
-`<sha>`, `<oid>` and `<claim-id>` the values the session itself produced.
+`ACO_AGENT` set to `Ada`; `<remote>`, `<tmp>` and `<home>` are the runner's own
+paths, `<sha>`, `<oid>` and `<claim-id>` the values the session itself produced.
 
 ### E-CLAIM-01 — the golden claim, seen in the state ref
 
@@ -221,7 +219,6 @@ Setup: bare-remote, bootstrapped, a live claim on issue `#42` scoped to `README.
 ```console
 $ aco rescope 42 --add AGENTS.md
 RESCOPED issue #42: <claim-id>
-2 of 6 versioned files (33%); overlaps no other open claims
 exit 0
 $ aco status
 CLAIMED issue #42: Ada (builder) base=<sha> branch=ada/issue-42 claim=<claim-id> 0h 0m

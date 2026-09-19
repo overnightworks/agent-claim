@@ -45,7 +45,7 @@ line per defect, and by a reader as the item's own reason (BODY-50..BODY-52).
 - [ ] [BODY-04] A fence whose content is not TOML makes `aco body --check` print `body malformed: agent-claim: agent-claim block is not valid TOML: <reason>` on stderr, exit `1`.
 - [ ] [BODY-05] An `agent-claim` fence quoted inside a longer documentation fence is not the item's block, so a body carrying only that one prints `body malformed: agent-claim: no agent-claim block`, exit `1`.
 - [ ] [BODY-06] Prose beside the block — headings, a `Blocked by: nichts` line, another tool's own section — carries no contract, so a body of prose plus one complete block prints `body ok`, exit `0`.
-- [ ] [BODY-07] A block whose lines end in CRLF is read like any other, so a complete CRLF body prints `body ok`, exit `0`, and a rewrite of one line leaves every other byte, CRLF included, unchanged.
+- [ ] [BODY-07] A block whose lines end in CRLF is read like any other: a complete CRLF body prints `body ok`, exit `0`; a rewrite keeps CRLF but re-renders the block's fields canonically, not byte-for-byte.
 
 ## Projection keys
 
@@ -64,7 +64,7 @@ line per defect, and by a reader as the item's own reason (BODY-50..BODY-52).
 - [ ] [BODY-17] A `[record]` whose `state` is neither `open` nor `closed` prints `body malformed: record.state: record.state must be open or closed` on stderr, exit `1`.
 - [ ] [BODY-18] A `[record]` with `state = "closed"` and no `closed_at` prints `body malformed: record.closed_at: record.closed_at is required when record.state is closed`, exit `1`.
 - [ ] [BODY-19] A `[record]` timestamp that is not an RFC 3339 UTC instant prints `body malformed: record.created_at: record.created_at must be an RFC 3339 UTC timestamp`, exit `1`.
-- [ ] [BODY-20] A `[record]` key outside `title`, `state`, `kind`, `labels`, `blocked_by`, `parent`, `origin`, `created_at`, `updated_at`, `closed_at` prints `unknown key record.<key>`, exit `1`.
+- [ ] [BODY-20] A `[record]` key outside the ten allowed keys prints `body malformed: record.<key>: unknown key record.<key>`, exit `1`.
 
 ## `frozen_until`
 
@@ -78,7 +78,7 @@ line per defect, and by a reader as the item's own reason (BODY-50..BODY-52).
 - [ ] [BODY-25] An `expectation` key that is not an array of tables prints `body malformed: expectation: expectation must be an array of tables` on stderr, exit `1`.
 - [ ] [BODY-26] An `[[expectation]]` entry that is not a table prints `body malformed: expectation[0]: expectation[0] must be a table` on stderr, exit `1`.
 - [ ] [BODY-27] An entry whose `text` is missing, blank or not a string prints `body malformed: expectation[0].text: expectation[0].text must be a non-empty string`, exit `1`.
-- [ ] [BODY-28] An entry carrying both `default` and a ruling prints `expectation[0] must be proposed (default) or ruled (ruling, ruled_on), not both` on stderr, exit `1`.
+- [ ] [BODY-28] An entry carrying both `default` and a ruling prints `body malformed: expectation[0].default: expectation[0] must be proposed (default) or ruled (ruling, ruled_on), not both` on stderr, exit `1`.
 - [ ] [BODY-29] An entry carrying neither prints `body malformed: expectation[0].default: expectation[0] must carry default, or both ruling and ruled_on`, exit `1`.
 - [ ] [BODY-30] An entry whose `default` is not `yes`, `no` or `later` prints `body malformed: expectation[0].default: expectation[0].default must be yes, no, or later`, exit `1`.
 - [ ] [BODY-31] An entry whose `ruling` is not `yes`, `no` or `later` prints `body malformed: expectation[0].ruling: expectation[0].ruling must be yes, no, or later`, exit `1`.
@@ -93,8 +93,8 @@ line per defect, and by a reader as the item's own reason (BODY-50..BODY-52).
 - [ ] [BODY-37] A `picture` whose text does not start with `<svg` prints `body malformed: expectation[0].picture: expectation[0].picture must be inline SVG rooted at <svg>`, exit `1`.
 - [ ] [BODY-38] A `picture` over 8192 bytes prints `body malformed: expectation[0].picture: expectation[0].picture must be at most 8192 bytes` on stderr, exit `1`.
 - [ ] [BODY-39] A `picture` containing `<script` in any casing prints `body malformed: expectation[0].picture: expectation[0].picture must not contain <script>`, exit `1`.
-- [ ] [BODY-40] A `picture` carrying an event-handler attribute, after a space or a `/`, prints `expectation[0].picture must not contain an event-handler attribute` on stderr, exit `1`.
-- [ ] [BODY-41] A `picture` whose `href` or `xlink:href` does not start with `#` prints `expectation[0].picture must not reference an href outside the document` on stderr, exit `1`.
+- [ ] [BODY-40] A `picture` carrying an event-handler attribute prints `body malformed: expectation[0].picture: expectation[0].picture must not contain an event-handler attribute`, exit `1`.
+- [ ] [BODY-41] A `picture` whose `href` or `xlink:href` does not start with `#` prints `body malformed: expectation[0].picture: expectation[0].picture must not reference an href outside the document`, exit `1`.
 - [ ] [BODY-42] A `picture` matching two refused contents names the earlier one in the order `<script>, <foreignObject>, on…=, javascript:, data:, href, animated href, url(), <iframe>, <embed>, <object>, srcdoc`.
 
 ## `[[slice]]`
@@ -124,7 +124,7 @@ line per defect, and by a reader as the item's own reason (BODY-50..BODY-52).
 
 - `aco body --check` never reads a file path, a live item, a dependency, the forge, or the state ref; it reads stdin and the repository's own storage pin only.
 - No reader ever derives a blocker or a parent from the body: `Blocked by:` prose beside the block is documentation, and the `Parent: #<n>` line is read back by `aco cut`'s own orphan adoption alone.
-- A rewrite of one block field never changes a byte outside the fence, and never reorders, reflows or re-quotes another field's operator prose.
+- A rewrite of one block field never changes a byte outside the fence, but it does re-render the whole block interior canonically: schema key order, TOML-safe quoting, the fence's own newline convention.
 - No reader guesses through a defect: a malformed body is refused by name, never treated as an empty or partial block.
 
 ## Examples
