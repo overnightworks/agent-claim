@@ -6199,16 +6199,31 @@ def _claim_argv(*flags: str) -> list[str]:
 
 
 @pytest.mark.parametrize(
-    ("item_scope", "requested_scope_flags", "expected_status", "expected_scope_or_error"),
+    (
+        "item_scope",
+        "requested_scope_flags",
+        "expected_status",
+        "expected_scope_or_error",
+        "versioned",
+        "expected_cost",
+    ),
     [
         pytest.param(
-            ["src/work.py"], (), 0, ["src/work.py"], id="omitted-takes-the-items-own-scope"
+            ["src/work.py"],
+            (),
+            0,
+            ["src/work.py"],
+            None,
+            (0, 4, 0.0),
+            id="omitted-takes-the-items-own-scope",
         ),
         pytest.param(
             None,
             (),
             2,
             issue_claim.CLAIM_SCOPE_MISSING,
+            None,
+            None,
             id="omitted-with-no-body-scope-refuses-by-name",
         ),
         pytest.param(
@@ -6216,6 +6231,8 @@ def _claim_argv(*flags: str) -> list[str]:
             ("--scope", "src/other.py"),
             2,
             issue_claim.CLAIM_SCOPE_MISMATCH,
+            None,
+            None,
             id="a-differing-explicit-scope-refuses-by-name",
         ),
         pytest.param(
@@ -6223,6 +6240,8 @@ def _claim_argv(*flags: str) -> list[str]:
             ("--scope", "b.py", "--scope", "a.py"),
             0,
             ["a.py", "b.py"],
+            None,
+            (0, 4, 0.0),
             id="the-same-set-in-a-different-order-is-accepted",
         ),
         pytest.param(
@@ -6230,6 +6249,8 @@ def _claim_argv(*flags: str) -> list[str]:
             (),
             2,
             "scope is wide: 4 paths exceeds three; pass --whole REASON",
+            None,
+            None,
             id="a-derived-wide-scope-refuses-without-whole",
         ),
         pytest.param(
@@ -6237,7 +6258,28 @@ def _claim_argv(*flags: str) -> list[str]:
             ("--whole", "spans the whole review pass"),
             0,
             ["a.py", "b.py", "c.py", "d.py"],
+            None,
+            (0, 4, 0.0),
             id="a-derived-wide-scope-is-accepted-with-whole",
+        ),
+        pytest.param(
+            ["docs/report,v2.md"],
+            (),
+            0,
+            ["docs/report,v2.md"],
+            ("docs/report,v2.md",),
+            (1, 1, 1.0),
+            id="a-comma-inside-a-derived-path-grounds-and-is-kept-whole",
+        ),
+        pytest.param(
+            ["a.py,b.py"],
+            (),
+            2,
+            "'a.py,b.py' matches no versioned file; one --scope path per flag, so its comma "
+            "is read literally -- repeat --scope for a second path",
+            None,
+            None,
+            id="a-comma-inside-a-derived-path-that-grounds-nothing-refuses-by-name",
         ),
     ],
 )
@@ -6248,6 +6290,8 @@ def test_cli_claim_scope_derivation_against_the_items_own_body(
     requested_scope_flags: tuple[str, ...],
     expected_status: int,
     expected_scope_or_error: list[str] | str,
+    versioned: tuple[str, ...] | None,
+    expected_cost: tuple[int, int, float] | None,
 ) -> None:
     """Issue #337 proof 3 (REVISE finding 2): issue-mode `--scope`
     derivation and validation against the item's own body -- omitted takes
@@ -6260,7 +6304,20 @@ def test_cli_claim_scope_derivation_against_the_items_own_body(
     for its slice-rule checks -- exactly once, whether the scope came from
     it (omitted `--scope`) or was only checked against it (explicit
     `--scope`), and never falls back to the single-item lookup, since #72
-    is always open and always in that listing."""
+    is always open and always in that listing.
+
+    Delta review (issue #337): a derived scope routes through the same
+    `_scope_versioning` call as an explicit one (`cli.py`'s `_cmd_claim`),
+    so the comma-grounding rule proved on `--scope` by
+    `test_cli_claim_scope_keeps_a_comma_inside_one_path` and
+    `test_cli_claim_refuses_a_comma_scope_that_matches_nothing_in_the_checkout`
+    must hold identically for a body-derived one -- the two trailing rows
+    here ground a comma-bearing entry against a matching versioned file and
+    refuse one that matches nothing, by the same message. Every accepting
+    row also asserts the `--json` cost fields (`versioned_files`,
+    `versioned_files_total`, `share`) a derived claim prints, not only its
+    resolved `scope` -- the same fields an explicit `--scope` claim prints,
+    since both origins feed the one shared `_scope_versioning` call."""
     client = _arranged_claim_client(monkeypatch)
     body = (
         complete_contract("Ship it.")
@@ -6268,6 +6325,8 @@ def test_cli_claim_scope_derivation_against_the_items_own_body(
         else complete_contract("Ship it.", scope=item_scope)
     )
     client.board_issues = (board_issue(72, "Work", body),)
+    if versioned is not None:
+        monkeypatch.setattr(checkout, "versioned_paths", lambda **_kwargs: versioned)
     board_reads: list[None] = []
     real_list_open_board_issues = client.list_open_board_issues
 
@@ -6285,6 +6344,11 @@ def test_cli_claim_scope_derivation_against_the_items_own_body(
     if expected_status == 0:
         payload = json.loads(capsys.readouterr().out)
         assert payload["scope"] == expected_scope_or_error
+        if expected_cost is not None:
+            n, total, share = expected_cost
+            assert payload["versioned_files"] == n
+            assert payload["versioned_files_total"] == total
+            assert payload["share"] == share
         return
     assert capsys.readouterr().err == f"ERROR: {expected_scope_or_error}\n"
     assert store.fetch_state(worktree=Path("."), remote="origin").claims == {}
