@@ -11,12 +11,13 @@ from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime, timedelta
 from types import MappingProxyType
-from typing import TypeVar
+from typing import TypeVar, cast
 
 from . import board, forge, process, protocol
 from .protocol import REPOSITORY_PATTERN, ClaimError
 
 _Page = TypeVar("_Page")
+_T = TypeVar("_T")
 TIMESTAMP_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 # gh 2.45 colorizes --jq output when it believes stdout is a TTY.
 ANSI_ESCAPE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
@@ -36,6 +37,10 @@ GH_QUIET_ENVIRONMENT = {
 API_ISSUE_STATES: dict[str, board.BlockerState] = {
     "open": board.BlockerState.OPEN,
     "closed": board.BlockerState.CLOSED,
+}
+_ITEM_REFERENCE_STATES: dict[str, forge.ItemState] = {
+    "open": forge.ItemState.OPEN,
+    "closed": forge.ItemState.CLOSED,
 }
 # The organization's native issue types (decision record 0001 ruling D3):
 # casefolded so an org's own casing of the type name never matters. An
@@ -214,6 +219,101 @@ def _bounded_command(command: list[str], *, purpose: str, input_data: bytes | No
     return decoded
 
 
+def _require_mapping(value: object, message: str) -> dict[str, object]:
+    """The object-shaped precondition every field read below shares: a `gh`
+    payload that is not itself a JSON object cannot carry any named field."""
+    if not isinstance(value, dict):
+        raise forge.ForgeMalformedResponseError(message)
+    return value
+
+
+def _mapped_field(
+    mapping: Mapping[str, object], name: str, table: Mapping[str, _T], message: str
+) -> _T:
+    """A field read through a lookup table -- GitHub's state strings onto this
+    adapter's own enums -- malformed the moment the raw value is not a key
+    the table recognizes."""
+    raw = mapping.get(name)
+    parsed = table.get(raw) if isinstance(raw, str) else None
+    if parsed is None:
+        raise forge.ForgeMalformedResponseError(message)
+    return parsed
+
+
+# The typed field decoder every `gh` JSON read in this adapter goes through
+# (issue #312): one function per field shape, each raising the caller's one
+# `message` on a type, pattern, or numeric mismatch. An optional variant
+# delegates to its required counterpart once `None` is ruled out, so each
+# shape's contract has one owner.
+def _string(
+    raw: object, message: str, *, pattern: re.Pattern[str] | None = None, non_empty: bool = False
+) -> str:
+    if (
+        not isinstance(raw, str)
+        or (pattern is not None and pattern.fullmatch(raw) is None)
+        or (non_empty and not raw)
+    ):
+        raise forge.ForgeMalformedResponseError(message)
+    return raw
+
+
+def _string_field(
+    mapping: Mapping[str, object],
+    name: str,
+    message: str,
+    *,
+    pattern: re.Pattern[str] | None = None,
+    non_empty: bool = False,
+) -> str:
+    return _string(mapping.get(name), message, pattern=pattern, non_empty=non_empty)
+
+
+def _optional_string_field(
+    mapping: Mapping[str, object],
+    name: str,
+    message: str,
+    *,
+    pattern: re.Pattern[str] | None = None,
+) -> str | None:
+    if mapping.get(name) is None:
+        return None
+    return _string_field(mapping, name, message, pattern=pattern)
+
+
+def _int_field(
+    mapping: Mapping[str, object], name: str, message: str, *, minimum: int | None = None
+) -> int:
+    # `bool` is never accepted here -- it is an `int` subclass in Python, but
+    # no field this adapter reads is boolean where its contract declares it
+    # numeric.
+    raw = mapping.get(name)
+    if isinstance(raw, bool) or not isinstance(raw, int) or (minimum is not None and raw < minimum):
+        raise forge.ForgeMalformedResponseError(message)
+    return raw
+
+
+def _optional_int_field(
+    mapping: Mapping[str, object], name: str, message: str, *, minimum: int | None = None
+) -> int | None:
+    if mapping.get(name) is None:
+        return None
+    return _int_field(mapping, name, message, minimum=minimum)
+
+
+def _bool_field(mapping: Mapping[str, object], name: str, message: str) -> bool:
+    raw = mapping.get(name)
+    if not isinstance(raw, bool):
+        raise forge.ForgeMalformedResponseError(message)
+    return raw
+
+
+def _string_list_field(mapping: Mapping[str, object], name: str, message: str) -> tuple[str, ...]:
+    raw = mapping.get(name)
+    if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
+        raise forge.ForgeMalformedResponseError(message)
+    return cast("tuple[str, ...]", tuple(raw))
+
+
 _READ_ONLY_OPERATIONS = (
     forge.ForgeOperation.ITEM_REFERENCE,
     forge.ForgeOperation.LANDING,
@@ -299,27 +399,16 @@ class GitHubForge:
             )
         except forge.ForgeNotFoundError:
             return forge.ItemReference(forge.ItemState.MISSING)
+        message = "GitHub returned a malformed issue reference"
         values = self._json_lines(raw, "issue reference")
-        if len(values) != 1 or not isinstance(values[0], dict):
-            raise forge.ForgeMalformedResponseError("GitHub returned a malformed issue reference")
-        value = values[0]
-        state = value.get("state")
-        title = value.get("title")
-        body = value.get("body")
-        is_landing = value.get("is_landing")
-        if (
-            state not in {"open", "closed"}
-            or not isinstance(title, str)
-            or (body is not None and not isinstance(body, str))
-            or not isinstance(is_landing, bool)
-        ):
-            raise forge.ForgeMalformedResponseError("GitHub returned a malformed issue reference")
-        return forge.ItemReference(
-            forge.ItemState.OPEN if state == "open" else forge.ItemState.CLOSED,
-            title,
-            body or "",
-            is_landing,
-        )
+        if len(values) != 1:
+            raise forge.ForgeMalformedResponseError(message)
+        mapping = _require_mapping(values[0], message)
+        state = _mapped_field(mapping, "state", _ITEM_REFERENCE_STATES, message)
+        title = _string_field(mapping, "title", message)
+        body = _optional_string_field(mapping, "body", message) or ""
+        is_landing = _bool_field(mapping, "is_landing", message)
+        return forge.ItemReference(state, title, body, is_landing)
 
     def _json_lines(self, raw: str, description: str) -> tuple[object, ...]:
         """Parse compact NDJSON, pretty JSON, or a concatenated JSON sequence."""
@@ -379,59 +468,39 @@ class GitHubForge:
     def _issue_kind(self, value: object) -> board.ItemKind | None:
         return _ISSUE_TYPE_KINDS.get(value.casefold()) if isinstance(value, str) else None
 
-    def _valid_children_progress(self, closed: object, total: object) -> bool:
+    @staticmethod
+    def _valid_children_progress(closed: int | None, total: int | None) -> bool:
         """`childrenClosed`/`childrenTotal` (`sub_issues_summary`) must arrive
         both present or both absent -- `ContainerProgress` has no
-        representation for "closed known, total unknown", and inventing one
-        would let the board show a progress figure the forge never sent.
-        `None` for both is preserved as `None`: `0/0` is a real container
-        state, never a stand-in for "the forge said nothing"."""
+        representation for "closed known, total unknown". `None` for both is
+        preserved as `None`: `0/0` is a real container state, not a stand-in
+        for "the forge said nothing". Each field's own type and
+        non-negativity is already checked by `_optional_int_field`."""
         if closed is None and total is None:
             return True
         if closed is None or total is None:
             return False
-        if isinstance(closed, bool) or not isinstance(closed, int) or closed < 0:
-            return False
-        if isinstance(total, bool) or not isinstance(total, int) or total < 0:
-            return False
         return closed <= total
 
     def _board_issue(self, value: object) -> board.Issue:
-        if not isinstance(value, dict):
-            raise forge.ForgeMalformedResponseError("GitHub returned a malformed board issue")
-        number = value.get("number")
-        title = value.get("title")
-        labels = value.get("labels")
-        body = value.get("body")
-        created_at = value.get("createdAt")
-        updated_at = value.get("updatedAt")
-        kind_raw = value.get("kind")
-        children_closed = value.get("childrenClosed")
-        children_total = value.get("childrenTotal")
-        blocked_by_count = value.get("blockedByCount")
-        if (
-            isinstance(number, bool)
-            or not isinstance(number, int)
-            or number < 1
-            or not isinstance(title, str)
-            or not isinstance(labels, list)
-            or not all(isinstance(label, str) for label in labels)
-            or not isinstance(body, str)
-            or not isinstance(created_at, str)
-            or TIMESTAMP_PATTERN.fullmatch(created_at) is None
-            or not isinstance(updated_at, str)
-            or TIMESTAMP_PATTERN.fullmatch(updated_at) is None
-            or (kind_raw is not None and not isinstance(kind_raw, str))
-            or not self._valid_children_progress(children_closed, children_total)
-            or isinstance(blocked_by_count, bool)
-            or not isinstance(blocked_by_count, int)
-            or blocked_by_count < 0
-        ):
-            raise forge.ForgeMalformedResponseError("GitHub returned a malformed board issue")
+        message = "GitHub returned a malformed board issue"
+        mapping = _require_mapping(value, message)
+        number = _int_field(mapping, "number", message, minimum=1)
+        title = _string_field(mapping, "title", message)
+        labels = _string_list_field(mapping, "labels", message)
+        body = _string_field(mapping, "body", message)
+        created_at = _string_field(mapping, "createdAt", message, pattern=TIMESTAMP_PATTERN)
+        updated_at = _string_field(mapping, "updatedAt", message, pattern=TIMESTAMP_PATTERN)
+        kind_raw = _optional_string_field(mapping, "kind", message)
+        children_closed = _optional_int_field(mapping, "childrenClosed", message, minimum=0)
+        children_total = _optional_int_field(mapping, "childrenTotal", message, minimum=0)
+        blocked_by_count = _int_field(mapping, "blockedByCount", message, minimum=0)
+        if not self._valid_children_progress(children_closed, children_total):
+            raise forge.ForgeMalformedResponseError(message)
         return board.Issue(
             number,
             title,
-            tuple(labels),
+            labels,
             body,
             created_at,
             updated_at,
@@ -442,58 +511,28 @@ class GitHubForge:
         )
 
     def _board_pull_request(self, value: object) -> board.PullRequest:
-        if not isinstance(value, dict):
-            raise forge.ForgeMalformedResponseError(
-                "GitHub returned a malformed board pull request"
-            )
-        number = value.get("number")
-        title = value.get("title")
-        body = value.get("body")
-        if body is None:
-            body = ""
-        head_ref_name = value.get("headRefName")
-        merged_at = value.get("mergedAt")
-        if (
-            isinstance(number, bool)
-            or not isinstance(number, int)
-            or number < 1
-            or not isinstance(title, str)
-            or not isinstance(body, str)
-            or not isinstance(head_ref_name, str)
-            or (merged_at is not None and not isinstance(merged_at, str))
-            or (isinstance(merged_at, str) and TIMESTAMP_PATTERN.fullmatch(merged_at) is None)
-        ):
-            raise forge.ForgeMalformedResponseError(
-                "GitHub returned a malformed board pull request"
-            )
+        message = "GitHub returned a malformed board pull request"
+        mapping = _require_mapping(value, message)
+        number = _int_field(mapping, "number", message, minimum=1)
+        title = _string_field(mapping, "title", message)
+        body = _optional_string_field(mapping, "body", message) or ""
+        head_ref_name = _string_field(mapping, "headRefName", message)
+        merged_at = _optional_string_field(mapping, "mergedAt", message, pattern=TIMESTAMP_PATTERN)
         return board.PullRequest(number, title, body, head_ref_name, merged_at)
 
     def _landing(self, value: object) -> forge.Landing:
-        if not isinstance(value, dict):
-            raise forge.ForgeMalformedResponseError(MALFORMED_PULL_REQUEST)
-        number = value.get("number")
-        body = value.get("body")
-        if body is None:
-            body = ""
-        base_ref_name = value.get("baseRefName")
-        head_ref_name = value.get("headRefName")
-        source_repository = _head_repository(value)
-        author = value.get("author")
-        login = author.get("login") if isinstance(author, dict) else None
-        merged_at = value.get("mergedAt")
-        if (
-            isinstance(number, bool)
-            or not isinstance(number, int)
-            or number < 1
-            or not isinstance(body, str)
-            or not isinstance(base_ref_name, str)
-            or not isinstance(head_ref_name, str)
-            or source_repository is None
-            or not isinstance(login, str)
-            or not login
-            or (merged_at is not None and not isinstance(merged_at, str))
-            or (isinstance(merged_at, str) and TIMESTAMP_PATTERN.fullmatch(merged_at) is None)
-        ):
+        message = MALFORMED_PULL_REQUEST
+        mapping = _require_mapping(value, message)
+        number = _int_field(mapping, "number", message, minimum=1)
+        body = _optional_string_field(mapping, "body", message) or ""
+        base_ref_name = _string_field(mapping, "baseRefName", message)
+        head_ref_name = _string_field(mapping, "headRefName", message)
+        source_repository = _head_repository(mapping)
+        author = mapping.get("author")
+        login_raw = author.get("login") if isinstance(author, dict) else None
+        login = _string(login_raw, message, non_empty=True)
+        merged_at = _optional_string_field(mapping, "mergedAt", message, pattern=TIMESTAMP_PATTERN)
+        if source_repository is None:
             raise forge.ForgeMalformedResponseError(MALFORMED_PULL_REQUEST)
         return forge.Landing(
             number,
@@ -529,29 +568,24 @@ class GitHubForge:
         return landing
 
     def _issue_reference(self, value: object, description: str) -> board.IssueReference:
-        if not isinstance(value, dict):
-            raise forge.ForgeMalformedResponseError(f"GitHub returned a malformed {description}")
-        number = value.get("number")
-        repository_url = value.get("repository")
-        repository = (
-            repository_url.rpartition("/repos/")[2] if isinstance(repository_url, str) else None
+        message = f"GitHub returned a malformed {description}"
+        mapping = _require_mapping(value, message)
+        number = _int_field(mapping, "number", message, minimum=1)
+        repository_url = mapping.get("repository")
+        # A sub-issue/dependency payload names its repository by URL
+        # (`.../repos/OWNER/REPO`), never by the bare name this adapter's
+        # own records carry.
+        derived = (
+            repository_url.rpartition("/repos/")[2]
+            if isinstance(repository_url, str)
+            else repository_url
         )
-        if (
-            isinstance(number, bool)
-            or not isinstance(number, int)
-            or number < 1
-            or repository is None
-            or re.fullmatch(REPOSITORY_PATTERN, repository) is None
-        ):
-            raise forge.ForgeMalformedResponseError(f"GitHub returned a malformed {description}")
+        repository = _string(derived, message, pattern=REPOSITORY_PATTERN)
         return board.IssueReference(repository, number)
 
     def _issue_state(self, value: object, description: str) -> board.BlockerState:
-        state = value.get("state") if isinstance(value, dict) else None
-        parsed = API_ISSUE_STATES.get(state) if isinstance(state, str) else None
-        if parsed is None:
-            raise forge.ForgeMalformedResponseError(f"GitHub returned a malformed {description}")
-        return parsed
+        message = f"GitHub returned a malformed {description}"
+        return _mapped_field(_require_mapping(value, message), "state", API_ISSUE_STATES, message)
 
     def parent_issue(self, number: int) -> board.ParentIssue | None:
         """The issue GitHub records as `number`'s parent, or None when it has none."""
@@ -570,14 +604,14 @@ class GitHubForge:
             # which the nonzero-exit classification (#4.2) reports as
             # `ForgeNotFoundError` -- that is an answer, not a failure.
             return None
+        message = "GitHub returned a malformed parent issue"
         values = self._json_lines(raw, "parent issue")
-        if len(values) != 1 or not isinstance(values[0], dict):
-            raise forge.ForgeMalformedResponseError("GitHub returned a malformed parent issue")
+        if len(values) != 1:
+            raise forge.ForgeMalformedResponseError(message)
         value = values[0]
-        body = value.get("body")
-        kind_raw = value.get("kind")
-        if not isinstance(body, str) or (kind_raw is not None and not isinstance(kind_raw, str)):
-            raise forge.ForgeMalformedResponseError("GitHub returned a malformed parent issue")
+        mapping = _require_mapping(value, message)
+        body = _string_field(mapping, "body", message)
+        kind_raw = _optional_string_field(mapping, "kind", message)
         return board.ParentIssue(
             self._issue_reference(value, "parent issue"), body, self._issue_kind(kind_raw)
         )
@@ -652,34 +686,21 @@ class GitHubForge:
     MALFORMED_BOARD_DEPENDENCY = "GitHub returned a malformed board blocked-by dependency"
 
     def _board_dependency(self, value: object) -> board.IssueDependency:
-        if not isinstance(value, dict):
-            raise forge.ForgeMalformedResponseError(self.MALFORMED_BOARD_DEPENDENCY)
-        number = value.get("number")
-        state = value.get("state")
-        closed_at = value.get("closedAt")
-        repository = value.get("repository")
-        is_pull_request = value.get("isPullRequest")
-        blocker_state = API_ISSUE_STATES.get(state) if isinstance(state, str) else None
-        if (
-            isinstance(number, bool)
-            or not isinstance(number, int)
-            or number < 1
-            or blocker_state is None
-            or not isinstance(repository, str)
-            or re.fullmatch(REPOSITORY_PATTERN, repository) is None
-            or not isinstance(is_pull_request, bool)
-            or (closed_at is not None and not isinstance(closed_at, str))
-            or (isinstance(closed_at, str) and TIMESTAMP_PATTERN.fullmatch(closed_at) is None)
-            or (blocker_state is board.BlockerState.CLOSED and closed_at is None)
-        ):
-            raise forge.ForgeMalformedResponseError(self.MALFORMED_BOARD_DEPENDENCY)
+        message = self.MALFORMED_BOARD_DEPENDENCY
+        mapping = _require_mapping(value, message)
+        number = _int_field(mapping, "number", message, minimum=1)
+        blocker_state = _mapped_field(mapping, "state", API_ISSUE_STATES, message)
+        closed_at = _optional_string_field(mapping, "closedAt", message, pattern=TIMESTAMP_PATTERN)
+        repository = _string_field(mapping, "repository", message, pattern=REPOSITORY_PATTERN)
+        is_pull_request = _bool_field(mapping, "isPullRequest", message)
+        if blocker_state is board.BlockerState.CLOSED and closed_at is None:
+            raise forge.ForgeMalformedResponseError(message)
         parsed_closed_at = None
         if closed_at is not None:
             try:
-                parsed_closed_at = datetime.fromisoformat(closed_at)
+                parsed_closed_at = datetime.fromisoformat(closed_at).astimezone(UTC)
             except ValueError as error:
-                raise forge.ForgeMalformedResponseError(self.MALFORMED_BOARD_DEPENDENCY) from error
-            parsed_closed_at = parsed_closed_at.astimezone(UTC)
+                raise forge.ForgeMalformedResponseError(message) from error
         return board.IssueDependency(
             board.IssueReference(repository, number),
             blocker_state,
@@ -816,18 +837,10 @@ class GitHubForge:
             raise forge.ForgeMalformedResponseError(
                 "GitHub returned invalid created-issue JSON"
             ) from error
-        identifier = created.get("id") if isinstance(created, dict) else None
-        number = created.get("number") if isinstance(created, dict) else None
-        if (
-            isinstance(identifier, bool)
-            or not isinstance(identifier, int)
-            or identifier < 1
-            or isinstance(number, bool)
-            or not isinstance(number, int)
-            or number < 1
-        ):
-            raise forge.ForgeMalformedResponseError("GitHub did not return a created issue")
-        return number
+        message = "GitHub did not return a created issue"
+        mapping = _require_mapping(created, message)
+        _int_field(mapping, "id", message, minimum=1)
+        return _int_field(mapping, "number", message, minimum=1)
 
     def _issue_identifier(self, number: int) -> int:
         """`number`'s internal id, which the sub-issue POST needs and the

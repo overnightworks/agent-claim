@@ -51,6 +51,64 @@ def test_only_the_github_adapter_speaks_gh_argv() -> None:
         assert '"gh"' not in module.read_text(), f"{module.name} must not construct a gh argv"
 
 
+def test_decoder_reads_a_matching_string_field() -> None:
+    assert github._string_field({"title": "Work"}, "title", "bad") == "Work"
+
+
+def test_decoder_fails_loud_on_a_string_field_of_the_wrong_type() -> None:
+    with pytest.raises(ClaimError) as excinfo:
+        github._string_field({"title": 5}, "title", "malformed thing")
+
+    assert str(excinfo.value) == "malformed thing"
+
+
+def test_decoder_reads_a_missing_optional_string_field_as_none() -> None:
+    assert github._optional_string_field({}, "mergedAt", "bad") is None
+
+
+def test_decoder_reads_a_matching_integer_field() -> None:
+    assert github._int_field({"number": 12}, "number", "bad", minimum=1) == 12
+
+
+def test_decoder_fails_loud_on_an_integer_field_below_its_minimum() -> None:
+    with pytest.raises(ClaimError) as excinfo:
+        github._int_field({"number": 0}, "number", "malformed number", minimum=1)
+
+    assert str(excinfo.value) == "malformed number"
+
+
+def test_decoder_fails_loud_on_a_list_field_with_a_wrongly_typed_element() -> None:
+    with pytest.raises(ClaimError) as excinfo:
+        github._string_list_field({"labels": ["ok", 5]}, "labels", "malformed labels")
+
+    assert str(excinfo.value) == "malformed labels"
+
+
+def test_decoder_fails_loud_on_a_string_field_that_does_not_match_its_pattern() -> None:
+    with pytest.raises(ClaimError) as excinfo:
+        github._string_field(
+            {"mergedAt": "yesterday"},
+            "mergedAt",
+            "malformed timestamp",
+            pattern=github.TIMESTAMP_PATTERN,
+        )
+
+    assert str(excinfo.value) == "malformed timestamp"
+
+
+def test_decoder_reads_a_nested_object_field() -> None:
+    author = {"login": "ada"}
+    assert github._string(author.get("login"), "bad") == "ada"
+
+
+def test_decoder_fails_loud_on_a_nested_object_field_of_the_wrong_type() -> None:
+    author = {"login": 5}
+    with pytest.raises(ClaimError) as excinfo:
+        github._string(author.get("login"), "malformed author")
+
+    assert str(excinfo.value) == "malformed author"
+
+
 def board_issue_page_client(*rows: dict[str, object]) -> GitHubForge:
     return GitHubForge(
         github._repository_id(REPOSITORY),
@@ -532,6 +590,7 @@ def test_github_adapter_item_reference_is_missing_after_a_404() -> None:
     ("raw", "match"),
     [
         pytest.param("not-json", "invalid issue reference JSON", id="not-json"),
+        pytest.param("", "malformed issue reference", id="no-response"),
         pytest.param(json.dumps([]), "malformed issue reference", id="no-values"),
         pytest.param(
             json.dumps([{"a": 1}, {"b": 2}]), "malformed issue reference", id="two-values"
@@ -551,6 +610,11 @@ def test_github_adapter_item_reference_is_missing_after_a_404() -> None:
             json.dumps({"state": "open", "title": "x", "body": 5}),
             "malformed issue reference",
             id="body-not-text",
+        ),
+        pytest.param(
+            json.dumps({"state": "open", "title": "x", "body": None, "is_landing": 5}),
+            "malformed issue reference",
+            id="is-landing-not-a-bool",
         ),
     ],
 )
@@ -1672,6 +1736,15 @@ def test_github_adapter_fails_loud_on_a_malformed_parent_kind() -> None:
 def test_github_adapter_fails_loud_when_the_parent_issue_response_is_not_one_object() -> None:
     client = GitHubForge(
         github._repository_id(REPOSITORY), run=lambda arguments, input_data=None: json.dumps([])
+    )
+
+    with pytest.raises(ClaimError, match="malformed parent issue"):
+        client.parent_issue(72)
+
+
+def test_github_adapter_fails_loud_when_the_parent_issue_response_is_empty() -> None:
+    client = GitHubForge(
+        github._repository_id(REPOSITORY), run=lambda arguments, input_data=None: ""
     )
 
     with pytest.raises(ClaimError, match="malformed parent issue"):
