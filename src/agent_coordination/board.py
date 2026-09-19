@@ -64,14 +64,6 @@ WORK_ITEM_KIND = "work-item"
 CLASSIFICATION_LINE_PATTERN = re.compile(r"(?im)^(?P<kind>Work-Item|No-Item):(?P<value>[^\r\n]*)$")
 WORK_ITEM_VALUE_PATTERN = re.compile(QUALIFIED_REFERENCE, re.ASCII)
 RECOVERY_STEP = "close or re-project"
-# Printed by `render` (issue #248) whenever `Board.landings_derivable` is
-# `False`: a board source that cannot list merged pull requests leaves
-# `RECOVERY` and every `Stage.CODE_LANDED` row structurally empty, not
-# temporarily so, and this line is the difference a reader cannot otherwise
-# tell from the same "none" a proven-empty GitHub board would also print.
-LANDINGS_NOT_DERIVABLE_LINE = (
-    "landings are not derivable from this board source: recovery and code-landed stay empty"
-)
 # A slice's pull request must never close its still-open epic — that would
 # retire the epic before its remaining slices exist. This repository's
 # established substitute is a whole line opening with one of these markers
@@ -408,28 +400,62 @@ def trunk_commit_classification(
     return None
 
 
-def trunk_landed_work_items(
-    classifications: Iterable[TrunkClassification | ClassificationDefect | None],
-) -> frozenset[int]:
-    """Item numbers a trunk commit's own trailer block names as landed
-    (issue #304): every `TrunkWorkItemClassification.numbers` value across
-    `classifications` (one `TrunkLanding.classification` per commit),
-    joined into the one set `build_board` unions into `landed_references` --
-    an item landed by a trailer-carrying merge commit is landed whether or
-    not a matching pull request body also named it."""
-    return frozenset(
-        number
-        for classification in classifications
-        if isinstance(classification, TrunkWorkItemClassification)
-        for number in classification.numbers
-    )
-
-
 @dataclass(frozen=True)
 class ClassificationDefect:
     """Why a pull request's classification is not one this repository accepts."""
 
     message: str
+
+
+@dataclass(frozen=True)
+class TrunkLandingItem:
+    """One item a trunk commit's own trailer names as landed (issue #371):
+    `sha`/`committed_at` identify that commit. Read once by the caller from
+    `checkout.trunk_landings` (a layer this module may never import) and
+    handed in as plain data -- one entry per named item, since a trailer
+    block may repeat `Work-Item:` (`TrunkWorkItemClassification`). The one
+    source `landing_rows` below drives the board's Landungen view from,
+    under both storages."""
+
+    item: int
+    sha: str
+    committed_at: datetime
+
+
+@dataclass(frozen=True)
+class TrunkLandingEvidence:
+    """A `LandingRow`'s primary evidence (issue #371): the trailer-carrying
+    trunk commit that named its item landed, read straight from local git
+    history under both storages."""
+
+    sha: str
+
+
+@dataclass(frozen=True)
+class PullRequestLandingEvidence:
+    """A `LandingRow`'s `github`-only supplementary evidence (issue #371):
+    the merged pull request that plainly closed, declared, or (for an
+    epic's slice) touched its item, used only when no trunk commit's own
+    trailer names that item at all -- an older squash landing whose commit
+    message carries no trailer."""
+
+    number: int
+
+
+LandingEvidence = TrunkLandingEvidence | PullRequestLandingEvidence
+
+
+@dataclass(frozen=True)
+class LandingRow:
+    """One row of the board's Landungen view (issue #371): `item` landed at
+    `committed_at`, evidenced by `evidence`. This is the one projection
+    `board`, `--json`, and `board --html` all read, so no two ever disagree
+    about what landed and when -- independent of whether `item` is still
+    open, unlike `Stage.CODE_LANDED`."""
+
+    item: int
+    committed_at: datetime
+    evidence: LandingEvidence
 
 
 @dataclass(frozen=True)
@@ -629,22 +655,22 @@ class Board:
     `recovery` holds the items a merged pull request declared as its work
     item while they stayed open: the landing happened, the bookkeeping did
     not.
+
+    `landings` is the Landungen view (issue #371): `landing_rows`' own
+    projection over the trunk walk (plus, under `github`, its
+    pull-request supplement), independent of `items`/`recovery` -- a row
+    stands whether or not its item is still open.
     """
 
     items: tuple[BoardItem, ...]
     ready_now: tuple[BoardItem, ...]
     stale: tuple[BoardItem, ...]
     recovery: tuple[BoardItem, ...]
+    landings: tuple[LandingRow, ...]
     uncut: tuple[UncutSlices, ...]
     repository: str
     requests: int
     measurements: Measurements
-    # False for a board source that cannot list merged pull requests at all
-    # (issue #248): `recovery` and `Stage.CODE_LANDED` then stay
-    # structurally empty rather than temporarily so, and `render`/
-    # `board_json` say that plainly instead of rendering the same "none"
-    # either way.
-    landings_derivable: bool = True
 
 
 def _validated_priority_labels(raw: dict[str, object]) -> tuple[str, ...]:
@@ -2235,6 +2261,80 @@ def _touched_without_closing(pull_requests: tuple[PullRequest, ...]) -> frozense
     return frozenset(touched)
 
 
+def _merged_at(pull_request: PullRequest) -> datetime:
+    """`pull_request`'s own merge date, parsed the way every other board
+    timestamp is (issue #371): `recent_merged_pull_requests` names only
+    already-merged pull requests, so a `None` here is the forge answering a
+    listing it does not honor, not a shape this function ever papers over."""
+    if pull_request.merged_at is None:
+        raise protocol.ClaimError("a recently-merged pull request carries no merge date")
+    return _timestamp(pull_request.merged_at)
+
+
+def _pull_request_landing_rows(
+    recent_merged_pull_requests: tuple[PullRequest, ...],
+    already_landed: frozenset[int],
+    repository: str,
+) -> tuple[LandingRow, ...]:
+    """`github`'s own supplement to the trunk walk (issue #371): one
+    `LandingRow` per item a merged pull request plainly closes, declares,
+    lands, or (for an epic's slice) touches -- LAND-41's own wide
+    definition, reused whole rather than reimplemented narrower -- that no
+    trunk commit's trailer already names (`already_landed`, the trunk
+    walk's own dedup, trailer path first). The first pull request naming a
+    given item wins when more than one plausibly could,
+    `recent_merged_pull_requests`' own order."""
+    rows: dict[int, LandingRow] = {}
+    for pull_request in recent_merged_pull_requests:
+        claimed = (
+            (
+                _associated_issues((pull_request,), repository)
+                | _touched_without_closing((pull_request,))
+            )
+            - already_landed
+            - rows.keys()
+        )
+        if not claimed:
+            continue
+        committed_at = _merged_at(pull_request)
+        evidence = PullRequestLandingEvidence(pull_request.number)
+        for item in claimed:
+            rows[item] = LandingRow(item, committed_at, evidence)
+    return tuple(rows.values())
+
+
+def landing_rows(
+    trunk_landing_items: tuple[TrunkLandingItem, ...],
+    recent_merged_pull_requests: tuple[PullRequest, ...],
+    repository: str,
+    storage: Storage,
+) -> tuple[LandingRow, ...]:
+    """The board's Landungen view (issue #371): one row per item a trunk
+    commit's own trailer names as landed, across the trunk walk's own depth
+    -- the one source under both storages, independent of whether that item
+    is still open. `github` alone adds one more row per item a merged pull
+    request plainly landed with no trailer of its own (`github`'s squash
+    convention before this repository trailer-tagged every landing),
+    deduplicated against the trunk rows, trailer path first. Newest first,
+    so a reader sees the most recent landing at the top."""
+    trunk_rows = {
+        entry.item: LandingRow(entry.item, entry.committed_at, TrunkLandingEvidence(entry.sha))
+        for entry in trunk_landing_items
+    }
+    pull_request_rows = (
+        _pull_request_landing_rows(recent_merged_pull_requests, frozenset(trunk_rows), repository)
+        if storage is Storage.GITHUB
+        else ()
+    )
+    return tuple(
+        sorted(
+            (*trunk_rows.values(), *pull_request_rows),
+            key=lambda row: row.committed_at,
+            reverse=True,
+        )
+    )
+
+
 def board_rank(item: BoardItem) -> tuple[int, int, int, int, int]:
     """The one order `items`, `ready_now`, and every "is X ahead of Y" comparison share.
 
@@ -2468,10 +2568,18 @@ class BoardBuildInputs:
     now: datetime | None = None
     trunk_landings: tuple[datetime, ...] = ()
     # Item numbers a trunk commit's own trailer block already names as
-    # landed (issue #304, `trunk_landed_work_items`) -- independent of
-    # `trunk_landings` above, which carries only each commit's timestamp for
-    # ruling-freshness, never its classification.
+    # landed (issue #304) -- independent of `trunk_landings` above, which
+    # carries only each commit's timestamp for ruling-freshness, never its
+    # classification. The caller's own rollup of `trunk_landing_items`
+    # below (issue #371), which carries the same numbers with their sha.
     trunk_landed_work_items: frozenset[int] = frozenset()
+    # Every item a trunk commit's own trailer names as landed, `sha` and all
+    # (issue #371) -- the one source `landing_rows` builds the board's
+    # Landungen view from, under both storages. Read once by the caller from
+    # the same `checkout.trunk_landings` call that already feeds
+    # `trunk_landed_work_items`/`landed_at_by_item` above; kept as its own
+    # field rather than folded into those two, since neither carries `sha`.
+    trunk_landing_items: tuple[TrunkLandingItem, ...] = ()
     children: Mapping[int, tuple[ChildItem, ...]] = field(default_factory=dict)
     dependencies: Mapping[int, tuple[IssueDependency, ...]] = field(default_factory=dict)
     requests: int = 0
@@ -2485,7 +2593,6 @@ class BoardBuildInputs:
     # claim with a branch) but no landed one, so the two stay independent
     # booleans instead of one storage-shaped flag.
     open_pull_requests_supported: bool = True
-    landings_derivable: bool = True
     # Every claim's own ref-history lifecycle (issue #357,
     # `store.claim_lifecycle`): `size`/`landed_at` still `None` exactly as
     # that reader leaves them -- `build_board` is the one place both are
@@ -2714,11 +2821,13 @@ def build_board(inputs: BoardBuildInputs) -> Board:
             if item.idle_days > STALE_IDLE_DAYS and item.stage is Stage.TEXT_ONLY
         ),
         recovery=tuple(item for item in ordered if item.number in landed_work_items),
+        landings=landing_rows(
+            inputs.trunk_landing_items, recent_merged_pull_requests, repository, config.storage
+        ),
         uncut=uncut,
         repository=repository,
         requests=inputs.requests,
         measurements=measurements,
-        landings_derivable=inputs.landings_derivable,
     )
 
 
@@ -3031,6 +3140,19 @@ def _project_uncut_row_scope(finding: dict[str, object]) -> None:
             del row["scope"]
 
 
+def _project_landing_row(row: dict[str, object]) -> None:
+    """One `LandingRow`'s JSON shape (issue #371): `committed_at` turned to
+    ISO text like every other board timestamp, and `evidence` -- a nested
+    `TrunkLandingEvidence`/`PullRequestLandingEvidence` dict after `asdict`
+    -- flattened into `sha`/`pull_request`, exactly one of which is ever
+    non-`null`, so a consumer never has to branch on which evidence
+    dataclass produced a row."""
+    row["committed_at"] = cast(datetime, row["committed_at"]).astimezone(UTC).isoformat()
+    evidence = cast("dict[str, object]", row.pop("evidence"))
+    row["sha"] = evidence.get("sha")
+    row["pull_request"] = evidence.get("number")
+
+
 def board_json(board: Board) -> str:
     payload = asdict(board)
     repository = payload.pop("repository")
@@ -3046,6 +3168,8 @@ def board_json(board: Board) -> str:
             if container is not None:
                 for child in container["open_children"]:
                     _project_blocker_references(child, "blocked_by", repository)
+    for row in cast(_JsonRows, payload["landings"]):
+        _project_landing_row(row)
     for finding in cast(_JsonRows, payload["uncut"]):
         _project_uncut_row_scope(finding)
     _project_measurements(cast("dict[str, object]", payload["measurements"]))
@@ -3139,6 +3263,22 @@ def item_label(number: int, storage: Storage) -> str:
     return f"#{number}"
 
 
+# git's own default abbreviation length -- a Landungen row's sha is evidence
+# to look up, not a full identity, so the short form is enough (issue #371).
+_SHORT_SHA_LENGTH = 7
+
+
+def _landing_evidence_cell(evidence: LandingEvidence) -> str:
+    if isinstance(evidence, TrunkLandingEvidence):
+        return evidence.sha[:_SHORT_SHA_LENGTH]
+    return f"PR #{evidence.number}"
+
+
+def _landing_row_line(row: LandingRow, storage: Storage) -> str:
+    date = row.committed_at.astimezone(UTC).date().isoformat()
+    return f"{item_label(row.item, storage)} {date} {_landing_evidence_cell(row.evidence)}"
+
+
 def render(board: Board, *, storage: Storage = Storage.GITHUB) -> str:
     rows = [
         (
@@ -3195,13 +3335,13 @@ def render(board: Board, *, storage: Storage = Storage.GITHUB) -> str:
     ready = ", ".join(item_label(item.number, storage) for item in board.ready_now) or "none"
     stale = ", ".join(item_label(item.number, storage) for item in board.stale) or "none"
     recovery = ", ".join(item_label(item.number, storage) for item in board.recovery) or "none"
+    landings = "\n".join(_landing_row_line(row, storage) for row in board.landings) or "none"
     containers = "\n".join(_container_lines(board, storage)) or "none"
     uncut = "\n".join(_uncut_line(finding, storage) for finding in board.uncut) or "none"
-    landings_note = "" if board.landings_derivable else f"\n{LANDINGS_NOT_DERIVABLE_LINE}"
     measurements = "\n".join(measurements_lines(board.measurements))
     return (
         f"{table}\n\nREADY NOW\n{ready}\n\nSTALE\n{stale}\n\nRECOVERY ({RECOVERY_STEP})\n{recovery}"
-        f"{landings_note}"
+        f"\n\nLANDUNGEN\n{landings}"
         f"\n\nCONTAINERS\n{containers}\n\nUNCUT\n{uncut}\n\nMESSUNGEN\n{measurements}"
         f"\n\nrequests: {board.requests}"
     )

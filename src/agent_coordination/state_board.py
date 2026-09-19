@@ -19,9 +19,12 @@ compare-and-swap write to `items/<id>.md`, implemented in `cli.py` over
 this adapter has no data for any of them. The two pull-request listings
 still return an empty tuple rather than raising: `cli._board` calls them
 unconditionally for every board read, and "no pull requests exist here" is
-this adapter's honest answer, not a refusal. `Stage.CODE_LANDED` and
-`Board.recovery` fall out of that same emptiness -- both stay empty until
-#230 slice 6 adds merge-commit-derived landings (README, "Storage pin").
+this adapter's honest answer, not a refusal. `Board.recovery` -- purely
+pull-request-body-declared -- stays empty from that same emptiness.
+`Stage.CODE_LANDED` and the board's own Landungen view do not: both read
+`checkout.trunk_landings`'s trailer block straight from local git history
+instead (issues #304, #371), independent of this adapter's own missing
+pull-request data.
 """
 
 from __future__ import annotations
@@ -318,9 +321,11 @@ class StateRefBoard:
         # `since` stays the `BoardSource` protocol's own parameter name
         # (positional identity matters for structural conformance) even
         # though this adapter never filters by it: `state-ref` cannot list
-        # merged pull requests at all, so every caller reads
-        # `landings_derivable` first (issue #248) and treats this empty
-        # tuple as "not derivable", never as "proven zero landings".
+        # merged pull requests at all, so this empty tuple is this
+        # adapter's own honest answer -- `Board.recovery` (purely
+        # pull-request-declared) stays empty from it, while `Stage.CODE_LANDED`
+        # and the board's own Landungen view read the trunk walk instead
+        # (issue #371) and never depend on this listing at all.
         del since
         return ()
 

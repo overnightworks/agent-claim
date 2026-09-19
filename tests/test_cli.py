@@ -536,9 +536,9 @@ def test_board_projects_fixture_json_without_github_writes(
         "ready_now",
         "stale",
         "recovery",
+        "landings",
         "uncut",
         "requests",
-        "landings_derivable",
         "measurements",
     }
     first = payload["items"][0]
@@ -762,6 +762,50 @@ def test_board_marks_an_item_landed_by_a_trailer_carrying_trunk_commit_without_a
     payload = json.loads(capsys.readouterr().out)
     ten = next(item for item in payload["items"] if item["number"] == 10)
     assert ten["stage"] == "code-landed"
+
+
+def test_board_dedupes_a_landing_between_the_trunk_trailer_and_a_squash_pull_request(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Issue #371, Beweis 2: under `github`, a trunk-trailer landing (#10)
+    and an older-style squash pull request with no trailer of its own (#11)
+    both show as `landings` rows -- one row per item, the trailer path
+    winning for #10 even though pull request #89 also plainly closes it,
+    proving the dedup rather than merely two different items landing."""
+    client = _single_item_board_environment(monkeypatch, tmp_path)
+    client.board_issues = (
+        board_issue(10, "Trailer landed", complete_contract("Ship #10.")),
+        board_issue(11, "Squash landed", complete_contract("Ship #11.")),
+    )
+    client.board_merged_pull_requests = (
+        board.PullRequest(
+            number=89,
+            title="New-style trailer landing",
+            body="Work-Item: #10\n\nCloses #10",
+            head_ref_name="codex/issue-10-fix",
+            merged_at="2026-08-29T00:00:00Z",
+        ),
+        board.PullRequest(
+            number=90,
+            title="Old-style squash",
+            body="Closes #11",
+            head_ref_name="old/squash-11",
+            merged_at="2026-08-18T00:00:00Z",
+        ),
+    )
+    trailer_landing = checkout.TrunkLanding(
+        "a" * 40, datetime(2026, 8, 29, tzinfo=UTC), board.TrunkWorkItemClassification((10,))
+    )
+    monkeypatch.setattr(checkout, "trunk_landings", lambda *_args, **_kwargs: (trailer_landing,))
+
+    assert issue_claim.main(["--repo", "example/agent-claim", "board", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    landings = {row["item"]: row for row in payload["landings"]}
+    assert landings.keys() == {10, 11}
+    assert landings[10]["sha"] == "a" * 40
+    assert landings[10]["pull_request"] is None
+    assert landings[11]["sha"] is None
+    assert landings[11]["pull_request"] == 90
 
 
 def test_board_html_prints_the_rendered_page_to_stdout(
@@ -3803,7 +3847,7 @@ def test_board_reads_priority_configuration_from_the_checkout_root(
     monkeypatch.setattr(checkout, "_git_output", git_output)
     monkeypatch.setattr(checkout, "trunk_landings", lambda *_args, **_kwargs: ())
 
-    projected = issue_claim._board(client, ()).board
+    projected = issue_claim._board(client, ())
 
     assert [item.number for item in projected.items] == [21, 20]
     assert observed == [["rev-parse", "--show-toplevel"]]
@@ -4412,7 +4456,7 @@ def test_board_fetches_children_only_for_container_kinded_issues(
     monkeypatch.setattr(checkout, "_git_output", lambda _arguments, **_kwargs: str(tmp_path))
     monkeypatch.setattr(checkout, "trunk_landings", lambda *_args, **_kwargs: ())
 
-    projected = issue_claim._board(client, ()).board
+    projected = issue_claim._board(client, ())
 
     assert client.observed_children_lookups == [90]
     container_item = next(item for item in projected.items if item.number == 90)

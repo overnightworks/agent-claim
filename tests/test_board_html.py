@@ -6,7 +6,7 @@ covers what the rendered page says."""
 from __future__ import annotations
 
 import re
-from dataclasses import replace
+from dataclasses import fields, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -33,10 +33,11 @@ def _fixture_page(
     #101, one active claim on a standalone item (#102, optionally also
     blocked by #60 when `lane_blocked` -- issue #300 residual: proves the
     lane card, not just the topic part, carries `open_blocker_label`), one
-    landing #103 is closed by (merged pull request #555), and one landing
-    (#104) whose merged pull request (#556) only board.py's own private
-    "lands" convention resolves -- `_closing_pull_request`'s honest
-    residual. `lane_blocked` defaults to `False` so the GitHub golden page
+    landing #103 closed by merged pull request #555, and one landing (#104)
+    only board.py's own private "lands" convention resolves (pull request
+    #556, issue #371: the Landungen view reuses that same wide matching, so
+    both rows resolve to their own pull request, neither "PR nicht
+    zugeordnet"). `lane_blocked` defaults to `False` so the GitHub golden page
     stays untouched; only the state-ref proof below turns it on. The
     container (#100) also carries a top-level `size = "M"` (issue #357),
     measured into a real (non-weak) estimate by its own one completed lane
@@ -162,7 +163,6 @@ def _fixture_page(
     sources = board_html.BoardSources(
         bodies=bodies,
         claimants={102: board_html.LaneClaimant("Codex Sol", "builder", "codex/issue-102-claims")},
-        recent_merged_pull_requests=recent_merged_pull_requests,
         state_tip="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
         storage=storage,
     )
@@ -175,7 +175,7 @@ def _empty_measurements() -> board.Measurements:
     )
 
 
-def _empty_page(*, landings_derivable: bool = True) -> board_html.BoardPage:
+def _empty_page() -> board_html.BoardPage:
     return board_html.BoardPage(
         repository="acme/board",
         state_tip="",
@@ -183,7 +183,6 @@ def _empty_page(*, landings_derivable: bool = True) -> board_html.BoardPage:
         lanes=(),
         topics=(),
         landed=(),
-        landings_derivable=landings_derivable,
         measurements=_empty_measurements(),
     )
 
@@ -227,14 +226,6 @@ def test_an_empty_board_renders_all_four_headings_with_nichts() -> None:
     for heading in ("Wartet auf dich", "Lanes", "Themen", "Landungen"):
         assert heading in rendered
     assert rendered.count("nichts") == 4
-
-
-def test_landings_not_derivable_shows_the_one_line_instead_of_items() -> None:
-    rendered = board_html.render(_empty_page(landings_derivable=False))
-    assert "nicht ableitbar" in rendered
-    # Landungen alone carries the "nicht ableitbar" line; the other three
-    # empty sections still say "nichts".
-    assert rendered.count("nichts") == 3
 
 
 def test_a_card_carries_the_exact_copyable_rule_command_per_outcome() -> None:
@@ -303,31 +294,22 @@ def test_css_never_sets_a_min_width_above_400px() -> None:
     assert all(width <= 400 for width in widths)
 
 
-def test_a_landed_item_with_no_resolved_pull_request_still_shows() -> None:
+def test_a_landed_item_shows_its_pull_request_evidence() -> None:
+    evidence = board.PullRequestLandingEvidence(41)
     page = replace(
         _empty_page(),
-        landed=(
-            board_html.LandedItem(
-                item=9,
-                item_title="Unklar gemerged",
-                pull_request_number=None,
-                pull_request_title=None,
-            ),
-        ),
+        landed=(board.LandingRow(9, datetime(2026, 8, 19, tzinfo=UTC), evidence),),
     )
     rendered = board_html.render(page)
-    assert "#9 Unklar gemerged" in rendered
-    assert "PR nicht zugeordnet" in rendered
+    assert "<li>#9 2026-08-19 PR #41</li>" in rendered
 
 
-def test_a_trailer_landed_item_shows_with_its_state_ref_id_when_prs_are_unlistable() -> None:
-    """Issue #304 review delta (Codex Sol): state-ref's own
-    `landings_derivable=False` means it cannot list merged pull requests at
-    all, but a trunk commit's own `Work-Item:` trailer still lands an item
-    straight from local git history (`board.trunk_landed_work_items`) --
-    that row shows with its `aco-...` id, date, and short sha instead of the
-    "nicht ableitbar" line the missing pull-request capability alone would
-    otherwise force."""
+def test_a_trailer_landed_item_shows_regardless_of_pull_request_capability() -> None:
+    """Issue #371: a trunk commit's own `Work-Item:` trailer lands an item
+    straight from local git history, independent of whether `github`
+    storage's own pull-request supplement even applies -- that row shows
+    with its `aco-...` id, date, and short sha, under `storage = state-ref`,
+    which never lists a pull request at all."""
     landed_issue = board_issue(9, "Trailer gelandet", complete_contract("Verifizieren."))
     projected = board.build_board(
         board.BoardBuildInputs(
@@ -335,39 +317,33 @@ def test_a_trailer_landed_item_shows_with_its_state_ref_id_when_prs_are_unlistab
             open_pull_requests=(),
             recent_merged_pull_requests=(),
             claims=(),
-            config=board.BoardConfig(),
+            config=board.BoardConfig(storage=board.Storage.STATE_REF),
             repository="example/agent-claim",
             now=datetime(2026, 8, 30, tzinfo=UTC),
-            trunk_landed_work_items=frozenset({9}),
-            landings_derivable=False,
+            trunk_landing_items=(
+                board.TrunkLandingItem(9, "cafefeedcafefeed", datetime(2026, 8, 30, tzinfo=UTC)),
+            ),
         )
     )
     sources = board_html.BoardSources(
         bodies={9: landed_issue.body},
         claimants={},
-        recent_merged_pull_requests=(),
         state_tip="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
         storage=board.Storage.STATE_REF,
-        trunk_landed_items=(
-            board_html.TrunkLandedItem(9, "cafefeedcafefeed", datetime(2026, 8, 30, tzinfo=UTC)),
-        ),
     )
 
     rendered = board_html.render(board_html.build_page(projected, sources))
 
     item_id = items.format_item_id(9)
-    assert "nicht ableitbar" not in rendered
-    assert (
-        f"<li>{item_id} Trailer gelandet &mdash; 2026-08-30 <code>cafefee</code></li>" in rendered
-    )
+    assert f"<li>{item_id} 2026-08-30 <code>cafefee</code></li>" in rendered
 
 
 def test_a_trunk_landed_item_with_no_pull_request_shows_beside_pr_rows() -> None:
     """A github-storage board still lands an item through a squash/merge
     commit's own `Work-Item:` trailer with no matching pull request body
     (`board.py`'s union, issue #304) -- that row renders with its date and
-    short sha alongside a normally PR-resolved landing, never "PR nicht
-    zugeordnet"."""
+    short sha alongside a normally PR-resolved landing, issue #371's own
+    dedup keeping each item to exactly one row."""
     pr_landed_issue = board_issue(103, "Kleine Verbesserung", complete_contract("Verifizieren."))
     trunk_landed_issue = board_issue(105, "Nur Trailer", complete_contract("Beobachten."))
     closing_pull_request = board.PullRequest(
@@ -387,23 +363,21 @@ def test_a_trunk_landed_item_with_no_pull_request_shows_beside_pr_rows() -> None
             config=board.BoardConfig(),
             repository="example/agent-claim",
             now=datetime(2026, 8, 21, tzinfo=UTC),
-            trunk_landed_work_items=frozenset({105}),
+            trunk_landing_items=(
+                board.TrunkLandingItem(105, "1234567890abcdef", datetime(2026, 8, 20, tzinfo=UTC)),
+            ),
         )
     )
     sources = board_html.BoardSources(
         bodies={103: pr_landed_issue.body, 105: trunk_landed_issue.body},
         claimants={},
-        recent_merged_pull_requests=recent_merged_pull_requests,
         state_tip="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-        trunk_landed_items=(
-            board_html.TrunkLandedItem(105, "1234567890abcdef", datetime(2026, 8, 20, tzinfo=UTC)),
-        ),
     )
 
     rendered = board_html.render(board_html.build_page(projected, sources))
 
-    assert "PR #555: Kleine Verbesserung landen" in rendered
-    assert "<li>#105 Nur Trailer &mdash; 2026-08-20 <code>1234567</code></li>" in rendered
+    assert "<li>#103 2026-08-19 PR #555</li>" in rendered
+    assert "<li>#105 2026-08-20 <code>1234567</code></li>" in rendered
 
 
 @pytest.mark.parametrize(
@@ -427,3 +401,18 @@ def test_the_default_outcome_is_marked_recommended(default: str, recommended_fla
             assert "Vorgabe" in body
         else:
             assert "Vorgabe" not in body
+
+
+def test_landings_derivable_and_its_not_derivable_line_are_fully_retired() -> None:
+    """Issue #371, Beweis 3: the trunk walk is always present, so the
+    capability flag and its "nicht ableitbar" line are gone from every
+    module and every JSON/HTML shape that used to carry them -- a structural
+    stand-in for a grep, since a stray reintroduction would otherwise slip
+    back in silently."""
+    assert not hasattr(board, "LANDINGS_NOT_DERIVABLE_LINE")
+    assert not hasattr(board_html, "LANDINGS_NOT_DERIVABLE_TEXT")
+    assert not hasattr(board_html, "TrunkLandedItem")
+    assert not hasattr(board_html, "LandedItem")
+    assert "landings_derivable" not in {field.name for field in fields(board.Board)}
+    assert "landings_derivable" not in {field.name for field in fields(board.BoardBuildInputs)}
+    assert "landings_derivable" not in {field.name for field in fields(board_html.BoardPage)}

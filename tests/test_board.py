@@ -2011,13 +2011,41 @@ def test_an_epic_inherits_the_landed_stage_of_a_slice_that_did_not_close_it() ->
     epic = board_issue(
         60, "Epic cut into dispatched slices", complete_contract("Cut the next slice.")
     )
-    slice_pull_request = board.PullRequest(120, "Slice 1", _slice_pull_request_body(60), "branch")
+    slice_pull_request = board.PullRequest(
+        120, "Slice 1", _slice_pull_request_body(60), "branch", merged_at="2026-08-19T00:00:00Z"
+    )
 
     projected = projected_board(
         (epic,), (), (slice_pull_request,), (), board.BoardConfig(), now=now
     )
 
     assert projected.items[0].stage is board.Stage.CODE_LANDED
+
+
+def test_landing_rows_refuses_a_recently_merged_pull_request_with_no_merge_date() -> None:
+    """Issue #371: `recent_merged_pull_requests` names only already-merged
+    pull requests -- a `None` `merged_at` there is the forge answering a
+    listing it does not honor, refused loud rather than silently dropped or
+    dated with a guess."""
+    epic = board_issue(70, "Epic", complete_contract("Cut the next slice."))
+    slice_pull_request = board.PullRequest(130, "Slice 1", _slice_pull_request_body(70), "branch")
+
+    with pytest.raises(protocol.ClaimError, match="no merge date"):
+        projected_board((epic,), (), (slice_pull_request,), (), board.BoardConfig())
+
+
+def test_render_shows_a_trunk_landing_row_with_its_short_sha() -> None:
+    """Issue #371: `board`'s text output prints a `LANDUNGEN` row for a
+    trunk-trailer landing under `<label> <date> <short sha>`, independent of
+    any pull request."""
+    issue = board_issue(80, "Trunk landed", complete_contract("Ship #80."))
+    trunk_item = board.TrunkLandingItem(80, "0123456789abcdef", datetime(2026, 8, 29, tzinfo=UTC))
+
+    projected = projected_board(
+        (issue,), (), (), (), board.BoardConfig(), trunk_landing_items=(trunk_item,)
+    )
+
+    assert "LANDUNGEN\n#80 2026-08-29 0123456" in board.render(projected)
 
 
 def test_an_epic_is_in_flight_while_an_open_slice_touches_it_without_closing_it() -> None:

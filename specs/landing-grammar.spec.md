@@ -65,8 +65,7 @@ matching line.
 | `--abandoned` outcome | — | — | LAND-39 | — |
 | issue-less lane, `storage = "state-ref"` | — | — | LAND-56 | — |
 | still-open item a merged PR already declared | — | — | — | LAND-43, LAND-51, LAND-53 |
-| `landings_derivable` is false | — | — | — | LAND-44, LAND-46, LAND-54 |
-| a `code-landed` row with no resolved pull request | — | — | — | LAND-45 |
+| the Landungen view's own rows | — | — | — | LAND-44, LAND-45, LAND-46, LAND-54 |
 
 ## The trunk's own trailer block
 
@@ -156,10 +155,10 @@ sentence>`, not restated.
 - [ ] [LAND-43] `aco board`'s `RECOVERY` names a still-open item there from a merged pull request's typed `Work-Item:` line (why one can be open there is CLAIM-52's fact, `specs/claim-record.spec.md`).
 - [ ] [LAND-51] `aco board`'s recovery reading is keyed on that typed `Work-Item:` line alone, never on the trunk trailer and never on an issue's update time.
 - [ ] [LAND-53] `aco next` names every recovery item first, each as `RECOVERY\n<label>: close or re-project`, ahead of the item it recommends next.
-- [ ] [LAND-44] A board source that cannot list merged pull requests at all prints ``landings are not derivable from this board source: recovery and code-landed stay empty`` after `RECOVERY` in text output.
-- [ ] [LAND-54] That same board source's `--json` carries `"landings_derivable": false` as a top-level field.
-- [ ] [LAND-45] `board --html`'s Landungen section pairs `code-landed` with the closing/declaring pull request (`PR #<n>: <title>`), narrower than LAND-41; else `<date> <sha7>`; else `PR nicht zugeordnet`.
-- [ ] [LAND-46] `board --html` shows `nicht ableitbar` in place of the "Landungen" list only once neither a pull request nor a trunk trailer resolves any row.
+- [ ] [LAND-44] `aco board`'s Landungen view lists one row per trunk-trailer-landed item, sha and date from that commit, under both storages, item open or closed.
+- [ ] [LAND-45] Under `github` only, Landungen adds one row per item a merged pull request plainly landed (LAND-41) with no trailer, deduped against trailer rows, which always win.
+- [ ] [LAND-46] `board --html`'s Landungen section renders `<label> <date> <sha7>` or `<label> <date> PR #<n>`; empty renders `nichts`, never a capability-gated line.
+- [ ] [LAND-54] `board --json`'s `"landings"` rows each carry `{"item", "committed_at", "sha", "pull_request"}`, exactly one of `sha`/`pull_request` non-`null`.
 
 ## Never
 

@@ -1203,7 +1203,7 @@ def _release_landing(
         issues=issues,
         history=_ClaimHistory(ages=claim_ages),
         dependencies=dependencies,
-    ).board
+    )
     action = board.next_action(projected)
     parent_closable = (
         None if landed is None else _parent_closable_number(client, landed.number, storage)
@@ -1379,18 +1379,6 @@ def _load_board_config(client: forge.BoardSource, toplevel: Path) -> board.Board
 
 
 @dataclass(frozen=True)
-class _BoardFetch:
-    """`_board`'s own result, plus the recently-merged pull requests it reads
-    to classify each item's `Stage.CODE_LANDED` (#276) -- carried alongside
-    `board` so `board --html`'s Landungen section can pair a landed item
-    with its pull request without a second `gh` read `board` did not
-    already perform."""
-
-    board: board.Board
-    recent_merged_pull_requests: tuple[board.PullRequest, ...]
-
-
-@dataclass(frozen=True)
 class _ClaimHistory:
     """The store's own git-history reads one board build needs (issue #357):
     bundled into one parameter so `_board` stays under the five-argument
@@ -1446,7 +1434,7 @@ def _board(
     issues: tuple[board.Issue, ...] | None = None,
     history: _ClaimHistory | None = None,
     dependencies: dict[int, tuple[board.IssueDependency, ...]] | None = None,
-) -> _BoardFetch:
+) -> board.Board:
     history = history or _ClaimHistory()
     now = datetime.now(UTC)
     config = _load_board_config(client, _resolve_toplevel())
@@ -1495,45 +1483,43 @@ def _board(
             ),
         )
     trunk_landings = checkout.trunk_landings(config.canonical_remote, TRUNK_LANDING_DEPTH)
-    landed_at_by_item = {
-        number: landing.committed_at
+    # One walk of `trunk_landings` feeds three views `board.py` keeps
+    # separate (issue #371): `trunk_landing_items` (sha and all) drives the
+    # Landungen view itself; `landed_at_by_item`/`trunk_landed_work_items`
+    # are its own narrower rollups for `Stage.CODE_LANDED` and the
+    # measurements' landing dates.
+    trunk_landing_items = tuple(
+        board.TrunkLandingItem(number, landing.sha, landing.committed_at)
         for landing in trunk_landings
         if isinstance(landing.classification, board.TrunkWorkItemClassification)
         for number in landing.classification.numbers
-    }
-    return _BoardFetch(
-        board.build_board(
-            board.BoardBuildInputs(
-                issues=issues,
-                open_pull_requests=pull_requests[0],
-                recent_merged_pull_requests=pull_requests[1],
-                claims=claims,
-                config=config,
-                repository=client.repository.path,
-                now=now,
-                trunk_landings=tuple(landing.committed_at for landing in trunk_landings),
-                trunk_landed_work_items=board.trunk_landed_work_items(
-                    landing.classification for landing in trunk_landings
-                ),
-                children=children,
-                dependencies=dependencies,
-                requests=client.requests,
-                claim_ages=history.ages,
-                lane_events=history.lane_events,
-                unparsed_lifecycle_commits=history.unparsed_lifecycle_commits,
-                closed_item_sizes=closed_item_sizes,
-                landed_at_by_item=landed_at_by_item,
-                open_pull_requests_supported=(
-                    client.capability(forge.ForgeOperation.LIST_OPEN_BOARD_PULL_REQUESTS)
-                    is not forge.Capability.UNSUPPORTED
-                ),
-                landings_derivable=(
-                    client.capability(forge.ForgeOperation.LIST_RECENT_MERGED_BOARD_PULL_REQUESTS)
-                    is not forge.Capability.UNSUPPORTED
-                ),
-            )
-        ),
-        pull_requests[1],
+    )
+    landed_at_by_item = {entry.item: entry.committed_at for entry in trunk_landing_items}
+    return board.build_board(
+        board.BoardBuildInputs(
+            issues=issues,
+            open_pull_requests=pull_requests[0],
+            recent_merged_pull_requests=pull_requests[1],
+            claims=claims,
+            config=config,
+            repository=client.repository.path,
+            now=now,
+            trunk_landings=tuple(landing.committed_at for landing in trunk_landings),
+            trunk_landed_work_items=frozenset(entry.item for entry in trunk_landing_items),
+            trunk_landing_items=trunk_landing_items,
+            children=children,
+            dependencies=dependencies,
+            requests=client.requests,
+            claim_ages=history.ages,
+            lane_events=history.lane_events,
+            unparsed_lifecycle_commits=history.unparsed_lifecycle_commits,
+            closed_item_sizes=closed_item_sizes,
+            landed_at_by_item=landed_at_by_item,
+            open_pull_requests_supported=(
+                client.capability(forge.ForgeOperation.LIST_OPEN_BOARD_PULL_REQUESTS)
+                is not forge.Capability.UNSUPPORTED
+            ),
+        )
     )
 
 
@@ -3924,13 +3910,13 @@ def _observed_board(
     ledger; the forge is still the board's own data source)."""
     worktree, _remote, observed = _store_observation()
     live_claims = tuple(observed.claims.values())
-    fetch = _board(
+    projected = _board(
         session.forge(),
         live_claims,
         issues=issues,
         history=_claim_history(worktree, observed),
     )
-    return _ObservedBoard(fetch.board, live_claims)
+    return _ObservedBoard(projected, live_claims)
 
 
 def _lane_claimants(observed: protocol.ClaimState) -> dict[int, board_html.LaneClaimant]:
@@ -3948,16 +3934,15 @@ def _board_html_page(
     session: _ReadSession, *, served: board_html.ServedRuleForm | None = None
 ) -> str:
     """The one state -> page render both `board --html` (issue #276) and
-    `board --serve` (issue #280) use -- every `gh` read `board` already
-    performs (`_board`'s own merged-pull-request fetch serves the Landungen
-    section instead of asking `gh` a second time) plus one extra local
-    `checkout.trunk_landings` read for the trunk-landed rows' own commit
-    identity (issue #304 review delta), rendered fresh every call so
-    `--serve`'s `GET` never reads stale state."""
+    `board --serve` (issue #280) use -- every `gh`/local-git read `board`
+    already performs, including `_board`'s own `checkout.trunk_landings`
+    read, which now also serves the Landungen section's rows directly
+    through `projected.landings` (issue #371) -- rendered fresh every call
+    so `--serve`'s `GET` never reads stale state."""
     client = session.forge()
     issues = client.list_open_board_issues()
     worktree, _remote, observed = _store_observation()
-    fetch = _board(
+    projected = _board(
         client,
         tuple(observed.claims.values()),
         issues=issues,
@@ -3965,27 +3950,13 @@ def _board_html_page(
     )
     bodies = {issue.number: issue.body for issue in issues}
     config = _board_config(_resolve_toplevel())
-    # `_board`'s own `checkout.trunk_landings` read (issue #304) stays
-    # private to its `BoardBuildInputs` classification; the Landungen
-    # section needs each landed item's own commit identity too (issue #304
-    # review delta), which that classification discards, so this reads the
-    # same local git history a second time rather than widening `_BoardFetch`
-    # for the one caller that needs the raw records.
-    trunk_landed_items = tuple(
-        board_html.TrunkLandedItem(number, landing.sha, landing.committed_at)
-        for landing in checkout.trunk_landings(config.canonical_remote, TRUNK_LANDING_DEPTH)
-        if isinstance(landing.classification, board.TrunkWorkItemClassification)
-        for number in landing.classification.numbers
-    )
     sources = board_html.BoardSources(
         bodies=bodies,
         claimants=_lane_claimants(observed),
-        recent_merged_pull_requests=fetch.recent_merged_pull_requests,
         state_tip="" if observed.tip is None else str(observed.tip),
         storage=config.storage,
-        trunk_landed_items=trunk_landed_items,
     )
-    page = board_html.build_page(fetch.board, sources)
+    page = board_html.build_page(projected, sources)
     return board_html.render(page, served=served)
 
 
@@ -4234,7 +4205,7 @@ def _claim_target_checks(
         tuple(observed.claims.values()),
         issues=tuple(open_by_number.values()),
         history=_ClaimHistory(ages=_claim_ages(context.worktree, observed)),
-    ).board
+    )
     checks = _slice_rule_checks(
         BoardReferenceLookup(client, client.repository.path, open_by_number),
         target_issue,
