@@ -813,6 +813,8 @@ done_when = "Observable terminal condition"
 
 frozen_until = { trigger = "named trigger", ruled_on = 2026-09-06 }
 
+scope = ["src/widget.py", "tests/test_widget.py"]
+
 [[expectation]]
 text = "An operator sentence"
 default = "later"
@@ -825,15 +827,16 @@ ruled_on = 2026-09-06
 [[slice]]
 index = 4
 title = "Block contract in issue bodies"
+scope = ["src/agent_coordination/board.py"]
 ```
 ````
 
 `version`, `now`, `next`, and `done_when` are required; `now`/`next`/`done_when`
 may be the empty string (an unfilled skeleton — incomplete, but still a valid
-block). `frozen_until`, `expectation`, and `slice` are optional; an explicit
-`slice = []` is a table intentionally left present but empty (it still counts
-as "has a table" for `cut --row`). Each `[[expectation]]` is either *proposed*
-(`default = "yes" | "no" | "later"`) or *ruled* (`ruling = "yes" | "no" | "later"`
+block). `frozen_until`, `scope`, `expectation`, and `slice` are optional; an
+explicit `slice = []` is a table intentionally left present but empty (it
+still counts as "has a table" for `cut --row`). Each `[[expectation]]` is
+either *proposed* (`default = "yes" | "no" | "later"`) or *ruled* (`ruling = "yes" | "no" | "later"`
 with a TOML date `ruled_on`) — never both, never neither; a ruled `"later"`
 transcribes an explicit operator decision to defer, not merely a proposer's
 guessed default. It may also carry three optional card fields (issue #295,
@@ -847,11 +850,25 @@ also right after a `/`), a `javascript:` or `data:` reference anywhere, a
 `url(` reference anywhere, and an `href`/`xlink:href` not starting with `#`
 — anything else is refused with a sentence, both on write and on
 a stored body that already carries one). Absent, a card falls back to `text`
-as before. Per-slice
-files, done-when, and dependencies stay in the human prose beside the block;
-only a slice's `index` and `title` are typed. Schema and version tokens, and
-an expectation's `default`/`ruling` values, are protocol — always this exact
-English spelling; every other value (`now`/`next`/`done_when`,
+as before.
+
+`scope` (issue #331) is optional both at the block's top level and on any
+`[[slice]]` row, and, when present, must be a non-empty array of paths —
+an empty array is `body malformed: scope: scope must name at least one path`
+(`slice[N].scope must name at least one path` for a row). Each entry goes
+through the exact same grammar a live `claim --scope` value does: no absolute
+path, no `..` segment, no leading/trailing space, no duplicate — the owning
+refusal becomes the body's own defect sentence verbatim (e.g. `body
+malformed: scope: claim scope must be repository-relative: '/etc/passwd'`).
+A valid array always renders sorted and deduplicated, and always ahead of
+`[[expectation]]`/`[[slice]]` — TOML would otherwise bind a `scope` written
+after a table to that table's last entry instead of to the top level.
+Missing means unknown, not empty: a body with no `scope` key projects `None`,
+never `()`. Per-slice done-when and dependencies still stay in the human
+prose beside the block; a slice's `index`, `title`, and optional `scope` are
+typed. Schema and version tokens, and an expectation's `default`/`ruling`
+values, are protocol — always this exact English spelling; every other value
+(`now`/`next`/`done_when`,
 `frozen_until.trigger`, expectation `text`/`question`/`example`/`picture`,
 slice `title`) is the operator's own prose and is never parsed. `next`'s own non-parsed vocabulary
 (`keiner | keine | nichts | none | -` for "no further work", plus `tbd | todo
