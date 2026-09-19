@@ -58,7 +58,7 @@ with `--json` also `specs/release.spec.md`'s own `{"ok": false, "error":
 
 ## The body precondition
 
-- [ ] [CUT-05] `<n>`'s body failing `body --check` refuses `#<n> body malformed: <field>: <message>; cut needs a valid agent-claim block`, exit `2`.
+- [ ] [CUT-05] `<n>` with a malformed body (BODY-50) refuses `#<n> body malformed: <field>: <message>; cut needs a valid agent-claim block`, exit `2`; an incomplete body (BODY-51) is accepted.
 
 ## Row selection
 
