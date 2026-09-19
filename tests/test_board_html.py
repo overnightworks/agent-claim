@@ -25,13 +25,19 @@ from agent_coordination import board, board_html, items
 GOLDEN_PATH = Path(__file__).parent / "board_html_golden.html"
 
 
-def _fixture_page(*, storage: board.Storage = board.Storage.GITHUB) -> board_html.BoardPage:
+def _fixture_page(
+    *, storage: board.Storage = board.Storage.GITHUB, lane_blocked: bool = False
+) -> board_html.BoardPage:
     """A container (#100) with two children -- one closed, one open and
     blocked (#101, blocked by #50) -- one open `[[expectation]]` line on
-    #101, one active claim on a standalone item (#102), one landing #103
-    is closed by (merged pull request #555), and one landing (#104) whose
-    merged pull request (#556) only board.py's own private "lands"
-    convention resolves -- `_closing_pull_request`'s honest residual."""
+    #101, one active claim on a standalone item (#102, optionally also
+    blocked by #60 when `lane_blocked` -- issue #300 residual: proves the
+    lane card, not just the topic part, carries `open_blocker_label`), one
+    landing #103 is closed by (merged pull request #555), and one landing
+    (#104) whose merged pull request (#556) only board.py's own private
+    "lands" convention resolves -- `_closing_pull_request`'s honest
+    residual. `lane_blocked` defaults to `False` so the GitHub golden page
+    stays untouched; only the state-ref proof below turns it on."""
     child_dependency = block_dependency(50)
     open_child = board_issue(
         101,
@@ -54,6 +60,7 @@ def _fixture_page(*, storage: board.Storage = board.Storage.GITHUB) -> board_htm
         102,
         "Laufende Lane",
         complete_contract("Fertigstellen.", now="Am Bauen.", done_when="Gemergt."),
+        blocked_by_count=1 if lane_blocked else 0,
     )
     landed_item = board_issue(103, "Kleine Verbesserung", complete_contract("Verifizieren."))
     unresolved_landed_item = board_issue(104, "Randfall", complete_contract("Beobachten."))
@@ -80,6 +87,9 @@ def _fixture_page(*, storage: board.Storage = board.Storage.GITHUB) -> board_htm
         merged_at="2026-08-19T00:00:00Z",
     )
     recent_merged_pull_requests = (closing_pull_request, landing_only_pull_request)
+    dependencies = {101: (child_dependency,)}
+    if lane_blocked:
+        dependencies[102] = (block_dependency(60),)
     projected = projected_board(
         (container_issue, open_child, claimed_item, landed_item, unresolved_landed_item),
         open_pull_requests=(),
@@ -87,7 +97,7 @@ def _fixture_page(*, storage: board.Storage = board.Storage.GITHUB) -> board_htm
         claims=(claim,),
         config=board.BoardConfig(),
         children={100: (board.ChildItem(101, board.ChildState.OPEN),)},
-        dependencies={101: (child_dependency,)},
+        dependencies=dependencies,
         now=datetime(2026, 8, 21, tzinfo=UTC),
     )
     bodies = {
@@ -130,22 +140,28 @@ def test_render_matches_the_golden_page_byte_for_byte() -> None:
 def test_render_labels_cards_topics_and_lanes_with_state_ref_ids() -> None:
     """Issue #292 proof 3: under `storage = "state-ref"`, `board --html`
     shows `aco-xxxxxx` -- never `#n` -- in every topic, lane, card heading
-    (a card's `item-tag` carries the item label since issue #295), and a
-    blocked topic part's own `blocked by` reference (issue #300, Codex Terra
-    review: `BoardSources.storage` reaches `open_blocker_label` there too,
-    not just the item labels around it); the `github` golden page above
-    stays byte-identical, so only this storage's own rendering differs."""
-    rendered = board_html.render(_fixture_page(storage=board.Storage.STATE_REF))
+    (a card's `item-tag` carries the item label since issue #295), a
+    blocked topic part's own `blocked by` reference, and a blocked lane
+    card's own `Blocked by` fact under its pin (issue #300, Codex delta:
+    `BoardSources.storage` reaches `open_blocker_label` for `_lane_card`
+    too, not just the topic parts around it); the `github` golden page
+    above stays byte-identical, so only this storage's own rendering
+    differs."""
+    rendered = board_html.render(_fixture_page(storage=board.Storage.STATE_REF, lane_blocked=True))
     open_child_id = items.format_item_id(101)  # the card's topic part
     container_id = items.format_item_id(100)  # the container topic
     claimed_item_id = items.format_item_id(102)  # the lane
     blocker_id = items.format_item_id(50)  # #101's own blocker
+    lane_blocker_id = items.format_item_id(60)  # the lane's own blocker
 
     assert f"<strong>{container_id} Sammelitem</strong>" in rendered
     assert f"<span>{open_child_id} Zugang klären (blocked by {blocker_id})</span>" in rendered
-    assert f"<h3>{claimed_item_id} Laufende Lane</h3>" in rendered
+    lane_html = re.search(r'<article class="lane">.*?</article>', rendered, re.DOTALL)
+    assert lane_html is not None
+    assert f"<h3>{claimed_item_id} Laufende Lane</h3>" in lane_html.group()
+    assert f"<dt>Blocked by</dt><dd>{lane_blocker_id}</dd>" in lane_html.group()
     assert f'<span class="item-tag">{open_child_id} Zugang klären</span>' in rendered
-    for number in (50, 100, 101, 102):
+    for number in (50, 60, 100, 101, 102):
         assert f">#{number} " not in rendered
         assert f"#{number})" not in rendered
 

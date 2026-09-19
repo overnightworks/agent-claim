@@ -959,10 +959,30 @@ _EXPECTATION_PICTURE_SMIL_HREF_ATTRIBUTE = re.compile(
     r"attributename\s*=\s*(?:\"(?:xlink:)?href\"|'(?:xlink:)?href'|(?:xlink:)?href(?=[\s/>]))",
     re.IGNORECASE,
 )
-_EXPECTATION_PICTURE_SMIL_EXTERNAL_TARGET = re.compile(
-    r"""\b(?:to|from|values)\s*=\s*(?:"(?!#)|'(?!#)|(?![\s"'#]))""", re.IGNORECASE
+# `values` lists a `;`-separated sequence of keyframes (SMIL's own syntax),
+# so a rule that only reads the first character after `=` misses a later
+# external segment such as `values="#a;http://evil.example"` (issue #300
+# residual, Codex delta). The regex only captures the raw attribute value in
+# each of SMIL's own quoting forms; `_expectation_picture_smil_external_target`
+# below splits it on `;` and refuses if any trimmed segment does not start
+# with `#`, so `to`/`from` (which never carry a `;`) are covered by the same
+# one-segment case.
+_EXPECTATION_PICTURE_SMIL_TARGET_ATTRIBUTE = re.compile(
+    r"""\b(?:to|from|values)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]*))""", re.IGNORECASE
 )
 _EXPECTATION_PICTURE_SVG_ELEMENT = re.compile(r"<[^<>]+>")
+
+
+def _expectation_picture_smil_external_target(element: str) -> bool:
+    """Whether `element` sets SMIL `to`, `from`, or `values` to any
+    `;`-separated segment that does not start with `#` (issue #300
+    residual): `values` can list several keyframes, so every segment is
+    checked, not only the value's first character."""
+    for match in _EXPECTATION_PICTURE_SMIL_TARGET_ATTRIBUTE.finditer(element):
+        raw = next(group for group in match.groups() if group is not None)
+        if any(not segment.strip().startswith("#") for segment in raw.split(";")):
+            return True
+    return False
 
 
 def _expectation_picture_smil_external_href(value: str) -> bool:
@@ -972,7 +992,7 @@ def _expectation_picture_smil_external_href(value: str) -> bool:
     document (issue #300, Codex Terra review)."""
     return any(
         _EXPECTATION_PICTURE_SMIL_HREF_ATTRIBUTE.search(element)
-        and _EXPECTATION_PICTURE_SMIL_EXTERNAL_TARGET.search(element)
+        and _expectation_picture_smil_external_target(element)
         for element in _EXPECTATION_PICTURE_SVG_ELEMENT.findall(value)
     )
 

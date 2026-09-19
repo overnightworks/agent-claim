@@ -320,6 +320,11 @@ def test_append_expectation_writes_the_card_fields() -> None:
             id="smil-animated-xlink-href",
         ),
         pytest.param(
+            '<svg><animate attributeName="href" values="#a;http://evil.example"/></svg>',
+            "must not animate href to an external target",
+            id="smil-animated-href-values-later-segment-external",
+        ),
+        pytest.param(
             "<svg><style>rect{fill:url(http://evil.example/x.png)}</style></svg>",
             "must not contain a url() reference",
             id="style-element-url",
@@ -412,6 +417,14 @@ def test_expectation_picture_allows_an_unrelated_animation_to_an_external_url() 
         '<svg><animate attributeName="href" to="#ok"/>'
         '<animate attributeName="x" to="http://evil.example"/></svg>'
     )
+    assert board._expectation_picture_defect(picture) is None
+
+
+def test_expectation_picture_allows_an_animated_href_with_every_values_segment_internal() -> None:
+    """`values` lists every keyframe `;`-separated (issue #300 residual):
+    two internal anchors are as harmless as one, so a picture must not be
+    refused just because `values` contains a semicolon."""
+    picture = '<svg><animate attributeName="href" values="#a;#b"/></svg>'
     assert board._expectation_picture_defect(picture) is None
 
 
