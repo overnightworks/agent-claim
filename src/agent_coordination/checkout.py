@@ -17,30 +17,58 @@ GROK_SESSION_ID_ENV = "GROK_SESSION_ID"
 CLAUDE_SESSION_ID_ENV = "CLAUDE_SESSION_ID"
 
 
-# One owner for every git-subprocess failure sentence: `_git_output`,
-# `versioned_paths`, and `path_is_tracked` each run their own `git`
-# subprocess and must translate the same three failure shapes -- a missing
-# executable, a timeout, and a nonzero exit with no readable detail -- to
-# the same `ClaimError` text (issue #315 Sonar S1192).
+# One owner for every git-subprocess failure sentence: `_git_run` launches
+# every `git` subprocess this module runs and translates the same three
+# launch-failure shapes -- a missing executable, a timeout, and any other
+# OS-level launch failure -- to the same `ClaimError` text (issue #315 Sonar
+# S1192; issue #314 gate G's follow-up folds `versioned_paths` and
+# `path_is_tracked` into this one owner too, F1). `_git_output`,
+# `versioned_paths`, and `path_is_tracked` each interpret a successful
+# launch's exit status their own way.
 _GIT_MISSING_EXECUTABLE_ERROR = "git is required for issue claims"
 _GIT_TIMED_OUT_ERROR = "git timed out while validating the build checkout"
 _UNKNOWN_GIT_FAILURE_DETAIL = "unknown git failure"
 
 
-def _git_output(arguments: list[str]) -> str:
+def _git_run(arguments: list[str], *, directory: Path | None = None) -> process.CapturedResult:
+    """Launch `git arguments`, in `directory` when given via `-C` (issue
+    #314) -- every caller that must judge a specific checkout rather than
+    the calling process's own cwd names `directory` explicitly, so the
+    checkout a security decision reads is never an accident of where the
+    process happens to run.
+
+    Every OS-level launch failure -- a missing executable, a timeout, or
+    anything else (permission denied, out of file descriptors, `-C` naming a
+    non-directory, ...) -- fails closed as a `ClaimError`, never an
+    uncaught traceback out of `protect`'s hook boundary. Interpreting a
+    successful launch's exit status is each caller's own job.
+    """
+    command = ["git", *(["-C", str(directory)] if directory is not None else []), *arguments]
     try:
-        result = process.run_captured(["git", *arguments])
+        return process.run_captured(command)
     except process.ExecutableMissingError as error:
         raise ClaimError(_GIT_MISSING_EXECUTABLE_ERROR) from error
     except process.ProcessTimedOutError as error:
         raise ClaimError(_GIT_TIMED_OUT_ERROR) from error
+    except OSError as error:
+        raise ClaimError(f"git failed to launch: {error}") from error
+
+
+def _git_failure_detail(result: process.CapturedResult) -> str:
+    return (
+        result.stderr.decode().strip()
+        or result.stdout.decode().strip()
+        or _UNKNOWN_GIT_FAILURE_DETAIL
+    )
+
+
+def _git_output(arguments: list[str], *, directory: Path | None = None) -> str:
+    """`git arguments`'s stdout, in `directory` when given via `-C` (issue
+    #314) or the calling process's own cwd otherwise; a nonzero exit fails
+    closed."""
+    result = _git_run(arguments, directory=directory)
     if result.exit_status != 0:
-        detail = (
-            result.stderr.decode().strip()
-            or result.stdout.decode().strip()
-            or _UNKNOWN_GIT_FAILURE_DETAIL
-        )
-        raise ClaimError(detail)
+        raise ClaimError(_git_failure_detail(result))
     # Trailing-only: every caller wants the one newline `git` appends after its
     # output trimmed, but `git status --porcelain`'s short format is
     # significant in its *leading* column (` M path` names a modified file by
@@ -123,52 +151,39 @@ def parse_remote_location(url: str) -> RemoteLocation:
     raise ClaimError(f"remote url {url!r} names no recognized host")
 
 
-def versioned_paths() -> tuple[str, ...]:
-    try:
-        result = process.run_captured(["git", "ls-files", "-z", "--full-name"])
-    except process.ExecutableMissingError as error:
-        raise ClaimError(_GIT_MISSING_EXECUTABLE_ERROR) from error
-    except process.ProcessTimedOutError as error:
-        raise ClaimError(_GIT_TIMED_OUT_ERROR) from error
+def versioned_paths(*, directory: Path | None = None) -> tuple[str, ...]:
+    """Every versioned path git tracks, from `directory` via `-C` when given
+    (issue #314: `rescope`'s own resolved checkout, never the calling
+    process's cwd) or the process's own checkout otherwise (`claim`'s own
+    precondition, unaffected by #314)."""
+    result = _git_run(["ls-files", "-z", "--full-name"], directory=directory)
     if result.exit_status != 0:
-        detail = (
-            result.stderr.decode().strip()
-            or result.stdout.decode().strip()
-            or _UNKNOWN_GIT_FAILURE_DETAIL
-        )
-        raise ClaimError(detail)
+        raise ClaimError(_git_failure_detail(result))
     return tuple(dict.fromkeys(path for path in result.stdout.decode().split("\0") if path))
 
 
-def path_is_tracked(path: str) -> bool:
+def path_is_tracked(path: str, *, directory: Path | None = None) -> bool:
     """Whether `path` (repo-relative, forward slashes) is tracked in git's
-    index right now (issue #315) -- absent, untracked, and ignored all read
-    as `False`, since `git ls-files --error-unmatch` exits 1, and only 1,
-    for a path it does not track. A dedicated call, not
-    `path in versioned_paths()`: that listing's exact membership and count
-    are a different concern (scope-width math over every tracked file), so
-    a test fixing one axis never has to carry the other.
+    index right now, read from `directory` via `-C` when given (issue #314:
+    `_board_config`'s own resolved checkout, never the calling process's
+    cwd) or the process's own checkout otherwise (issue #315) -- absent,
+    untracked, and ignored all read as `False`, since
+    `git ls-files --error-unmatch` exits 1, and only 1, for a path it does
+    not track. A dedicated call, not `path in versioned_paths()`: that
+    listing's exact membership and count are a different concern
+    (scope-width math over every tracked file), so a test fixing one axis
+    never has to carry the other.
 
     Exit 1 is the one status `--error-unmatch` defines for "not tracked";
     any other nonzero exit (e.g. 128 outside a git repository) is a real git
     failure, matching `versioned_paths`'s handling in this module -- it must
     not read as an untrusted pin instead of a git error."""
-    try:
-        result = process.run_captured(["git", "ls-files", "--error-unmatch", "--", path])
-    except process.ExecutableMissingError as error:
-        raise ClaimError(_GIT_MISSING_EXECUTABLE_ERROR) from error
-    except process.ProcessTimedOutError as error:
-        raise ClaimError(_GIT_TIMED_OUT_ERROR) from error
+    result = _git_run(["ls-files", "--error-unmatch", "--", path], directory=directory)
     if result.exit_status == 0:
         return True
     if result.exit_status == 1:
         return False
-    detail = (
-        result.stderr.decode().strip()
-        or result.stdout.decode().strip()
-        or _UNKNOWN_GIT_FAILURE_DETAIL
-    )
-    raise ClaimError(detail)
+    raise ClaimError(_git_failure_detail(result))
 
 
 def paths_under_scope(paths: tuple[str, ...], scope: tuple[str, ...]) -> tuple[str, ...]:
@@ -181,13 +196,17 @@ def paths_under_scope(paths: tuple[str, ...], scope: tuple[str, ...]) -> tuple[s
     )
 
 
-def _scope_directories(paths: tuple[str, ...]) -> tuple[str, ...]:
-    """Return the scope entries that name a git tree or on-disk directory."""
+def _scope_directories(paths: tuple[str, ...], *, directory: Path | None = None) -> tuple[str, ...]:
+    """Return the scope entries that name a git tree or on-disk directory,
+    read from `directory` via `-C` when given (issue #314 gate B4:
+    `rescope`'s own resolved checkout, never the calling process's cwd) or
+    the process's own checkout otherwise (`claim`'s own precondition,
+    unaffected by #314)."""
     directories: list[str] = []
     toplevel: str | None = None
     for path in paths:
         try:
-            kind = _git_output(["cat-file", "-t", f"HEAD:{path}"])
+            kind = _git_output(["cat-file", "-t", f"HEAD:{path}"], directory=directory)
         except ClaimError:
             kind = ""
         if kind == "tree":
@@ -195,7 +214,7 @@ def _scope_directories(paths: tuple[str, ...]) -> tuple[str, ...]:
             continue
         if toplevel is None:
             try:
-                toplevel = _git_output(["rev-parse", "--show-toplevel"])
+                toplevel = _git_output(["rev-parse", "--show-toplevel"], directory=directory)
             except ClaimError:
                 toplevel = ""
         if toplevel and (Path(toplevel) / path).is_dir():
@@ -206,6 +225,14 @@ def _scope_directories(paths: tuple[str, ...]) -> tuple[str, ...]:
 ISOLATED_WORKTREE_RECIPE = (
     "git worktree add ../<repo>-worktrees/issue-<n>-<slug> -b <agent>/issue-<n>-<slug>"
 )
+
+# One owner for both worktree-isolation refusal sentences (issue #314 gate
+# B6, Sonar S1192): `claim`'s own cwd-based precondition
+# (`_validate_worktree_branch`) and `rescope`'s path-resolved one
+# (`_refuse_shared_checkout`) raise the identical two sentences, so each is
+# spelled once here instead of twice across the two functions.
+ISOLATED_NON_MAIN_BRANCH_REFUSAL = "build claims require an isolated non-main worktree branch; "
+LINKED_ISOLATED_WORKTREE_REFUSAL = "build claims require a linked isolated worktree checkout; "
 
 
 class WorktreeRepair(StrEnum):
@@ -245,15 +272,17 @@ def _worktree_repair_instruction(repair: WorktreeRepair, *, branch: str | None) 
 def _validate_worktree_branch(
     branch: str, *, repair: WorktreeRepair = WorktreeRepair.CREATE
 ) -> None:
-    """Require an isolated non-main worktree checked out on `branch`.
-
-    Rescope uses this without also binding HEAD to the claim base or requiring
-    a clean tree, so a lane can sharpen scope after it has already committed.
+    """Require an isolated non-main worktree checked out on `branch`, read
+    from the calling process's own cwd -- `claim`'s own precondition, since
+    a fresh claim is created by literally standing in the worktree it
+    claims. `rescope` no longer shares this (issue #314): it judges an
+    already-resolved `PathCheckout` instead, via `_refuse_shared_checkout`
+    below, so a rescope invoked from a foreign cwd is not silently judged by
+    the wrong checkout.
     """
     if is_default_branch(branch):
         raise ClaimError(
-            "build claims require an isolated non-main worktree branch; "
-            f"{_worktree_repair_instruction(repair, branch=None)}"
+            f"{ISOLATED_NON_MAIN_BRANCH_REFUSAL}{_worktree_repair_instruction(repair, branch=None)}"
         )
     current = _git_output(["branch", "--show-current"])
     git_directory = Path(_git_output(["rev-parse", "--git-dir"])).resolve()
@@ -262,8 +291,116 @@ def _validate_worktree_branch(
         raise ClaimError(f"claim branch {branch!r} does not match checkout branch {current!r}")
     if git_directory == common_directory:
         raise ClaimError(
-            "build claims require a linked isolated worktree checkout; "
+            f"{LINKED_ISOLATED_WORKTREE_REFUSAL}"
             f"{_worktree_repair_instruction(repair, branch=branch)}"
+        )
+
+
+class CheckoutKind(StrEnum):
+    """Whether a resolved checkout is the shared main checkout or a linked,
+    isolated worktree (issue #314) -- the one structural fact `protect` and
+    `rescope` judge a write or a rescope by, read from the checkout itself
+    rather than from a branch name."""
+
+    MAIN = "main"
+    LINKED_WORKTREE = "linked_worktree"
+
+
+@dataclass(frozen=True)
+class PathCheckout:
+    """The git checkout that owns a directory, resolved directly from that
+    directory (issue #314) -- never from the calling process's own cwd, so
+    the same directory yields the same checkout regardless of where the
+    process runs. `protect` resolves this from a hook payload path's own
+    parent directory; `rescope` resolves it from the first absolute path it
+    is given, falling back to its own process cwd when none is (its one
+    other legitimate location signal). `common_directory` is the one fact
+    shared by every worktree of the same repository -- the key a caller
+    fetching store state once per repository, not once per worktree, caches
+    on (issue #314 gate G5). `has_commit` is `False` for an unborn branch
+    (a symbolic `HEAD` naming a branch with no commit yet): a resolved
+    checkout with no commit must never itself authorize a write (issue #314
+    gate G3), since its branch name can coincidentally match a still-live
+    claim's."""
+
+    toplevel: Path
+    branch: str
+    kind: CheckoutKind
+    common_directory: Path
+    has_commit: bool
+
+
+NO_COMMIT_CHECKOUT_REASON = "no commit on this branch"
+NOT_IN_A_REPOSITORY_REASON = "not in a repository"
+
+
+def resolve_path_checkout(directory: Path) -> PathCheckout | None:
+    """The checkout owning `directory`, or `None` when `directory` sits
+    outside every git repository ("not in a repository", issue #314).
+
+    Every git read runs `git -C directory`, so the result is the same
+    regardless of the calling process's own cwd -- unlike the ad hoc,
+    cwd-implicit `_git_output` calls this replaces in `protect` and
+    `rescope`, which silently read the *process's* checkout instead of the
+    one the caller actually means. `--path-format=absolute` makes the
+    toplevel/git-dir/common-dir comparison below meaningful: git's default,
+    relative-to-`-C`-directory paths would otherwise have to be re-resolved
+    against `directory` itself, not the caller's own cwd.
+    """
+    try:
+        combined = _git_output(
+            [
+                "rev-parse",
+                "--path-format=absolute",
+                "--show-toplevel",
+                "--git-dir",
+                "--git-common-dir",
+            ],
+            directory=directory,
+        )
+        toplevel, git_directory, common_directory = combined.splitlines()
+        branch = _git_output(["branch", "--show-current"], directory=directory)
+    except (ClaimError, ValueError):
+        return None
+    kind = CheckoutKind.MAIN if git_directory == common_directory else CheckoutKind.LINKED_WORKTREE
+    try:
+        _git_output(["rev-parse", "--verify", "HEAD"], directory=directory)
+        has_commit = True
+    except ClaimError:
+        has_commit = False
+    return PathCheckout(
+        toplevel=Path(toplevel),
+        branch=branch,
+        kind=kind,
+        common_directory=Path(common_directory),
+        has_commit=has_commit,
+    )
+
+
+def _refuse_shared_checkout(path_checkout: PathCheckout, *, repair: WorktreeRepair) -> None:
+    """`rescope`'s own worktree-isolation refusal (issue #314): the same
+    invariant `_validate_worktree_branch` enforces for `claim`, judged from
+    an already path-resolved checkout's own `directory` instead of a fresh
+    git read in the calling process's own cwd (gate G4).
+
+    Unlike `claim`'s own `is_default_branch`, which falls back to guessing
+    `{main, master}` when `origin/HEAD` cannot be resolved, this denies
+    outright: `rescope` judges an attacker-reachable payload location, so a
+    repository whose default branch is `trunk`, read from a checkout with no
+    recorded `origin/HEAD` yet, must never slip through unnoticed as "not
+    the default branch".
+    """
+    default_branch = default_branch_name(directory=path_checkout.toplevel)
+    if default_branch is None:
+        raise ClaimError(DEFAULT_BRANCH_UNKNOWN_REASON)
+    if path_checkout.branch == default_branch:
+        raise ClaimError(
+            f"{ISOLATED_NON_MAIN_BRANCH_REFUSAL}{_worktree_repair_instruction(repair, branch=None)}"
+        )
+    if path_checkout.kind is CheckoutKind.MAIN:
+        raise ClaimError(
+            f"{LINKED_ISOLATED_WORKTREE_REFUSAL}"
+            f"{_worktree_repair_instruction(repair, branch=path_checkout.branch)}"
         )
 
 
@@ -291,23 +428,44 @@ def _validate_checkout(request: ClaimRequest) -> None:
 
 DEFAULT_BRANCH_FALLBACK = frozenset({"main", "master"})
 
+# `protect`'s and `rescope`'s own denial when a resolved checkout's default
+# branch cannot be determined at all (issue #314 gate G4): unlike `claim`'s
+# `is_default_branch` fallback below, they never guess -- see
+# `_refuse_shared_checkout`'s and `_protect_basic_checkout_denial`'s own
+# docstrings for why the two callers of the same `default_branch_name`
+# resolver accept different risk here.
+DEFAULT_BRANCH_UNKNOWN_REASON = "default branch unknown"
 
-def _origin_head_ref() -> str | None:
-    """The `origin/HEAD` symbolic ref (e.g. `refs/remotes/origin/trunk`), or
+# One owner for `protect`'s "not main" denial (issue #314 repeat gate,
+# finding 4, Sonar S1192): `_protect_not_main_denial` in `cli.py` returns
+# this for both a shared main checkout and a linked worktree that sits on
+# the resolved default branch, so the one production spelling lives here
+# instead of twice in that function.
+PROTECT_NOT_MAIN_REASON = "not main"
+
+
+def _origin_head_ref(*, directory: Path | None = None) -> str | None:
+    """The `origin/HEAD` symbolic ref (e.g. `refs/remotes/origin/trunk`),
+    read from `directory` via `-C` when given (issue #314: a resolved
+    checkout's own default-branch lookup, never the calling process's cwd)
+    or the process's own checkout otherwise (`claim`'s own precondition) --
     `None` when a clone or `git remote set-head` never recorded one -- the
     two-name fallback below is the caller's job (issue #238), since `claim`
     and `protect` word their refusals differently."""
     try:
-        symbolic = _git_output(["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"])
+        symbolic = _git_output(
+            ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"], directory=directory
+        )
     except ClaimError:
         return None
     return symbolic or None
 
 
-def default_branch_name() -> str | None:
-    """The repository's default branch name, read from `origin/HEAD`, or
-    `None` when git cannot resolve it."""
-    ref = _origin_head_ref()
+def default_branch_name(*, directory: Path | None = None) -> str | None:
+    """The repository's default branch name, read from `directory`'s own
+    `origin/HEAD` when given (issue #314) or the process's own checkout
+    otherwise, or `None` when git cannot resolve it."""
+    ref = _origin_head_ref(directory=directory)
     if ref is None:
         return None
     return ref.removeprefix("refs/remotes/origin/")
@@ -316,9 +474,18 @@ def default_branch_name() -> str | None:
 def is_default_branch(branch: str) -> bool:
     """Whether `branch` is the repository's default branch (issue #238):
     the name `origin/HEAD` resolves to, or the historical `{"main", "master"}`
-    guess when a repository has no recorded `origin/HEAD`. One owner for both
-    `claim`'s worktree precondition and `protect`'s "not main" refusal, so a
-    repository whose default branch is `trunk` is guarded the same way."""
+    guess when a repository has no recorded `origin/HEAD`.
+
+    `claim`'s own worktree precondition (`_validate_worktree_branch`) alone:
+    always read from the calling process's own cwd, since a fresh claim is
+    created by literally standing in the worktree it claims -- there is no
+    attacker-reachable payload location to spoof here, so the historical
+    guess stays an accepted risk (issue #238) this function keeps
+    unchanged. `protect` and `rescope` judge a resolved checkout's default
+    branch directly through `default_branch_name(directory=...)` instead
+    (issue #314 gate G4) and deny outright when it cannot be resolved,
+    rather than share this guess.
+    """
     resolved = default_branch_name()
     if resolved is not None:
         return branch == resolved

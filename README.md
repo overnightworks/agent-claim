@@ -190,10 +190,15 @@ never reads the board and reports neither. A forge failure after the release
 has already committed never undoes or fails it -- one hint line stands in for
 `freed`/`next` instead, naming the repair.
 `rescope <issue> --add <path> [--drop <path>]` changes a live claim's scope
-without releasing it: the claim id and base stay, added paths are advisory
-like `claim`, and a resulting wide scope uses the same `--whole` rule as
-`claim`. There is no release window. It does not require HEAD to match
-base or a clean tree.
+without releasing it. Each `--add`/`--drop` value is an absolute path, never
+repository-relative: `rescope` resolves its checkout from that path directly
+(issue #314), the same way `protect`'s hook resolves from a payload path and
+never from the process's own cwd, so a relative value denies outright rather
+than being guessed against cwd. Each resolved value is then canonicalized to
+a repository-relative scope entry before the same `claim`-style rules apply:
+the claim id and base stay, added paths are advisory like `claim`, and a
+resulting wide scope uses the same `--whole` rule as `claim`. There is no
+release window. It does not require HEAD to match base or a clean tree.
 
 Run commands in the repository being coordinated, or pass `--repo
 OWNER/REPOSITORY`. A claim must begin from a clean linked worktree and binds its
@@ -1096,6 +1101,20 @@ hook file. The CLI does not write `~/.grok`.
   }
 }
 ```
+
+Install this in the settings of the session that actually runs the
+subagents -- the orchestrating head's settings, not each worktree's own --
+since every dispatched subagent's tool calls (and Codex's `apply_patch`)
+share that one session's process, cwd included (issue #314). `protect`
+judges a write from the payload's own path, never from that shared process
+cwd: it resolves the checkout that owns `Path(file_path).parent` (or, for an
+`apply_patch` patch touching several files, each path's own checkout in
+turn, one denial winning), so the same session's hook correctly tells a
+subagent's linked worktree from another lane's by branch -- allowing only a
+write whose own checkout holds a live claim on that branch and covers the
+path -- denying `not main` for a path in the shared main checkout, and
+denying `not in a repository` for a path outside every git checkout
+entirely.
 
 The matcher is `*` (every tool call), not a write-tool name list: a name the
 matcher itself skipped would never reach `protect` at all. `protect` is the

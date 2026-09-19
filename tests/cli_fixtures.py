@@ -40,7 +40,7 @@ def stub_board_config_tracked(monkeypatch: pytest.MonkeyPatch) -> None:
     `conftest.py`'s "everything but git-toplevel isolation stays local to its
     test module") so every test file states in its own body that it reads a
     tracked board.toml by default."""
-    monkeypatch.setattr(checkout, "path_is_tracked", lambda _path: True)
+    monkeypatch.setattr(checkout, "path_is_tracked", lambda _path, **_kwargs: True)
 
 
 def _git_checkout(
@@ -51,12 +51,26 @@ def _git_checkout(
     common_directory: str = "/repo/.git",
     dirty: str = "",
 ) -> dict[tuple[str, ...], str]:
+    toplevel = "/repo"
     return {
         ("rev-parse", "HEAD"): head,
-        ("rev-parse", "--show-toplevel"): "/repo",
+        ("rev-parse", "--verify", "HEAD"): head,
+        ("rev-parse", "--show-toplevel"): toplevel,
         ("branch", "--show-current"): branch,
         ("rev-parse", "--git-dir"): git_directory,
         ("rev-parse", "--git-common-dir"): common_directory,
+        # `resolve_path_checkout`'s one combined call (issue #314): the same
+        # three facts above, in the order it requests them via
+        # `-C`/`--path-format=absolute`, so `rescope`'s path-based checkout
+        # resolution reads the identical fixture the separate keys above
+        # already describe.
+        (
+            "rev-parse",
+            "--path-format=absolute",
+            "--show-toplevel",
+            "--git-dir",
+            "--git-common-dir",
+        ): "\n".join((toplevel, git_directory, common_directory)),
         ("status", "--porcelain"): dirty,
         ("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"): "refs/remotes/origin/main",
     }
@@ -76,7 +90,7 @@ def _fallback_git_output(
     additionally covers the otherwise-untested case of git exiting 0 with an
     empty ref name."""
 
-    def git(arguments: list[str]) -> str:
+    def git(arguments: list[str], **_kwargs: object) -> str:
         key = tuple(arguments)
         if key == _ORIGIN_HEAD_SYMBOLIC_REF:
             if origin_head_empty:
@@ -170,9 +184,8 @@ def arrange_scope_width(
     monkeypatch.setattr(
         checkout,
         "_scope_directories",
-        lambda paths: tuple(path for path in paths if path in directories),
+        lambda paths, **_kwargs: tuple(path for path in paths if path in directories),
     )
-    if versioned is not None:
-        monkeypatch.setattr(checkout, "versioned_paths", lambda: versioned)
+    monkeypatch.setattr(checkout, "versioned_paths", lambda **_kwargs: versioned or ())
     if validate_checkout:
         monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)

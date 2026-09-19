@@ -1181,7 +1181,7 @@ class TestCliStateRefForge:
         config_dir = tmp_path / ".agent-claim"
         config_dir.mkdir()
         (config_dir / "board.toml").write_text('storage = "state-ref"\n')
-        monkeypatch.setattr(checkout, "path_is_tracked", lambda _path: True)
+        monkeypatch.setattr(checkout, "path_is_tracked", lambda _path, **_kwargs: True)
 
     def _live_state_ref_checkout(
         self,
@@ -1274,7 +1274,7 @@ class TestCliStateRefForge:
         assert f"#{RULABLE_NUMBER}" not in rulings_out
 
         monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
-        monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+        monkeypatch.setattr(checkout, "_scope_directories", lambda paths, **_kwargs: ())
         monkeypatch.setattr(checkout, "versioned_paths", lambda: ("README",))
         claimed = issue_claim.main(
             [
@@ -1403,7 +1403,7 @@ class TestCliStateRefForge:
         `claim` test stubs it."""
         self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, _item_files())
         monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
-        monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+        monkeypatch.setattr(checkout, "_scope_directories", lambda paths, **_kwargs: ())
         monkeypatch.setattr(checkout, "versioned_paths", lambda: ("README",))
 
         claimed = issue_claim.main(
@@ -2068,7 +2068,7 @@ class TestCliStateRefForge:
         capsys.readouterr()
 
         monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
-        monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+        monkeypatch.setattr(checkout, "_scope_directories", lambda paths, **_kwargs: ())
         monkeypatch.setattr(checkout, "versioned_paths", lambda: ("README",))
         claimed = issue_claim.main(
             [
@@ -2155,7 +2155,7 @@ class TestCliStateRefForge:
         item_files = {**_item_files(), **_rulable_item_files()}
         self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, item_files)
         monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
-        monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+        monkeypatch.setattr(checkout, "_scope_directories", lambda paths, **_kwargs: ())
         monkeypatch.setattr(checkout, "versioned_paths", lambda: ("README",))
 
         claimed = issue_claim.main(
@@ -2517,7 +2517,7 @@ class TestCliStateRefForge:
             monkeypatch, tmp_path, bare_remote, worktree, _close_scenario_item_files()
         )
         monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
-        monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+        monkeypatch.setattr(checkout, "_scope_directories", lambda paths, **_kwargs: ())
         monkeypatch.setattr(checkout, "versioned_paths", lambda: ("README",))
         claimed = issue_claim.main(
             [
@@ -2630,7 +2630,7 @@ class TestCliStateRefForge:
         sentence README says it prints."""
         self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, {})
         monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
-        monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+        monkeypatch.setattr(checkout, "_scope_directories", lambda paths, **_kwargs: ())
         monkeypatch.setattr(checkout, "versioned_paths", lambda: ("README",))
 
         bootstrap_out = _run_ok(["bootstrap"], capsys).strip()
