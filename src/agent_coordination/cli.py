@@ -9,7 +9,7 @@ import sys
 import uuid
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, date, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -224,17 +224,33 @@ def _claim_cost_line(
     return f"{n} of {total} versioned files ({percent}%); {_touch_summary(own_scope, touches)}"
 
 
+def _resolved_claim_branch(arguments: argparse.Namespace) -> str:
+    """`claim`'s own branch: `--branch` when given, else the current
+    checkout branch -- the one resolution `_request` and `_cmd_claim` (issue
+    #337, which needs it before `_request` builds a full request) both bind
+    to, so it stays a single owner rather than two copies of the same git
+    call and validation."""
+    branch = (
+        checkout._git_output(["branch", "--show-current"])
+        if arguments.branch is None
+        else arguments.branch
+    )
+    return protocol._valid_branch({"branch": branch})
+
+
 def _request(arguments: argparse.Namespace) -> protocol.ClaimRequest:
+    """The validated `ClaimRequest` `claim` submits, `arguments.scope`
+    bound as-is when given. Omitted -- issue mode only (issue #337); lane
+    mode still refuses it, `_cmd_claim`'s own first check -- it binds the
+    empty tuple instead of raising: `_cmd_claim` replaces it with the
+    item's own body scope, or a live claim's stored scope on replay, before
+    this request's scope ever reaches a wide-scope check or a write."""
     agent = protocol._outbound_text(checkout._resolved_agent(arguments.agent), "agent", maximum=128)
     role = protocol._outbound_text(arguments.role, "role", maximum=64)
     base = checkout._git_output(["rev-parse", "HEAD"]) if arguments.base is None else arguments.base
     if protocol.COMMIT_PATTERN.fullmatch(base) is None:
         raise protocol.ClaimError("base must be a full lowercase commit SHA")
-    if arguments.branch is None:
-        branch = checkout._git_output(["branch", "--show-current"])
-    else:
-        branch = arguments.branch
-    branch = protocol._valid_branch({"branch": branch})
+    branch = _resolved_claim_branch(arguments)
     issue = _optional_issue_number(arguments.issue)
     identity = _resolved_identity(issue, branch)
     claim_id = arguments.claim_id or uuid.uuid4().hex
@@ -249,7 +265,7 @@ def _request(arguments: argparse.Namespace) -> protocol.ClaimRequest:
         role=role,
         base=base,
         branch=branch,
-        scope=protocol._valid_scope(arguments.scope),
+        scope=() if arguments.scope is None else protocol._valid_scope(arguments.scope),
         claim_id=claim_id,
         out_of_order_reason=arguments.out_of_order,
         whole_reason=whole_reason,
@@ -391,8 +407,11 @@ def _add_claim_parser(commands: argparse._SubParsersAction) -> None:
     claim.add_argument(
         "--scope",
         action="append",
-        required=True,
-        help="a repository-relative path; repeat --scope for more than one path",
+        help=(
+            "a repository-relative path; repeat --scope for more than one path; issue mode "
+            "takes it from the item's own body when omitted, and refuses a value whose set "
+            "differs from it; lane mode always requires it"
+        ),
     )
     claim.add_argument(
         "--claim-id",
@@ -500,6 +519,14 @@ def _add_cut_parser(commands: argparse._SubParsersAction) -> None:
         type=int,
         metavar="N",
         help="the slice table's # column value to cut; default is the first cuttable row",
+    )
+    cut.add_argument(
+        "--scope",
+        action="append",
+        help=(
+            "a repository-relative path; repeat --scope for more than one path; fills the "
+            "cut slice's own row scope when it has none, and becomes the child's scope"
+        ),
     )
     cut.add_argument("--json", action="store_true", help=JSON_HELP)
 
@@ -634,6 +661,11 @@ def _add_item_parser(commands: argparse._SubParsersAction) -> None:
         type=items.parse_origin,
         metavar="FORGE#N",
         help="bind this lane to a foreign forge issue, e.g. gitlab#514",
+    )
+    new.add_argument(
+        "--scope",
+        action="append",
+        help="a repository-relative path; repeat --scope for more than one path",
     )
     new.add_argument("--json", action="store_true", help=JSON_HELP)
     show = item_commands.add_parser(
@@ -2469,8 +2501,9 @@ def _cmd_item_new(parsed: argparse.Namespace) -> int:
         if kind is board.ItemKind.CONTAINER
         else board.BLOCK_CHILD_SKELETON
     )
+    body = _block_body_with_scope(skeleton, _requested_body_scope(parsed.scope))
     item_id = client.create_item(
-        title=parsed.title, body=skeleton, kind=kind, parent=parsed.parent, origin=parsed.origin
+        title=parsed.title, body=body, kind=kind, parent=parsed.parent, origin=parsed.origin
     )
     _print_item_new_result(item_id, items.item_number(item_id), as_json=parsed.json)
     return 0
@@ -3652,41 +3685,187 @@ def _cmd_rescope(parsed: argparse.Namespace, _session: _WriteSession) -> None:
     print(f"RESCOPED {_claim_subject(rescoped)}: {rescoped.claim_id}")
 
 
+LANE_CLAIM_SCOPE_REQUIRED = "lane claim requires --scope; a lane names no item to derive it from"
+CLAIM_SCOPE_MISSING = "item names no scope; pass --scope"
+CLAIM_SCOPE_MISMATCH = "claim scope differs from the item's scope; correct the item first"
+
+
+def _item_scope(
+    client: forge.ForgeReader,
+    open_by_number: Mapping[int, board.Issue],
+    number: int,
+    *,
+    storage: board.Storage,
+) -> tuple[str, ...] | None:
+    """The item's own top-level `scope = [...]` (issue #337): read from
+    `open_by_number` -- the open-board listing `claim` needs anyway for its
+    slice-rule checks -- when the target is open, so a derived scope costs
+    no separate body read; a closed, missing, or pull-request target never
+    appears there, and falls back to the one single-item lookup
+    `_issue_reference_state` uses for the same reason (issue #245). Both
+    project through `board.parse_body`, so a state-ref and a GitHub item are
+    read exactly alike, and a malformed body simply carries no scope rather
+    than failing `claim` with an unrelated defect message."""
+    issue = open_by_number.get(number)
+    body = (
+        issue.body if issue is not None else _item_body_or_refuse(client, number, command="claim")
+    )
+    return board.parse_body(body, storage=storage).scope
+
+
+def _resolved_claim_request(
+    requested: protocol.ClaimRequest,
+    observed: protocol.ClaimState,
+    session: _WriteSession,
+    storage: board.Storage,
+) -> tuple[protocol.ClaimRequest, dict[int, board.Issue] | None]:
+    """`requested` with its scope filled in for an issue-mode claim that
+    omitted `--scope` (issue #337), paired with the open-board listing that
+    filling it cost -- `None` when it cost nothing, so `_cmd_claim` never
+    fetches that board a second time for its own slice-rule checks.
+
+    A live claim already on this identity and branch is a replayed,
+    interrupted request even when the retry drops `--scope`: its own stored
+    scope is taken outright, with no forge call and no body read at all, so
+    a retry never refuses merely because the body changed, or lost its
+    scope, since the original claim was opened -- and `_matching_store_claim`
+    is guaranteed `None` for an identity with no live claim at all, so this
+    is the only place that needs to look. Otherwise the item's own body
+    `scope = [...]` is the source of truth, fetched from the same open board
+    `_cmd_claim` needs anyway for its slice-rule checks, so the caller reuses
+    it rather than asking again."""
+    identity = requested.identity
+    assert isinstance(identity, protocol.IssueIdentity)
+    live = observed.claims.get(protocol.claim_key(identity, requested.branch))
+    if live is not None:
+        return replace(requested, scope=live.scope), None
+    client = session.forge()
+    open_by_number = {issue.number: issue for issue in client.list_open_board_issues()}
+    item_scope = _item_scope(client, open_by_number, identity.issue, storage=storage)
+    if item_scope is None:
+        raise protocol.ClaimUnavailableError(CLAIM_SCOPE_MISSING)
+    return replace(requested, scope=item_scope), open_by_number
+
+
+def _reject_scope_mismatch(
+    open_by_number: Mapping[int, board.Issue],
+    target_issue: int,
+    scope: tuple[str, ...],
+    storage: board.Storage,
+) -> None:
+    """Refuses an explicit `--scope` whose canonical set differs from the
+    target item's own body scope (issue #337) -- reusing the open board
+    `_cmd_claim` fetches once, whether for a derived scope or for its
+    slice-rule checks, so this costs no second forge read. A target item
+    outside the fetched open list, or one with no `scope` field of its own,
+    has nothing to differ from and is silently accepted, exactly as before
+    this field existed. A derived scope always came from this same body, so
+    the comparison here is trivially satisfied -- never an extra read, just
+    an inexpensive no-op check."""
+    issue = open_by_number.get(target_issue)
+    if issue is None:
+        return
+    item_scope = board.parse_body(issue.body, storage=storage).scope
+    if item_scope is not None and item_scope != scope:
+        raise protocol.ClaimUnavailableError(CLAIM_SCOPE_MISMATCH)
+
+
+def _scope_versioning(scope: tuple[str, ...], whole_reason: str | None) -> ScopeVersioning:
+    """`claim`'s local, forge-free scope checks (issue #207's comma guard,
+    the wide-scope width gate) against the real checkout, run once the
+    requested scope is final -- whether it came from `--scope` or was
+    derived from the item's own body."""
+    versioned = checkout.versioned_paths()
+    _reject_ungrounded_comma_scope(scope, versioned, flag="--scope")
+    n, total, share = _reject_wide_scope(scope, versioned, whole_reason)
+    return ScopeVersioning(n, total, share)
+
+
+@dataclass(frozen=True)
+class _ClaimTargetContext:
+    """The board-environment scalars `_claim_target_checks` needs beyond
+    the claim request itself, bundled once instead of PLR0913's
+    five-scalar ceiling (issue #337): `storage` and `worktree` `_cmd_claim`
+    already resolved before this point, and `open_by_number` -- the open
+    board, when deriving the scope already fetched it, `None` otherwise --
+    so a fresh issue claim that did not derive its scope still fetches the
+    board exactly once, inside `_claim_target_checks` itself."""
+
+    storage: board.Storage
+    worktree: Path
+    open_by_number: dict[int, board.Issue] | None
+
+
+def _claim_target_checks(
+    session: _WriteSession,
+    requested: protocol.ClaimRequest,
+    observed: protocol.ClaimState,
+    context: _ClaimTargetContext,
+) -> tuple[tuple[SliceCheck, ...], int | None, protocol.ActiveClaim | None]:
+    """`_cmd_claim`'s slice-rule checks against its own target issue,
+    `()`/`None`/`None` for a lane claim -- there is no target issue to
+    check against. A replayed claim (`_matching_store_claim`) skips the
+    forge and the checks entirely, since an interrupted retry was already
+    accepted once. A fresh issue claim reuses `context.open_by_number` when
+    deriving the scope already fetched it (issue #337), so this never
+    re-fetches the open board a second time, then runs the mismatch and
+    slice-rule gates against it. `session.forge()` -- built and
+    Erwartung-6-checked on this first call (issue #245) -- runs only on
+    this fresh-claim path, never for a lane claim or a replay."""
+    if not isinstance(requested.identity, protocol.IssueIdentity):
+        return (), None, None
+    target_issue = requested.identity.issue
+    replayed = _matching_store_claim(observed, requested)
+    if replayed is not None:
+        return (), target_issue, replayed
+    client = session.forge()
+    open_by_number = context.open_by_number
+    if open_by_number is None:
+        open_by_number = {issue.number: issue for issue in client.list_open_board_issues()}
+    _reject_scope_mismatch(open_by_number, target_issue, requested.scope, context.storage)
+    projected = _board(
+        client,
+        tuple(observed.claims.values()),
+        issues=tuple(open_by_number.values()),
+        claim_ages=_claim_ages(context.worktree, observed),
+    ).board
+    checks = _slice_rule_checks(
+        BoardReferenceLookup(client, client.repository.path, open_by_number),
+        target_issue,
+        projected,
+        requested.out_of_order_reason,
+        context.storage,
+    )
+    return checks, target_issue, replayed
+
+
 def _cmd_claim(parsed: argparse.Namespace, session: _WriteSession) -> int:
     requested = _request(parsed)
-    versioned = checkout.versioned_paths()
-    _reject_ungrounded_comma_scope(requested.scope, versioned, flag="--scope")
-    n, total, share = _reject_wide_scope(requested.scope, versioned, requested.whole_reason)
-    worktree, canonical_remote, observed = _store_observation()
-    _require_state_ref(observed)
-    checks: tuple[SliceCheck, ...] = ()
-    target_issue: int | None = None
-    replayed = None
-    storage = _board_config(_resolve_toplevel()).storage
-    if isinstance(requested.identity, protocol.IssueIdentity):
-        target_issue = requested.identity.issue
-        replayed = _matching_store_claim(observed, requested)
-        if replayed is None:
-            # A lane claim never reaches here (only an `IssueIdentity` not
-            # already replayed does), so `session.forge()` -- built and
-            # Erwartung-6-checked on this first call (issue #245) -- never
-            # runs for a lane claim at all.
-            client = session.forge()
-            open_issues = client.list_open_board_issues()
-            open_by_number = {issue.number: issue for issue in open_issues}
-            projected = _board(
-                client,
-                tuple(observed.claims.values()),
-                issues=open_issues,
-                claim_ages=_claim_ages(worktree, observed),
-            ).board
-            checks = _slice_rule_checks(
-                BoardReferenceLookup(client, client.repository.path, open_by_number),
-                target_issue,
-                projected,
-                requested.out_of_order_reason,
-                storage,
-            )
+    if isinstance(requested.identity, protocol.LaneIdentity) and not requested.scope:
+        raise protocol.ClaimUnavailableError(LANE_CLAIM_SCOPE_REQUIRED)
+    open_by_number: dict[int, board.Issue] | None = None
+    if requested.scope or not isinstance(requested.identity, protocol.IssueIdentity):
+        # Scope already final (given, or a lane's own required value): the
+        # local shape checks run first, exactly as before this field
+        # existed, so a comma or width refusal never touches the store or
+        # resolves the repository toplevel.
+        versioning = _scope_versioning(requested.scope, requested.whole_reason)
+        worktree, canonical_remote, observed = _store_observation()
+        _require_state_ref(observed)
+        storage = _board_config(_resolve_toplevel()).storage
+    else:
+        # `--scope` was omitted in issue mode: the item's own scope has to
+        # come from the store, and usually the forge, before it can even be
+        # shape-checked -- both observed exactly once, here, so an omitted-
+        # scope claim never fetches either a second time (issue #337).
+        worktree, canonical_remote, observed = _store_observation()
+        _require_state_ref(observed)
+        storage = _board_config(_resolve_toplevel()).storage
+        requested, open_by_number = _resolved_claim_request(requested, observed, session, storage)
+        versioning = _scope_versioning(requested.scope, requested.whole_reason)
+    checks, target_issue, replayed = _claim_target_checks(
+        session, requested, observed, _ClaimTargetContext(storage, worktree, open_by_number)
+    )
     if any(check.level == "error" for check in checks):
         _refuse_claim(parsed.json, target_issue, checks)
         return 2
@@ -3707,14 +3886,13 @@ def _cmd_claim(parsed: argparse.Namespace, session: _WriteSession) -> int:
         live = tuple(observed.claims.values())
     touches = protocol.conflicting_claims(live, claimed)
     if parsed.json:
-        return _claim_json(
-            claimed,
-            versioning=ScopeVersioning(n, total, share),
-            touches=touches,
-            checks=checks,
-        )
+        return _claim_json(claimed, versioning=versioning, touches=touches, checks=checks)
     print(f"CLAIMED {_claim_subject(claimed, storage)}: {claimed.claim_id}")
-    print(_claim_cost_line(n, total, requested.scope, touches))
+    print(
+        _claim_cost_line(
+            versioning.versioned_files, versioning.versioned_files_total, requested.scope, touches
+        )
+    )
     return 0
 
 
@@ -3911,13 +4089,37 @@ def _body_with_parent(skeleton: str, parent: int | None) -> str:
     return skeleton if parent is None else f"Parent: #{parent}\n\n{skeleton}"
 
 
-def _cut_child_body(container: int) -> str:
+def _requested_body_scope(raw: list[str] | None) -> tuple[str, ...] | None:
+    """A repeated `--scope` flag's canonical value, or `None` when it was
+    never given -- `item new` and `cut` (issue #337) both take an optional
+    `--scope`, so this is the one place either turns the raw flag list into
+    the same canonical form `protocol._valid_scope` produces for `claim`."""
+    return None if raw is None else protocol._valid_scope(raw)
+
+
+def _block_body_with_scope(body: str, scope: tuple[str, ...] | None) -> str:
+    """`body`'s `agent-claim` block, with a top-level `scope = [...]`
+    written in (issue #337) -- the same write path `board.render_block`'s
+    other callers use (`locate_agent_claim_block` then
+    `replace_agent_claim_block`), so `item new --scope` and `cut --scope`
+    never grow a second body-scope writer. `body` unchanged when `scope` is
+    `None`."""
+    if scope is None:
+        return body
+    located = board.locate_agent_claim_block(body)
+    new_data = {**located.data, "scope": list(scope)}
+    return board.replace_agent_claim_block(body, located, new_data)
+
+
+def _cut_child_body(container: int, scope: tuple[str, ...] | None = None) -> str:
     """The body `cut` writes for a fresh child: one `Parent: #<container>`
-    line ahead of `board.BLOCK_CHILD_SKELETON`. A repeat `cut` after a
-    partial failure reads this line back (`_orphan_names_container`) to
-    tell `container`'s own orphan apart from an unrelated open issue that
+    line ahead of `board.BLOCK_CHILD_SKELETON`, plus the cut slice's own
+    top-level `scope = [...]` (issue #337) when the cut carries one -- the
+    linked row's own scope, or a filled `--scope`. A repeat `cut` after a
+    partial failure reads the parent line back (`_orphan_names_container`)
+    to tell `container`'s own orphan apart from an unrelated open issue that
     merely shares the row's title (#260)."""
-    return _body_with_parent(board.BLOCK_CHILD_SKELETON, container)
+    return _block_body_with_scope(_body_with_parent(board.BLOCK_CHILD_SKELETON, container), scope)
 
 
 def _orphan_names_container(body: str, container: int) -> bool:
@@ -3997,7 +4199,13 @@ def _block_slice_entries(data: Mapping[str, object]) -> list[dict[str, object]]:
 
 
 def _slice_row(entry: dict[str, object]) -> board.SliceRow:
-    return board.SliceRow(cast(int, entry["index"]), cast(str, entry["title"]))
+    """One `[[slice]]` entry as `cut` sees it. `entry`'s own `scope` (issue
+    #337), when it carries one, already passed `protocol._valid_scope` at
+    `_located_block_or_refuse`'s own `parse_body` gate -- a body that failed
+    that check never reaches here -- so this is the one canonicalizing pass,
+    not a second validation of an already-checked value."""
+    scope = protocol._valid_scope(entry["scope"]) if "scope" in entry else None
+    return board.SliceRow(cast(int, entry["index"]), cast(str, entry["title"]), scope)
 
 
 def _cut_link(
@@ -4050,6 +4258,24 @@ def _located_block_or_refuse(
     return board.locate_agent_claim_block(body)
 
 
+CUT_ROW_SCOPE_ALREADY_SET = "slice {index} already names a scope; edit the container instead"
+
+
+def _cut_row_scope(
+    link: board.SliceRow | None, requested: tuple[str, ...] | None
+) -> tuple[str, ...] | None:
+    """The scope `cut`'s fresh child inherits (issue #337): the linked
+    row's own scope when it already has one -- `--scope` then refuses by
+    name, since the row is the one place to change it -- else `--scope`
+    fills the (still empty) row and becomes the child's scope; with no
+    linked row at all, `--scope` becomes the child's scope directly."""
+    if link is not None and link.scope is not None:
+        if requested is not None:
+            raise protocol.ClaimUnavailableError(CUT_ROW_SCOPE_ALREADY_SET.format(index=link.index))
+        return link.scope
+    return requested
+
+
 def _cut_slice(
     client: forge.ForgeWriter,
     target: board.Issue,
@@ -4062,6 +4288,7 @@ def _cut_slice(
     link = _cut_link(number, located.data, parsed.row)
     if link is not None:
         _require_matching_title(number, link, parsed.title)
+    child_scope = _cut_row_scope(link, _requested_body_scope(parsed.scope))
     adopted = _adoptable_child(client, number, parsed.title, idea_label)
     try:
         child = (
@@ -4070,7 +4297,7 @@ def _cut_slice(
             else client.create_child(
                 parent=number,
                 title=parsed.title,
-                body=_cut_child_body(number),
+                body=_cut_child_body(number, child_scope),
                 kind=board.ItemKind.TASK,
             )
         )

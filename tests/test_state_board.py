@@ -253,6 +253,25 @@ def _item_files_with_container_slices(slice_rows: tuple[tuple[int, str], ...]) -
     return {**_item_files(), f"{CONTAINER_ID}.md": _container_body_with_slices(slice_rows).encode()}
 
 
+def _item_files_with_one_scoped_slice(
+    index: int, title: str, scope: tuple[str, ...] | None
+) -> dict[str, bytes]:
+    """`_item_files_with_container_slices`'s own one-row shape, that row's
+    own `scope` set to `scope` (issue #337) -- `None` names a row with no
+    scope of its own, matching how `_render_scope` omits the key entirely
+    rather than writing an empty one."""
+    entry: dict[str, object] = {"index": index, "title": title}
+    if scope is not None:
+        entry["scope"] = list(scope)
+    data = {
+        **_CONTAINER_PROJECTION.block_data(),
+        "slice": [entry],
+        "record": _record(title="Epic", state="open", kind="container"),
+    }
+    container_body = f"Prose.\n\n```agent-claim\n{board.render_block(data)}```\n"
+    return {**_item_files(), f"{CONTAINER_ID}.md": container_body.encode()}
+
+
 # A second open expectation line beside `EXPECTATION_TEXT` (issue #283): one
 # CLI-level `aco rule` proof needs a line still open after the ruled one, so
 # `aco rulings` still has something to print for this item -- a fully-ruled
@@ -1594,6 +1613,121 @@ class TestCliStateRefForge:
         after = store.fetch_state(worktree=worktree, remote=remote_url)
         assert after.tip == before.tip
 
+    def _cut_child_scope(
+        self, worktree: Path, bare_remote: Path, capsys: pytest.CaptureFixture[str]
+    ) -> tuple[str, ...] | None:
+        """The just-cut child's own top-level `scope`, `None` when the block
+        carries no `scope` key at all -- shared by every scope-inheritance
+        case below so each states only its own arrangement and expectation."""
+        out = capsys.readouterr().out.strip()
+        child_number = int(out.rsplit("#", 1)[1])
+        remote_url = f"file://{bare_remote}"
+        state = store.fetch_state(worktree=worktree, remote=remote_url)
+        assert state.tip is not None
+        item_files_after = store.read_item_files(worktree, state.tip)
+        [child_id] = [
+            items.item_id_from_filename(name)
+            for name in item_files_after
+            if items.item_number(items.item_id_from_filename(name)) == child_number
+        ]
+        data = board.locate_agent_claim_block(item_files_after[f"{child_id}.md"].decode()).data
+        scope = data.get("scope")
+        return None if scope is None else protocol._valid_scope(scope)
+
+    @pytest.mark.parametrize(
+        (
+            "has_row",
+            "row_scope",
+            "requested_scope",
+            "title",
+            "expected_status",
+            "expected_child_scope",
+            "expected_err",
+        ),
+        [
+            pytest.param(
+                True,
+                None,
+                ("src/c.py",),
+                "Slice C",
+                0,
+                ("src/c.py",),
+                None,
+                id="fills-an-empty-row",
+            ),
+            pytest.param(
+                True,
+                ("src/c.py",),
+                None,
+                "Slice C",
+                0,
+                ("src/c.py",),
+                None,
+                id="inherits-without-the-flag",
+            ),
+            pytest.param(
+                True,
+                ("src/c.py",),
+                ("src/other.py",),
+                "Slice C",
+                2,
+                None,
+                issue_claim.CUT_ROW_SCOPE_ALREADY_SET.format(index=1),
+                id="refuses-a-row-that-already-names-one",
+            ),
+            pytest.param(
+                False,
+                None,
+                ("src/loose.py",),
+                "Loose Cut",
+                0,
+                ("src/loose.py",),
+                None,
+                id="no-slice-table-becomes-the-childs-scope-directly",
+            ),
+        ],
+    )
+    def test_cut_scope_fills_inherits_or_refuses_against_a_slice_rows_scope(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+        has_row: bool,
+        row_scope: tuple[str, ...] | None,
+        requested_scope: tuple[str, ...] | None,
+        title: str,
+        expected_status: int,
+        expected_child_scope: tuple[str, ...] | None,
+        expected_err: str | None,
+    ) -> None:
+        """Issue #337 proof 2: `cut --scope` fills a linked row's own scope
+        only when the row carries none -- a row that already names one
+        refuses by name instead, since the row is the one place to change
+        it -- and with no linked row at all, `--scope` becomes the fresh
+        child's own top-level scope directly; either way a successful cut's
+        child inherits exactly the row's own scope."""
+        item_files = (
+            _item_files_with_one_scoped_slice(1, title, row_scope) if has_row else _item_files()
+        )
+        self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, item_files)
+        remote_url = f"file://{bare_remote}"
+        before = store.fetch_state(worktree=worktree, remote=remote_url)
+        argv = ["cut", str(CONTAINER_NUMBER), "--title", title]
+        for path in requested_scope or ():
+            argv.extend(["--scope", path])
+
+        status = issue_claim.main(argv)
+
+        assert status == expected_status
+        if expected_status == 0:
+            assert self._cut_child_scope(worktree, bare_remote, capsys) == expected_child_scope
+            return
+        assert capsys.readouterr().err == f"ERROR: {expected_err}\n"
+        after = store.fetch_state(worktree=worktree, remote=remote_url)
+        assert after.tip == before.tip
+
     def test_cut_adopts_the_child_after_a_partial_failure_from_a_competing_write(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -1899,6 +2033,32 @@ class TestCliStateRefForge:
         assert board_status == 0
         assert "Fresh Item" in capsys.readouterr().out
 
+    def test_item_new_scope_writes_the_field_canonically(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+    ) -> None:
+        """Issue #337 proof 1: repeated `--scope` flags write the block's
+        own top-level `scope = [...]`, canonicalized (sorted, deduplicated)
+        by the same `protocol._valid_scope` a live claim's own scope passes
+        through -- never a second grammar."""
+        self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, _item_files())
+
+        status = issue_claim.main(
+            ["item", "new", "--title", "Scoped Item", "--scope", "src/b.py", "--scope", "src/a.py"]
+        )
+
+        assert status == 0
+        printed = capsys.readouterr().out.strip()
+        remote_url = f"file://{bare_remote}"
+        state = store.fetch_state(worktree=worktree, remote=remote_url)
+        assert state.tip is not None
+        stored = store.read_item_files(worktree, state.tip)[f"{printed}.md"].decode()
+        assert board.locate_agent_claim_block(stored).data["scope"] == ["src/a.py", "src/b.py"]
+
     def test_item_new_kind_container_writes_the_container_skeleton(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -1990,6 +2150,12 @@ class TestCliStateRefForge:
                 False,
                 id="malformed-origin",
             ),
+            pytest.param(
+                ["item", "new", "--title", "Escapes", "--scope", "../outside"],
+                "claim scope must be repository-relative",
+                False,
+                id="scope-escapes-the-repository",
+            ),
         ],
     )
     def test_item_new_refuses_and_writes_nothing(
@@ -2003,11 +2169,12 @@ class TestCliStateRefForge:
         expected_err_substring: str,
         patch_minting_collision: bool,
     ) -> None:
-        """Issue #285 proof 3 / issue #316 proof 2: `item new` refuses --
-        on an injected minting collision against every already-known id
-        after three attempts, or on an `--origin` that does not match
-        `FORGE#N` (refused before `argparse` even reaches `item new`'s own
-        body) -- with a diagnostic naming the cause, and nothing reaches
+        """Issue #285 proof 3 / issue #316 proof 2 / issue #337 proof 1:
+        `item new` refuses -- on an injected minting collision against every
+        already-known id after three attempts, on an `--origin` that does
+        not match `FORGE#N` (refused before `argparse` even reaches `item
+        new`'s own body), or on a `--scope` value `protocol._valid_scope`
+        refuses -- with a diagnostic naming the cause, and nothing reaches
         the remote."""
         self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, _item_files())
         if patch_minting_collision:
