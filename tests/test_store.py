@@ -1650,6 +1650,80 @@ def test_claim_lifecycle_counts_a_release_with_no_matching_claim_as_unparsed(
     assert lifecycle == store.ClaimLifecycle(events=(), unparsed=1)
 
 
+def test_claim_lifecycle_counts_a_second_claim_of_the_same_id_as_unparsed(
+    bare_remote: Path, worktree: Path
+) -> None:
+    """A second `claim` commit naming a `claim_id` this walk already
+    opened -- history `protocol.apply`'s own `consumed_ids` never lets a
+    live writer produce, since a claim id is never claimed twice -- used to
+    silently overwrite the accumulator and duplicate the same id into
+    `events` (issue #357 gate B2). It must instead count as `unparsed` and
+    leave the first claim's own event untouched: one event for `c1`, still
+    naming item 1, still open."""
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    first_claim = _committed_claim(bare_remote, worktree, issue=1)
+    state = store.fetch_state(worktree=worktree, remote=str(bare_remote))
+    assert state.tip is not None
+    _push_message_only_commit(
+        bare_remote,
+        worktree,
+        parent=str(state.tip),
+        message=(
+            f"claim issue 1 again\n\noperation_id: op-1-dup\n"
+            f"claim_id: {first_claim.claim_id}\nitem: 9\nintent: claim\n"
+        ),
+    )
+    final_state = store.fetch_state(worktree=worktree, remote=str(bare_remote))
+    assert final_state.tip is not None
+
+    lifecycle = store.claim_lifecycle(worktree=worktree, tip=final_state.tip)
+
+    assert lifecycle.unparsed == 1
+    assert len(lifecycle.events) == 1
+    assert lifecycle.events[0].item == "1"
+    assert lifecycle.events[0].released_at is None
+
+
+def test_claim_lifecycle_counts_a_second_release_of_the_same_claim_as_unparsed(
+    bare_remote: Path, worktree: Path
+) -> None:
+    """A second `release` commit for a `claim_id` this walk already closed --
+    `protocol.apply`'s `consumed_ids` never lets a live writer release a
+    claim twice -- used to silently overwrite `released_at` with the second
+    commit's own committer date (issue #357 gate B2). It must instead count
+    as `unparsed` and leave the first release's own timestamp untouched."""
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    _committed_claim(bare_remote, worktree, issue=1)
+    first_release_state = store.commit_transition(
+        worktree=worktree,
+        remote=str(bare_remote),
+        subject=store.ClaimTransitionSubject("release issue 1", item="1"),
+        intent=_release_intent("c1", "op-1-release"),
+    )
+    assert first_release_state.tip is not None
+    first_lifecycle = store.claim_lifecycle(worktree=worktree, tip=first_release_state.tip)
+    (first_event,) = first_lifecycle.events
+    assert first_event.released_at is not None
+    _push_message_only_commit(
+        bare_remote,
+        worktree,
+        parent=str(first_release_state.tip),
+        message=(
+            "release issue 1 again\n\noperation_id: op-1-release-dup\n"
+            "claim_id: c1\nitem: 1\nintent: release\n"
+        ),
+    )
+    final_state = store.fetch_state(worktree=worktree, remote=str(bare_remote))
+    assert final_state.tip is not None
+
+    lifecycle = store.claim_lifecycle(worktree=worktree, tip=final_state.tip)
+
+    assert lifecycle.unparsed == 1
+    (event,) = lifecycle.events
+    assert event.item == "1"
+    assert event.released_at == first_event.released_at
+
+
 def test_claim_lifecycle_fails_loud_when_the_log_read_fails(
     monkeypatch: pytest.MonkeyPatch, bare_remote: Path, worktree: Path
 ) -> None:

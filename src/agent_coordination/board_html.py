@@ -633,10 +633,18 @@ def _render_landed_section(page: BoardPage) -> str:
 
 
 def _render_measurements_section(page: BoardPage) -> str:
+    """`board.measurements_lines`, rendered whole (issue #357 gate B1): the
+    text section joins every line with no line dropped, so this section
+    must too -- `unfinished`/`unparsed` are their own trailing lines
+    (`measurements_lines`) that stand regardless of whether any size class
+    was itself measured, and hiding them behind the `not classes` branch
+    silently dropped a nonzero `unparsed`/`unfinished` count whenever no
+    class had a measured lane at all."""
     lines = board.measurements_lines(page.measurements)
-    if not page.measurements.classes:
-        return f'<p class="empty">{html.escape(lines[0])}</p>'
-    heading = f"<p>{html.escape(lines[0])}</p>"
+    heading_class = "" if page.measurements.classes else ' class="empty"'
+    heading = f"<p{heading_class}>{html.escape(lines[0])}</p>"
+    if len(lines) == 1:
+        return heading
     rows = "".join(f"<li>{html.escape(line)}</li>" for line in lines[1:])
     return f'{heading}<ul class="measurements">{rows}</ul>'
 

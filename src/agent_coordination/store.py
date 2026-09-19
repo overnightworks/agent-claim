@@ -534,13 +534,23 @@ def claim_lifecycle(*, worktree: Path, tip: ObjectId) -> ClaimLifecycle:
     history torn at a boundary this first-parent walk cannot see past -- is
     counted into `unparsed` rather than raised (issue #357 R2): the same
     "never crash the whole board over one broken record" contract
-    `_parsed_transition` already keeps for a single malformed commit.
+    `_parsed_transition` already keeps for a single malformed commit. A
+    second `claim` for a `claim_id` this walk already opened, or a second
+    `release`/`landing` for one it already closed, is the same kind of torn
+    or duplicated history -- `protocol.apply`'s `consumed_ids` never lets a
+    live `claim_id` be claimed twice or released twice, so a commit shaped
+    that way cannot be a second genuine transition -- and is counted into
+    `unparsed` the same way, its first (and only trustworthy) event left
+    untouched rather than overwritten or duplicated (issue #357 gate B2).
     """
     transitions, unparsed = _claim_lifecycle_transitions(worktree, tip)
     accumulators: dict[str, _LifecycleAccumulator] = {}
     order: list[str] = []
     for transition in transitions:
         if transition.intent == _CLAIM_LABEL:
+            if transition.claim_id in accumulators:
+                unparsed += 1
+                continue
             accumulators[transition.claim_id] = _LifecycleAccumulator(
                 item=transition.item, claimed_at=transition.committed_at
             )
@@ -552,8 +562,10 @@ def claim_lifecycle(*, worktree: Path, tip: ObjectId) -> ClaimLifecycle:
             continue
         if transition.intent == _RESCOPE_LABEL:
             accumulator.rescoped += 1
-        else:
+        elif accumulator.released_at is None:
             accumulator.released_at = transition.committed_at
+        else:
+            unparsed += 1
     events = tuple(
         metrics.LaneEvent(
             item=accumulators[claim_id].item,

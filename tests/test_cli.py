@@ -668,6 +668,30 @@ def test_board_shows_the_empty_measurements_sentence_with_nothing_measured(
     assert "keine Messungen seit" in capsys.readouterr().out
 
 
+def test_board_html_shows_unparsed_commits_alongside_the_empty_measurements_sentence(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Gate B1 (issue #357): `board_html._render_measurements_section` used
+    to return only `lines[0]` ("keine Messungen seit ...") whenever no size
+    class had a measured lane, silently dropping a nonzero `unparsed` (or
+    `unfinished`) trailing line the text section already showed. With a
+    history that carries no measured class but two claim-shaped commits this
+    walk could not parse, the HTML page must show both the empty-measurements
+    sentence and the unparsed count, exactly like the text form."""
+    _single_item_board_environment(monkeypatch, tmp_path)
+    _patch_store_write(monkeypatch, unparsed_lifecycle_commits=2)
+
+    assert issue_claim.main(["--repo", "example/agent-claim", "board"]) == 0
+    text = capsys.readouterr().out
+    assert "keine Messungen seit" in text
+    assert f"2 {board.UNPARSED_TRAILER_SENTENCE}" in text
+
+    assert issue_claim.main(["--repo", "example/agent-claim", "board", "--html"]) == 0
+    html_page = capsys.readouterr().out
+    assert "keine Messungen seit" in html_page
+    assert f"2 {board.UNPARSED_TRAILER_SENTENCE}" in html_page
+
+
 def test_board_renders_with_no_state_ref_bootstrapped_at_all(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
