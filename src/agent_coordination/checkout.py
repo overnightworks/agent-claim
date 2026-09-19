@@ -27,9 +27,15 @@ _GIT_TIMED_OUT_ERROR = "git timed out while validating the build checkout"
 _UNKNOWN_GIT_FAILURE_DETAIL = "unknown git failure"
 
 
-def _git_output(arguments: list[str]) -> str:
+def _git_output(arguments: list[str], *, directory: Path | None = None) -> str:
+    """Run `git arguments`, in `directory` when given via `-C` (issue #314) --
+    every caller that must judge a specific checkout rather than the calling
+    process's own cwd names `directory` explicitly, so the checkout a
+    security decision reads is never an accident of where the process
+    happens to run."""
+    command = ["git", *(["-C", str(directory)] if directory is not None else []), *arguments]
     try:
-        result = process.run_captured(["git", *arguments])
+        result = process.run_captured(command)
     except process.ExecutableMissingError as error:
         raise ClaimError(_GIT_MISSING_EXECUTABLE_ERROR) from error
     except process.ProcessTimedOutError as error:
@@ -245,10 +251,13 @@ def _worktree_repair_instruction(repair: WorktreeRepair, *, branch: str | None) 
 def _validate_worktree_branch(
     branch: str, *, repair: WorktreeRepair = WorktreeRepair.CREATE
 ) -> None:
-    """Require an isolated non-main worktree checked out on `branch`.
-
-    Rescope uses this without also binding HEAD to the claim base or requiring
-    a clean tree, so a lane can sharpen scope after it has already committed.
+    """Require an isolated non-main worktree checked out on `branch`, read
+    from the calling process's own cwd -- `claim`'s own precondition, since
+    a fresh claim is created by literally standing in the worktree it
+    claims. `rescope` no longer shares this (issue #314): it judges an
+    already-resolved `PathCheckout` instead, via `_refuse_shared_checkout`
+    below, so a rescope invoked from a foreign cwd is not silently judged by
+    the wrong checkout.
     """
     if is_default_branch(branch):
         raise ClaimError(
@@ -264,6 +273,80 @@ def _validate_worktree_branch(
         raise ClaimError(
             "build claims require a linked isolated worktree checkout; "
             f"{_worktree_repair_instruction(repair, branch=branch)}"
+        )
+
+
+class CheckoutKind(StrEnum):
+    """Whether a resolved checkout is the shared main checkout or a linked,
+    isolated worktree (issue #314) -- the one structural fact `protect` and
+    `rescope` judge a write or a rescope by, read from the checkout itself
+    rather than from a branch name."""
+
+    MAIN = "main"
+    LINKED_WORKTREE = "linked_worktree"
+
+
+@dataclass(frozen=True)
+class PathCheckout:
+    """The git checkout that owns a directory, resolved directly from that
+    directory (issue #314) -- never from the calling process's own cwd, so
+    the same directory yields the same checkout regardless of where the
+    process runs. `protect` resolves this from a hook payload path's own
+    parent directory; `rescope` resolves it from its own process cwd, its
+    one legitimate location signal."""
+
+    toplevel: Path
+    branch: str
+    kind: CheckoutKind
+
+
+def resolve_path_checkout(directory: Path) -> PathCheckout | None:
+    """The checkout owning `directory`, or `None` when `directory` sits
+    outside every git repository ("not in a repository", issue #314).
+
+    Every git read runs `git -C directory`, so the result is the same
+    regardless of the calling process's own cwd -- unlike the ad hoc,
+    cwd-implicit `_git_output` calls this replaces in `protect` and
+    `rescope`, which silently read the *process's* checkout instead of the
+    one the caller actually means. `--path-format=absolute` makes the
+    toplevel/git-dir/common-dir comparison below meaningful: git's default,
+    relative-to-`-C`-directory paths would otherwise have to be re-resolved
+    against `directory` itself, not the caller's own cwd.
+    """
+    try:
+        combined = _git_output(
+            [
+                "rev-parse",
+                "--path-format=absolute",
+                "--show-toplevel",
+                "--git-dir",
+                "--git-common-dir",
+            ],
+            directory=directory,
+        )
+        toplevel, git_directory, common_directory = combined.splitlines()
+        branch = _git_output(["branch", "--show-current"], directory=directory)
+    except (ClaimError, ValueError):
+        return None
+    kind = CheckoutKind.MAIN if git_directory == common_directory else CheckoutKind.LINKED_WORKTREE
+    return PathCheckout(toplevel=Path(toplevel), branch=branch, kind=kind)
+
+
+def _refuse_shared_checkout(path_checkout: PathCheckout, *, repair: WorktreeRepair) -> None:
+    """`rescope`'s own worktree-isolation refusal (issue #314): the same
+    invariant `_validate_worktree_branch` enforces for `claim`, judged from
+    an already path-resolved checkout instead of a fresh git read in the
+    calling process's own cwd.
+    """
+    if is_default_branch(path_checkout.branch):
+        raise ClaimError(
+            "build claims require an isolated non-main worktree branch; "
+            f"{_worktree_repair_instruction(repair, branch=None)}"
+        )
+    if path_checkout.kind is CheckoutKind.MAIN:
+        raise ClaimError(
+            "build claims require a linked isolated worktree checkout; "
+            f"{_worktree_repair_instruction(repair, branch=path_checkout.branch)}"
         )
 
 

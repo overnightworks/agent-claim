@@ -1,10 +1,11 @@
 """Direct `checkout.py` behavior: remote/worktree/branch validation, the
-`_git_output` boundary, dirty-path reading, `versioned_paths`, trunk
-landings, and remote-location parsing. `_validate_checkout` is exercised
-through `issue_claim._validate_checkout`, `cli.py`'s own re-export of the
-same function every `claim`/`rescope` command call site uses. Tests that
-drive these through `issue_claim.main([...])` stay in `tests/test_cli.py` as
-CLI-wiring behavior."""
+`_git_output` boundary and its `directory` (issue #314), `resolve_path_checkout`
+(the path-based checkout resolver `protect` and `rescope` share), dirty-path
+reading, `versioned_paths`, trunk landings, and remote-location parsing.
+`_validate_checkout` is exercised through `issue_claim._validate_checkout`,
+`cli.py`'s own re-export of the same function every `claim` call site uses.
+Tests that drive these through `issue_claim.main([...])` stay in
+`tests/test_cli.py` as CLI-wiring behavior."""
 
 from __future__ import annotations
 
@@ -255,54 +256,6 @@ def test_checkout_validation_names_the_isolated_worktree_recipe_for_a_shared_che
     )
 
 
-def test_checkout_validation_return_to_claim_names_no_branch_from_the_trunk(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """`rescope` shares this check with `claim` (issue #211), but its honest
-    repair differs: its claim's worktree already exists, so recommending the
-    `git worktree add` recipe builds a second, foreign one. From the trunk
-    branch no other branch is known here to name, so `RETURN_TO_CLAIM` points
-    back at the claim's own worktree without inventing one."""
-    values = {("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"): "refs/remotes/origin/main"}
-    monkeypatch.setattr(checkout, "_git_output", lambda arguments: values[tuple(arguments)])
-
-    with pytest.raises(ClaimError) as error:
-        checkout._validate_worktree_branch("main", repair=checkout.WorktreeRepair.RETURN_TO_CLAIM)
-
-    assert str(error.value) == (
-        "build claims require an isolated non-main worktree branch; "
-        "run this command from this claim's own worktree, not the primary checkout"
-    )
-
-
-def test_checkout_validation_return_to_claim_names_the_known_branch(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Checked out directly on a real branch inside the shared (non-linked)
-    checkout, that branch is already known -- it is the same branch the
-    caller resolved its identity from -- so `RETURN_TO_CLAIM` names it
-    instead of leaving the sentence branch-less."""
-    values = {
-        ("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"): "refs/remotes/origin/main",
-        ("branch", "--show-current"): "codex/issue-211-worktree-repair-sentence",
-        ("rev-parse", "--git-dir"): "/repo/.git",
-        ("rev-parse", "--git-common-dir"): "/repo/.git",
-    }
-    monkeypatch.setattr(checkout, "_git_output", lambda arguments: values[tuple(arguments)])
-
-    with pytest.raises(ClaimError) as error:
-        checkout._validate_worktree_branch(
-            "codex/issue-211-worktree-repair-sentence",
-            repair=checkout.WorktreeRepair.RETURN_TO_CLAIM,
-        )
-
-    assert str(error.value) == (
-        "build claims require a linked isolated worktree checkout; "
-        "run this command from this claim's own worktree on "
-        "'codex/issue-211-worktree-repair-sentence', not the primary checkout"
-    )
-
-
 def test_checkout_validation_names_the_first_three_dirty_paths_and_the_rest_as_a_count(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -410,6 +363,135 @@ def test_dirty_paths_reads_a_rename_from_real_git_status(
 
     assert checkout._dirty_paths(checkout._git_output(["status", "--porcelain"])) == (
         "README.md -> RENAMED.md",
+    )
+
+
+def test_git_output_directory_runs_git_dash_c_in_that_directory(tmp_path: Path) -> None:
+    """`directory` (issue #314) must reach the real `git` process as `-C`,
+    not merely be accepted and ignored -- the one fact every path-based
+    resolution downstream of `_git_output` depends on."""
+    repository = _scratch_git_repository(tmp_path)
+
+    assert checkout._git_output(["rev-parse", "--show-toplevel"], directory=repository) == str(
+        repository.resolve()
+    )
+
+
+def _repo_with_linked_worktree(tmp_path: Path) -> tuple[Path, Path]:
+    """A real repository with a linked, isolated worktree on a feature
+    branch (issue #314) -- `main` is the shared checkout, `worktree` is what
+    a claim actually builds in, via the same `git worktree add` recipe
+    `checkout.ISOLATED_WORKTREE_RECIPE` documents."""
+    main = _scratch_git_repository(tmp_path)
+    worktree = tmp_path / "repo-worktrees" / "issue-1-widget"
+    worktree.parent.mkdir(parents=True)
+    _real_git(main, "worktree", "add", "-q", str(worktree), "-b", "codex/issue-1-widget")
+    return main, worktree
+
+
+def test_resolve_path_checkout_reads_the_linked_worktree_owning_a_directory(
+    tmp_path: Path,
+) -> None:
+    _main, worktree = _repo_with_linked_worktree(tmp_path)
+    (worktree / "src").mkdir()
+
+    resolved = checkout.resolve_path_checkout(worktree / "src")
+
+    assert resolved == checkout.PathCheckout(
+        toplevel=worktree.resolve(),
+        branch="codex/issue-1-widget",
+        kind=checkout.CheckoutKind.LINKED_WORKTREE,
+    )
+
+
+def test_resolve_path_checkout_reads_the_main_checkout_owning_a_directory(
+    tmp_path: Path,
+) -> None:
+    main, _worktree = _repo_with_linked_worktree(tmp_path)
+
+    resolved = checkout.resolve_path_checkout(main)
+
+    assert resolved == checkout.PathCheckout(
+        toplevel=main.resolve(), branch="main", kind=checkout.CheckoutKind.MAIN
+    )
+
+
+def test_resolve_path_checkout_is_independent_of_the_calling_process_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole point of issue #314: resolving from `directory` rather than
+    an implicit process cwd means the same directory resolves the same way
+    regardless of where the test process itself is standing."""
+    _main, worktree = _repo_with_linked_worktree(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    resolved = checkout.resolve_path_checkout(worktree)
+
+    assert resolved is not None
+    assert resolved.kind is checkout.CheckoutKind.LINKED_WORKTREE
+    assert resolved.branch == "codex/issue-1-widget"
+
+
+def test_resolve_path_checkout_denies_a_directory_outside_every_repository(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "not-a-repo"
+    outside.mkdir()
+
+    assert checkout.resolve_path_checkout(outside) is None
+
+
+def test_refuse_shared_checkout_return_to_claim_names_no_branch_from_the_trunk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`rescope` uses `RETURN_TO_CLAIM` on an already path-resolved checkout
+    (issue #314): its claim's worktree already exists, so recommending the
+    `git worktree add` recipe builds a second, foreign one. From the trunk
+    branch no other branch is known here to name, so `RETURN_TO_CLAIM` points
+    back at the claim's own worktree without inventing one."""
+    values = {("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"): "refs/remotes/origin/main"}
+    monkeypatch.setattr(checkout, "_git_output", lambda arguments: values[tuple(arguments)])
+    path_checkout = checkout.PathCheckout(
+        toplevel=Path("/repo"), branch="main", kind=checkout.CheckoutKind.LINKED_WORKTREE
+    )
+
+    with pytest.raises(ClaimError) as error:
+        checkout._refuse_shared_checkout(
+            path_checkout, repair=checkout.WorktreeRepair.RETURN_TO_CLAIM
+        )
+
+    assert str(error.value) == (
+        "build claims require an isolated non-main worktree branch; "
+        "run this command from this claim's own worktree, not the primary checkout"
+    )
+
+
+def test_refuse_shared_checkout_return_to_claim_names_the_known_branch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Checked out directly on a real branch inside the shared (non-linked)
+    checkout, that branch is already known -- it is the same branch the
+    caller resolved its identity from -- so `RETURN_TO_CLAIM` names it
+    instead of leaving the sentence branch-less."""
+    values = {("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"): "refs/remotes/origin/main"}
+    monkeypatch.setattr(checkout, "_git_output", lambda arguments: values[tuple(arguments)])
+    path_checkout = checkout.PathCheckout(
+        toplevel=Path("/repo"),
+        branch="codex/issue-211-worktree-repair-sentence",
+        kind=checkout.CheckoutKind.MAIN,
+    )
+
+    with pytest.raises(ClaimError) as error:
+        checkout._refuse_shared_checkout(
+            path_checkout, repair=checkout.WorktreeRepair.RETURN_TO_CLAIM
+        )
+
+    assert str(error.value) == (
+        "build claims require a linked isolated worktree checkout; "
+        "run this command from this claim's own worktree on "
+        "'codex/issue-211-worktree-repair-sentence', not the primary checkout"
     )
 
 

@@ -51,12 +51,25 @@ def _git_checkout(
     common_directory: str = "/repo/.git",
     dirty: str = "",
 ) -> dict[tuple[str, ...], str]:
+    toplevel = "/repo"
     return {
         ("rev-parse", "HEAD"): head,
-        ("rev-parse", "--show-toplevel"): "/repo",
+        ("rev-parse", "--show-toplevel"): toplevel,
         ("branch", "--show-current"): branch,
         ("rev-parse", "--git-dir"): git_directory,
         ("rev-parse", "--git-common-dir"): common_directory,
+        # `resolve_path_checkout`'s one combined call (issue #314): the same
+        # three facts above, in the order it requests them via
+        # `-C`/`--path-format=absolute`, so `rescope`'s path-based checkout
+        # resolution reads the identical fixture the separate keys above
+        # already describe.
+        (
+            "rev-parse",
+            "--path-format=absolute",
+            "--show-toplevel",
+            "--git-dir",
+            "--git-common-dir",
+        ): "\n".join((toplevel, git_directory, common_directory)),
         ("status", "--porcelain"): dirty,
         ("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"): "refs/remotes/origin/main",
     }

@@ -1097,6 +1097,20 @@ hook file. The CLI does not write `~/.grok`.
 }
 ```
 
+Install this in the settings of the session that actually runs the
+subagents -- the orchestrating head's settings, not each worktree's own --
+since every dispatched subagent's tool calls (and Codex's `apply_patch`)
+share that one session's process, cwd included (issue #314). `protect`
+judges a write from the payload's own path, never from that shared process
+cwd: it resolves the checkout that owns `Path(file_path).parent` (or, for an
+`apply_patch` patch touching several files, each path's own checkout in
+turn, one denial winning), so the same session's hook correctly tells a
+subagent's linked worktree from another lane's by branch -- allowing only a
+write whose own checkout holds a live claim on that branch and covers the
+path -- denying `not main` for a path in the shared main checkout, and
+denying `not in a repository` for a path outside every git checkout
+entirely.
+
 The matcher is `*` (every tool call), not a write-tool name list: a name the
 matcher itself skipped would never reach `protect` at all. `protect` is the
 real allowlist (issue #238) -- it fails closed on the tool name, denying
