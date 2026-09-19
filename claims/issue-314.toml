@@ -1,8 +1,0 @@
-claim_id = "56a9a2f2cac84fecafae5c3d6051ddf5"
-agent = "Claude head (coordinator)"
-role = "builder"
-base = "167d030b6cb1ddcea8f2d5591f0c08c7762dd867"
-branch = "claude/issue-314-protect-path"
-scope = ["src/agent_coordination/cli.py", "src/agent_coordination/checkout.py", "tests/test_protect.py", "README.md"]
-opened_commit = "d0345701040bafc6d8f9a345d5a558a2b6b70991"
-whole_reason = "protect and rescope resolve the checkout from the payload path: cli's protect region, checkout's resolver, the protect tests, the README hook section"
