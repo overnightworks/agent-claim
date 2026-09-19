@@ -19,11 +19,48 @@ today, each with a named future caller.
 logging call reaches the override through `BaseHTTPRequestHandler`'s own
 `self.log_message(...)` -- never by a literal call this package writes, so
 vulture never sees a caller for any of the three.
+
+`metrics.measure`, `Size.MEDIUM`/`Size.LARGE`, and the report dataclasses'
+presentation-only fields (`LaneEvent.rescopes`, `LaneMeasure.landing_wait_hours`,
+`SizeClassStats.p80_hours`, `ContainerSum.n_estimated`/`n_without_size`,
+`Parallelism.overlapping_lanes`) have no caller inside `src` yet (issue #308):
+`store.claim_lifecycle` and the `aco metrics` command that read this module's
+report are Lane 1b of #299, not yet landed. Each is a named future caller,
+not speculative surface; tests already exercise every one of these names.
 """
+
+from datetime import UTC, date, datetime
 
 from agent_coordination.board import NoItemKind
 from agent_coordination.board_serve import _BoardRequestHandler
 from agent_coordination.forge import Capability, ForgeUnsupportedError
+from agent_coordination.metrics import (
+    ContainerSum,
+    LaneEvent,
+    LaneMeasure,
+    Parallelism,
+    Size,
+    SizeClassStats,
+    measure,
+)
+
+_lane_event_for_vulture = LaneEvent(
+    item="",
+    size=None,
+    container=None,
+    claimed_at=datetime(2000, 1, 1, tzinfo=UTC),
+    released_at=None,
+    landed_at=None,
+    rescopes=0,
+)
+_lane_measure_for_vulture = LaneMeasure(
+    item="", size=None, container=None, wall_hours=0.0, landing_wait_hours=None
+)
+_size_class_stats_for_vulture = SizeClassStats(
+    size=Size.SMALL, n=0, median_hours=0.0, p80_hours=0.0, weak=False
+)
+_container_sum_for_vulture = ContainerSum(container="", hours=0.0, n_estimated=0, n_without_size=0)
+_parallelism_for_vulture = Parallelism(day=date(2000, 1, 1), overlapping_lanes=0)
 
 _referenced_only_for_vulture = (
     NoItemKind.DOCS,
@@ -33,4 +70,13 @@ _referenced_only_for_vulture = (
     _BoardRequestHandler.do_GET,
     _BoardRequestHandler.do_POST,
     _BoardRequestHandler.log_message,
+    measure,
+    Size.MEDIUM,
+    Size.LARGE,
+    _lane_event_for_vulture.rescopes,
+    _lane_measure_for_vulture.landing_wait_hours,
+    _size_class_stats_for_vulture.p80_hours,
+    _container_sum_for_vulture.n_estimated,
+    _container_sum_for_vulture.n_without_size,
+    _parallelism_for_vulture.overlapping_lanes,
 )
