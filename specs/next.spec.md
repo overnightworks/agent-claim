@@ -8,9 +8,11 @@ three `NextAction` variants' own text and `--json`, the `RECOVERY`
 preamble and `SKIPPED` tail, and exit `0`/`3`. It cites rather than
 restates: the forge-resolution precondition (`specs/board.spec.md`,
 BOARD-01/BOARD-02), `RECOVERY`'s own content and its always-first
-placement (`specs/landing-grammar.spec.md`, LAND-53), and the kind
+placement (`specs/landing-grammar.spec.md`, LAND-53), the kind
 exclusion a container without a recognized `kind` gets from every
-container-shaped view (`specs/board.spec.md`, BOARD-09). `<n>` is an
+container-shaped view (`specs/board.spec.md`, BOARD-08), and the scope
+overlap grammar `aco claim`'s own cost line already defines
+(`specs/claim-record.spec.md`, CLAIM-31/CLAIM-32). `<n>` is an
 item number, `<label>` an item as `specs/landing-grammar.spec.md` prints
 it, `<s>` an integer score.
 
@@ -27,15 +29,16 @@ it, `<s>` an integer score.
 | that same container still names further work | NEXT-07 | NEXT-13 |
 | a landed-but-open item exists | LAND-53 (cited) | NEXT-14 |
 | an unworkable item exists beside the top action | NEXT-08 | NEXT-14 |
-| further free items exist, disjoint from the first action | NEXT-09 | NEXT-15 |
+| further free items exist, disjoint from the first action | NEXT-09, NEXT-22, NEXT-23 | NEXT-15 |
 | more than three such candidates | NEXT-10 | NEXT-15 |
 | the first action itself names no scope | NEXT-16 | NEXT-15 |
 | a candidate names no scope of its own | NEXT-17 | NEXT-15 |
 | a closable container or recovery item, any rank | NEXT-18, NEXT-19 | NEXT-14 |
+| neither exists | NEXT-20 | NEXT-14 |
 
 ## No actionable item
 
-- [ ] [NEXT-01] With nothing left to pull, `aco next` prints `No actionable item.` -- still followed by the `parallel:`/`scope unknown:`/`close:` tail -- and exits `3`; `--json`'s `"action"` is `null`.
+- [ ] [NEXT-01] With nothing left to pull, `aco next` prints `No actionable item.`, still followed by the `parallel:`/`scope unknown:`/`close:` tail, exit `3`; `--json`'s `"action"` is `null`.
 
 ## A work item action
 
@@ -46,7 +49,7 @@ it, `<s>` an integer score.
 ## A container's own action
 
 - [ ] [NEXT-05] A childless container with an undispatched `[[slice]]` row prints `cut_slice <label>: <next>`, then `Next: aco cut <n> --title "<cut title>"`, exit `0` (see E-NEXT-03).
-- [ ] [NEXT-06] A childless container with an empty slice table and a `Next` line still naming work prints only `close_container <label>: <next>`, never inventing a `cut` command from that prose (see E-NEXT-04).
+- [ ] [NEXT-06] A childless container with an empty slice table and a `Next` line naming work prints only `close_container <label>: <next>`, never a guessed `cut` command (see E-NEXT-04).
 - [ ] [NEXT-07] The same container with no further `Next` work prints `close_container <label>: <closed>/<total> children closed, no Next work` (see E-NEXT-04).
 
 ## `RECOVERY` and `SKIPPED`
@@ -56,22 +59,23 @@ it, `<s>` an integer score.
 ## `parallel:`
 
 - [ ] [NEXT-09] `parallel:` lists every further free item the walk placed, `<label> (<n> path[s])`, comma-joined, in board order, alongside the first action (see E-NEXT-05).
+- [ ] [NEXT-22] `parallel:` occupies live claims' scopes and the first action's scope, then walks further qualifying actions in board order, skipping a close proposal or recovery item outright (see E-NEXT-05).
+- [ ] [NEXT-23] A candidate whose `scope` stays disjoint (CLAIM-31/CLAIM-32's grammar) from everything occupied is placed, its `scope` then joining what's occupied for the rest of the walk (see E-NEXT-05).
 - [ ] [NEXT-10] Beyond three placed candidates, only the first three are named, followed by `, and <n> more`; `--json`'s own `candidates` array still carries every one (see E-NEXT-05).
-- [ ] [NEXT-16] Once the first action names no scope, the tail collapses to `parallel: unknown (first action names no scope)`, and `scope unknown:` is skipped entirely -- never printed as `none` (see E-NEXT-02).
+- [ ] [NEXT-16] Once the first action names no scope, the tail collapses to `parallel: unknown (first action names no scope)`; `scope unknown:` is skipped, never printed as `none` (see E-NEXT-02).
 - [ ] [NEXT-17] `scope unknown:` lists, in board order, every candidate the walk could not place for lacking a scope of its own, or `none`; printed whenever the first action does name a scope.
 
 ## `close:`
 
-- [ ] [NEXT-18] `close:` names a childless container only once it also carries no undispatched `[[slice]]` row; an uncut row instead routes it to the cut proposal (NEXT-05), never to `close:` (see E-NEXT-06).
-- [ ] [NEXT-19] `close:` unions every landed-but-open recovery item with those closable containers, first-seen order, unconditionally -- regardless of the first action's own rank (#310 finding 29) (see E-NEXT-06).
-- [ ] [NEXT-20] `close:` never names a container the forge reports no recognized `kind` for (BOARD-09's own exclusion, #309): such an item is read as ordinary, not as one with nothing left to do.
-- [ ] [NEXT-21] `close:` prints `none` when neither a closable container nor a recovery item exists.
+- [ ] [NEXT-18] `close:` unions closable containers (kind, no open child, no uncut `[[slice]]` row) then recovery items, both in board order, first-seen, regardless of the first action's rank (#310; see E-NEXT-06).
+- [ ] [NEXT-19] `close:` never names a container the forge reports no recognized `kind` for (BOARD-08's own exclusion, #309): such an item is read as ordinary, not as one with nothing left to do.
+- [ ] [NEXT-20] `close:` prints `none` when neither a closable container nor a recovery item exists.
 
 ## `--json`
 
-- [ ] [NEXT-11] A work-item action's object adds `"action": "work_item"`, `number`, `score`, `title`, `next`, `command`, `ruling_landings`, `ruling_old`, and `ruling_hint` only when NEXT-04 applies (see E-NEXT-07).
+- [ ] [NEXT-11] A work-item action adds `"action": "work_item"`, `number`, `score`, `title`, `next`, `command`, and `ruling_landings`/`ruling_old`/`ruling_hint` only per NEXT-04 (see E-NEXT-07).
 - [ ] [NEXT-12] A cut proposal's object adds `"action": "cut_slice"`, `number`, `title`, `slice`, `cut_title`, `command` (see E-NEXT-07).
-- [ ] [NEXT-13] A close proposal's object adds `"action": "close_container"`, `number`, `closed`, `total`, `next_step` -- never a `command` or `cut_title` key, since there is no command to run (see E-NEXT-07).
+- [ ] [NEXT-13] A close proposal adds `"action": "close_container"`, `number`, `closed`, `total`, `next_step` -- never `command`/`cut_title`, since none exists to run (see E-NEXT-07).
 - [ ] [NEXT-14] The object always carries `recovery` (`{number, title, step}` each), `skipped` (`{number, reason}` each), and `close` (a bare number array), independent of `action`.
 - [ ] [NEXT-15] `parallel` always carries `first_scope_unknown`, `candidates` (`{number, scope}` each, uncapped), and `scope_unknown` (a bare number array).
 
@@ -79,7 +83,7 @@ it, `<s>` an integer score.
 
 - `aco next` never writes anything: it is a pure projection over the same read `board` performs.
 - `close:` never fires the cut proposal's own `Next:`/`Run:` lines: a closable container's own action, when it is also the top action, never carries a command -- NEXT-06/NEXT-07 already refuse to invent one.
-- `parallel:`/`scope_unknown:` never occupy or place a `board.recovery` item: a landed-but-open item is `close:`'s domain alone, never a `parallel:` candidate or an occupant that could crowd out a real free item behind it.
+- `parallel:`/`scope unknown:` never occupy or place a `board.recovery` item: a landed-but-open item is `close:`'s domain alone, never a `parallel:` candidate or an occupant that could crowd out a real free item behind it.
 - The first action's own row is never repeated inside `parallel:`'s candidate list, whatever its own scope is.
 - Exit `3` never carries any action-specific line: `No actionable item.` alone stands where `Next:`/`Run:` would.
 
@@ -167,7 +171,7 @@ exit 0
 ### E-NEXT-06 — `close:` unions a closable container and a recovery item
 
 Setup: bare-remote, fake `gh`, a top-ranked item `#70`, a closable container `#71`, a
-recovery item `#72` a merged pull request already declared closed while it stayed open
+recovery item `#72` whose merged pull request typed a `Work-Item:` line for it while it stayed open
 
 ```console
 $ aco next

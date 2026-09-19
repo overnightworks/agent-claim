@@ -24,13 +24,13 @@ it, `<k>` an expectation line's 1-based index.
 ## Rows and lines
 
 - [ ] [RUL-01] Each open-line item prints one header, `<label> <open>/<total>: <title>`, then one line per expectation entry -- ruled ones too -- in block order (see E-RUL-01).
-- [ ] [RUL-02] A still-open line prints `  <k> open: <summary>`; a ruled one prints `  <k> ruled <outcome> <date>: <summary>`, `<summary>` one line, capped at 100 characters plus `…` (see E-RUL-01).
-- [ ] [RUL-03] Rows are ordered board-ranked first, then by fewer open lines, then ascending `<n>` -- never `board --json`'s own raw `items` order (see E-RUL-02).
+- [ ] [RUL-02] A still-open line prints `  <k> open: <summary>`; a ruled one prints `  <k> ruled <outcome> <date>: <summary>`, `<summary>` capped at 100 characters total, its last char `…` when cut (see E-RUL-01).
+- [ ] [RUL-03] Rows are ordered by priority category and score first, then fewer open lines, then ascending `<n>` -- never `board --json`'s own raw `items` order (see E-RUL-02).
 - [ ] [RUL-04] An item whose every expectation line is already ruled is left off the list entirely, in both text and `--json` (see E-RUL-02).
 
 ## `--json`
 
-- [ ] [RUL-05] Each row is `{"number", "title", "open", "total", "lines"}`; each line is `{"index", "text", "state"}`, `state` `"open"` or `"ruled <outcome> <date>"`, `text` full and untruncated (see E-RUL-03).
+- [ ] [RUL-05] Each row is `{"number", "title", "open", "total", "lines"}`; each line is `{"index", "text", "state"}`, `state` `"open"` or `"ruled <outcome> <date>"`, text untruncated (see E-RUL-03).
 - [ ] [RUL-06] A line's `question`/`example`/`picture` (`aco ask`, ASK-03) each add their own key, present only when that field was given.
 
 ## Empty board
