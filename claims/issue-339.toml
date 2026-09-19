@@ -1,7 +1,0 @@
-claim_id = "d779bb8386fd4562a36294d6e8e4a350"
-agent = "Claude head (coordinator)"
-role = "builder"
-base = "f8bd0a60ecb7350ce20fd581c8eaf722e01e8bb9"
-branch = "claude/issue-339-spec-release"
-scope = ["scripts/spec_coverage_ratchet.txt", "specs/release.spec.md"]
-opened_commit = "e86e75cd9c6b0acba875df3634ed9822f6d10d62"
