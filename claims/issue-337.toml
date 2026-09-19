@@ -1,8 +1,0 @@
-claim_id = "0f0ca800d6ff4be29353bf387e40f249"
-agent = "Claude head (coordinator)"
-role = "builder"
-base = "b887b3b0faab9a9002d5916a1dd468cd97e2d3ef"
-branch = "claude/issue-337-scope-claim"
-scope = ["README.md", "src/agent_coordination/cli.py", "tests/test_cli.py", "tests/test_state_board.py"]
-opened_commit = "cbcc4c1830a36f09adda73a3953729360d61e394"
-whole_reason = "three commands (item new --scope, cut --scope, claim deriving the item scope) across cli and its two test modules and the README"
