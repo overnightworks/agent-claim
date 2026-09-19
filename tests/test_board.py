@@ -2320,6 +2320,78 @@ def test_board_configuration_accepts_every_key_it_defines(tmp_path: Path) -> Non
     )
 
 
+def test_load_brief_config_returns_none_when_the_file_does_not_exist(tmp_path: Path) -> None:
+    """Issue #324: absence is not `BriefConfig()`'s own default the way it is
+    for `board.toml` -- `aco brief --step` reads `None` as "the repository
+    tracks no rules" and refuses on it, so this must stay tellable apart
+    from "the file exists but names no rules for this step"."""
+    assert board.load_brief_config(tmp_path / "brief.toml") is None
+
+
+def test_load_brief_config_reads_rules_and_checks_per_step(tmp_path: Path) -> None:
+    config_path = tmp_path / "brief.toml"
+    config_path.write_text(
+        '[build]\nrules = ["Stay in scope."]\nchecks = ["ruff check ."]\n'
+        '[review]\nrules = ["Stay read-only."]\n'
+    )
+
+    config = board.load_brief_config(config_path)
+
+    assert config is not None
+    assert config == board.BriefConfig(
+        build=board.BriefStepRules(rules=("Stay in scope.",), checks=("ruff check .",)),
+        review=board.BriefStepRules(rules=("Stay read-only.",)),
+    )
+    assert config.for_step(board.BriefStep.FIX) == board.BriefStepRules()
+
+
+def test_load_brief_config_fails_loud_on_unparsable_toml(tmp_path: Path) -> None:
+    config_path = tmp_path / "brief.toml"
+    config_path.write_text("this is not valid toml =\n")
+
+    with pytest.raises(ClaimError, match=f"cannot read brief configuration {config_path}"):
+        board.load_brief_config(config_path)
+
+
+def test_load_brief_config_refuses_a_step_section_that_is_not_a_table(tmp_path: Path) -> None:
+    config_path = tmp_path / "brief.toml"
+    config_path.write_text('build = "not a table"\n')
+
+    with pytest.raises(ClaimError, match=r"\[build\] must be a table"):
+        board.load_brief_config(config_path)
+
+
+@pytest.mark.parametrize(
+    ("content", "suffix"),
+    [
+        ('[deploy]\nrules = ["Never do this."]\n', "has unknown top-level key deploy"),
+        ('[build]\nrule = ["typo"]\n', "[build] has unknown key rule"),
+    ],
+    ids=["top-level", "inside-a-step"],
+)
+def test_load_brief_config_refuses_an_unknown_key_by_name(
+    tmp_path: Path, content: str, suffix: str
+) -> None:
+    config_path = tmp_path / "brief.toml"
+    config_path.write_text(content)
+
+    with pytest.raises(ClaimError) as refused:
+        board.load_brief_config(config_path)
+
+    assert str(refused.value) == f"brief configuration {config_path} {suffix}"
+
+
+@pytest.mark.parametrize("value", ["not a list", [1], [" padded "], [""]])
+def test_load_brief_config_refuses_a_malformed_rules_or_checks_list(
+    tmp_path: Path, value: object
+) -> None:
+    config_path = tmp_path / "brief.toml"
+    config_path.write_text(f"[build]\nrules = {json.dumps(value)}\n")
+
+    with pytest.raises(ClaimError, match=r"\[build\] rules must be a list of non-empty strings"):
+        board.load_brief_config(config_path)
+
+
 def test_parse_body_reads_a_valid_minimal_block() -> None:
     parsed = board.parse_body(agent_claim_body(MINIMAL_BLOCK_TOML))
 

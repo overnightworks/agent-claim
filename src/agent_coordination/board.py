@@ -773,6 +773,127 @@ def load_config(path: Path = CONFIG_PATH) -> BoardConfig:
     )
 
 
+# The repository-owned rules a lane step's dispatch brief prints (issue
+# #324): a repository used to carry these ~25 lines by hand in every
+# dispatch, pasted fresh each time. `.agent-claim/brief.toml` gives it one
+# tracked owner instead, read only when `aco brief --step` asks for it.
+BRIEF_CONFIG_PATH = Path(".agent-claim/brief.toml")
+
+
+class BriefStep(StrEnum):
+    """The four lane steps a dispatch brief can print rules and checks for
+    (issue #324) -- `aco brief --step`'s own choices, and `.agent-claim/
+    brief.toml`'s four section names."""
+
+    BUILD = "build"
+    REVIEW = "review"
+    FIX = "fix"
+    LAND = "land"
+
+
+@dataclass(frozen=True)
+class BriefStepRules:
+    """One `.agent-claim/brief.toml` section's own content: the repository's
+    conduct sentences for this step (`rules`) and the exact commands that
+    verify it (`checks`). Either list is empty, never absent, when the
+    section names none -- a step no repository has opinions about yet is not
+    a parse defect."""
+
+    rules: tuple[str, ...] = ()
+    checks: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class BriefConfig:
+    """`.agent-claim/brief.toml`'s own four sections, one `BriefStepRules`
+    each -- the file `load_brief_config` reads and `for_step` indexes by the
+    same `BriefStep` `aco brief --step` accepts."""
+
+    build: BriefStepRules = field(default_factory=BriefStepRules)
+    review: BriefStepRules = field(default_factory=BriefStepRules)
+    fix: BriefStepRules = field(default_factory=BriefStepRules)
+    land: BriefStepRules = field(default_factory=BriefStepRules)
+
+    def for_step(self, step: BriefStep) -> BriefStepRules:
+        return {
+            BriefStep.BUILD: self.build,
+            BriefStep.REVIEW: self.review,
+            BriefStep.FIX: self.fix,
+            BriefStep.LAND: self.land,
+        }[step]
+
+
+# Every top-level section `.agent-claim/brief.toml` defines; anything else is
+# a typo, refused by name the same way `_refuse_unknown_config_keys` refuses
+# one in `board.toml`.
+BRIEF_CONFIG_STEPS = frozenset(step.value for step in BriefStep)
+# The only two keys a `[build]`/`[review]`/`[fix]`/`[land]` table may carry.
+BRIEF_STEP_KEYS = frozenset({"rules", "checks"})
+
+
+def _validated_brief_string_list(
+    raw: dict[str, object], path: Path, section: str, key: str
+) -> tuple[str, ...]:
+    values = raw.get(key)
+    if values is None:
+        return ()
+    if not isinstance(values, list) or not all(
+        isinstance(value, str) and value.strip() == value and value for value in values
+    ):
+        raise protocol.ClaimError(
+            f"brief configuration {path} [{section}] {key} must be a list of non-empty strings"
+        )
+    return tuple(values)
+
+
+def _validated_brief_step_rules(
+    raw: dict[str, object], path: Path, step: BriefStep
+) -> BriefStepRules:
+    section = step.value
+    section_raw = raw.get(section)
+    if section_raw is None:
+        return BriefStepRules()
+    if not isinstance(section_raw, dict):
+        raise protocol.ClaimError(f"brief configuration {path} [{section}] must be a table")
+    unknown = sorted(set(section_raw) - BRIEF_STEP_KEYS)
+    if unknown:
+        named = ", ".join(unknown)
+        raise protocol.ClaimError(f"brief configuration {path} [{section}] has unknown key {named}")
+    return BriefStepRules(
+        rules=_validated_brief_string_list(section_raw, path, section, "rules"),
+        checks=_validated_brief_string_list(section_raw, path, section, "checks"),
+    )
+
+
+def _refuse_unknown_brief_config_keys(raw: dict[str, object], path: Path) -> None:
+    unknown = sorted(set(raw) - BRIEF_CONFIG_STEPS)
+    if unknown:
+        named = ", ".join(unknown)
+        raise protocol.ClaimError(f"brief configuration {path} has unknown top-level key {named}")
+
+
+def load_brief_config(path: Path = BRIEF_CONFIG_PATH) -> BriefConfig | None:
+    """The repository's own `.agent-claim/brief.toml` (issue #324), or `None`
+    when it does not exist at `path` at all. Unlike `load_config`, absence
+    is not a default to fall back on: `aco brief --step` refuses on it, so
+    an agent asking for rules that were never written learns that instead
+    of silently seeing none. Plain `aco brief` never calls this at all."""
+    if not path.exists():
+        return None
+    try:
+        with path.open("rb") as stream:
+            raw = tomllib.load(stream)
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        raise protocol.ClaimError(f"cannot read brief configuration {path}: {error}") from error
+    _refuse_unknown_brief_config_keys(raw, path)
+    return BriefConfig(
+        build=_validated_brief_step_rules(raw, path, BriefStep.BUILD),
+        review=_validated_brief_step_rules(raw, path, BriefStep.REVIEW),
+        fix=_validated_brief_step_rules(raw, path, BriefStep.FIX),
+        land=_validated_brief_step_rules(raw, path, BriefStep.LAND),
+    )
+
+
 def _opening_fence_delimiter(line: str) -> tuple[str, int] | None:
     match = FENCE_OPENING_PATTERN.match(line)
     if match is None:
