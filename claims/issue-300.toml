@@ -1,8 +1,0 @@
-claim_id = "c7f0363d3a3b452381ac91e931a5780d"
-agent = "Claude head (coordinator)"
-role = "builder"
-base = "1c188b131ad74fce925be436046d945d5fcbcf1b"
-branch = "claude/issue-300-residuals"
-scope = ["src/agent_coordination/cli.py", "src/agent_coordination/board.py", "tests/test_state_board.py", "tests/test_board.py", "tests/test_store.py", "tests/test_cli.py"]
-opened_commit = "1fd4f5ec761e9ac1f5c1cc07f0b5fabb59149e8d"
-whole_reason = "seven named residuals across cli, board and their four test modules; each is a few lines, together one hygiene lane"
