@@ -53,7 +53,12 @@ runner's own git object ids.
 - [ ] [ITEM-05] A `--scope` value that is absolute, `..`, or `~`-prefixed refuses with CLAIM-19's own sentence; a duplicate refuses with CLAIM-21's `claim scope contains duplicate paths`, before any write.
 - [ ] [ITEM-06] `--origin FORGE#N` failing its grammar refuses `'<value>' is not an origin; use forge#n or host/owner/repo#n, e.g. gitlab#514`, exit `2`, before `item new`'s own body ever runs.
 - [ ] [ITEM-19] `--origin`'s grammar is ASCII-only, case-insensitive `forge#n`/`host/owner/repo#n` tokens; an accepted value is stored in `record.origin` with its original case (PIN-20).
-- [ ] [ITEM-20] `--size S|M|L` (issue #357) writes the fresh item's own top-level `size` (BODY-57..BODY-59); invalid, argparse refuses first. `id`/`--json` stay ITEM-01's shape; `size` is never printed.
+- [ ] [ITEM-20] `--size S|M|L` writes the item's own top-level `size` (BODY-57..BODY-59); argparse refuses an invalid value first. `id`/`--json` stay ITEM-01's shape; `size` is never printed.
+
+  ```
+  $ aco item new --title "Ship it" --size M
+  writes size = "M" at the block's top level, ahead of [record]
+  ```
 
 ## `item show`
 
@@ -69,7 +74,12 @@ runner's own git object ids.
 - [ ] [ITEM-13] `aco item edit ITEM`'s every other field — `parent`, `state`, `origin`, `kind`, `created_at`, `closed_at` — stays this item's own stored value; `updated_at` always moves to now.
 - [ ] [ITEM-14] A delivered body carrying no `[record]` table at all leaves `title`, `labels`, `blocked_by` unchanged too, exactly `item edit`'s own pre-#287 behaviour.
 - [ ] [ITEM-15] `aco item edit ITEM --json` prints `{"item", "number", "oid"}`, `oid` the freshly written blob's own oid (see E-ITEM-03).
-- [ ] [ITEM-21] `aco item edit ITEM --size S|M|L` (issue #357) patches only the block's own top-level `size`, reads no stdin, and works under both storages; state-ref also bumps `record.updated_at` to now.
+- [ ] [ITEM-21] `item edit --size S|M|L` patches only the top-level `size`, reads no stdin, works under both storages; state-ref also bumps `record.updated_at`.
+
+  ```
+  $ aco item edit <item-id> --size L
+  patches size = "L" only; every other field, including the body outside it, is untouched
+  ```
 - [ ] [ITEM-22] `item edit --size` prints `EDITED #<n> size=<S|M|L>` (`--json`: `{"item", "size"}`); an invalid value is refused by argparse before any write.
 
 ## `item close`

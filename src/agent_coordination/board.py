@@ -3075,6 +3075,7 @@ def _kind_cell(item: BoardItem) -> str:
 
 NO_SIZE_CELL = "keine Größe"
 WEAK_ESTIMATE_CELL = "schwach"
+UNPARSED_TRAILER_SENTENCE = "Commits ohne lesbaren Item-Trailer"
 
 
 def estimate_cell(item: BoardItem) -> str:
@@ -3106,17 +3107,21 @@ def measurements_lines(measurements: Measurements) -> list[str]:
     """`Measurements`, rendered as the board's own "Messungen"/"keine
     Messungen" lines (issue #357) -- the one text `render`, `board_html.py`,
     and `board --json`'s human-facing callers all read from, rather than
-    each formatting `Measurements` its own way."""
+    each formatting `Measurements` its own way. `unfinished`/`unparsed`
+    (BOARD-30) each append their own line whenever non-zero, independent of
+    whether any class was itself measured -- an unparsed commit is never
+    hidden just because nothing else could be measured."""
     as_of = measurements.as_of.isoformat()
-    if not measurements.classes:
-        return [f"keine Messungen seit {as_of}"]
-    since = measurements.since.date().isoformat() if measurements.since is not None else as_of
-    lines = [f"Messungen (Stand {as_of}, seit {since})"]
-    lines.extend(_class_measurement_line(entry) for entry in measurements.classes)
+    if measurements.classes:
+        since = measurements.since.date().isoformat() if measurements.since is not None else as_of
+        lines = [f"Messungen (Stand {as_of}, seit {since})"]
+        lines.extend(_class_measurement_line(entry) for entry in measurements.classes)
+    else:
+        lines = [f"keine Messungen seit {as_of}"]
     if measurements.unfinished:
         lines.append(f"{measurements.unfinished} Lanes ohne Ende")
     if measurements.unparsed:
-        lines.append(f"{measurements.unparsed} Commits ohne lesbaren Item-Trailer")
+        lines.append(f"{measurements.unparsed} {UNPARSED_TRAILER_SENTENCE}")
     return lines
 
 

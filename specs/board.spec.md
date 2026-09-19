@@ -61,7 +61,13 @@ does, before either reads a single issue -- cited there, not restated.
 - [ ] [BOARD-08] An item the forge reports no `kind` for, or a non-`container` `kind`, is left out of `CONTAINERS` even with child counts of its own (#309): never guessed at (see E-BOARD-03).
 - [ ] [BOARD-09] `UNCUT` lists one line per item with an undispatched `[[slice]]` row, `<label>: rows <indices> uncut`, or `none` when every slice table is either empty or fully cut.
 - [ ] [BOARD-10] The table and every section are followed by one closing line, `requests: <n>`, `<n>` the exact count of forge calls this run made (see E-BOARD-02).
-- [ ] [BOARD-24] `ESTIMATE` reads `~<n>h (<S|M|L>, n=<k>)` for a class with three or more measured lanes, `schwach` for fewer (including zero), and `keine Größe` for no `size` at all (see E-BOARD-02).
+- [ ] [BOARD-24] `ESTIMATE` reads `~<n>h (<S|M|L>, n=<k>)` when measured, else `schwach` or `keine Größe` (see E-BOARD-02).
+
+  ```
+  ~5h (M, n=4)   # class has 3+ measured lanes
+  schwach        # fewer than 3, including 0
+  keine Größe    # the item names no size
+  ```
 - [ ] [BOARD-25] `MESSUNGEN` follows `UNCUT`: measured, `Messungen (Stand <date>, seit <date>)` then one line per class; else only `keine Messungen seit <date>` (see E-BOARD-02).
 - [ ] [BOARD-29] Each `MESSUNGEN` class line reads `<S|M|L>: n=<k>, median <h>h, p80 <h>h`, `(schwach)` appended under three, then `<first>..<last>` dates.
 - [ ] [BOARD-30] `MESSUNGEN` appends `<n> Lanes ohne Ende` when any claim is still open, and `<n> Commits ohne lesbaren Item-Trailer` when any transition commit could not be read.
@@ -72,7 +78,12 @@ does, before either reads a single issue -- cited there, not restated.
 - [ ] [BOARD-12] `landings_derivable` is `false` for a board source that cannot list merged pull requests, `true` otherwise -- the one field `render`'s BOARD-06 line reports in text.
 - [ ] [BOARD-13] Each item's `open_blockers` is split into a same-repository `int` list plus a sibling `foreign_blockers` list of `"<repository>#<n>"` strings, never one mixed list.
 - [ ] [BOARD-14] An `uncut` row's own `scope` key is present, canonical and non-empty only when that row carries a `scope` of its own; a scopeless row's object carries no `scope` key at all, never `"scope": null`.
-- [ ] [BOARD-26] Each item's own object carries `size` (`"S"`/`"M"`/`"L"`, or `null` for an unsized item) and `estimate` (`null`, or `{"item", "size", "median_hours", "n", "weak"}`) alongside its other fields.
+- [ ] [BOARD-26] Each item object carries `size` (`"S"`/`"M"`/`"L"`/`null`) and `estimate` (`null`, or the fields below) alongside its other fields.
+
+  ```
+  {"size": "M", "estimate": {"item": "aco-1", "size": "M", "median_hours": 5, "n": 4, "weak": false}}
+  {"size": null, "estimate": null}
+  ```
 - [ ] [BOARD-27] The top-level `measurements` object carries exactly `{"classes", "unfinished", "unparsed", "since", "as_of"}` (see E-BOARD-04).
 - [ ] [BOARD-31] Each `classes` entry carries `{"stats": {"size", "n", "median_hours", "p80_hours", "weak"}, "first_event_at", "last_event_at"}`; `since` is `null` only with no lane event read.
 

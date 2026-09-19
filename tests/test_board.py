@@ -3377,6 +3377,44 @@ def test_build_board_reports_a_measured_estimate_with_median_and_count() -> None
     assert board.estimate_cell(item) == "~5h (M, n=3)"
 
 
+def test_build_board_leaves_a_lane_claims_own_event_unjoined_to_any_size_class() -> None:
+    """A `docs/`/`fix/` lane claim's own lifecycle event carries no issue
+    number at all (issue #357 R2): `_joined_lane_event` returns it
+    unchanged rather than joining it against `size_by_number`/
+    `landed_at_by_item`, so it can never be sorted into a size class --
+    mixing one into an otherwise-clean `M` measurement leaves that class's
+    own `n` exactly at the number of real issue-shaped events."""
+    lane_events = (
+        *(
+            _lane_event(
+                str(number),
+                claimed_at=datetime(2026, 8, 10 + index, tzinfo=UTC),
+                released_at=datetime(2026, 8, 10 + index, hours, tzinfo=UTC),
+            )
+            for index, (number, hours) in enumerate([(211, 4), (212, 5), (216, 6)])
+        ),
+        _lane_event(
+            "docs/lane-cleanup",
+            claimed_at=datetime(2026, 8, 10, tzinfo=UTC),
+            released_at=datetime(2026, 8, 10, 2, tzinfo=UTC),
+        ),
+    )
+    projected = projected_board(
+        (_sized_item(211, "M"), _sized_item(212, "M"), _sized_item(216, "M")),
+        (),
+        (),
+        (),
+        board.BoardConfig(),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+        lane_events=lane_events,
+    )
+
+    (m_class,) = (
+        entry for entry in projected.measurements.classes if entry.stats.size is metrics.Size.MEDIUM
+    )
+    assert m_class.stats.n == 3
+
+
 def test_build_board_sums_multiple_claims_of_one_item_into_one_sample() -> None:
     """One item claimed, released, and reclaimed -- a builder then a fixer --
     contributes exactly one measured sample, its wall-clock durations added
@@ -3558,6 +3596,31 @@ def test_render_shows_the_unparsed_lifecycle_commit_count() -> None:
     assert projected.measurements.unparsed == 2
     rendered = board.render(projected)
     assert "2 Commits ohne lesbaren Item-Trailer" in rendered
+
+
+def test_render_shows_the_unparsed_count_even_with_no_measured_class() -> None:
+    """`unparsed` never hides behind `classes` being empty (BOARD-30, issue
+    #357 R2): a board with no measured lane at all still surfaces every
+    unparsed commit, alongside the "keine Messungen" sentence rather than
+    silently instead of it."""
+    projected = projected_board(
+        (_sized_item(224, "M"),),
+        (),
+        (),
+        (),
+        board.BoardConfig(),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+        unparsed_lifecycle_commits=3,
+    )
+
+    assert projected.measurements.classes == ()
+    assert projected.measurements.unparsed == 3
+    lines = board.measurements_lines(projected.measurements)
+    assert lines[0] == "keine Messungen seit 2026-08-21"
+    assert "3 Commits ohne lesbaren Item-Trailer" in lines
+    rendered = board.render(projected)
+    assert "keine Messungen seit 2026-08-21" in rendered
+    assert "3 Commits ohne lesbaren Item-Trailer" in rendered
 
 
 def test_estimate_changes_only_when_its_own_size_classs_measured_lanes_change() -> None:

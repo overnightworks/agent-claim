@@ -125,7 +125,13 @@ line per defect, and by a reader as the item's own reason (BODY-50..BODY-52).
 
 - [ ] [BODY-57] A block with no `size` key is valid: absence means "no estimate", never a default class, and `aco body --check` prints `body ok`, exit `0`.
 - [ ] [BODY-58] `size = "S"`, `"M"`, or `"L"` is valid: `aco body --check` prints `body ok`, exit `0`.
-- [ ] [BODY-59] A `size` outside `S`/`M`/`L` -- an invalid string, or a non-scalar value such as a list or a table -- prints `body malformed: size: size must be S, M, or L`, exit `1`, the same sentence either way.
+- [ ] [BODY-59] A `size` outside `S`/`M`/`L` prints `body malformed: size: size must be S, M, or L`, exit `1`, the same sentence for every invalid shape.
+
+  ```
+  size = "XL"    # not one of S, M, L
+  size = ["S"]   # a list, not a scalar
+  size = {}      # a table, not a scalar
+  ```
 
 ## Never
 

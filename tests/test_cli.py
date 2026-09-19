@@ -611,24 +611,31 @@ def test_board_shows_measured_estimates_across_text_json_and_html(
         _lane("31", 15, 2),
     )
     _patch_store_write(monkeypatch, lane_events=lane_events)
+    # The one scenario value this test's three checks (text, `--json`, `--html`)
+    # all read back rather than each re-typing the M class's own median/count.
+    measured_size, measured_median_hours, measured_sample_count = "M", 5, 3
+    measured_estimate_cell = (
+        f"~{measured_median_hours}h ({measured_size}, n={measured_sample_count})"
+    )
+    board_args = ["--repo", "example/agent-claim", "board"]
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "board"]) == 0
+    assert issue_claim.main(board_args) == 0
     text = capsys.readouterr().out
-    assert "~5h (M, n=3)" in text
+    assert measured_estimate_cell in text
     assert "schwach" in text
     assert "keine Größe" in text
     assert "Messungen (Stand" in text
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "board", "--json"]) == 0
+    assert issue_claim.main([*board_args, "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     thirty = next(item for item in payload["items"] if item["number"] == 30)
     thirty_one = next(item for item in payload["items"] if item["number"] == 31)
     thirty_two = next(item for item in payload["items"] if item["number"] == 32)
     assert thirty["estimate"] == {
         "item": "30",
-        "size": "M",
-        "median_hours": 5,
-        "n": 3,
+        "size": measured_size,
+        "median_hours": measured_median_hours,
+        "n": measured_sample_count,
         "weak": False,
     }
     assert thirty_one["estimate"]["weak"] is True
@@ -636,10 +643,10 @@ def test_board_shows_measured_estimates_across_text_json_and_html(
     assert thirty_two["estimate"] is None
     assert payload["measurements"]["classes"]
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "board", "--html"]) == 0
+    assert issue_claim.main([*board_args, "--html"]) == 0
     html_page = capsys.readouterr().out
     assert "Messungen" in html_page
-    assert "~5h (M, n=3)" in html_page
+    assert measured_estimate_cell in html_page
 
 
 def test_board_shows_the_empty_measurements_sentence_with_nothing_measured(
@@ -12775,7 +12782,7 @@ def test_cli_reset_refuses_when_a_claim_is_live_and_touches_nothing(
     store.commit_transition(
         worktree=repository,
         remote=str(bare_remote),
-        subject=store.TransitionSubject("claim issue 42"),
+        subject=store.ClaimTransitionSubject("claim issue 42", item="42"),
         intent=_real_claim_intent(42),
     )
     tip_before = _real_git(repository, "ls-remote", str(bare_remote), store.STATE_REF).stdout.split(
@@ -12948,13 +12955,13 @@ def test_cli_reset_restore_from_the_bundle_into_a_fresh_repository_recovers_stat
     store.commit_transition(
         worktree=repository,
         remote=str(bare_remote),
-        subject=store.TransitionSubject("claim issue 42"),
+        subject=store.ClaimTransitionSubject("claim issue 42", item="42"),
         intent=_real_claim_intent(42),
     )
     store.commit_transition(
         worktree=repository,
         remote=str(bare_remote),
-        subject=store.TransitionSubject("release issue 42"),
+        subject=store.ClaimTransitionSubject("release issue 42", item="42"),
         intent=protocol.ReleaseIntent(
             claim_id=protocol.ClaimId("claim-42"),
             agent="Codex Sol",

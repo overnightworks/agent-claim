@@ -511,8 +511,10 @@ from a claim's own scope or path count. The estimate comes from
 `claimed_at`, `released_at` (`None` while still open — counted as an
 unfinished lane, never measured), and its rescope count; a commit whose
 trailer this walk cannot read at all (older history, or a foreign commit
-merely shaped like a transition) is skipped and counted separately, never a
-crash. A claim's own item number matches it against that item's *current*
+merely shaped like a transition), carries an unparsable committer date, or
+is a well-formed release/rescope naming a claim this walk never saw
+claimed, is skipped and counted separately, never a crash. A claim's own
+item number matches it against that item's *current*
 size, open or closed — a board build already reads every open item's body
 for other reasons, and reads a closed or vanished item's own body once more
 through the forge/state for exactly the numbers a completed claim still

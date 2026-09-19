@@ -3041,17 +3041,17 @@ def _require_state_ref(state: protocol.ClaimState) -> None:
 
 def _transition_subject(
     action: str, identity: protocol.ClaimIdentity, branch: str
-) -> store.TransitionSubject:
-    """One claim-shaped transition's own `store.TransitionSubject` (§1
-    "Commit message"; issue #357 R1): `text` is `claim issue 42`, `rescope
+) -> store.ClaimTransitionSubject:
+    """One claim-shaped transition's own `store.ClaimTransitionSubject` (§1
+    "Commit message"; issue #357 R2): `text` is `claim issue 42`, `rescope
     lane docs/lane-cleanup`, and so on -- `action` plus `issue`/`lane` plus
     `protocol.transition_item_identifier`'s own bare identifier; `item` is
     that same identifier again, carried separately into the commit's own
-    `item:` trailer rather than reconstructed from `text` by
+    mandatory `item:` trailer rather than reconstructed from `text` by
     `claim_lifecycle`'s reader."""
     kind = "lane" if isinstance(identity, protocol.LaneIdentity) else "issue"
     item = protocol.transition_item_identifier(identity, branch)
-    return store.TransitionSubject(f"{action} {kind} {item}", item=item)
+    return store.ClaimTransitionSubject(f"{action} {kind} {item}", item=item)
 
 
 def _claim_intent_from_request(
