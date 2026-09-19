@@ -55,20 +55,25 @@ here reads or writes it. `specs/bootstrap.spec.md` owns `bootstrap`;
 ## A GitHub workflow: claim, build, land
 
 ```bash
+git worktree add ../repo-worktrees/issue-42-widget -b Ada/issue-42-widget
+cd ../repo-worktrees/issue-42-widget
 aco claim 42 --agent "Ada" --scope src/widget.py
 # edit, commit, push, open a pull request naming Work-Item: #42
 aco release 42 --merged 57
 ```
 
-`claim` opens one live claim before the first worktree edit and refuses
-out-of-order or blocked work by name unless overridden with
-`--out-of-order REASON`. `release --merged <pull request>` verifies that
-pull request against GitHub -- merged into the default branch, its body
-naming this item -- before closing the item and releasing the claim, then
-reports what that landing freed and what to pull next. The exact
-preconditions, identity resolution, and refusals are `specs/claim.spec.md`
-and `specs/release.spec.md`'s own; the claim record itself -- scope, roles,
-resources, overlap -- is `specs/claim-record.spec.md`'s.
+`claim` refuses before the first edit unless the checkout is already a
+linked, isolated worktree on a non-main branch -- create it first, exactly
+as shown, naming the issue and agent in both the directory and the branch;
+`claim` then opens one live claim there and refuses out-of-order or blocked
+work by name unless overridden with `--out-of-order REASON`. `release
+--merged <pull request>` verifies that pull request against GitHub -- merged
+into the default branch, its body naming this item -- before closing the
+item and releasing the claim, then reports what that landing freed and what
+to pull next. The exact preconditions, identity resolution, and refusals
+are `specs/claim.spec.md` and `specs/release.spec.md`'s own; the claim
+record itself -- scope, roles, resources, overlap -- is
+`specs/claim-record.spec.md`'s.
 
 ## Issueless lane claims
 
@@ -80,13 +85,18 @@ and `release` take no positional number in this mode.
 git worktree add ../repo-worktrees/docs-tidy-readme -b docs/tidy-readme
 cd ../repo-worktrees/docs-tidy-readme
 aco claim --agent "Ada" --scope README.md
+# edit, commit, push, open a pull request whose body declares No-Item: docs
 aco release --merged 58
 ```
 
 This lane branch must land within the session it was claimed in; it never
-appears on `board`, `rulings`, or `next` since it owns no issue.
-`specs/claim.spec.md` owns the exact branch-name grammar and its refusal
-when a checkout is not on a matching branch.
+appears on `board`, `rulings`, or `next` since it owns no issue. Its pull
+request carries `No-Item: docs` or `No-Item: fix` in place of a `Work-Item:`
+line -- the one classification `release --merged` accepts for a lane with no
+issue to close. `specs/claim.spec.md` owns the exact branch-name grammar and
+its refusal when a checkout is not on a matching branch;
+`specs/landing-grammar.spec.md` owns the `No-Item:` classification and its
+refusals.
 
 ## A workflow without a forge
 
@@ -96,10 +106,12 @@ instead of issues.
 
 ```bash
 git init --bare -b main /srv/aco/repo.git
-git remote add origin file:///srv/aco/repo.git
+git clone /srv/aco/repo.git repo && cd repo
 git remote set-head origin main
+mkdir .agent-claim
 printf 'storage = "state-ref"\n' > .agent-claim/board.toml
 git add -f .agent-claim/board.toml && git commit -m "pin state-ref storage"
+git push origin main
 aco bootstrap
 ```
 
@@ -113,7 +125,7 @@ aco item new --title "Build the widget" --parent <container-id>
 aco item edit <item-id> < body.md
 aco claim <item-id> --scope src/widget.py
 # build, then land a commit carrying "Work-Item: <item-id>" on main
-aco release --merged
+aco release <item-id> --merged
 ```
 
 `specs/storage-pin.spec.md` owns the pin and the two item-id forms
@@ -122,6 +134,11 @@ aco release --merged
 must say to count as a landing.
 
 ## Recovering a provider workspace
+
+```bash
+aco register widget --path ~/git/widget --session-id 11111111-1111-1111-1111-111111111111 --agent Ada --stopped
+aco run widget
+```
 
 `aco register` records a local, deliberate mapping from a project to a
 stopped or explicitly selected running native provider conversation
@@ -198,13 +215,15 @@ is refused by name.
 
 ## Board
 
-`aco board` projects the open work board read-only: a fixed-width text
-table by default, `--json`, a static `--html` page, or a served `--serve`
-page an operator opens in a browser. Every item that carries a top-level
-`size = "S"|"M"|"L"` also shows an estimate (`~4h (M, n=5)`) derived from how
-long previously measured claims of that size actually took, never from a
-claim's own scope. The exact text sections, JSON keys, HTML layout, and
-estimate derivation are `specs/board.spec.md`'s own.
+`aco board` projects the open work board: a fixed-width text table by
+default, `--json`, or a static `--html` page -- all three read-only.
+`--serve` instead runs a live page on 127.0.0.1 with a one-click ruling form
+per expectation line, so it is the one form of this command that writes.
+Every item that carries a top-level `size = "S"|"M"|"L"` shows a measured
+estimate (`~4h (M, n=5)`) only once three or more same-size claims have
+landed; fewer measurements, including zero, show `schwach` instead. The
+exact text sections, JSON keys, HTML layout, and estimate derivation are
+`specs/board.spec.md`'s own.
 
 ## Scope and boundaries
 
@@ -219,14 +238,11 @@ for them. aco does not allocate work, merge code, or operate a lease server;
 it never writes provider configuration, and never touches `~/.claude`,
 `~/.codex`, or `~/.grok` except the one workspace mapping described above.
 
-Most commands accept `--json` for a machine-readable form. A refusal that
-reaches a command's shared error path always prints `ERROR: <sentence>` on
-stderr and exits `2`; with `--json` requested it also prints a JSON object
-carrying that same sentence, on the same stream a successful run would have
-used. `next` is the one command that exits non-zero (`3`) without that
-being a refusal at all -- it simply had nothing to name. Each command's own
-`--json` shape, and the exact refusal-object grammar, is its owning spec's
-fact below.
+Most commands accept `--json` for a machine-readable form; the refusal
+object a command's own error path prints on stderr, and the one exception --
+`next`, which exits non-zero without ever refusing anything -- are each
+command's own spec's fact (e.g. `specs/release.spec.md` and
+`specs/next.spec.md`), cited rather than repeated here.
 
 ## Commands and their specs
 
@@ -252,6 +268,7 @@ by exactly one file below; this table is the map, not a copy.
 | `aco item new/show/edit/close` | `specs/item.spec.md` | the state-ref item lifecycle |
 | `aco body --template/--check` | `specs/body.spec.md` | composes or validates a body offline |
 | `aco protect` | `specs/protect.spec.md` | the `PreToolUse` hook's write verdict |
+| `aco register/run/login` | `specs/workspace.spec.md` | records, resumes, and autostarts a provider workspace mapping |
 | `agent-claim` block grammar | `specs/body-block.spec.md` | the fenced TOML block every item-reading command parses |
 | claim record | `specs/claim-record.spec.md` | the stored claim fields `claim`/`release`/`rescope`/`status`/`protect` share |
 | state ref transport | `specs/ref-store-cas.spec.md` | the compare-and-swap `refs/aco/state` every store command reads and writes |
