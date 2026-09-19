@@ -185,10 +185,15 @@ A successful `--merged` release then reads the board once, lazily, to name
 what it freed: `freed: #a, #b` (or `freed: none`) for every open item whose
 last open blocker was this landing, and `next: #n score s: <title>` (or
 `next: none`) for the same pick `aco next` would make; `--json` carries these
-as `freed` (a list of numbers) and `next` (a number or `null`). `--abandoned`
-never reads the board and reports neither. A forge failure after the release
-has already committed never undoes or fails it -- one hint line stands in for
-`freed`/`next` instead, naming the repair.
+as `freed` (a list of numbers) and `next` (a number or `null`). When this
+release closed a container's last open child, leaving it with no undispatched
+`[[slice]]` row either (issue #348), it also names that parent: `parent #n: no
+open children — close it` (`--json`: `parent_closable`, a number or `null`) —
+the same decision `next`'s own `close:` line makes for a childless, uncut
+container. `--abandoned` never reads the board and reports neither. A forge
+failure after the release has already committed never undoes or fails it --
+one hint line stands in for `freed`/`next`/the parent hint instead, naming
+the repair.
 `rescope <issue> --add <path> [--drop <path>]` changes a live claim's scope
 without releasing it. Each `--add`/`--drop` value is an absolute path, never
 repository-relative: `rescope` resolves its checkout from that path directly
@@ -617,9 +622,13 @@ like `item show`'s own closed-item proof. The compare-and-swap `expected` oid
 is this process's own already-read snapshot, the same discipline `item edit`
 uses; a second worktree writing from that same snapshot refuses with the same
 "written since it was read" sentence. Prints one line, `CLOSED aco-xxxxxx`
-(`--json`: `{"item", "number", "closed_at"}`), then a `freed:` line in
-`release --merged`'s own form naming every open item whose only open local
-blocker was this one. It refuses: a second close on an already-closed item,
+(`--json`: `{"item", "number", "closed_at", "parent_closable"}`), then a
+`freed:` line in `release --merged`'s own form naming every open item whose
+only open local blocker was this one, and — when this close was its parent's
+last open child, the parent left with no undispatched `[[slice]]` row either
+(issue #348) — `release --merged`'s own parent hint: `parent #n: no open
+children — close it` (`--json`: `parent_closable`, a number or `null`). It
+refuses: a second close on an already-closed item,
 naming the date it closed on; an unknown id; an item still carrying a live
 claim ("release the claim first" — a closed item with a live claim would be
 the `RECOVERY` anomaly the board already guards against); and, under `storage
@@ -723,10 +732,10 @@ top-ranked qualifying row — the same `board_rank` order `board` shows.
 or `null` when nothing qualifies. `work_item`: the row is open, free,
 unblocked, not frozen, and has a complete Now/Next/Done when
 contract, or is a configured projectionless idea; its text form also prints
-`Run: aco claim <n> --scope <paths>` (the literal placeholder
-`<paths>`, since the scope cannot be derived) and a line pointing at the
-item body for the real paths — the `--json` form is unchanged beyond the
-always-present `action` field. `cut_slice`: a container with no open child
+`Run: aco claim <n>` once the item names its own top-level `scope = [...]`
+(issue #337 derives it, so `claim` needs nothing more) — `Run: aco claim <n>
+--scope <paths>` plus a `scope unknown` line otherwise, an item whose body
+names no scope of its own. `cut_slice`: a container with no open child
 still carries an undispatched `[[slice]]` row (`{"action": "cut_slice",
 "number", "title", "slice", "cut_title"}`); `slice` is the container's own
 human step — its `Next` line when that still names work, else the row's own
@@ -752,6 +761,28 @@ as the `next` action is never also listed there). `next` exits 3 when
 nothing qualifies, but still prints at least `No actionable item.` (plus any
 `SKIPPED`/`RECOVERY` sections) in text, and `--json` still emits an object —
 `{"action": null, "recovery": [...], "skipped": [...]}` — never nothing.
+
+After the first action, `next` names how wide the head can run right now
+(issue #348, Operator 19.09.2026: "ist das die maximale Auslastung?"). A
+`parallel:` line names the maximal set of further free rows disjoint from
+every live claim's scope and from the first action's own — a
+priority-preserving greedy walk of the remaining actionable rows and cut
+proposals in board order, each placed and then itself occupied the moment it
+is disjoint from everything occupied so far; overlap is path ancestry
+(`src` overlaps `src/a.py`), never a second rule. The text form names at
+most three, plus `and N more`; `--json`'s `parallel.candidates` carries
+every one with its full scope. A row this walk could not place either way —
+it names no scope of its own — is named instead under `scope unknown:`
+(`--json`: `parallel.scope_unknown`), not silently dropped. When the first
+action itself names no scope (a cut proposal's row included), no set can be
+founded on it at all: text prints `parallel: unknown (first action names no
+scope)` and drops `scope unknown:` entirely; `--json` carries
+`parallel.first_scope_unknown: true` with both other fields empty. A
+`close:` line then always names every zero-cost action the board holds right
+now — every childless container with no undispatched `[[slice]]` row, union
+every landed-but-open `RECOVERY` item — regardless of which row ranks first
+(`--json`: `close`, a list of numbers); `none` when there is nothing to
+close.
 `claim` refuses work out of order when a higher-priority actionable item — the
 same order `board` and `next` use — is free. It also refuses an item that has
 at least one open GitHub blocked-by dependency, including a foreign

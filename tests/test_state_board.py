@@ -347,6 +347,32 @@ def _close_scenario_item_files() -> dict[str, bytes]:
     }
 
 
+# A container-and-only-child scenario for `aco item close`'s own parent hint
+# (issue #348, Beweis 4): the parent's block carries no `[[slice]]` row, so
+# closing its only child leaves it freshly closable -- `item close`'s own
+# version of `release --merged`'s parent hint.
+CLOSE_PARENT_ID = "aco-00000e"
+CLOSE_PARENT_NUMBER = items.item_number(CLOSE_PARENT_ID)
+CLOSE_CHILD_ID = "aco-00000f"
+CLOSE_CHILD_NUMBER = items.item_number(CLOSE_CHILD_ID)
+_CLOSE_PARENT_PROJECTION = _Projection("Land every slice.", "keiner", "All slices are closed.")
+_CLOSE_CHILD_PROJECTION = _Projection("Ship the slice.", "Land it.", "Slice is done.")
+
+
+def _close_parent_scenario_item_files() -> dict[str, bytes]:
+    parent_body = _state_ref_body(
+        _CLOSE_PARENT_PROJECTION, _record(title="Parent", state="open", kind="container")
+    )
+    child_body = _state_ref_body(
+        _CLOSE_CHILD_PROJECTION,
+        _record(title="Child", state="open", kind="task", parent=CLOSE_PARENT_ID),
+    )
+    return {
+        f"{CLOSE_PARENT_ID}.md": parent_body.encode(),
+        f"{CLOSE_CHILD_ID}.md": child_body.encode(),
+    }
+
+
 def _decoded_record(body: str, item_id: str) -> items.ItemRecord:
     """`body`'s `[record]` table, decoded -- the same read `StateRefBoard`
     itself performs, used here to check a write's persisted result straight
@@ -2638,6 +2664,50 @@ class TestCliStateRefForge:
         assert f"#{CLOSE_TARGET_NUMBER}" not in next_out
         assert "blocked by" not in next_out
 
+    def test_item_close_prints_the_parent_hint_for_the_last_open_child(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+    ) -> None:
+        """Issue #348, Beweis 4: closing a container's only open child
+        prints the same parent hint `release --merged` prints, naming the
+        container `item close`'s own way (`freed:`'s own id form)."""
+        self._live_state_ref_checkout(
+            monkeypatch, tmp_path, bare_remote, worktree, _close_parent_scenario_item_files()
+        )
+
+        status = issue_claim.main(["item", "close", str(CLOSE_CHILD_NUMBER)])
+
+        assert status == 0
+        assert capsys.readouterr().out.splitlines() == [
+            f"CLOSED {CLOSE_CHILD_ID}",
+            "freed: none",
+            f"parent {CLOSE_PARENT_ID}: no open children — close it",
+        ]
+
+    def test_item_close_json_carries_the_parent_closable_number(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+    ) -> None:
+        """Issue #348, Beweis 4 (JSON): `parent_closable` carries the same
+        number the text form's parent hint names."""
+        self._live_state_ref_checkout(
+            monkeypatch, tmp_path, bare_remote, worktree, _close_parent_scenario_item_files()
+        )
+
+        status = issue_claim.main(["item", "close", str(CLOSE_CHILD_NUMBER), "--json"])
+
+        assert status == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["parent_closable"] == CLOSE_PARENT_NUMBER
+
     def test_item_close_refuses_a_second_close_with_the_closed_date_and_leaves_the_oid_unchanged(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -2899,7 +2969,15 @@ class TestCliStateRefForge:
         assert _run_ok(["status", child_id], capsys).strip() == f"UNCLAIMED issue {child_id}"
 
         close_out = _run_ok(["item", "close", child_id], capsys)
-        assert close_out.splitlines() == [f"CLOSED {child_id}", "freed: none"]
+        # `child_id` was `container_id`'s only child and the container's own
+        # block carries no `[[slice]]` row, so this close leaves it freshly
+        # closable (issue #348) -- named by the same parent hint `release
+        # --merged` prints.
+        assert close_out.splitlines() == [
+            f"CLOSED {child_id}",
+            "freed: none",
+            f"parent {container_id}: no open children — close it",
+        ]
 
         asked_text = "Does the runbook still hold without a forge?"
         asked_out = _run_ok(["ask", container_id, "--text", asked_text], capsys)
