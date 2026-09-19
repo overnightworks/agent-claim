@@ -3,15 +3,18 @@
 `aco brief <item>`: one dispatch brief composed from reads a lane step's body
 otherwise gets assembled from by hand -- the item's own body, its live issue
 claim, that claim's lane tip, and the files the lane touches against its
-base. This file owns the command's own argument, its printed section shape,
-when each section carries a value versus stays empty, and its `--json`
-object; `specs/claim-record.spec.md` owns the claim record's own fields this
-command reads (CLAIM-01, CLAIM-05, CLAIM-47), `specs/storage-pin.spec.md`
-owns the item-reference grammar `<item>` accepts (PIN-08) and the
-state-ref forge gate (PIN-04, PIN-05), and `specs/release.spec.md` owns the
-`--json` refusal object's own shape (REL-24). `<item>` is the argument as
-given; `<n>` its resolved number. A refusal reaching the shared collection
-point prints `ERROR: <sentence>` on stderr, exit `2`.
+base. `aco brief <item> --step <step>` adds two more sections, this
+repository's own rules and checks for that lane step, read from the tracked
+`.agent-claim/brief.toml`. This file owns the command's own argument, its
+printed section shape, when each section carries a value versus stays empty,
+and its `--json` object; `specs/claim-record.spec.md` owns the claim record's
+own fields this command reads (CLAIM-01, CLAIM-05, CLAIM-47),
+`specs/storage-pin.spec.md` owns the item-reference grammar `<item>` accepts
+(PIN-08) and the state-ref forge gate (PIN-04, PIN-05), and
+`specs/release.spec.md` owns the `--json` refusal object's own shape
+(REL-24). `<item>` is the argument as given; `<n>` its resolved number;
+`<step>` is one of `build`, `review`, `fix`, `land`. A refusal reaching the
+shared collection point prints `ERROR: <sentence>` on stderr, exit `2`.
 
 ## Behavior table
 
@@ -39,6 +42,18 @@ point prints `ERROR: <sentence>` on stderr, exit `2`.
 - [ ] [BRIEF-06] `aco brief <item> --json` prints one object `{"body", "claim", "tip", "touched"}`, `"claim"` `null` with no live claim (see E-BRIEF-04).
 - [ ] [BRIEF-10] A non-`null` `"claim"` object is `{"agent", "role", "branch", "base", "scope", "whole", "age"}`, `"whole"` `null` without one (see E-BRIEF-04).
 
+## `--step`
+
+| state \ trigger | `aco brief <item> --step <step>` (text) | `aco brief <item> --step <step> --json` |
+|---|---|---|
+| a tracked `.agent-claim/brief.toml` | BRIEF-12, BRIEF-13 | BRIEF-14 |
+| no tracked `.agent-claim/brief.toml` | BRIEF-15 | BRIEF-15 |
+
+- [ ] [BRIEF-12] `--step <step>` prints the four sections, then a blank line, `RULES`, one line per `[<step>].rules` entry, empty when it names none (see E-BRIEF-07).
+- [ ] [BRIEF-13] `RULES`' own lines are followed by a blank line, `CHECKS`, one line per `[<step>].checks` entry, empty when it names none (see E-BRIEF-07).
+- [ ] [BRIEF-14] `aco brief <item> --step <step> --json` adds `"rules"` and `"checks"` string-list keys to BRIEF-06/BRIEF-10's own object (see E-BRIEF-08).
+- [ ] [BRIEF-15] `--step <step>` refuses `no .agent-claim/brief.toml in the repository`, exit `2`, before reading the body or claim, when the repository tracks no such file (see E-BRIEF-09).
+
 ## Forge resolution
 
 - [ ] [BRIEF-07] `aco brief <item>` on a canonical remote whose host has no forge adapter refuses `no forge adapter for host <host>`, exit `2`, before any forge resolution (see E-BRIEF-05).
@@ -51,6 +66,8 @@ point prints `ERROR: <sentence>` on stderr, exit `2`.
 - `aco brief` never writes: it is a pure composition of three existing reads (the item's body, the store's live claims, and one local `git diff`), never a new data source and never a transition against the state ref.
 - `aco brief`'s claim line is never `aco status`'s own `CLAIMED`/`CONFLICT` line (CLAIM-01): it carries no verb, no identity prefix, no `claim=` field, and orders `branch=` before `base=`, the reverse of `status`'s own order.
 - `aco brief --json`'s claim object is never `aco status --json`'s own claim object (STAT-07, STAT-09): no `claim_id`, `resource`, `resource_value`, `overlaps`, or `old` key.
+- [ ] [BRIEF-16] Without `--step`, `.agent-claim/brief.toml`'s presence or content changes nothing: `brief` prints exactly BRIEF-01..06's sections either way (see E-BRIEF-10).
+- `aco brief --step` never writes: `.agent-claim/brief.toml` is one more existing read, never a write, and never a new claim or state-ref transition.
 
 ## Examples
 
@@ -160,5 +177,81 @@ no active claim
 TIP
 
 TOUCHED
+exit 0
+```
+
+### E-BRIEF-07 -- `--step` prints this repository's own rules and checks
+
+Setup: bare-remote, fake `gh`, issue `#42` body `The item's own body.`, a
+linked worktree on `ada/issue-42` already `aco claim 42 --scope README.md`,
+one commit on `ada/issue-42` past `<base>` touching `README.md`, pushed to
+`origin`, `.agent-claim/brief.toml` tracked with:
+
+```toml
+[build]
+rules = ["Stay in scope."]
+checks = ["ruff check ."]
+```
+
+```console
+$ aco brief 42 --step build
+The item's own body.
+
+CLAIM
+Ada (builder) branch=ada/issue-42 base=<base> 0h 0m
+  README.md
+
+TIP
+<tip>
+
+TOUCHED
+README.md
+
+RULES
+Stay in scope.
+
+CHECKS
+ruff check .
+exit 0
+```
+
+### E-BRIEF-08 -- `--step --json`
+
+Setup: as E-BRIEF-07
+
+```console
+$ aco brief 42 --step build --json
+{"body": "The item's own body.", "claim": {"agent": "Ada", "role": "builder", "branch": "ada/issue-42", "base": "<base>", "scope": ["README.md"], "whole": null, "age": "0h 0m"}, "tip": "<tip>", "touched": ["README.md"], "rules": ["Stay in scope."], "checks": ["ruff check ."]}
+exit 0
+```
+
+### E-BRIEF-09 -- `--step` with no tracked `.agent-claim/brief.toml`
+
+Setup: bare-remote, fake `gh`, no `.agent-claim/brief.toml` in the repository
+at all
+
+```console
+$ aco brief 42 --step build
+2> ERROR: no .agent-claim/brief.toml in the repository
+exit 2
+```
+
+### E-BRIEF-10 -- a tracked `.agent-claim/brief.toml` changes nothing without `--step`
+
+Setup: as E-BRIEF-07
+
+```console
+$ aco brief 42
+The item's own body.
+
+CLAIM
+Ada (builder) branch=ada/issue-42 base=<base> 0h 0m
+  README.md
+
+TIP
+<tip>
+
+TOUCHED
+README.md
 exit 0
 ```
