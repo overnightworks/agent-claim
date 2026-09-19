@@ -5284,6 +5284,17 @@ def test_landing_intent_survives_an_unrelated_ref_move_with_no_half_state(
     )
 
     assert racer.racer_commit is not None
+    # The racer's own commit is the ref state that stood between the
+    # rejected first push and the retry that succeeded -- reading its tree
+    # (an immutable git object, not a live poll) proves neither the item nor
+    # the claim was ever half-landed there: the item is still open at its
+    # pre-landing oid and the claim is still present, exactly as they were
+    # before this transition ever touched the ref.
+    racer_item_oid = _real_git(
+        worktree, "rev-parse", f"{racer.racer_commit}:items/{item_id}.md"
+    ).stdout.strip()
+    assert racer_item_oid == open_oid
+    assert "claims/issue-10.toml" in _state_ref_paths(worktree, racer.racer_commit)
     assert new_state.items[item_id] == closed_oid
     assert protocol.claim_key(protocol.IssueIdentity(10), "") not in new_state.claims
     assert new_state.tip is not None
@@ -10546,6 +10557,61 @@ def test_release_merged_close_failure_preserves_the_claim_and_prints_a_sentence(
     assert capsys.readouterr().err == "ERROR: gh: connection reset\n"
     assert store.fetch_state(worktree=Path("."), remote="origin").claims
     assert client.closed_issues == set()
+
+
+def test_release_merged_retries_after_a_post_close_cas_failure_without_a_second_comment(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #359: unlike a close failure (above), a CAS failure on the
+    release transition itself strikes *after* `close_landed_item` already
+    ran -- the comment is posted and the issue closed on the forge before
+    `store.commit_transition` ever raises. The retry's own
+    `_verify_merged_release` now finds the work item already closed and
+    returns no pending close (the same branch the replay-refusal proof
+    exercises under `storage = state-ref`), so `close_landed_item` never
+    runs a second time -- one comment total -- and the retried transition
+    releases the claim."""
+    client = merged_release_client(monkeypatch, body="Work-Item: #72\n\nCloses #72")
+    monkeypatch.setattr(issue_claim, "_fetch_issue_reference", _LIVE_FETCH_ISSUE_REFERENCE)
+    close_calls: list[int] = []
+    real_close_landed_item = client.close_landed_item
+
+    def counting_close(number: int, *, pull_request: int) -> None:
+        close_calls.append(number)
+        real_close_landed_item(number, pull_request=pull_request)
+
+    monkeypatch.setattr(client, "close_landed_item", counting_close)
+    real_commit_transition = store.commit_transition
+    attempts = 0
+
+    def cas_failure_once(*args: object, **kwargs: object) -> protocol.ClaimState:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise protocol.ClaimUnavailableError(
+                f"{store.STATE_REF} moved 5 times while retrying: another writer on "
+                "origin keeps landing first; retry the command"
+            )
+        return real_commit_transition(*args, **kwargs)
+
+    monkeypatch.setattr(store, "commit_transition", cas_failure_once)
+
+    status = issue_claim.main(["--repo", REPOSITORY, "release", "72", "--merged", "12"])
+
+    assert status == 2
+    assert capsys.readouterr().err == (
+        f"ERROR: {store.STATE_REF} moved 5 times while retrying: another writer on "
+        "origin keeps landing first; retry the command\n"
+    )
+    assert close_calls == [WORK_ITEM_ISSUE]
+    assert client.closed_issues == {WORK_ITEM_ISSUE}
+    assert store.fetch_state(worktree=Path("."), remote="origin").claims
+
+    retry_status = issue_claim.main(["--repo", REPOSITORY, "release", "72", "--merged", "12"])
+
+    assert retry_status == 0
+    assert close_calls == [WORK_ITEM_ISSUE]
+    assert store.fetch_state(worktree=Path("."), remote="origin").claims == {}
 
 
 _CONTRADICTORY_TRAILERS = (
