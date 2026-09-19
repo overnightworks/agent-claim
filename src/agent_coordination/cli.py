@@ -1137,9 +1137,12 @@ def _parent_closable_number(
     undispatched `[[slice]]` row is left to cut -- `board.closable_container_number`
     is the one owner for that decision, reused rather than re-derived board-wide
     for one relation. `None` covers every non-container parent, one still
-    holding another open child, or no parent at all."""
+    holding another open child, an already-closed parent (a second close
+    would only refuse), or no parent at all."""
     parent = client.parent_issue(closed_child)
     if parent is None:
+        return None
+    if client.item_reference(parent.reference.number).state is not forge.ItemState.OPEN:
         return None
     children = client.list_children(parent.reference.number)
     return board.closable_container_number(parent, children, storage)
@@ -3795,12 +3798,11 @@ def _cmd_next(parsed: argparse.Namespace, session: _ReadSession) -> int:
         close=board.zero_cost_closes(projected),
     )
     storage = _board_config(_resolve_toplevel()).storage
-    exit_code = 0 if action is not None else 3
     if parsed.json:
         _next_json(report, storage)
-        return exit_code
-    _next(report, storage)
-    return exit_code
+    else:
+        _next(report, storage)
+    return 0 if action is not None else 3
 
 
 def _cmd_rescope(parsed: argparse.Namespace, _session: _WriteSession) -> None:

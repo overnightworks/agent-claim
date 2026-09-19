@@ -625,9 +625,10 @@ uses; a second worktree writing from that same snapshot refuses with the same
 (`--json`: `{"item", "number", "closed_at", "parent_closable"}`), then a
 `freed:` line in `release --merged`'s own form naming every open item whose
 only open local blocker was this one, and — when this close was its parent's
-last open child, the parent left with no undispatched `[[slice]]` row either
-(issue #348) — `release --merged`'s own parent hint: `parent #n: no open
-children — close it` (`--json`: `parent_closable`, a number or `null`). It
+last open child, the parent still open, with no undispatched `[[slice]]` row
+either (issue #348) — `release --merged`'s own parent hint, in `item close`'s
+own state-ref id form: `parent aco-xxxxxx: no open children — close it`
+(`--json`: `parent_closable`, a number or `null`). It
 refuses: a second close on an already-closed item,
 naming the date it closed on; an unknown id; an item still carrying a live
 claim ("release the claim first" — a closed item with a live claim would be

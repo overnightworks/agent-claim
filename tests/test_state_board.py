@@ -359,9 +359,11 @@ _CLOSE_PARENT_PROJECTION = _Projection("Land every slice.", "keiner", "All slice
 _CLOSE_CHILD_PROJECTION = _Projection("Ship the slice.", "Land it.", "Slice is done.")
 
 
-def _close_parent_scenario_item_files() -> dict[str, bytes]:
+def _close_parent_scenario_item_files(*, parent_state: str = "open") -> dict[str, bytes]:
+    closed_at = "2026-09-16T00:00:00Z" if parent_state == "closed" else None
     parent_body = _state_ref_body(
-        _CLOSE_PARENT_PROJECTION, _record(title="Parent", state="open", kind="container")
+        _CLOSE_PARENT_PROJECTION,
+        _record(title="Parent", state=parent_state, kind="container", closed_at=closed_at),
     )
     child_body = _state_ref_body(
         _CLOSE_CHILD_PROJECTION,
@@ -2686,6 +2688,34 @@ class TestCliStateRefForge:
             f"CLOSED {CLOSE_CHILD_ID}",
             "freed: none",
             f"parent {CLOSE_PARENT_ID}: no open children — close it",
+        ]
+
+    def test_item_close_omits_the_parent_hint_for_an_already_closed_parent(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+    ) -> None:
+        """Issue #348 review (G2): a parent already closed by some other
+        landing before this close even runs is never named freshly
+        closable -- a childless, uncut container that is not open must not
+        surface the hint, since a second close would only refuse."""
+        self._live_state_ref_checkout(
+            monkeypatch,
+            tmp_path,
+            bare_remote,
+            worktree,
+            _close_parent_scenario_item_files(parent_state="closed"),
+        )
+
+        status = issue_claim.main(["item", "close", str(CLOSE_CHILD_NUMBER)])
+
+        assert status == 0
+        assert capsys.readouterr().out.splitlines() == [
+            f"CLOSED {CLOSE_CHILD_ID}",
+            "freed: none",
         ]
 
     def test_item_close_json_carries_the_parent_closable_number(

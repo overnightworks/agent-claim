@@ -2673,7 +2673,11 @@ def parallel_set(
     alongside right now (issue #348) -- see `ParallelSet` for the packing
     rule. `CloseContainerAction` never competes for scope at all
     (`zero_cost_closes` names it instead) and is skipped outright, whether it
-    is `action` itself (occupying nothing) or a later candidate."""
+    is `action` itself (occupying nothing) or a later candidate. A
+    `board.recovery` item -- landed but still open -- is `zero_cost_closes`'
+    own domain too, never this walk's: it is skipped outright as a later
+    candidate, so it neither claims a place in `candidates` nor occupies a
+    scope that would silently crowd out a real free item behind it."""
     if action is None:
         return ParallelSet((), (), False)
     uncut_by_container = _uncut_by_container(board)
@@ -2683,13 +2687,14 @@ def parallel_set(
     occupied = [claim.scope for claim in live_claims]
     occupied.append(first_scope)
     first_number = _action_number(action)
+    recovery_numbers = frozenset(item.number for item in board.recovery)
     candidates: list[ParallelCandidate] = []
     scope_unknown: list[int] = []
     for candidate in _qualifying_actions(board):
         if isinstance(candidate, CloseContainerAction):
             continue
         number = _action_number(candidate)
-        if number == first_number:
+        if number == first_number or number in recovery_numbers:
             continue
         scope = _action_scope(candidate, uncut_by_container)
         if scope is None:

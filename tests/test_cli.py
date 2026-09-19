@@ -1028,14 +1028,19 @@ _EMPTY_PARALLEL_JSON: dict[str, object] = {
     "scope_unknown": [],
 }
 
-# issue #348, Beweis 1: four free items -- Beta and Gamma name the same
+# issue #348, Beweis 1: five free items -- Beta and Gamma name the same
 # path (the "two overlapping each other" pair), Delta names no scope at
-# all -- read against two live claims that occupy their own, disjoint
-# paths. Alpha out-ranks the rest purely by its lower issue number (every
-# item shares the same score), so it is always the first action; Beta then
-# wins the walk over Gamma (board order), and Gamma is dropped silently --
+# all, Epsilon names a path under claim-live-1's own directory scope (the
+# "excluded by a live claim, not by another candidate" case; R1 review) --
+# read against two live claims that occupy their own, disjoint paths.
+# Alpha out-ranks the rest purely by its lower issue number (every item
+# shares the same score), so it is always the first action; Beta then wins
+# the walk over Gamma (board order), and Gamma is dropped silently --
 # neither `parallel:` nor `scope unknown:` names an item excluded for
-# overlap, only one excluded for lacking a scope at all.
+# overlap, only one excluded for lacking a scope at all. Epsilon is
+# dropped the same silent way, but for a different reason: were the walk
+# not occupying the live claims' own scopes, Epsilon would have nothing to
+# collide with and would surface in `parallel:` instead.
 _PARALLEL_ALPHA = board_issue(
     50, "Alpha", complete_contract("Ship Alpha.", scope=["src/alpha1.py", "src/alpha2.py"])
 )
@@ -1044,9 +1049,18 @@ _PARALLEL_GAMMA = board_issue(
     52, "Gamma", complete_contract("Ship Gamma.", scope=["src/shared.py"])
 )
 _PARALLEL_DELTA = board_issue(53, "Delta", complete_contract("Ship Delta."))
-_PARALLEL_ITEMS = (_PARALLEL_ALPHA, _PARALLEL_BETA, _PARALLEL_GAMMA, _PARALLEL_DELTA)
+_PARALLEL_EPSILON = board_issue(
+    54, "Epsilon", complete_contract("Ship Epsilon.", scope=["claimed/deep/file.py"])
+)
+_PARALLEL_ITEMS = (
+    _PARALLEL_ALPHA,
+    _PARALLEL_BETA,
+    _PARALLEL_GAMMA,
+    _PARALLEL_DELTA,
+    _PARALLEL_EPSILON,
+)
 _PARALLEL_LIVE_CLAIMS = (
-    request(claim_id="claim-live-1", issue=990, scope=("claimed/one.py",)),
+    request(claim_id="claim-live-1", issue=990, scope=("claimed",)),
     request(claim_id="claim-live-2", issue=991, scope=("claimed/two.py",)),
 )
 
@@ -3943,12 +3957,12 @@ def test_next_caps_the_parallel_text_list_at_three_and_counts_the_rest(
     json_exit_code = issue_claim.main(["--repo", "example/agent-claim", "next", "--json"])
     assert json_exit_code == 0
     payload = json.loads(capsys.readouterr().out)
-    assert [candidate["number"] for candidate in payload["parallel"]["candidates"]] == [
-        61,
-        62,
-        63,
-        64,
-        65,
+    assert payload["parallel"]["candidates"] == [
+        {"number": 61, "scope": ["Bravo/x.py"]},
+        {"number": 62, "scope": ["Charlie/x.py"]},
+        {"number": 63, "scope": ["Delta/x.py"]},
+        {"number": 64, "scope": ["Echo/x.py"]},
+        {"number": 65, "scope": ["Foxtrot/x.py"]},
     ]
 
 
@@ -4072,6 +4086,56 @@ def test_next_close_names_every_zero_cost_action_regardless_of_rank(
     assert json_exit_code == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["close"] == [71, 72]
+
+
+def test_next_parallel_set_never_lets_a_recovery_item_occupy_or_candidate(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """issue #348 review (G1): a landed-but-open item is `zero_cost_closes`'
+    own domain, never `parallel_set`'s. `landed_but_open` (#71) and
+    `free_item` (#72) name the same scope, and board order visits #71
+    first -- pre-fix, the walk occupied that scope for #71 and silently
+    dropped #72 as "overlapping", even though #71 was never real work in
+    flight. #72 must still surface in `parallel:`, and #71 only under
+    `close:`, never as a candidate of its own."""
+    top_ranked = board_issue(
+        70, "Top ranked work", complete_contract("Ship it.", scope=["a"]), labels=("security",)
+    )
+    landed_but_open = board_issue(
+        71, "Landed but open", complete_contract("Close it.", scope=["b"])
+    )
+    free_item = board_issue(72, "Free item", complete_contract("Ship it too.", scope=["b"]))
+    client = _configured_board_client(
+        monkeypatch, tmp_path, open_issues=(top_ranked, landed_but_open, free_item)
+    )
+    monkeypatch.setattr(
+        client,
+        "list_recent_merged_board_pull_requests",
+        lambda _since: (
+            board.PullRequest(
+                150, "Lands it", "Work-Item: #71\n\nCloses #71", "branch", "2026-08-20T00:00:00Z"
+            ),
+        ),
+    )
+
+    exit_code = issue_claim.main(["--repo", "example/agent-claim", "next"])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "#70 score" in out
+    assert "parallel: #72 (1 path)\n" in out
+    assert "close: #71\n" in out
+    assert "#71 (1 path)" not in out
+
+    json_exit_code = issue_claim.main(["--repo", "example/agent-claim", "next", "--json"])
+    assert json_exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["parallel"] == {
+        "first_scope_unknown": False,
+        "candidates": [{"number": 72, "scope": ["b"]}],
+        "scope_unknown": [],
+    }
+    assert payload["close"] == [71]
 
 
 def test_board_queries_merged_pull_requests_back_to_the_oldest_open_issue(
@@ -9622,14 +9686,18 @@ PARENT_OF_WORK_ITEM = 79
 
 
 def _released_last_child_client(
-    monkeypatch: pytest.MonkeyPatch, *, sibling_open: bool
+    monkeypatch: pytest.MonkeyPatch, *, sibling_open: bool, parent_closed: bool = False
 ) -> FakeForge:
     """`merged_release_client` plus a recorded parent relation (issue #348,
     Beweis 4): `WORK_ITEM_ISSUE` is `PARENT_OF_WORK_ITEM`'s only child when
     `sibling_open` is `False` -- its own close leaves the parent with no
     open children and no uncut `[[slice]]` row, exactly `next`'s own
     `CloseContainerAction` branch -- or one still-open sibling when `True`,
-    the parent hint's own negative case."""
+    the parent hint's own negative case. `parent_closed` (G2 review) covers
+    the third negative case: the parent itself already closed (by some
+    other landing) before this release even runs -- a childless, uncut
+    parent that is not open must never be named closable, since a second
+    close would only refuse."""
     client = merged_release_client(monkeypatch, body="Work-Item: #72\n\nCloses #72")
     client.closed_issues.add(WORK_ITEM_ISSUE)
     monkeypatch.setattr(issue_claim, "_fetch_issue_reference", _LIVE_FETCH_ISSUE_REFERENCE)
@@ -9642,27 +9710,32 @@ def _released_last_child_client(
     if sibling_open:
         children.append(board.ChildItem(999, board.ChildState.OPEN))
     client.children[PARENT_OF_WORK_ITEM] = tuple(children)
+    if parent_closed:
+        client.closed_issues.add(PARENT_OF_WORK_ITEM)
     return client
 
 
 @pytest.mark.parametrize(
-    ("sibling_open", "hint_expected"),
+    ("sibling_open", "parent_closed", "hint_expected"),
     [
-        pytest.param(False, True, id="last_open_child_names_the_parent"),
-        pytest.param(True, False, id="a_sibling_still_open_omits_the_hint"),
+        pytest.param(False, False, True, id="last_open_child_names_the_parent"),
+        pytest.param(True, False, False, id="a_sibling_still_open_omits_the_hint"),
+        pytest.param(False, True, False, id="an_already_closed_parent_omits_the_hint"),
     ],
 )
 def test_release_merged_names_the_parent_hint_only_for_the_last_open_child(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     sibling_open: bool,
+    parent_closed: bool,
     hint_expected: bool,
 ) -> None:
     """issue #348, Beweis 4: releasing a container's last open child names
     the parent as freshly closable, the same decision `next`'s own `close:`
     line makes for a childless, uncut container -- a still-open sibling
-    keeps the container un-closable and the hint absent."""
-    _released_last_child_client(monkeypatch, sibling_open=sibling_open)
+    keeps the container un-closable and the hint absent, and so does a
+    parent that is already closed itself (G2 review)."""
+    _released_last_child_client(monkeypatch, sibling_open=sibling_open, parent_closed=parent_closed)
 
     exit_code = issue_claim.main(
         ["--repo", REPOSITORY, "release", str(WORK_ITEM_ISSUE), "--merged", "12"]
