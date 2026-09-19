@@ -3301,10 +3301,12 @@ def _board_html_page(
     session: _ReadSession, *, served: board_html.ServedRuleForm | None = None
 ) -> str:
     """The one state -> page render both `board --html` (issue #276) and
-    `board --serve` (issue #280) use -- the exact reads `board` already
+    `board --serve` (issue #280) use -- every `gh` read `board` already
     performs (`_board`'s own merged-pull-request fetch serves the Landungen
-    section instead of asking `gh` a second time), rendered fresh every
-    call so `--serve`'s `GET` never reads stale state."""
+    section instead of asking `gh` a second time) plus one extra local
+    `checkout.trunk_landings` read for the trunk-landed rows' own commit
+    identity (issue #304 review delta), rendered fresh every call so
+    `--serve`'s `GET` never reads stale state."""
     client = session.forge()
     issues = client.list_open_board_issues()
     worktree, _remote, observed = _store_observation()
@@ -3315,13 +3317,26 @@ def _board_html_page(
         claim_ages=_claim_ages(worktree, observed),
     )
     bodies = {issue.number: issue.body for issue in issues}
-    storage = board.load_config(_resolve_toplevel() / board.CONFIG_PATH).storage
+    config = board.load_config(_resolve_toplevel() / board.CONFIG_PATH)
+    # `_board`'s own `checkout.trunk_landings` read (issue #304) stays
+    # private to its `BoardBuildInputs` classification; the Landungen
+    # section needs each landed item's own commit identity too (issue #304
+    # review delta), which that classification discards, so this reads the
+    # same local git history a second time rather than widening `_BoardFetch`
+    # for the one caller that needs the raw records.
+    trunk_landed_items = tuple(
+        board_html.TrunkLandedItem(number, landing.sha, landing.committed_at)
+        for landing in checkout.trunk_landings(config.canonical_remote, TRUNK_LANDING_DEPTH)
+        if isinstance(landing.classification, board.TrunkWorkItemClassification)
+        for number in landing.classification.numbers
+    )
     sources = board_html.BoardSources(
         bodies=bodies,
         claimants=_lane_claimants(observed),
         recent_merged_pull_requests=fetch.recent_merged_pull_requests,
         state_tip="" if observed.tip is None else str(observed.tip),
-        storage=storage,
+        storage=config.storage,
+        trunk_landed_items=trunk_landed_items,
     )
     page = board_html.build_page(fetch.board, sources)
     return board_html.render(page, served=served)

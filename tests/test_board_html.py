@@ -269,6 +269,92 @@ def test_a_landed_item_with_no_resolved_pull_request_still_shows() -> None:
     assert "PR nicht zugeordnet" in rendered
 
 
+def test_a_trailer_landed_item_shows_with_its_state_ref_id_when_prs_are_unlistable() -> None:
+    """Issue #304 review delta (Codex Sol): state-ref's own
+    `landings_derivable=False` means it cannot list merged pull requests at
+    all, but a trunk commit's own `Work-Item:` trailer still lands an item
+    straight from local git history (`board.trunk_landed_work_items`) --
+    that row shows with its `aco-...` id, date, and short sha instead of the
+    "nicht ableitbar" line the missing pull-request capability alone would
+    otherwise force."""
+    landed_issue = board_issue(9, "Trailer gelandet", complete_contract("Verifizieren."))
+    projected = board.build_board(
+        board.BoardBuildInputs(
+            issues=(landed_issue,),
+            open_pull_requests=(),
+            recent_merged_pull_requests=(),
+            claims=(),
+            config=board.BoardConfig(),
+            repository="example/agent-claim",
+            now=datetime(2026, 8, 30, tzinfo=UTC),
+            trunk_landed_work_items=frozenset({9}),
+            landings_derivable=False,
+        )
+    )
+    sources = board_html.BoardSources(
+        bodies={9: landed_issue.body},
+        claimants={},
+        recent_merged_pull_requests=(),
+        state_tip="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        storage=board.Storage.STATE_REF,
+        trunk_landed_items=(
+            board_html.TrunkLandedItem(9, "cafefeedcafefeed", datetime(2026, 8, 30, tzinfo=UTC)),
+        ),
+    )
+
+    rendered = board_html.render(board_html.build_page(projected, sources))
+
+    item_id = items.format_item_id(9)
+    assert "nicht ableitbar" not in rendered
+    assert (
+        f"<li>{item_id} Trailer gelandet &mdash; 2026-08-30 <code>cafefee</code></li>" in rendered
+    )
+
+
+def test_a_trunk_landed_item_with_no_pull_request_shows_beside_pr_rows() -> None:
+    """A github-storage board still lands an item through a squash/merge
+    commit's own `Work-Item:` trailer with no matching pull request body
+    (`board.py`'s union, issue #304) -- that row renders with its date and
+    short sha alongside a normally PR-resolved landing, never "PR nicht
+    zugeordnet"."""
+    pr_landed_issue = board_issue(103, "Kleine Verbesserung", complete_contract("Verifizieren."))
+    trunk_landed_issue = board_issue(105, "Nur Trailer", complete_contract("Beobachten."))
+    closing_pull_request = board.PullRequest(
+        number=555,
+        title="Kleine Verbesserung landen",
+        body="Fixes #103.",
+        head_ref_name="codex/issue-103-fix",
+        merged_at="2026-08-19T00:00:00Z",
+    )
+    recent_merged_pull_requests = (closing_pull_request,)
+    projected = board.build_board(
+        board.BoardBuildInputs(
+            issues=(pr_landed_issue, trunk_landed_issue),
+            open_pull_requests=(),
+            recent_merged_pull_requests=recent_merged_pull_requests,
+            claims=(),
+            config=board.BoardConfig(),
+            repository="example/agent-claim",
+            now=datetime(2026, 8, 21, tzinfo=UTC),
+            trunk_landed_work_items=frozenset({105}),
+        )
+    )
+    sources = board_html.BoardSources(
+        bodies={103: pr_landed_issue.body, 105: trunk_landed_issue.body},
+        claimants={},
+        recent_merged_pull_requests=recent_merged_pull_requests,
+        state_tip="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        trunk_landed_items=(
+            board_html.TrunkLandedItem(105, "1234567890abcdef", datetime(2026, 8, 20, tzinfo=UTC)),
+        ),
+    )
+
+    rendered = board_html.render(board_html.build_page(projected, sources))
+
+    assert "PR #555: Kleine Verbesserung landen" in rendered
+    assert "<li>#105 Nur Trailer &mdash; 2026-08-20 <code>1234567</code></li>" in rendered
+
+
 @pytest.mark.parametrize(
     ("default", "recommended_flag"),
     [("yes", "--yes"), ("no", "--no"), ("later", "--later")],
