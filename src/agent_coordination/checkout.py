@@ -17,18 +17,28 @@ GROK_SESSION_ID_ENV = "GROK_SESSION_ID"
 CLAUDE_SESSION_ID_ENV = "CLAUDE_SESSION_ID"
 
 
+# One owner for every git-subprocess failure sentence: `_git_output`,
+# `versioned_paths`, and `path_is_tracked` each run their own `git`
+# subprocess and must translate the same three failure shapes -- a missing
+# executable, a timeout, and a nonzero exit with no readable detail -- to
+# the same `ClaimError` text (issue #315 Sonar S1192).
+_GIT_MISSING_EXECUTABLE_ERROR = "git is required for issue claims"
+_GIT_TIMED_OUT_ERROR = "git timed out while validating the build checkout"
+_UNKNOWN_GIT_FAILURE_DETAIL = "unknown git failure"
+
+
 def _git_output(arguments: list[str]) -> str:
     try:
         result = process.run_captured(["git", *arguments])
     except process.ExecutableMissingError as error:
-        raise ClaimError("git is required for issue claims") from error
+        raise ClaimError(_GIT_MISSING_EXECUTABLE_ERROR) from error
     except process.ProcessTimedOutError as error:
-        raise ClaimError("git timed out while validating the build checkout") from error
+        raise ClaimError(_GIT_TIMED_OUT_ERROR) from error
     if result.exit_status != 0:
         detail = (
             result.stderr.decode().strip()
             or result.stdout.decode().strip()
-            or "unknown git failure"
+            or _UNKNOWN_GIT_FAILURE_DETAIL
         )
         raise ClaimError(detail)
     # Trailing-only: every caller wants the one newline `git` appends after its
@@ -117,14 +127,14 @@ def versioned_paths() -> tuple[str, ...]:
     try:
         result = process.run_captured(["git", "ls-files", "-z", "--full-name"])
     except process.ExecutableMissingError as error:
-        raise ClaimError("git is required for issue claims") from error
+        raise ClaimError(_GIT_MISSING_EXECUTABLE_ERROR) from error
     except process.ProcessTimedOutError as error:
-        raise ClaimError("git timed out while validating the build checkout") from error
+        raise ClaimError(_GIT_TIMED_OUT_ERROR) from error
     if result.exit_status != 0:
         detail = (
             result.stderr.decode().strip()
             or result.stdout.decode().strip()
-            or "unknown git failure"
+            or _UNKNOWN_GIT_FAILURE_DETAIL
         )
         raise ClaimError(detail)
     return tuple(dict.fromkeys(path for path in result.stdout.decode().split("\0") if path))
@@ -146,15 +156,17 @@ def path_is_tracked(path: str) -> bool:
     try:
         result = process.run_captured(["git", "ls-files", "--error-unmatch", "--", path])
     except process.ExecutableMissingError as error:
-        raise ClaimError("git is required for issue claims") from error
+        raise ClaimError(_GIT_MISSING_EXECUTABLE_ERROR) from error
     except process.ProcessTimedOutError as error:
-        raise ClaimError("git timed out while validating the build checkout") from error
+        raise ClaimError(_GIT_TIMED_OUT_ERROR) from error
     if result.exit_status == 0:
         return True
     if result.exit_status == 1:
         return False
     detail = (
-        result.stderr.decode().strip() or result.stdout.decode().strip() or "unknown git failure"
+        result.stderr.decode().strip()
+        or result.stdout.decode().strip()
+        or _UNKNOWN_GIT_FAILURE_DETAIL
     )
     raise ClaimError(detail)
 
