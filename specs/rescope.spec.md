@@ -3,18 +3,19 @@
 `aco rescope` adds or drops paths on a live claim without releasing it. This
 file owns the command's own location resolution (`--add`/`--drop` absolute
 paths only, issue #314), its checkout preconditions, the scope-combining
-refusals, and the `RESCOPED ...`/`--json` report. `specs/claim-record.spec.md`
-owns the record itself, the width gate's literal and `--whole`'s own field
-(CLAIM-25..30), a foreign-claimant refusal (CLAIM-37), a claim id with no
-live claim (CLAIM-16), and that a rescope replaces only the scope while
-`claim_id`, `base` and age keep counting (CLAIM-49); `specs/protect.spec.md`
-owns the checkout resolver's `relative payload path`, `not in a repository`,
-`no commit on this branch` and `default branch unknown` sentences
-(PROT-09..11, PROT-13) that `rescope` shares verbatim, `protect`'s own
-docstring names the sharing; `specs/claim.spec.md` owns the issueless-lane
-branch refusal (CLM-07) `_resolved_identity` shares with `rescope` too. This
-file cites those IDs rather than restating them. `<flag>` is `--add` or
-`--drop`, `<path>` a path, `<claim-id>` the selected claim's own id.
+refusals, its own `_selected_store_claim` lookup (RESC-14), and the
+`RESCOPED ...`/`--json` report. `specs/claim-record.spec.md` owns the record
+itself, the width gate's literal and `--whole`'s own field (CLAIM-25..30), a
+foreign-claimant refusal (CLAIM-37), and that a rescope replaces only the
+scope while `claim_id`, `base` and age keep counting (CLAIM-49);
+`specs/protect.spec.md` owns the checkout resolver's `relative payload path`,
+`not in a repository`, `no commit on this branch` and `default branch
+unknown` sentences (PROT-09..11, PROT-13) that `rescope` shares verbatim,
+`protect`'s own docstring names the sharing; `specs/claim.spec.md` owns the
+issueless-lane branch refusal (CLM-07) `_resolved_identity` shares with
+`rescope` too. This file cites those IDs rather than restating them.
+`<flag>` is `--add` or `--drop`, `<path>` a path, `<claim-id>` the selected
+claim's own id.
 
 ## Behavior table
 
@@ -28,7 +29,7 @@ file cites those IDs rather than restating them. `<flag>` is `--add` or
 | on the repository's own trunk branch | RESC-04 | RESC-04 | RESC-04 | — |
 | default branch cannot be resolved | PROT-13 | PROT-13 | PROT-13 | — |
 | the path resolves outside the checkout | RESC-05 | RESC-05 | — | — |
-| no live claim on this identity/branch | CLAIM-16 | CLAIM-16 | CLAIM-16 | — |
+| no live claim on this identity/branch | RESC-14 | RESC-14 | RESC-14 | — |
 | a different agent than the claimant | CLAIM-37 | CLAIM-37 | CLAIM-37 | — |
 | a comma-bearing value matching nothing | RESC-06 | — (never checked) | — | — |
 | dropping a path not in the claim's scope | — | RESC-07 | — | — |
@@ -45,16 +46,20 @@ file cites those IDs rather than restating them. `<flag>` is `--add` or
 - [ ] [RESC-04] On the repository's own trunk branch, rescope refuses `build claims require an isolated non-main worktree branch; run this command from this claim's own worktree, not the primary checkout`, exit `2`.
 - [ ] [RESC-05] A `--add`/`--drop` path resolving outside the resolved checkout refuses `<flag> path '<path>' is outside the resolved checkout <toplevel>`, exit `2`.
 
+## Selecting the live claim
+
+- [ ] [RESC-14] No live claim on this identity/branch, or a `--claim-id` not matching the one live claim, refuses `<subject> has no active build claim`, exit `2`; `rescope` and `release` share this lookup.
+
 ## Combining the scope
 
 - [ ] [RESC-06] An `--add` value with a comma matching no versioned file refuses `'<path>' matches no versioned file; one --add path per flag`, exit `2` (its comma is read literally).
 - [ ] [RESC-07] A `--drop` value the live claim's own scope does not hold refuses `cannot drop '<path>'; it is not in this claim's scope`, exit `2`.
 - [ ] [RESC-08] An `--add`/`--drop` combination leaving the scope set unchanged refuses `rescope does not change the claim scope`, exit `2`; omitting both flags refuses the same way.
 - [ ] [RESC-09] Dropping every scoped path with no `--add` to replace them refuses `rescope must leave a non-empty scope`, exit `2`.
-- [ ] [RESC-10] A combined scope tripping the width gate refuses `scope is wide: 4 paths of 12 versioned files (33 %) exceeds a quarter; pass --whole REASON`, exit `2` (CLM-18).
+- [ ] [RESC-10] A combined scope tripping the width gate refuses, in the wording `claim-record.spec.md` owns (CLAIM-25, CLAIM-26, CLAIM-29; see CLM-18), exit `2`.
 - [ ] [RESC-11] `--whole "<reason>"` admits a wide combined scope and replaces the stored `whole_reason`; an omitted `--whole` keeps a prior reason instead of clearing it.
 - [ ] [RESC-12] A clean combine prints `RESCOPED <subject>: <claim-id>`, exit `0` (see E-RESC-01).
-- [ ] [RESC-13] With `--json`, a clean combine prints `{"issue": <n>|null, "lane": null|true, "claim_id": "<id>", "agent": "<agent>", "role": "<role>", "base": "<sha>", "branch": "<branch>", "scope": [...]}`.
+- [ ] [RESC-13] With `--json`, a clean combine prints one object with `issue`/`lane`, `claim_id`, `agent`, `role`, `base`, `branch`, `scope`: `42`/`null` for an issue, `null`/`true` for a lane (E-RESC-01).
 
 ## Never
 

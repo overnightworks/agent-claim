@@ -37,7 +37,7 @@ runner's own values; `<agent>` and `<role>` are the claimant's.
 | foreign claim, coordinator override | CLAIM-51 | — | CLAIM-38, CLAIM-39, CLAIM-40 |
 | hand-corrupted claim file | CLAIM-06..CLAIM-08, CLAIM-59..CLAIM-63 | CLAIM-06..CLAIM-08, CLAIM-59..CLAIM-63 | — |
 | hand-corrupted claim key | CLAIM-09, CLAIM-56, CLAIM-64..CLAIM-66 | CLAIM-09, CLAIM-56, CLAIM-64..CLAIM-66 | — |
-| item naming its own scope | CLAIM-53, CLAIM-54, CLAIM-55 | — | — |
+| item naming its own scope | CLAIM-53, CLAIM-54, CLAIM-55, CLAIM-67 | — | — |
 
 ## The record and its key
 
@@ -136,6 +136,7 @@ runner's own values; `<agent>` and `<role>` are the claimant's.
 - [ ] [CLAIM-53] Issue-mode `aco claim 42` without `--scope` takes the item's own `scope` into the record and prints the same `CLAIMED issue #42` line an explicit scope would (see E-CLAIM-06).
 - [ ] [CLAIM-54] A `--scope` set differing from the item's own `scope` refuses `claim scope differs from the item's scope; correct the item first`, exit `2`, so no reader claims a false disjointness.
 - [ ] [CLAIM-55] An item naming no `scope` refuses issue-mode `aco claim 42` without `--scope` with `item names no scope; pass --scope`, exit `2`.
+- [ ] [CLAIM-67] An explicit `--scope` matching the item's own `scope` as a set, reordered, still claims: CLAIM-54 refuses only a genuine mismatch, never a reordering.
 
 ## Never
 
@@ -149,7 +150,10 @@ runner's own values; `<agent>` and `<role>` are the claimant's.
 `Setup: bare-remote` is a fresh work repository whose `origin` is a local bare
 repository with `main` at one commit, a git identity, `origin/HEAD`, and
 `ACO_AGENT` set to `Ada`; `<remote>`, `<tmp>` and `<home>` are the runner's own
-paths, `<sha>`, `<oid>` and `<claim-id>` the values the session itself produced.
+paths, `<sha>`, `<oid>` and `<claim-id>` the values the session itself
+produced, and `<worktree>` the runner's own linked-worktree directory -- an
+`--add`/`--drop` example names a path under it, since `rescope` accepts only
+an absolute path (RESC-01).
 
 ### E-CLAIM-01 — the golden claim, seen in the state ref
 
@@ -217,7 +221,7 @@ exit 0
 Setup: bare-remote, bootstrapped, a live claim on issue `#42` scoped to `README.md`
 
 ```console
-$ aco rescope 42 --add AGENTS.md
+$ aco rescope 42 --add <worktree>/AGENTS.md
 RESCOPED issue #42: <claim-id>
 exit 0
 $ aco status
