@@ -14,6 +14,7 @@ import threading
 from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 from cli_fixtures import stub_board_config_tracked
@@ -3308,62 +3309,53 @@ def test_export_state_bundle_fails_loud_and_leaves_no_trace(
     assert not list(destination.parent.glob(f".{destination.name}.*"))
 
 
-def test_export_state_bundle_reports_a_failed_temporary_cleanup_after_a_successful_publish(
-    monkeypatch: pytest.MonkeyPatch, bare_remote: Path, worktree: Path, tmp_path: Path
+def _fail_temporary_unlink(
+    monkeypatch: pytest.MonkeyPatch, destination: Path, attempted: list[Path]
 ) -> None:
-    """The previous implementation claimed `destination` itself up front
-    and suppressed a failure to remove it again after the bundle-create
-    subprocess failed, which could leave an empty file there with no error
-    surfaced for that specific failure (19.09.2026 REVISE finding 4). The
-    redesign never writes `destination` directly -- it publishes a
-    completed temporary file into place with `os.link` -- so the
-    equivalent failure is now a *successful* publish whose now-redundant
-    temporary copy cannot be removed; that must raise loud, naming the
-    path, rather than pass silently, while the publish itself stands."""
-    tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
-    store.fetch_state(worktree=worktree, remote=str(bare_remote))
-    destination = tmp_path / "export" / "state.bundle"
-    destination.parent.mkdir()
+    """Fail `Path.unlink` for exactly the temporary file
+    `_write_and_publish_bundle` claims for `destination` (the
+    `tempfile.mkstemp` prefix its own docstring names), leaving every other
+    `unlink` call -- including this test's own leftover cleanup once it has
+    restored the real function -- untouched. Records the intercepted path in
+    `attempted`: an observable stand-in for "the unlink was attempted" that
+    counting fake calls would not be."""
     real_unlink = Path.unlink
 
     def fake_unlink(self: Path, missing_ok: bool = False) -> None:
         if self.name.startswith(f".{destination.name}."):
+            attempted.append(self)
             raise OSError("simulated temporary-file cleanup failure")
         real_unlink(self, missing_ok=missing_ok)
 
     monkeypatch.setattr(Path, "unlink", fake_unlink)
 
-    with pytest.raises(protocol.ClaimError, match="could not remove the now-redundant temporary"):
-        store.export_state_bundle(worktree=worktree, tip=tip, destination=destination)
 
-    monkeypatch.setattr(Path, "unlink", real_unlink)
-    assert destination.exists()
-    _git("bundle", "verify", str(destination), cwd=worktree)
-    leftover = list(destination.parent.glob(f".{destination.name}.*"))
-    for stray in leftover:
-        stray.unlink()
-
-
-def test_export_state_bundle_names_every_leftover_when_the_ref_cleanup_also_fails(
-    monkeypatch: pytest.MonkeyPatch, bare_remote: Path, worktree: Path, tmp_path: Path
+def _fail_export_ref_deletion(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    fail_bundle_create: bool,
+    ref_deletion_raises: bool,
 ) -> None:
-    """A failed bundle-create and a failed ref cleanup are independent
-    (issue #298, the second 19.09.2026 gate REVISE): the raised error names
-    the ref cleanup could not remove and still carries the original
-    bundle-create failure as its cause, rather than either one silently
-    winning over the other."""
-    tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
-    store.fetch_state(worktree=worktree, remote=str(bare_remote))
-    destination = tmp_path / "export" / "state.bundle"
-    destination.parent.mkdir()
+    """Patch `process.run_captured` so the bundle-create subprocess and the
+    `EXPORT_BUNDLE_REF` cleanup fail the way each row of the parametrized
+    cleanup-independence family below needs -- a nonzero exit for the
+    cleanup, matching a real `git update-ref` refusal, or a raised
+    `OSError`, matching an invocation that never reached git at all (issue
+    #298, the third 19.09.2026 gate REVISE: `_run_git` only wraps
+    `ExecutableMissingError`/`ProcessTimedOutError`, so a broader exception
+    must be shown to actually reach `_delete_export_ref`). Every other
+    invocation, including the real `update-ref` that points
+    `EXPORT_BUNDLE_REF` at `tip`, runs for real."""
     real_run_captured = process.run_captured
 
     def fake_run_captured(arguments: list[str]) -> process.CapturedResult:
-        if "bundle" in arguments and "create" in arguments:
+        if fail_bundle_create and "bundle" in arguments and "create" in arguments:
             return process.CapturedResult(
                 exit_status=1, stdout=b"", stderr=b"simulated bundle create failure"
             )
         if arguments[-3:] == ["update-ref", "-d", store.EXPORT_BUNDLE_REF]:
+            if ref_deletion_raises:
+                raise OSError("simulated ref-deletion invocation failure")
             return process.CapturedResult(
                 exit_status=1, stdout=b"", stderr=b"simulated ref cleanup failure"
             )
@@ -3371,19 +3363,12 @@ def test_export_state_bundle_names_every_leftover_when_the_ref_cleanup_also_fail
 
     monkeypatch.setattr(store.process, "run_captured", fake_run_captured)
 
-    with pytest.raises(protocol.ClaimError) as excinfo:
-        store.export_state_bundle(worktree=worktree, tip=tip, destination=destination)
 
-    message = str(excinfo.value)
-    assert "simulated bundle create failure" in message
-    assert store.EXPORT_BUNDLE_REF in message
-    assert "simulated ref cleanup failure" in message
-    assert excinfo.value.__cause__ is not None
-    assert "simulated bundle create failure" in str(excinfo.value.__cause__)
-    assert not destination.exists()
-    assert not list(destination.parent.glob(f".{destination.name}.*"))
-
-    monkeypatch.setattr(store.process, "run_captured", real_run_captured)
+def _verify_and_remove_the_leftover_export_ref(worktree: Path) -> None:
+    """`EXPORT_BUNDLE_REF` genuinely exists after a cleanup row whose ref
+    deletion was made to fail: confirm that before removing it for real, so
+    a future regression that quietly drops the real `update-ref` call
+    cannot pass this test by accident."""
     assert (
         store._run_git(
             worktree, ["show-ref", "--verify", "--quiet", store.EXPORT_BUNDLE_REF]
@@ -3393,40 +3378,211 @@ def test_export_state_bundle_names_every_leftover_when_the_ref_cleanup_also_fail
     store._run_git(worktree, ["update-ref", "-d", store.EXPORT_BUNDLE_REF])
 
 
-def test_export_state_bundle_names_the_temp_path_when_a_refused_publish_also_fails_to_clean_up(
-    monkeypatch: pytest.MonkeyPatch, bare_remote: Path, worktree: Path, tmp_path: Path
-) -> None:
-    """A refused publish (`destination` already exists) and a failed
-    temporary-file cleanup are independent (issue #298, the second
-    19.09.2026 gate REVISE): the raised error names the temporary file
-    cleanup could not remove and still carries the original refusal as its
-    cause."""
+class _CleanupFailureCase(NamedTuple):
+    """One row of the export-cleanup-independence test family below.
+
+    `arrange` sets up `tip`/`destination` and whichever of the two cleanup
+    steps (or the primary write/publish) this row breaks, returning the
+    call's `tip` and `destination`. `error_match` filters the outer
+    `pytest.raises`; `None` skips the filter for a row whose distinguishing
+    text lives only in the body. `cause_fragment` is `None` for a row with
+    no primary error (a successful publish whose cleanup still fails).
+    `destination_exists_after` and `destination_bytes_after` say what should
+    remain at `destination` -- `verify_bundle` additionally asks for a real
+    `git bundle verify` where `destination` is a genuine publish rather than
+    an untouched pre-existing file. `temp_leftover_expected` says whether the
+    temporary file should remain; `postcheck` runs after the real
+    `process.run_captured`/`Path.unlink` are restored, for a row that leaves
+    a real git-level leftover of its own (a ref cleanup failure) rather than
+    only a filesystem one.
+    """
+
+    id: str
+    arrange: Callable[
+        [pytest.MonkeyPatch, Path, Path, Path, list[Path]], tuple[protocol.ObjectId, Path]
+    ]
+    error_match: str | None
+    message_fragments: tuple[str, ...]
+    cause_fragment: str | None
+    destination_exists_after: bool
+    destination_bytes_after: bytes | None
+    verify_bundle: bool
+    temp_leftover_expected: bool
+    postcheck: Callable[[Path], None]
+
+
+def _arrange_successful_publish_with_a_failed_temp_unlink(
+    monkeypatch: pytest.MonkeyPatch,
+    bare_remote: Path,
+    worktree: Path,
+    tmp_path: Path,
+    attempted_unlinks: list[Path],
+) -> tuple[protocol.ObjectId, Path]:
+    tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    store.fetch_state(worktree=worktree, remote=str(bare_remote))
+    destination = tmp_path / "export" / "state.bundle"
+    destination.parent.mkdir()
+    _fail_temporary_unlink(monkeypatch, destination, attempted_unlinks)
+    return tip, destination
+
+
+def _arrange_a_failed_bundle_create_with_a_failed_ref_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    bare_remote: Path,
+    worktree: Path,
+    tmp_path: Path,
+    attempted_unlinks: list[Path],
+) -> tuple[protocol.ObjectId, Path]:
+    tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    store.fetch_state(worktree=worktree, remote=str(bare_remote))
+    destination = tmp_path / "export" / "state.bundle"
+    destination.parent.mkdir()
+    _fail_export_ref_deletion(monkeypatch, fail_bundle_create=True, ref_deletion_raises=False)
+    return tip, destination
+
+
+def _arrange_a_refused_publish_with_a_failed_temp_unlink(
+    monkeypatch: pytest.MonkeyPatch,
+    bare_remote: Path,
+    worktree: Path,
+    tmp_path: Path,
+    attempted_unlinks: list[Path],
+) -> tuple[protocol.ObjectId, Path]:
     tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
     destination = tmp_path / "state.bundle"
     destination.write_bytes(b"an earlier export")
-    real_unlink = Path.unlink
+    _fail_temporary_unlink(monkeypatch, destination, attempted_unlinks)
+    return tip, destination
 
-    def fake_unlink(self: Path, missing_ok: bool = False) -> None:
-        if self.name.startswith(f".{destination.name}."):
-            raise OSError("simulated temporary-file cleanup failure")
-        real_unlink(self, missing_ok=missing_ok)
 
-    monkeypatch.setattr(Path, "unlink", fake_unlink)
+def _arrange_a_failed_bundle_create_with_both_cleanup_steps_failing(
+    monkeypatch: pytest.MonkeyPatch,
+    bare_remote: Path,
+    worktree: Path,
+    tmp_path: Path,
+    attempted_unlinks: list[Path],
+) -> tuple[protocol.ObjectId, Path]:
+    tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    store.fetch_state(worktree=worktree, remote=str(bare_remote))
+    destination = tmp_path / "export" / "state.bundle"
+    destination.parent.mkdir()
+    _fail_export_ref_deletion(monkeypatch, fail_bundle_create=True, ref_deletion_raises=True)
+    _fail_temporary_unlink(monkeypatch, destination, attempted_unlinks)
+    return tip, destination
 
-    with pytest.raises(protocol.ClaimError, match="already exists") as excinfo:
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        _CleanupFailureCase(
+            id="successful-publish-temp-unlink-fails",
+            arrange=_arrange_successful_publish_with_a_failed_temp_unlink,
+            error_match="could not remove the now-redundant temporary",
+            message_fragments=(),
+            cause_fragment=None,
+            destination_exists_after=True,
+            destination_bytes_after=None,
+            verify_bundle=True,
+            temp_leftover_expected=True,
+            postcheck=lambda worktree: None,
+        ),
+        _CleanupFailureCase(
+            id="bundle-create-fails-and-ref-cleanup-exits-nonzero",
+            arrange=_arrange_a_failed_bundle_create_with_a_failed_ref_cleanup,
+            error_match=None,
+            message_fragments=(
+                "simulated bundle create failure",
+                store.EXPORT_BUNDLE_REF,
+                "simulated ref cleanup failure",
+            ),
+            cause_fragment="simulated bundle create failure",
+            destination_exists_after=False,
+            destination_bytes_after=None,
+            verify_bundle=False,
+            temp_leftover_expected=False,
+            postcheck=_verify_and_remove_the_leftover_export_ref,
+        ),
+        _CleanupFailureCase(
+            id="refused-publish-temp-unlink-fails",
+            arrange=_arrange_a_refused_publish_with_a_failed_temp_unlink,
+            error_match="already exists",
+            message_fragments=("simulated temporary-file cleanup failure",),
+            cause_fragment="already exists",
+            destination_exists_after=True,
+            destination_bytes_after=b"an earlier export",
+            verify_bundle=False,
+            temp_leftover_expected=True,
+            postcheck=lambda worktree: None,
+        ),
+        _CleanupFailureCase(
+            id="bundle-create-fails-and-both-cleanup-steps-fail",
+            arrange=_arrange_a_failed_bundle_create_with_both_cleanup_steps_failing,
+            error_match=None,
+            message_fragments=(
+                "simulated bundle create failure",
+                store.EXPORT_BUNDLE_REF,
+                "simulated ref-deletion invocation failure",
+                "simulated temporary-file cleanup failure",
+            ),
+            cause_fragment="simulated bundle create failure",
+            destination_exists_after=False,
+            destination_bytes_after=None,
+            verify_bundle=False,
+            temp_leftover_expected=True,
+            postcheck=_verify_and_remove_the_leftover_export_ref,
+        ),
+    ],
+    ids=lambda case: case.id,
+)
+def test_export_state_bundle_names_every_uncleaned_leftover_and_preserves_the_original_cause(
+    monkeypatch: pytest.MonkeyPatch,
+    bare_remote: Path,
+    worktree: Path,
+    tmp_path: Path,
+    case: _CleanupFailureCase,
+) -> None:
+    """The two cleanup steps `_clear_export_artifacts` runs -- clearing
+    `EXPORT_BUNDLE_REF` and removing the temporary file -- are independent
+    of each other and of whatever exception type each raises (issue #298,
+    the second and third 19.09.2026 gate REVISEs): whichever one fails,
+    the other is still attempted, the raised error names every artifact
+    that is actually left behind together with its own failure, and it is
+    chained to the write/publish failure that preceded it when there was
+    one -- never silently dropped in favour of a cleanup failure, and never
+    silently dropping a cleanup failure in favour of it."""
+    attempted_unlinks: list[Path] = []
+    tip, destination = case.arrange(monkeypatch, bare_remote, worktree, tmp_path, attempted_unlinks)
+
+    with pytest.raises(protocol.ClaimError, match=case.error_match) as excinfo:
         store.export_state_bundle(worktree=worktree, tip=tip, destination=destination)
 
     message = str(excinfo.value)
-    assert "simulated temporary-file cleanup failure" in message
-    assert excinfo.value.__cause__ is not None
-    assert "already exists" in str(excinfo.value.__cause__)
-    assert destination.read_bytes() == b"an earlier export"
+    for fragment in case.message_fragments:
+        assert fragment in message
+    if case.cause_fragment is None:
+        assert excinfo.value.__cause__ is None
+    else:
+        assert excinfo.value.__cause__ is not None
+        assert case.cause_fragment in str(excinfo.value.__cause__)
+    assert destination.exists() == case.destination_exists_after
+    if case.destination_bytes_after is not None:
+        assert destination.read_bytes() == case.destination_bytes_after
 
-    monkeypatch.setattr(Path, "unlink", real_unlink)
-    leftover = list(destination.parent.glob(f".{destination.name}.*"))
-    assert leftover
-    for stray in leftover:
-        stray.unlink()
+    monkeypatch.undo()  # restore the real process.run_captured/Path.unlink before cleanup below
+
+    if case.temp_leftover_expected:
+        assert attempted_unlinks, "the temporary file's own unlink must still be attempted"
+        assert str(attempted_unlinks[0]) in message
+        leftover = list(destination.parent.glob(f".{destination.name}.*"))
+        assert leftover
+        for stray in leftover:
+            stray.unlink()
+    else:
+        assert not list(destination.parent.glob(f".{destination.name}.*"))
+    if case.verify_bundle:
+        _git("bundle", "verify", str(destination), cwd=worktree)
+
+    case.postcheck(worktree)
 
 
 @pytest.mark.parametrize(
