@@ -2,10 +2,9 @@
 `_git_output` boundary and its `directory` (issue #314), `resolve_path_checkout`
 (the path-based checkout resolver `protect` and `rescope` share), dirty-path
 reading, `versioned_paths`, trunk landings, and remote-location parsing.
-`_validate_checkout` is exercised through `issue_claim._validate_checkout`,
-`cli.py`'s own re-export of the same function every `claim` call site uses.
-Tests that drive these through `issue_claim.main([...])` stay in
-`tests/test_cli.py` as CLI-wiring behavior."""
+`_validate_checkout` -- the precondition every `claim` call site in `cli.py`
+uses -- is exercised directly. Tests that drive these through
+`issue_claim.main([...])` stay in `tests/test_cli.py` as CLI-wiring behavior."""
 
 from __future__ import annotations
 
@@ -26,7 +25,6 @@ from cli_fixtures import (
 )
 
 from agent_coordination import board, checkout, process, protocol
-from agent_coordination import cli as issue_claim
 from agent_coordination.protocol import ClaimError, ClaimRequest
 
 _LIVE_VERSIONED_PATHS = checkout.versioned_paths
@@ -117,7 +115,7 @@ def test_checkout_validation_binds_clean_head_and_branch(
         checkout, "_git_output", lambda arguments, **_kwargs: values[tuple(arguments)]
     )
 
-    issue_claim._validate_checkout(request())
+    checkout._validate_checkout(request())
 
 
 @pytest.mark.parametrize(
@@ -183,7 +181,7 @@ def test_checkout_validation_rejects_false_or_late_claims(
     )
 
     with pytest.raises(ClaimError, match=message):
-        issue_claim._validate_checkout(candidate)
+        checkout._validate_checkout(candidate)
 
 
 def test_checkout_validation_names_the_base_repair(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -202,7 +200,7 @@ def test_checkout_validation_names_the_base_repair(monkeypatch: pytest.MonkeyPat
     candidate = request()
 
     with pytest.raises(ClaimError) as error:
-        issue_claim._validate_checkout(candidate)
+        checkout._validate_checkout(candidate)
 
     assert str(error.value) == (
         f"claim base {BASE} does not match checkout HEAD {'b' * 40}; "
@@ -237,7 +235,7 @@ def test_checkout_validation_names_the_isolated_worktree_recipe_for_the_default_
     candidate = request(branch=branch)
 
     with pytest.raises(ClaimError) as error:
-        issue_claim._validate_checkout(candidate)
+        checkout._validate_checkout(candidate)
 
     assert str(error.value) == (
         "build claims require an isolated non-main worktree branch; "
@@ -264,7 +262,7 @@ def test_checkout_validation_names_the_isolated_worktree_recipe_for_a_shared_che
     candidate = request()
 
     with pytest.raises(ClaimError) as error:
-        issue_claim._validate_checkout(candidate)
+        checkout._validate_checkout(candidate)
 
     assert str(error.value) == (
         "build claims require a linked isolated worktree checkout; "
@@ -295,7 +293,7 @@ def test_checkout_validation_names_the_first_three_dirty_paths_and_the_rest_as_a
     candidate = request()
 
     with pytest.raises(ClaimError) as error:
-        issue_claim._validate_checkout(candidate)
+        checkout._validate_checkout(candidate)
 
     assert str(error.value) == (
         "claim must be acquired before the first worktree edit: "
@@ -322,7 +320,7 @@ def test_checkout_validation_names_every_dirty_path_when_three_or_fewer(
     candidate = request()
 
     with pytest.raises(ClaimError) as error:
-        issue_claim._validate_checkout(candidate)
+        checkout._validate_checkout(candidate)
 
     assert str(error.value) == "claim must be acquired before the first worktree edit: src/a.py"
 
@@ -643,11 +641,11 @@ def test_claim_default_branch_fallback_denies_only_main_and_master(
     candidate = request(branch=branch)
 
     if not denied:
-        issue_claim._validate_checkout(candidate)
+        checkout._validate_checkout(candidate)
         return
 
     with pytest.raises(ClaimError, match="isolated non-main worktree branch"):
-        issue_claim._validate_checkout(candidate)
+        checkout._validate_checkout(candidate)
 
 
 def test_versioned_paths_reads_nul_terminated_ls_files_without_stripping(

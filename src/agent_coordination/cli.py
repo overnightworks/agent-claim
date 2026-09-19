@@ -34,23 +34,6 @@ from . import (
     workspace,
 )
 
-ACO_AGENT_ENV = checkout.ACO_AGENT_ENV
-CLAUDE_SESSION_ID_ENV = checkout.CLAUDE_SESSION_ID_ENV
-GROK_SESSION_ID_ENV = checkout.GROK_SESSION_ID_ENV
-ClaimError = protocol.ClaimError
-ClaimRequest = protocol.ClaimRequest
-ClaimUnavailableError = protocol.ClaimUnavailableError
-InvalidClaimMarkerError = protocol.InvalidClaimMarkerError
-IssueIdentity = protocol.IssueIdentity
-LaneIdentity = protocol.LaneIdentity
-ISSUELESS_LANE_BRANCH_PREFIXES = protocol.ISSUELESS_LANE_BRANCH_PREFIXES
-_git_output = checkout._git_output
-_resolved_agent = checkout._resolved_agent
-_timestamp = board._timestamp
-_validate_checkout = checkout._validate_checkout
-claims_conflict = protocol.claims_conflict
-claims_holding_path = protocol.claims_holding_path
-
 DEFAULT_CLAIM_ROLE = "builder"
 NEXT_PULL_DESCRIPTION = (
     "Pulling is not dispatching: an item whose expectations are still unruled is "
@@ -1245,7 +1228,7 @@ def _merged_pull_request_floor(issues: tuple[board.Issue, ...], now: datetime) -
     """
     if not issues:
         return now
-    return min(_timestamp(issue.created_at) for issue in issues)
+    return min(board._timestamp(issue.created_at) for issue in issues)
 
 
 # A container's children are their own `gh list_children` subprocess call;

@@ -241,7 +241,7 @@ def test_protect_denied_checkout_validation_never_reads_the_store(
     accident, since none of them assert the store was left untouched."""
     _isolate_protect_home(monkeypatch, tmp_path)
     work = tmp_path / "work"
-    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
     git_directory = work / ".git"
     _patch_protect_git(
         monkeypatch, work, git_directory=git_directory, common_directory=git_directory
@@ -307,7 +307,7 @@ def test_protect_grok_camelcase_allows_when_session_claim_covers_path(
     path_key: str,
 ) -> None:
     home, work = _isolate_protect_home(monkeypatch, tmp_path)
-    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
     _patch_protect_git(monkeypatch, work)
     _patch_protect_claim(monkeypatch)
 
@@ -331,7 +331,7 @@ def test_protect_allows_a_lane_claim_covering_the_path(
     agent/branch/scope, so a lane claim (no GitHub issue at all) passes through it
     unchanged, with no code path change required."""
     home, work = _isolate_protect_home(monkeypatch, tmp_path)
-    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
     _patch_protect_git(monkeypatch, work, branch="docs/lane-cleanup")
     _patch_protect_claim(monkeypatch, branch="docs/lane-cleanup", lane=True)
 
@@ -352,7 +352,7 @@ def test_protect_grok_camelcase_denies_write_without_this_session_claim(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     home, work = _isolate_protect_home(monkeypatch, tmp_path)
-    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
     _patch_protect_git(monkeypatch, work)
     _patch_protect_claim(monkeypatch, agent="Codex Sol")
 
@@ -374,7 +374,7 @@ def test_protect_absolute_file_path_allows_when_claim_scope_covers_it(
 ) -> None:
     _isolate_protect_home(monkeypatch, tmp_path)
     work = tmp_path / "work"
-    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
     _patch_protect_git(monkeypatch, work)
     _patch_protect_claim(monkeypatch)
     target = work / "src" / "agent_coordination" / "cli.py"
@@ -400,7 +400,7 @@ def test_protect_dirty_worktree_still_allows_covered_write(
     _isolate_protect_home(monkeypatch, tmp_path)
     work = tmp_path / "work"
     (work / "dirty.txt").write_text("edited\n", encoding="utf-8")
-    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
     _patch_protect_git(monkeypatch, work)
     _patch_protect_claim(monkeypatch)
 
@@ -421,7 +421,7 @@ def test_protect_no_matching_claim_denies_claim_first(
 ) -> None:
     _isolate_protect_home(monkeypatch, tmp_path)
     work = tmp_path / "work"
-    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
     _patch_protect_git(monkeypatch, work)
     state = protocol.ClaimState(tip=protocol.ObjectId(BASE))
     monkeypatch.setattr(store, "fetch_state", lambda *, worktree, remote: state)
@@ -548,7 +548,7 @@ def test_protect_extended_mutating_tools_deny_on_main_without_a_claim(
     a fresh `tmp_path` -- rather than at collection time."""
     _isolate_protect_home(monkeypatch, tmp_path)
     work = tmp_path / "work"
-    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
     _patch_protect_git(
         monkeypatch, work, git_directory=work / ".git", common_directory=work / ".git"
     )
@@ -578,7 +578,7 @@ def test_protect_notebook_edit_reads_notebook_path(
     checked against the claim scope exactly like any other mutating tool."""
     _isolate_protect_home(monkeypatch, tmp_path)
     work = tmp_path / "work"
-    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
     _patch_protect_git(monkeypatch, work)
     _patch_protect_claim(monkeypatch)
 
@@ -610,7 +610,7 @@ def test_protect_notebook_edit_ignores_a_decoy_path_key_it_never_sends(
     check the way a first-wins generic key list would."""
     _isolate_protect_home(monkeypatch, tmp_path)
     work = tmp_path / "work"
-    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
     _patch_protect_git(monkeypatch, work)
     _patch_protect_claim(monkeypatch)
 
@@ -642,7 +642,7 @@ def test_protect_apply_patch_allows_when_every_touched_path_is_in_scope(
     must be in scope, not just the first."""
     _isolate_protect_home(monkeypatch, tmp_path)
     work = tmp_path / "work"
-    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
     _patch_protect_git(monkeypatch, work)
     _patch_protect_claim(monkeypatch)
     command = _patch_command(
@@ -703,7 +703,7 @@ def test_protect_apply_patch_denies_naming_the_first_path_outside_scope(
     than a path already absolute (issue #314 delta, finding R2)."""
     _isolate_protect_home(monkeypatch, tmp_path)
     work = tmp_path / "work"
-    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
     _patch_protect_git(monkeypatch, work)
     _patch_protect_claim(monkeypatch)
     lines = (line.format(work=work) for line in line_templates)
@@ -731,7 +731,7 @@ def test_protect_apply_patch_denies_an_indented_header_smuggled_after_add_file(
     this pins shut."""
     _isolate_protect_home(monkeypatch, tmp_path)
     work = tmp_path / "work"
-    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
     _patch_protect_git(monkeypatch, work)
     _patch_protect_claim(monkeypatch, scope=("README.md",))
     command = _patch_command(
@@ -762,7 +762,7 @@ def test_protect_apply_patch_denies_with_claim_first_when_no_session_claim_exist
     claim to be outside of."""
     _isolate_protect_home(monkeypatch, tmp_path)
     work = tmp_path / "work"
-    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
     _patch_protect_git(monkeypatch, work)
     _patch_protect_claim(monkeypatch, agent="Codex Sol")
     command = _patch_command(f"*** Update File: {work / 'src/widget.py'}", "@@", "-old", "+new")
@@ -806,7 +806,7 @@ def test_protect_primary_checkout_denies_not_main_without_github(
     on -- `git-dir == git-common-dir` is the whole test, not a branch name."""
     _isolate_protect_home(monkeypatch, tmp_path)
     work = tmp_path / "work"
-    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
     git_directory = work / ".git"
     _patch_protect_git(
         monkeypatch, work, git_directory=git_directory, common_directory=git_directory
@@ -850,7 +850,7 @@ def test_protect_denies_not_main_for_a_custom_or_unresolved_default_branch(
     way `claim`'s own precondition does."""
     _isolate_protect_home(monkeypatch, tmp_path)
     work = tmp_path / "work"
-    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
     _patch_protect_git(monkeypatch, work, branch=branch, origin_head=origin_head)
     _forbid_github_construction(monkeypatch)
 
@@ -880,7 +880,7 @@ def test_protect_path_resolving_to_the_checkout_root_denies_path_required(
     relative scope entry of `"."`, which `protocol._valid_scope` refuses."""
     _isolate_protect_home(monkeypatch, tmp_path)
     work = tmp_path / "work"
-    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
     _patch_protect_git(monkeypatch, work)
     _forbid_github_construction(monkeypatch)
 
@@ -934,7 +934,7 @@ def test_protect_write_decision_reflects_the_live_claim(
     all."""
     _isolate_protect_home(monkeypatch, tmp_path)
     work = tmp_path / "work"
-    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
     _patch_protect_git(monkeypatch, work)
     _patch_protect_claim(monkeypatch, branch=branch, scope=scope)
 
@@ -960,7 +960,7 @@ def test_protect_claim_error_from_write_path_denies_json_without_error_prefix(
     tests below)."""
     _isolate_protect_home(monkeypatch, tmp_path)
     work = tmp_path / "work"
-    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
     _patch_protect_git(monkeypatch, work)
 
     def failed(*_args: object, **_kwargs: object) -> board.BoardConfig:
@@ -988,7 +988,7 @@ def test_protect_non_claim_error_from_write_path_denies_json_without_traceback(
 ) -> None:
     _isolate_protect_home(monkeypatch, tmp_path)
     work = tmp_path / "work"
-    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
     _patch_protect_git(monkeypatch, work)
 
     def crashed(*_args: object, **_kwargs: object) -> board.BoardConfig:
@@ -1034,7 +1034,7 @@ def test_protect_maps_every_store_error_to_cannot_reach_the_state_ref(
 ) -> None:
     _isolate_protect_home(monkeypatch, tmp_path)
     work = tmp_path / "work"
-    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
     _patch_protect_git(monkeypatch, work)
 
     def fake_fetch_state(*, worktree: Path, remote: str) -> protocol.ClaimState:
@@ -1066,7 +1066,7 @@ def test_protect_apply_patch_maps_a_store_error_to_cannot_reach_the_state_ref(
     `_protect_fetch_claim_state` rather than re-deciding this on its own."""
     _isolate_protect_home(monkeypatch, tmp_path)
     work = tmp_path / "work"
-    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
     _patch_protect_git(monkeypatch, work)
 
     def fake_fetch_state(*, worktree: Path, remote: str) -> protocol.ClaimState:
@@ -1093,7 +1093,7 @@ def test_protect_missing_state_ref_denies_cannot_reach(
 ) -> None:
     _isolate_protect_home(monkeypatch, tmp_path)
     work = tmp_path / "work"
-    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
     _patch_protect_git(monkeypatch, work)
     monkeypatch.setattr(store, "fetch_state", lambda **_k: protocol.EMPTY_STATE)
 
@@ -1117,7 +1117,7 @@ def test_protect_allow_is_forge_free_against_a_non_github_remote(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     _, work = _isolate_protect_home(monkeypatch, tmp_path)
-    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
     _patch_protect_git(monkeypatch, work)
     _patch_protect_claim(monkeypatch)
     _forbid_forge_resolution(monkeypatch)
@@ -1138,7 +1138,7 @@ def test_protect_deny_is_forge_free_against_a_non_github_remote(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     _, work = _isolate_protect_home(monkeypatch, tmp_path)
-    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
     _patch_protect_git(monkeypatch, work)
     _patch_protect_claim(monkeypatch, agent="Codex Sol")
     _forbid_forge_resolution(monkeypatch)
@@ -1226,7 +1226,7 @@ def test_protect_allows_the_same_payload_path_from_every_cwd(
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
-    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
     _use_real_path_is_tracked(monkeypatch)
     main, worktree = _protect_real_repo_with_worktree(tmp_path)
     _main2, other_worktree = _protect_real_repo_with_worktree(tmp_path, slug="issue-90-other")
@@ -1268,7 +1268,7 @@ def test_protect_denies_a_path_outside_every_claim_scope_still(
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
-    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
     _use_real_path_is_tracked(monkeypatch)
     _main, worktree = _protect_real_repo_with_worktree(tmp_path)
     monkeypatch.chdir(worktree)
@@ -1299,7 +1299,7 @@ def test_protect_denies_a_path_outside_every_repository_as_such(
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
-    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
     outside = tmp_path / "not-a-repository"
     outside.mkdir()
     monkeypatch.chdir(outside)
@@ -1326,7 +1326,7 @@ def test_protect_apply_patch_judges_two_worktrees_separately_and_one_deny_wins(
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
-    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
     _use_real_path_is_tracked(monkeypatch)
     _main, claimed_worktree = _protect_real_repo_with_worktree(tmp_path)
     _main2, unclaimed_worktree = _protect_real_repo_with_worktree(tmp_path, slug="issue-90-other")
@@ -1374,7 +1374,7 @@ def test_rescope_succeeds_from_every_cwd_when_the_add_path_is_absolute(
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
-    _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Codex Sol"})
+    _set_agent_identity_env(monkeypatch, {checkout.ACO_AGENT_ENV: "Codex Sol"})
     _use_real_path_is_tracked(monkeypatch)
     main, worktree = _protect_real_repo_with_worktree(tmp_path)
     add = str(worktree / "docs" / "widget.md")
@@ -1436,7 +1436,7 @@ def test_rescope_rejects_a_wide_scope_from_a_foreign_cwd_via_the_resolved_checko
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
-    _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Codex Sol"})
+    _set_agent_identity_env(monkeypatch, {checkout.ACO_AGENT_ENV: "Codex Sol"})
     _use_real_path_is_tracked(monkeypatch)
     _main, worktree = _protect_real_repo_with_worktree(tmp_path)
     foreign_cwd = tmp_path / "elsewhere"
@@ -1471,7 +1471,7 @@ def test_protect_denies_a_relative_payload_path_even_from_the_claimed_worktree_c
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
-    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
     _main, worktree = _protect_real_repo_with_worktree(tmp_path)
     monkeypatch.chdir(worktree)
     state = _protect_state_with_claim(
@@ -1543,7 +1543,7 @@ def test_protect_denies_not_main_for_a_real_checkout(
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
-    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
     target = build_target(tmp_path)
     monkeypatch.chdir(tmp_path)
     _forbid_github_construction(monkeypatch)
@@ -1568,7 +1568,7 @@ def test_protect_denies_a_checkout_with_no_commit_yet(
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
-    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
     unborn = tmp_path / "unborn"
     unborn.mkdir()
     _real_git(unborn, "init", "-q", "-b", "codex/issue-72-widget")
@@ -1597,7 +1597,7 @@ def test_protect_apply_patch_fetches_store_state_once_per_repository(
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
-    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
+    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
     _use_real_path_is_tracked(monkeypatch)
     _main, claimed_worktree = _protect_real_repo_with_worktree(tmp_path)
     _main2, unclaimed_worktree = _protect_real_repo_with_worktree(tmp_path, slug="issue-90-other")
@@ -1696,7 +1696,7 @@ def test_rescope_denies_before_touching_the_store(
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
-    _set_agent_identity_env(monkeypatch, {issue_claim.ACO_AGENT_ENV: "Codex Sol"})
+    _set_agent_identity_env(monkeypatch, {checkout.ACO_AGENT_ENV: "Codex Sol"})
     args = build_args(tmp_path)
 
     status = issue_claim.main(args)

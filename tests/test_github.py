@@ -18,7 +18,7 @@ from board_fixtures import REPOSITORY
 from github_fixtures import LANDING_BRANCH
 
 from agent_coordination import board, forge, github, process
-from agent_coordination.cli import ClaimError
+from agent_coordination.protocol import ClaimError
 
 GitHubForge = github.GitHubForge
 

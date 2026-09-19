@@ -16,7 +16,6 @@ import pytest
 from board_fixtures import BASE
 
 from agent_coordination import checkout, github, store
-from agent_coordination import cli as issue_claim
 from agent_coordination.protocol import ClaimError
 
 
@@ -135,9 +134,9 @@ def _set_agent_identity_env(
     monkeypatch: pytest.MonkeyPatch, environ: dict[str, str] | None = None
 ) -> None:
     for name in (
-        issue_claim.ACO_AGENT_ENV,
-        issue_claim.GROK_SESSION_ID_ENV,
-        issue_claim.CLAUDE_SESSION_ID_ENV,
+        checkout.ACO_AGENT_ENV,
+        checkout.GROK_SESSION_ID_ENV,
+        checkout.CLAUDE_SESSION_ID_ENV,
     ):
         monkeypatch.delenv(name, raising=False)
     for name, value in (environ or {}).items():
@@ -161,9 +160,9 @@ def _forbid_git_fill(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _assert_missing_identity_message(message: str) -> None:
     assert "--agent" in message
-    assert issue_claim.ACO_AGENT_ENV in message
-    assert issue_claim.GROK_SESSION_ID_ENV in message
-    assert issue_claim.CLAUDE_SESSION_ID_ENV in message
+    assert checkout.ACO_AGENT_ENV in message
+    assert checkout.GROK_SESSION_ID_ENV in message
+    assert checkout.CLAUDE_SESSION_ID_ENV in message
     assert "GROK_AGENT" not in message
 
 
