@@ -29,7 +29,7 @@ jobs:
       - name: Check types
         run: uv run --locked pyright src tests scripts
       - name: Check for dead code
-        run: uv run --locked vulture src scripts/vulture_whitelist.py --min-confidence 60
+        run: test -n "$(find src -name '*.py' -print -quit)" && uv run --locked vulture src scripts/vulture_whitelist.py --min-confidence 60
       - name: Check root layout
         run: uv run --locked python scripts/check_root_layout.py
       - name: Check architecture contracts
