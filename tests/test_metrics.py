@@ -170,6 +170,27 @@ def test_completion_gates_measurement_and_landing_wait(
                 Parallelism(date(2026, 1, 4), 1),
             ),
         ),
+        (
+            [_lane("midnight-span", BASE.replace(hour=22), BASE.replace(day=2, hour=2))],
+            (),
+            (),
+            (
+                Parallelism(date(2026, 1, 1), 1),
+                Parallelism(date(2026, 1, 2), 1),
+            ),
+        ),
+        (
+            [_lane("ends-at-midnight", BASE.replace(hour=22), BASE.replace(day=2, hour=0))],
+            (),
+            (),
+            (Parallelism(date(2026, 1, 1), 1),),
+        ),
+        (
+            [_lane("starts-at-midnight", BASE.replace(day=2, hour=0), BASE.replace(day=2, hour=2))],
+            (),
+            (),
+            (Parallelism(date(2026, 1, 2), 1),),
+        ),
     ],
 )
 def test_container_sums_and_daily_parallelism(
@@ -181,7 +202,10 @@ def test_container_sums_and_daily_parallelism(
     """Container sums add up their open children's estimates and separately
     count children without a size; two lanes overlapping in wall-clock time
     on one day read `overlapping_lanes=2` for that day, three lanes on three
-    disjoint days each read `1`."""
+    disjoint days each read `1`. A lane spanning midnight contributes to
+    both dates it touches; a lane ending exactly at midnight does not
+    inflate the next date, and one starting exactly at midnight does not
+    inflate the previous date."""
     report = measure(lanes, open_items)
     assert report.container_sums == expected_container_sums
     assert report.parallelism == expected_parallelism
