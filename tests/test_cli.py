@@ -521,6 +521,34 @@ def _single_item_board_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     return client
 
 
+def test_board_marks_an_item_landed_by_a_trailer_carrying_trunk_commit_without_a_pull_request(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Issue #304 review finding B2's "lane 2": a trunk commit's own
+    `Work-Item:` trailer lands an item even when no merged pull request body
+    names it -- `landed_references` unions the trunk-derived set
+    (`board.trunk_landed_work_items`) with the PR-derived one, so the union
+    still holds an item a merge/squash commit landed without a matching
+    pull request body."""
+    _single_item_board_environment(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        checkout,
+        "trunk_landings",
+        lambda *_args, **_kwargs: (
+            checkout.TrunkLanding(
+                "trailersha",
+                datetime(2026, 8, 29, tzinfo=UTC),
+                board.TrunkWorkItemClassification((10,)),
+            ),
+        ),
+    )
+
+    assert issue_claim.main(["--repo", "example/agent-claim", "board", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    ten = next(item for item in payload["items"] if item["number"] == 10)
+    assert ten["stage"] == "code-landed"
+
+
 def test_board_html_prints_the_rendered_page_to_stdout(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:

@@ -1803,6 +1803,35 @@ class TestCliStateRefForge:
         assert status == 0
         assert capsys.readouterr().out.strip().endswith("requests: 0")
 
+    def test_board_marks_a_state_ref_item_landed_by_a_trailer_carrying_trunk_commit(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+    ) -> None:
+        """Issue #304: the trunk-derived landed set applies under
+        `storage = state-ref` exactly as under GitHub --
+        `checkout.trunk_landings` reads the real `main` history independent
+        of which forge names the item, so a trailer-carrying commit lands a
+        state-ref item with no merged pull request in the picture at all."""
+        item_id = "aco-000005"
+        item_number = items.item_number(item_id)
+        item_files = {
+            f"{item_id}.md": _state_ref_body(
+                _Projection("Ship it.", "Land it.", "It is done."),
+                _record(title="Trailer-landed", state="open", kind="task"),
+            ).encode()
+        }
+        _git("commit", "--allow-empty", "-m", f"Land it.\n\nWork-Item: {item_id}", cwd=worktree)
+        self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, item_files)
+
+        assert issue_claim.main(["board", "--json"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        item = next(row for row in payload["items"] if row["number"] == item_number)
+        assert item["stage"] == "code-landed"
+
     def test_board_refuses_without_an_origin_head(
         self,
         monkeypatch: pytest.MonkeyPatch,

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 import tomllib
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
@@ -398,6 +398,23 @@ def trunk_commit_classification(
     }:
         return NoItemClassification(NoItemKind(no_item_values[0].lower()))
     return None
+
+
+def trunk_landed_work_items(
+    classifications: Iterable[TrunkClassification | ClassificationDefect | None],
+) -> frozenset[int]:
+    """Item numbers a trunk commit's own trailer block names as landed
+    (issue #304): every `TrunkWorkItemClassification.numbers` value across
+    `classifications` (one `TrunkLanding.classification` per commit),
+    joined into the one set `build_board` unions into `landed_references` --
+    an item landed by a trailer-carrying merge commit is landed whether or
+    not a matching pull request body also named it."""
+    return frozenset(
+        number
+        for classification in classifications
+        if isinstance(classification, TrunkWorkItemClassification)
+        for number in classification.numbers
+    )
 
 
 @dataclass(frozen=True)
@@ -2280,6 +2297,11 @@ class BoardBuildInputs:
     repository: str
     now: datetime | None = None
     trunk_landings: tuple[datetime, ...] = ()
+    # Item numbers a trunk commit's own trailer block already names as
+    # landed (issue #304, `trunk_landed_work_items`) -- independent of
+    # `trunk_landings` above, which carries only each commit's timestamp for
+    # ruling-freshness, never its classification.
+    trunk_landed_work_items: frozenset[int] = frozenset()
     children: Mapping[int, tuple[ChildItem, ...]] = field(default_factory=dict)
     dependencies: Mapping[int, tuple[IssueDependency, ...]] = field(default_factory=dict)
     requests: int = 0
@@ -2346,7 +2368,8 @@ def build_board(inputs: BoardBuildInputs) -> Board:
         in_flight_references=_associated_issues(open_pull_requests, repository)
         | _touched_without_closing(open_pull_requests),
         landed_references=_associated_issues(recent_merged_pull_requests, repository)
-        | _touched_without_closing(recent_merged_pull_requests),
+        | _touched_without_closing(recent_merged_pull_requests)
+        | inputs.trunk_landed_work_items,
         open_branches=frozenset(pr.head_ref_name for pr in open_pull_requests),
         open_pull_requests_supported=inputs.open_pull_requests_supported,
         trunk_landings=inputs.trunk_landings,

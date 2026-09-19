@@ -1285,6 +1285,7 @@ def _board(
                 client, tuple(issue.number for issue in issues if issue.blocked_by_count > 0)
             ),
         )
+    trunk_landings = checkout.trunk_landings(config.canonical_remote, TRUNK_LANDING_DEPTH)
     return _BoardFetch(
         board.build_board(
             board.BoardBuildInputs(
@@ -1295,11 +1296,9 @@ def _board(
                 config=config,
                 repository=client.repository.path,
                 now=now,
-                trunk_landings=tuple(
-                    landing.committed_at
-                    for landing in checkout.trunk_landings(
-                        config.canonical_remote, TRUNK_LANDING_DEPTH
-                    )
+                trunk_landings=tuple(landing.committed_at for landing in trunk_landings),
+                trunk_landed_work_items=board.trunk_landed_work_items(
+                    landing.classification for landing in trunk_landings
                 ),
                 children=children,
                 dependencies=dependencies,
