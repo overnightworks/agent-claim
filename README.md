@@ -190,10 +190,15 @@ never reads the board and reports neither. A forge failure after the release
 has already committed never undoes or fails it -- one hint line stands in for
 `freed`/`next` instead, naming the repair.
 `rescope <issue> --add <path> [--drop <path>]` changes a live claim's scope
-without releasing it: the claim id and base stay, added paths are advisory
-like `claim`, and a resulting wide scope uses the same `--whole` rule as
-`claim`. There is no release window. It does not require HEAD to match
-base or a clean tree.
+without releasing it. Each `--add`/`--drop` value is an absolute path, never
+repository-relative: `rescope` resolves its checkout from that path directly
+(issue #314), the same way `protect`'s hook resolves from a payload path and
+never from the process's own cwd, so a relative value denies outright rather
+than being guessed against cwd. Each resolved value is then canonicalized to
+a repository-relative scope entry before the same `claim`-style rules apply:
+the claim id and base stay, added paths are advisory like `claim`, and a
+resulting wide scope uses the same `--whole` rule as `claim`. There is no
+release window. It does not require HEAD to match base or a clean tree.
 
 Run commands in the repository being coordinated, or pass `--repo
 OWNER/REPOSITORY`. A claim must begin from a clean linked worktree and binds its

@@ -475,12 +475,12 @@ def _add_rescope_parser(commands: argparse._SubParsersAction) -> None:
     rescope.add_argument(
         "--add",
         action="append",
-        help="a repository-relative path to add; repeat --add for more than one path",
+        help="an absolute path to add; repeat --add for more than one path",
     )
     rescope.add_argument(
         "--drop",
         action="append",
-        help="a repository-relative path to drop; repeat --drop for more than one path",
+        help="an absolute path to drop; repeat --drop for more than one path",
     )
     rescope.add_argument("--claim-id", help=EXPECTED_CLAIM_ID_HELP)
     rescope.add_argument(
@@ -3021,12 +3021,12 @@ def _protect_not_main_denial(path_checkout: checkout.PathCheckout) -> str | None
     on the default branch, or -- never `claim`'s own `{main, master}` guess
     -- a checkout whose default branch cannot even be resolved."""
     if path_checkout.kind is checkout.CheckoutKind.MAIN:
-        return "not main"
+        return checkout.PROTECT_NOT_MAIN_REASON
     default_branch = checkout.default_branch_name(directory=path_checkout.toplevel)
     if default_branch is None:
         return checkout.DEFAULT_BRANCH_UNKNOWN_REASON
     if path_checkout.branch == default_branch:
-        return "not main"
+        return checkout.PROTECT_NOT_MAIN_REASON
     return None
 
 

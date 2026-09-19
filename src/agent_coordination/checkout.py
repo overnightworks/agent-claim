@@ -436,6 +436,13 @@ DEFAULT_BRANCH_FALLBACK = frozenset({"main", "master"})
 # resolver accept different risk here.
 DEFAULT_BRANCH_UNKNOWN_REASON = "default branch unknown"
 
+# One owner for `protect`'s "not main" denial (issue #314 repeat gate,
+# finding 4, Sonar S1192): `_protect_not_main_denial` in `cli.py` returns
+# this for both a shared main checkout and a linked worktree that sits on
+# the resolved default branch, so the one production spelling lives here
+# instead of twice in that function.
+PROTECT_NOT_MAIN_REASON = "not main"
+
 
 def _origin_head_ref(*, directory: Path | None = None) -> str | None:
     """The `origin/HEAD` symbolic ref (e.g. `refs/remotes/origin/trunk`),

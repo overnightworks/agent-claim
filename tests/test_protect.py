@@ -112,6 +112,18 @@ def _patch_protect_git(
     common_directory: Path | None = None,
     origin_head: str | None = "refs/remotes/origin/main",
 ) -> None:
+    """Fake `checkout._git_output` for exactly one checkout, rooted at
+    `work` (issue #314 repeat gate, finding 2). The fake maps every queried
+    `directory` to `work`'s own answers only when that directory *is* `work`
+    or one of its descendants -- a payload path's parent, or `work` itself --
+    an explicit `{directory: checkout values}` mapping in spirit even though
+    every descendant of one root shares one git answer (real `git -C
+    <any subdirectory>` does too). A directory outside that mapping (the
+    hook process's own cwd, or any other stray location) fails the test
+    loudly instead of silently being answered with `work`'s checkout, which
+    is the one thing a directory-blind fake could never prove: that
+    `protect` actually selects its checkout from the payload path, not from
+    wherever it happened to ask."""
     values = _protect_git_values(
         work,
         branch=branch,
@@ -119,6 +131,7 @@ def _patch_protect_git(
         common_directory=common_directory,
         origin_head=origin_head,
     )
+    resolved_work = work.resolve()
 
     def git(arguments: list[str], *, directory: Path | None = None) -> str:
         if arguments == ["status", "--porcelain"]:
@@ -137,6 +150,13 @@ def _patch_protect_git(
             pytest.fail(
                 "protect read git with no directory at all (issue #314: every read must "
                 "name the payload's own checkout, never the calling process's cwd)"
+            )
+        resolved_directory = directory.resolve()
+        if resolved_directory != resolved_work and resolved_work not in resolved_directory.parents:
+            pytest.fail(
+                f"protect read git for {directory}, which this fixture does not map "
+                f"(issue #314 repeat gate, finding 2): only {work} and its descendants "
+                "are a known checkout here"
             )
         key = tuple(arguments)
         if key == _ORIGIN_HEAD_SYMBOLIC_REF and key not in values:
@@ -206,62 +226,45 @@ def _assert_protect_decision(
     assert payload == {"decision": "deny", "reason": reason}
 
 
-def test_protect_allowed_write_resolves_identity_then_git_then_store(
+def test_protect_denied_checkout_validation_never_reads_the_store(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    """A write from the shared main checkout denies `not main` from
+    checkout validation alone (gate G4), before any claim could possibly
+    cover it -- a counting fake store, observed the same way gate G5's own
+    `test_protect_apply_patch_fetches_store_state_once_per_repository` does
+    (`len(fetch_calls) == 1` there), must stay at 0 reads here (issue #314
+    repeat gate, finding 5): a resolver that read the store before checkout
+    validation finished would pass every other test in this file by
+    accident, since none of them assert the store was left untouched."""
     _isolate_protect_home(monkeypatch, tmp_path)
     work = tmp_path / "work"
     _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
-    calls: list[str] = []
-
-    resolve_agent = checkout._resolved_agent
-
-    def resolved_agent(explicit: str | None) -> str:
-        calls.append("identity")
-        return resolve_agent(explicit)
-
-    monkeypatch.setattr(checkout, "_resolved_agent", resolved_agent)
-
-    git_values = _protect_git_values(work)
-
-    def git(arguments: list[str], *, directory: Path | None = None) -> str:
-        if directory is None:
-            pytest.fail(
-                "protect read git with no directory at all (issue #314: every read must "
-                "name the payload's own checkout, never the calling process's cwd)"
-            )
-        calls.append("git")
-        return git_values[tuple(arguments)]
-
-    monkeypatch.setattr(checkout, "_git_output", git)
-
+    git_directory = work / ".git"
+    _patch_protect_git(
+        monkeypatch, work, git_directory=git_directory, common_directory=git_directory
+    )
+    _forbid_github_construction(monkeypatch)
     state = _protect_state_with_claim(_protect_active_claim("Grok sess-1"))
+    fetch_calls: list[Path] = []
 
-    def fake_fetch_state(*, worktree: Path, remote: str) -> protocol.ClaimState:
-        calls.append("store")
+    def counting_fetch_state(*, worktree: Path, remote: str) -> protocol.ClaimState:
+        fetch_calls.append(worktree)
         return state
 
-    monkeypatch.setattr(store, "fetch_state", fake_fetch_state)
+    monkeypatch.setattr(store, "fetch_state", counting_fetch_state)
 
     assert (
         _protect_main(
             monkeypatch,
             {"toolName": "write", "toolInput": {"path": str(work / "src/widget.py")}},
         )
-        == 0
+        == 2
     )
-    _assert_protect_decision(capsys, decision="allow")
-    # Outcome, not call sequence (issue #314 repeat gate, B5): identity
-    # always resolves first and the store is only ever touched once the
-    # checkout is fully resolved -- however many `_git_output` facts
-    # checkout resolution, the has-commit gate (G3), and the default-branch
-    # gate (G4) end up reading in between, a refactor that adds or removes
-    # one must not break this.
-    git_calls = [call for call in calls if call == "git"]
-    assert git_calls
-    assert calls == ["identity", *git_calls, "store"]
+    _assert_protect_decision(capsys, decision="deny", reason=checkout.PROTECT_NOT_MAIN_REASON)
+    assert len(fetch_calls) == 0
 
 
 @pytest.mark.parametrize(
@@ -861,11 +864,20 @@ def test_protect_denies_not_main_for_a_custom_or_unresolved_default_branch(
     _assert_protect_decision(capsys, decision="deny", reason=expected_reason)
 
 
-def test_protect_path_outside_repository_denies_path_required(
+def test_protect_path_resolving_to_the_checkout_root_denies_path_required(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    """`PATH_REQUIRED` fires when the payload path's own checkout resolves
+    (issue #314 repeat gate, finding 2 fallout: the pre-fix fake answered
+    any directory, including one genuinely outside `work`, with `work`'s own
+    checkout -- masking that this scenario needs a *real* descendant of the
+    checkout, not an outside path, to reach this denial at all) but the path
+    itself resolves to exactly the checkout root: `work/subdir/..` queries
+    git from the real descendant `work/subdir`, so the checkout resolves
+    fine, while the full path resolves to `work` itself -- a repository-
+    relative scope entry of `"."`, which `protocol._valid_scope` refuses."""
     _isolate_protect_home(monkeypatch, tmp_path)
     work = tmp_path / "work"
     _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
@@ -877,7 +889,7 @@ def test_protect_path_outside_repository_denies_path_required(
             monkeypatch,
             {
                 "toolName": "write",
-                "toolInput": {"path": str(tmp_path / "outside.py")},
+                "toolInput": {"path": str(work / "subdir" / "..")},
             },
         )
         == 2
@@ -885,46 +897,54 @@ def test_protect_path_outside_repository_denies_path_required(
     _assert_protect_decision(capsys, decision="deny", reason="path required")
 
 
-def test_protect_wrong_branch_denies_claim_first(
+@pytest.mark.parametrize(
+    ("branch", "scope", "decision", "reason"),
+    [
+        pytest.param("codex/issue-72-claims", ("src",), "allow", None, id="matching-claim"),
+        pytest.param("other/issue-72", ("src",), "deny", "claim first", id="wrong-branch"),
+        pytest.param(
+            "codex/issue-72-claims", ("docs",), "deny", "claim first", id="non-overlapping-scope"
+        ),
+    ],
+)
+def test_protect_write_decision_reflects_the_live_claim(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
+    branch: str,
+    scope: tuple[str, ...],
+    decision: str,
+    reason: str | None,
 ) -> None:
+    """One live claim, three shapes (issue #314 repeat gate, finding 5): the
+    default claim covers the write (`allow`); a claim on a different branch,
+    or one whose scope excludes the payload path, each deny `claim first` --
+    `protect` cannot tell an agent with no claim at all from one holding a
+    claim that plainly does not cover this write, so both share one reason.
+    This folds a former standalone allow-path test (which pinned identity,
+    then git, then store as an exact call sequence -- not a contract either
+    `protect` or its caller promises) together with its two sibling
+    `claim first` denials, which already differed from each other only in
+    which claim field misses: the same shape repeated for a fourth verdict
+    is exactly the near-identical-copy case a parametrized table replaces,
+    not three more functions. The companion proof below,
+    `test_protect_denied_checkout_validation_never_reads_the_store`, covers
+    the one part of that removed ordering that *is* observable behavior: a
+    denial before the checkout resolves must never touch the store at
+    all."""
     _isolate_protect_home(monkeypatch, tmp_path)
     work = tmp_path / "work"
     _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
     _patch_protect_git(monkeypatch, work)
-    _patch_protect_claim(monkeypatch, branch="other/issue-72")
+    _patch_protect_claim(monkeypatch, branch=branch, scope=scope)
 
-    assert (
-        _protect_main(
-            monkeypatch,
-            {"toolName": "write", "toolInput": {"path": str(work / "src/widget.py")}},
-        )
-        == 2
+    status = _protect_main(
+        monkeypatch,
+        {"toolName": "write", "toolInput": {"path": str(work / "src/widget.py")}},
     )
-    _assert_protect_decision(capsys, decision="deny", reason="claim first")
 
-
-def test_protect_non_overlapping_scope_denies_claim_first(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    _isolate_protect_home(monkeypatch, tmp_path)
-    work = tmp_path / "work"
-    _set_agent_identity_env(monkeypatch, {issue_claim.GROK_SESSION_ID_ENV: "sess-1"})
-    _patch_protect_git(monkeypatch, work)
-    _patch_protect_claim(monkeypatch, scope=("docs",))
-
-    assert (
-        _protect_main(
-            monkeypatch,
-            {"toolName": "write", "toolInput": {"path": str(work / "src/widget.py")}},
-        )
-        == 2
-    )
-    _assert_protect_decision(capsys, decision="deny", reason="claim first")
+    assert status == (0 if decision == "allow" else 2)
+    _assert_protect_decision(capsys, decision=decision, reason=reason)
 
 
 def test_protect_claim_error_from_write_path_denies_json_without_error_prefix(

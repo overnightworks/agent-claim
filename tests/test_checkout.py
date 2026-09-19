@@ -483,49 +483,124 @@ def test_resolve_path_checkout_denies_a_directory_outside_every_repository(
     assert checkout.resolve_path_checkout(outside) is None
 
 
+_ISOLATED_NON_MAIN_BRANCH_SENTENCE = (
+    "build claims require an isolated non-main worktree branch; "
+    "run this command from this claim's own worktree, not the primary checkout"
+)
+
+_FOREIGN_TOPLEVEL = Path("/foreign-worktree")
+
+
 @pytest.mark.parametrize(
-    ("branch", "kind", "expected"),
+    ("toplevel", "branch", "kind", "origin_head", "expected"),
     [
-        (
+        pytest.param(
+            Path("/repo"),
             "main",
             checkout.CheckoutKind.LINKED_WORKTREE,
-            "build claims require an isolated non-main worktree branch; "
-            "run this command from this claim's own worktree, not the primary checkout",
+            "refs/remotes/origin/main",
+            _ISOLATED_NON_MAIN_BRANCH_SENTENCE,
+            id="trunk-branch-names-none",
         ),
-        (
+        pytest.param(
+            Path("/repo"),
             "codex/issue-211-worktree-repair-sentence",
             checkout.CheckoutKind.MAIN,
+            "refs/remotes/origin/main",
             "build claims require a linked isolated worktree checkout; "
             "run this command from this claim's own worktree on "
             "'codex/issue-211-worktree-repair-sentence', not the primary checkout",
+            id="known-branch-named",
+        ),
+        pytest.param(
+            Path("/repo"),
+            "master",
+            checkout.CheckoutKind.LINKED_WORKTREE,
+            "refs/remotes/origin/master",
+            _ISOLATED_NON_MAIN_BRANCH_SENTENCE,
+            id="master-default-branch",
+        ),
+        pytest.param(
+            Path("/repo"),
+            "trunk",
+            checkout.CheckoutKind.LINKED_WORKTREE,
+            "refs/remotes/origin/trunk",
+            _ISOLATED_NON_MAIN_BRANCH_SENTENCE,
+            id="trunk-default-branch",
+        ),
+        pytest.param(
+            _FOREIGN_TOPLEVEL,
+            "trunk",
+            checkout.CheckoutKind.LINKED_WORKTREE,
+            "refs/remotes/origin/trunk",
+            _ISOLATED_NON_MAIN_BRANCH_SENTENCE,
+            id="foreign-checkout-default-differs-from-repo",
+        ),
+        pytest.param(
+            Path("/repo"),
+            "codex/issue-72-widget",
+            checkout.CheckoutKind.LINKED_WORKTREE,
+            None,
+            checkout.DEFAULT_BRANCH_UNKNOWN_REASON,
+            id="unresolved-origin-head",
         ),
     ],
-    ids=["trunk-branch-names-none", "known-branch-named"],
 )
-def test_refuse_shared_checkout_return_to_claim(
+def test_refuse_shared_checkout_matrix(
     monkeypatch: pytest.MonkeyPatch,
+    toplevel: Path,
     branch: str,
     kind: checkout.CheckoutKind,
+    origin_head: str | None,
     expected: str,
 ) -> None:
-    """`rescope` uses `RETURN_TO_CLAIM` on an already path-resolved checkout
-    (issue #314): its claim's worktree already exists, so recommending the
-    `git worktree add` recipe builds a second, foreign one. On the trunk
-    branch no other branch is known here to name, so `RETURN_TO_CLAIM` points
-    back at the claim's own worktree without inventing one; checked out
-    directly on a real branch inside the shared (non-linked) checkout, that
-    branch is already known -- it is the same branch the caller resolved its
-    identity from -- so `RETURN_TO_CLAIM` names it instead of leaving the
-    sentence branch-less."""
-    values = {("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"): "refs/remotes/origin/main"}
-    monkeypatch.setattr(
-        checkout, "_git_output", lambda arguments, **_kwargs: values[tuple(arguments)]
-    )
+    """`rescope`'s own worktree-isolation refusal (issue #314 repeat gate,
+    finding 3) resolves the repository's default branch the same way
+    `protect` does -- not just the hardcoded `main`/`master` fallback, but
+    any `origin/HEAD` a real clone can record (`master`, `trunk`), and never
+    falls back to that guess when `origin/HEAD` cannot be resolved at all.
+    `origin_head` is read *from `path_checkout.toplevel`* (issue #314): the
+    `foreign-checkout-default-differs-from-repo` row registers `/repo`'s own
+    default as `main` alongside `_FOREIGN_TOPLEVEL`'s own default as `trunk`
+    in the same fake, so a resolver that accidentally asked `/repo` instead
+    of the payload's own resolved toplevel would compare branch `trunk`
+    against default `main`, never raise, and fail this row outright --
+    unlike a fake with one single, ambient default that could never catch
+    that mistake.
+
+    `RETURN_TO_CLAIM` is used throughout: `rescope` acts on a claim whose
+    worktree already exists, so recommending the `git worktree add` recipe
+    would build a second, foreign one. On the trunk branch no other branch
+    is known here to name, so `RETURN_TO_CLAIM` points back at the claim's
+    own worktree without inventing one; checked out directly on a real
+    branch inside the shared (non-linked) checkout, that branch is already
+    known -- it is the same branch the caller resolved its identity from --
+    so `RETURN_TO_CLAIM` names it instead of leaving the sentence
+    branch-less."""
+    origin_head_by_toplevel: dict[Path, str] = {}
+    if toplevel != Path("/repo"):
+        # The foreign-checkout row proves directory-scoped resolution: `/repo`
+        # keeps its own default registered here too, so a resolver that
+        # accidentally read `/repo` instead of the payload's own toplevel
+        # sees a real (wrong) answer rather than an absent-key crash that
+        # would pass for an unrelated reason.
+        origin_head_by_toplevel[Path("/repo")] = "refs/remotes/origin/main"
+    if origin_head is not None:
+        origin_head_by_toplevel[toplevel] = origin_head
+
+    def git(arguments: list[str], *, directory: Path | None = None) -> str:
+        if arguments != ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"]:
+            raise AssertionError(f"unexpected git read: {arguments}")
+        if directory not in origin_head_by_toplevel:
+            raise ClaimError("unknown git failure")
+        return origin_head_by_toplevel[directory]
+
+    monkeypatch.setattr(checkout, "_git_output", git)
     path_checkout = checkout.PathCheckout(
-        toplevel=Path("/repo"),
+        toplevel=toplevel,
         branch=branch,
         kind=kind,
-        common_directory=Path("/repo/.git"),
+        common_directory=toplevel / ".git",
         has_commit=True,
     )
 
@@ -535,34 +610,6 @@ def test_refuse_shared_checkout_return_to_claim(
         )
 
     assert str(error.value) == expected
-
-
-def test_refuse_shared_checkout_denies_when_default_branch_is_unresolved(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Issue #314 gate G4: `rescope`'s own worktree-isolation refusal denies
-    outright when the resolved checkout's own `origin/HEAD` cannot be
-    resolved, never falling back to `claim`'s `{main, master}` guess -- a
-    repository whose default branch is `trunk`, read from a checkout with no
-    recorded `origin/HEAD` yet, must never slip through unnoticed as "not
-    the default branch"."""
-
-    def git(arguments: list[str], **_kwargs: object) -> str:
-        raise ClaimError("unknown git failure")
-
-    monkeypatch.setattr(checkout, "_git_output", git)
-    path_checkout = checkout.PathCheckout(
-        toplevel=Path("/repo"),
-        branch="trunk",
-        kind=checkout.CheckoutKind.LINKED_WORKTREE,
-        common_directory=Path("/repo/.git"),
-        has_commit=True,
-    )
-
-    with pytest.raises(ClaimError, match=checkout.DEFAULT_BRANCH_UNKNOWN_REASON):
-        checkout._refuse_shared_checkout(
-            path_checkout, repair=checkout.WorktreeRepair.RETURN_TO_CLAIM
-        )
 
 
 @pytest.mark.parametrize(
