@@ -384,6 +384,7 @@ class TestParseOrigin:
             pytest.param("gitlab#0514", False, id="leading-zero"),
             pytest.param("gitlab #514", False, id="embedded-space"),
             pytest.param("", False, id="empty"),
+            pytest.param("gitla\u212a#514", False, id="kelvin-sign-non-ascii-letter"),
         ],
     )
     def test_parse_origin_matches_the_one_origin_grammar(self, value: str, valid: bool) -> None:

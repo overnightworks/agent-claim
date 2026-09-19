@@ -45,7 +45,9 @@ ITEM_FILENAME_SUFFIX = ".md"
 # so a stored malformed origin is exactly as rejected as a malformed
 # `--origin` flag. This is also the one owner `aco pull <forge>#<n>` (#230
 # slice 5) will later split `record.origin` back out through.
-ORIGIN_PATTERN = re.compile(r"[a-z][a-z0-9-]*(?:[./][a-z][a-z0-9-]*)*#[1-9]\d*", re.IGNORECASE)
+ORIGIN_PATTERN = re.compile(
+    r"[a-z][a-z0-9-]*(?:[./][a-z][a-z0-9-]*)*#[1-9]\d*", re.ASCII | re.IGNORECASE
+)
 # The one hint text for a malformed origin, shared by `parse_origin`'s
 # argparse refusal and `board._record_relation_defects`' record defect, so a
 # bad `--origin` flag and a bad stored `record.origin` read the same
