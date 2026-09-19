@@ -834,7 +834,7 @@ def test_push_retry_exhausts_and_names_the_true_mix_when_the_ref_moves_once_then
     )
     transport = _MovesOnceThenSticksTransport()
 
-    with pytest.raises(protocol.ClaimUnavailableError, match="moved 1 times") as raised:
+    with pytest.raises(protocol.ClaimUnavailableError, match="moved 1 time") as raised:
         store.push_tree(
             worktree=worktree,
             remote=str(bare_remote),
@@ -1520,7 +1520,7 @@ def test_commit_transition_exhaustion_names_the_true_mix_when_the_ref_moves_once
     transport = _MovesOnceThenSticksTransport()
 
     intent = _issue_claim_intent(42)
-    with pytest.raises(protocol.ClaimUnavailableError, match="moved 1 times") as raised:
+    with pytest.raises(protocol.ClaimUnavailableError, match="moved 1 time") as raised:
         store.commit_transition(
             worktree=worktree,
             remote=str(bare_remote),

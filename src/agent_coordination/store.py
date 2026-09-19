@@ -704,6 +704,29 @@ class PendingCommit:
     operation_id: str
 
 
+def _pluralize_times(count: int) -> str:
+    return "time" if count == 1 else "times"
+
+
+def _advance_tip_retry(
+    *,
+    previous_tip: ObjectId | None,
+    refreshed_tip: ObjectId | None,
+    moves: int,
+    stationary_since_last_move: int,
+) -> tuple[int, int]:
+    """One rejected attempt's move/stationary tally, the bookkeeping shared
+    by `push_tree` and `commit_transition`: a genuine tip move (a concurrent
+    writer landing first) resets the stationary count, while finding the ref
+    exactly where the previous attempt left it (the push itself never
+    landed) extends it -- the split `_retry_exhaustion_error` needs to name
+    the real cause.
+    """
+    if refreshed_tip != previous_tip:
+        return moves + 1, 0
+    return moves, stationary_since_last_move + 1
+
+
 def _retry_exhaustion_error(
     *, remote: str, attempts: int, moves: int, stationary_since_last_move: int
 ) -> ClaimUnavailableError:
@@ -727,7 +750,7 @@ def _retry_exhaustion_error(
             f"{remote}'s {STATE_REF}.lock (delete it if stale) and push permissions; if "
             f"the ref itself is stuck, `git update-ref -d {STATE_REF}` on {remote} clears it"
         )
-    moved_report = f"{STATE_REF} moved {moves} times while retrying"
+    moved_report = f"{STATE_REF} moved {moves} {_pluralize_times(moves)} while retrying"
     if stationary_since_last_move == 0:
         return ClaimUnavailableError(
             f"{moved_report}: another writer on {remote} keeps landing first; retry the command"
@@ -773,11 +796,12 @@ def push_tree(
                 )
                 if found is not None:
                     return OperationAlreadyApplied(tip=refreshed.tip)
-            if refreshed.tip != parent:
-                moves += 1
-                stationary_since_last_move = 0
-            else:
-                stationary_since_last_move += 1
+            moves, stationary_since_last_move = _advance_tip_retry(
+                previous_tip=parent,
+                refreshed_tip=refreshed.tip,
+                moves=moves,
+                stationary_since_last_move=stationary_since_last_move,
+            )
             parent = refreshed.tip
             continue
         _write_lineage_stamp(worktree, new_commit)
@@ -1083,11 +1107,12 @@ def commit_transition(
                 )
                 if found is not None:
                     return refreshed
-            if refreshed.tip != observed.tip:
-                moves += 1
-                stationary_since_last_move = 0
-            else:
-                stationary_since_last_move += 1
+            moves, stationary_since_last_move = _advance_tip_retry(
+                previous_tip=observed.tip,
+                refreshed_tip=refreshed.tip,
+                moves=moves,
+                stationary_since_last_move=stationary_since_last_move,
+            )
             observed = refreshed
             continue
         _write_lineage_stamp(worktree, new_commit)
