@@ -133,7 +133,7 @@ runner's own values; `<agent>` and `<role>` are the claimant's.
 
 ## The item's own scope
 
-- [ ] [CLAIM-53] Issue-mode `aco claim 42` without `--scope` takes the item's own `scope` into the record and prints the same `CLAIMED issue #42` line as an explicit scope would; the same set given in a different order is accepted too, and a live claim already on #42 takes its own stored scope outright, without reading the body again.
+- [ ] [CLAIM-53] Issue-mode `aco claim 42` without `--scope` takes the item's own `scope` into the record and prints the same `CLAIMED issue #42` line an explicit scope would (see E-CLAIM-06).
 - [ ] [CLAIM-54] A `--scope` set differing from the item's own `scope` refuses `claim scope differs from the item's scope; correct the item first`, exit `2`, so no reader claims a false disjointness.
 - [ ] [CLAIM-55] An item naming no `scope` refuses issue-mode `aco claim 42` without `--scope` with `item names no scope; pass --scope`, exit `2`.
 
@@ -224,5 +224,20 @@ $ aco status
 CLAIMED issue #42: Ada (builder) base=<sha> branch=ada/issue-42 claim=<claim-id> 0h 0m
   README.md
   AGENTS.md
+exit 0
+```
+
+### E-CLAIM-06 — an omitted `--scope` takes the item's own scope, then replays from the record
+
+Setup: bare-remote, bootstrapped, a linked worktree on `ada/issue-42`, item `#42`'s body carries `scope = ["AGENTS.md", "README.md"]`
+
+```console
+$ aco claim 42
+CLAIMED issue #42: <claim-id>
+2 of 6 versioned files (33%); overlaps no other open claims
+exit 0
+$ aco claim 42 --claim-id <claim-id>
+CLAIMED issue #42: <claim-id>
+2 of 6 versioned files (33%); overlaps no other open claims
 exit 0
 ```
