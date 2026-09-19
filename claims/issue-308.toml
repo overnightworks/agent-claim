@@ -1,7 +1,0 @@
-claim_id = "c6c8364594f44703b509e8771562c222"
-agent = "Claude head (coordinator)"
-role = "builder"
-base = "a1c0c896b3aef77d79b5d2429138a4de7ec17ccb"
-branch = "claude/issue-308-metrics-module"
-scope = ["src/agent_coordination/metrics.py", "tests/test_metrics.py", "pyproject.toml"]
-opened_commit = "a10f7be64e2b84ac1b05d80785837e9741e64840"
