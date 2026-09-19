@@ -147,9 +147,11 @@ def _reject_wide_scope(
     scope: tuple[str, ...],
     versioned: tuple[str, ...],
     whole_reason: str | None,
+    *,
+    directory: Path | None = None,
 ) -> tuple[int, int, float]:
     n, total, share = _scope_cost(versioned, scope)
-    directories = checkout._scope_directories(scope)
+    directories = checkout._scope_directories(scope, directory=directory)
     trip = protocol.wide_scope_trip(
         scope, directories=directories, covered_file_count=n, versioned_file_count=total
     )
@@ -1244,8 +1246,13 @@ def _board_config(toplevel: Path) -> board.BoardConfig:
     forge command resolved a non-GitHub canonical remote. `board.load_config`
     itself stays a pure filesystem reader (Layers contract) -- this is the
     one place, reached by every store command, that can see whether git
-    actually tracks the pin."""
-    if not checkout.path_is_tracked(board.CONFIG_PATH.as_posix()):
+    actually tracks the pin. Reads `toplevel` explicitly (issue #314 gate
+    B3), never the calling process's own cwd: `protect`'s and `rescope`'s
+    own callers (`_canonical_remote_name`, via
+    `_protect_cached_claim_state_or_denial` and `_cmd_rescope`) pass the
+    payload's own resolved checkout, so a foreign cwd can never wrongly deny
+    a valid config or bless an untracked one."""
+    if not checkout.path_is_tracked(board.CONFIG_PATH.as_posix(), directory=toplevel):
         raise protocol.ClaimUnavailableError(
             f"{board.CONFIG_PATH} is not tracked in this checkout, so its "
             f"storage pin cannot be trusted: git add -f {board.CONFIG_PATH}"
@@ -3007,6 +3014,22 @@ def _protect_scope_denial(
     return "claim first"
 
 
+def _protect_not_main_denial(path_checkout: checkout.PathCheckout) -> str | None:
+    """`None` when `path_checkout` is a linked worktree off the repository's
+    default branch; otherwise the "not main" family of denials gate G4
+    names: the shared main checkout, a linked worktree that happens to sit
+    on the default branch, or -- never `claim`'s own `{main, master}` guess
+    -- a checkout whose default branch cannot even be resolved."""
+    if path_checkout.kind is checkout.CheckoutKind.MAIN:
+        return "not main"
+    default_branch = checkout.default_branch_name(directory=path_checkout.toplevel)
+    if default_branch is None:
+        return checkout.DEFAULT_BRANCH_UNKNOWN_REASON
+    if path_checkout.branch == default_branch:
+        return "not main"
+    return None
+
+
 def _protect_basic_checkout_denial(
     raw_path: str,
 ) -> tuple[checkout.PathCheckout | None, str | None]:
@@ -3023,18 +3046,21 @@ def _protect_basic_checkout_denial(
     otherwise coincidentally match a still-live claim's); a path in the
     shared main checkout, or in a checkout on the repository's default
     branch at all (gate G4 -- a linked worktree can sit on that branch after
-    the repository's default branch changes), denies "not main"."""
+    the repository's default branch changes), denies "not main"; a checkout
+    whose default branch cannot even be resolved there denies outright
+    (gate G4 -- never `claim`'s own `{main, master}` guess, since a
+    repository whose default branch is `trunk` would otherwise slip through
+    unnoticed as "not the default branch")."""
     if not Path(raw_path).is_absolute():
         return None, RELATIVE_PAYLOAD_PATH_DENIAL
     path_checkout = checkout.resolve_path_checkout(Path(raw_path).parent)
     if path_checkout is None:
-        return None, "not in a repository"
+        return None, checkout.NOT_IN_A_REPOSITORY_REASON
     if not path_checkout.has_commit:
         return None, checkout.NO_COMMIT_CHECKOUT_REASON
-    if path_checkout.kind is checkout.CheckoutKind.MAIN or checkout.is_default_branch(
-        path_checkout.branch
-    ):
-        return None, "not main"
+    not_main_denial = _protect_not_main_denial(path_checkout)
+    if not_main_denial is not None:
+        return None, not_main_denial
     return path_checkout, None
 
 
@@ -3177,19 +3203,25 @@ class _WriteSession:
 
 def _rescope_location(add: list[str] | None, drop: list[str] | None) -> Path:
     """The directory `rescope`'s checkout is resolved from (issue #314
-    delta, finding R1): the first `--add`/`--drop` entry that is already an
+    repeat gate, finding R1): every `--add`/`--drop` entry must itself be an
     absolute path -- the one location signal a dispatcher running in a
     foreign cwd (the head's own shared environment, editing a linked
     worktree through a subagent) can give without knowing that cwd. A
     relative entry carries no location of its own and is never joined to the
-    process's cwd to guess one -- finding R2's same principle, applied here
-    -- so `rescope` falls back to its own process cwd, its other legitimate
-    location signal, only when every given entry is relative or none is
-    given: unchanged from before this fix for that ordinary, undispatched
-    case."""
-    for raw_path in (*(add or ()), *(drop or ())):
-        if Path(raw_path).is_absolute():
-            return Path(raw_path).parent
+    process's cwd to guess one -- finding R2's same principle, applied here:
+    any relative entry, anywhere in either list, denies outright with the
+    same sentence `protect`'s own relative-payload-path gate uses, never
+    falling back to cwd to interpret it. `rescope` falls back to its own
+    process cwd only when neither flag names a single path at all -- its
+    other legitimate location signal, unchanged from before this fix for
+    that ordinary, undispatched case, and a distinct usage error
+    (`_combined_scope`'s own "does not change the claim scope") handles it
+    from there."""
+    entries = (*(add or ()), *(drop or ()))
+    if any(not Path(raw_path).is_absolute() for raw_path in entries):
+        raise protocol.ClaimUnavailableError(RELATIVE_PAYLOAD_PATH_DENIAL)
+    if entries:
+        return Path(entries[0]).parent
     return Path.cwd()
 
 
@@ -3197,17 +3229,14 @@ def _rescope_scope_entries(
     raw_paths: list[str] | None, *, toplevel: Path, flag: str
 ) -> tuple[str, ...]:
     """One `--add`/`--drop` list, canonicalized to repository-relative scope
-    entries: an absolute entry (`_rescope_location`'s own signal) is
-    resolved against `toplevel`; a relative entry is already the documented
-    repository-relative form and is validated as-is, never filesystem
-    joined."""
+    entries against `toplevel`. Every entry here is already absolute:
+    `_rescope_location` (issue #314 repeat gate, finding R1) denies outright
+    before this ever runs if any entry in either list is relative, so there
+    is no repository-relative form left to accept as-is."""
     if not raw_paths:
         return ()
     canonical: list[str] = []
     for raw_path in raw_paths:
-        if not Path(raw_path).is_absolute():
-            canonical.append(raw_path)
-            continue
         relative = _relative_scope_entry(raw_path, toplevel=toplevel)
         if relative is None:
             raise protocol.ClaimUnavailableError(
@@ -3227,7 +3256,7 @@ def _rescope_checkout(parsed: argparse.Namespace) -> checkout.PathCheckout:
     same precondition `protect` enforces on its own resolved checkout."""
     path_checkout = checkout.resolve_path_checkout(_rescope_location(parsed.add, parsed.drop))
     if path_checkout is None:
-        raise protocol.ClaimUnavailableError("not in a repository")
+        raise protocol.ClaimUnavailableError(checkout.NOT_IN_A_REPOSITORY_REASON)
     if not path_checkout.has_commit:
         raise protocol.ClaimUnavailableError(checkout.NO_COMMIT_CHECKOUT_REASON)
     return path_checkout
@@ -3599,7 +3628,9 @@ def _cmd_rescope(parsed: argparse.Namespace, _session: _WriteSession) -> None:
     versioned = checkout.versioned_paths(directory=worktree)
     _reject_ungrounded_comma_scope(requested.add, versioned, flag="--add")
     combined = protocol._combined_scope(selected.scope, requested.add, requested.drop)
-    _reject_wide_scope(combined, versioned, requested.whole_reason or selected.whole_reason)
+    _reject_wide_scope(
+        combined, versioned, requested.whole_reason or selected.whole_reason, directory=worktree
+    )
     intent = protocol.RescopeIntent(
         claim_id=selected.claim_id,
         agent=requested.agent,
