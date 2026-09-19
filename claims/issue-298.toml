@@ -1,8 +1,0 @@
-claim_id = "27d5162ffd2b48739ec82ebe09354716"
-agent = "Claude head (coordinator)"
-role = "builder"
-base = "617800521bc18ca3039016f45a5a4a7c3ca215e6"
-branch = "claude/issue-298-reset"
-scope = ["src/agent_coordination/store.py", "src/agent_coordination/cli.py", "tests/test_store.py", "tests/test_cli.py", "README.md"]
-opened_commit = "8c6849b943633cf0c2f76c0f75b2b4eec048a36b"
-whole_reason = "one command (reset) across store, cli, their two test modules and the README; splitting leaves a command that deletes nothing"
