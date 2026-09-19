@@ -1,0 +1,8 @@
+claim_id = "297d0e50f04347d0946cfb3951734d5d"
+agent = "Claude head (coordinator)"
+role = "builder"
+base = "3833f7b5a38b567704ddd06da8847c46b9df1b9f"
+branch = "claude/issue-348-next-parallel"
+scope = ["README.md", "src/agent_coordination/board.py", "src/agent_coordination/cli.py", "tests/test_board.py", "tests/test_cli.py", "tests/test_state_board.py"]
+opened_commit = "95f30e3004671e36dd457fc3b39b441efe7e53ff"
+whole_reason = "one projection (parallel set, close actions, parent hint) across board, cli, their three test modules and the README"
