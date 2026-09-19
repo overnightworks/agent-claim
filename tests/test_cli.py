@@ -12557,6 +12557,139 @@ def test_cli_brief_json_prints_one_object_with_body_claim_tip_and_touched(
     }
 
 
+def _write_repository_brief_config(toplevel: Path) -> None:
+    """`.agent-claim/brief.toml` lives at the resolved checkout toplevel, the
+    same root `board.toml` reads from -- under this suite's autouse
+    `_isolate_git_toplevel` (`tests/conftest.py`), that root is `tmp_path`,
+    never the scratch lane repository nested inside it."""
+    (toplevel / ".agent-claim").mkdir(exist_ok=True)
+    (toplevel / ".agent-claim" / "brief.toml").write_text(
+        '[build]\nrules = ["Stay in scope."]\nchecks = ["ruff check ."]\n'
+    )
+
+
+def _brief_step_scenario(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[str, str]:
+    """The scratch lane repository, a tracked `.agent-claim/brief.toml`
+    naming `[build]`'s rules and checks, and issue #258's own live claim --
+    the one arrangement `--step`'s text, `--json`, and no-`--step` cases all
+    share (issue #324). Returns `(base, tip)`; the repository itself is only
+    `monkeypatch.chdir`-ed into, never asserted on."""
+    repository, base, tip = _scratch_lane_repository(tmp_path)
+    _write_repository_brief_config(tmp_path)
+    client = FakeForge()
+    client.issue_references[258] = forge.ItemReference(
+        forge.ItemState.OPEN, "Brief", "The item's own body."
+    )
+    monkeypatch.setattr(github, "GitHubForge", lambda _repository: client)
+    claim = _brief_claim(base)
+    _patch_store_write(monkeypatch, claim, ages={claim.claim_id: datetime(2026, 8, 20, tzinfo=UTC)})
+    monkeypatch.chdir(repository)
+    return base, tip
+
+
+@pytest.mark.parametrize(
+    ("arguments", "step_lines"),
+    [
+        (("--step", "build"), ("", "RULES", "Stay in scope.", "", "CHECKS", "ruff check .")),
+        ((), ()),
+    ],
+    ids=["with-step", "without-step"],
+)
+def test_cli_brief_prints_the_tracked_brief_config_only_under_step(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    arguments: tuple[str, ...],
+    step_lines: tuple[str, ...],
+) -> None:
+    """Issue #324: `--step build` appends `.agent-claim/brief.toml`'s own
+    `RULES` and `CHECKS`, one line per `[build]` entry, after the four
+    sections a plain brief always prints; without `--step`, the same tracked
+    file's presence or content changes nothing (BRIEF-16)."""
+    base, tip = _brief_step_scenario(monkeypatch, tmp_path)
+
+    status = issue_claim.main(["--repo", "example/agent-claim", "brief", "258", *arguments])
+
+    assert status == 0
+    assert capsys.readouterr().out.splitlines() == [
+        "The item's own body.",
+        "",
+        "CLAIM",
+        f"Codex Sol (builder) branch=codex/issue-258-brief base={base} 24h 0m old",
+        "  README.md",
+        "",
+        "TIP",
+        tip,
+        "",
+        "TOUCHED",
+        "README.md",
+        *step_lines,
+    ]
+
+
+def test_cli_brief_step_json_adds_rules_and_checks_to_the_existing_object(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    base, tip = _brief_step_scenario(monkeypatch, tmp_path)
+
+    status = issue_claim.main(
+        ["--repo", "example/agent-claim", "brief", "258", "--step", "build", "--json"]
+    )
+
+    assert status == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "body": "The item's own body.",
+        "claim": {
+            "agent": "Codex Sol",
+            "role": "builder",
+            "branch": "codex/issue-258-brief",
+            "base": base,
+            "scope": ["README.md"],
+            "whole": None,
+            "age": "24h 0m",
+        },
+        "tip": tip,
+        "touched": ["README.md"],
+        "rules": ["Stay in scope."],
+        "checks": ["ruff check ."],
+    }
+
+
+@pytest.mark.parametrize(
+    "brief_toml_present",
+    [False, True],
+    ids=["missing", "untracked"],
+)
+def test_cli_brief_step_refuses_with_no_usable_brief_config(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    brief_toml_present: bool,
+) -> None:
+    """A `.agent-claim/brief.toml` this repository cannot actually read from
+    -- absent entirely, or present but not `git add`-ed -- refuses the same
+    way before ever reading the item's body (the same tracked-file
+    requirement `_board_config` enforces for `board.toml`'s storage pin)."""
+    repository, _base, _tip = _scratch_lane_repository(tmp_path)
+    if brief_toml_present:
+        _write_repository_brief_config(tmp_path)
+        monkeypatch.setattr(checkout, "path_is_tracked", lambda _path, **_kwargs: False)
+
+    def unused(_self: FakeForge, _number: int) -> forge.ItemReference:
+        pytest.fail("brief --step must refuse before reading the item's body")
+
+    client = FakeForge()
+    monkeypatch.setattr(FakeForge, "item_reference", unused)
+    monkeypatch.setattr(github, "GitHubForge", lambda _repository: client)
+    monkeypatch.chdir(repository)
+
+    status = issue_claim.main(["--repo", "example/agent-claim", "brief", "258", "--step", "build"])
+
+    captured = capsys.readouterr()
+    assert status == 2
+    assert captured.err == "ERROR: no .agent-claim/brief.toml in the repository\n"
+
+
 def test_cli_brief_refuses_a_non_github_canonical_remote_by_host(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
