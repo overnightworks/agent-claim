@@ -185,13 +185,20 @@ values, rather than silently preferring one.
 Omitted `--role` on `release` uses that selected claim's role; an explicit
 `--role` must still match unless `--coordinator-override`, which still requires
 `--role coordinator`. `release` takes exactly one outcome, never a free-form
-reason: `--merged <pull request>` or `--abandoned "<reason>"`. `--merged` is
-verified against GitHub before anything is written — the pull request must be
-merged into the default branch, its `Work-Item:` line must name this claim's
-item (or it must carry `No-Item:` for an issue-less lane), and that item must be
-closed; otherwise the release is refused, naming what is missing. A `--claim-id`
-already consumed, active or released, is refused before anything is written;
-release the old claim and pass a fresh `--claim-id` instead.
+reason: `--merged <pull request>` (or, under `storage = "state-ref"`,
+`--merged <sha|empty>`, issue #359) or `--abandoned "<reason>"`. Under
+`storage = "github"`, `--merged` is verified against GitHub before anything
+is written — the pull request must be merged into the default branch and
+its `Work-Item:` line must name this claim's item (or carry `No-Item:` for
+an issue-less lane); a still-open work item is closed by this same release
+(one comment naming the landing pull request, then the close) rather than
+refused. Under `storage = "state-ref"`, `--merged` reads the local
+first-parent trunk walk instead of a forge: a sha names the exact landing
+commit, an empty value picks the newest trunk commit whose own trailer
+names this item; a commit off the trunk, carrying no trailer, or naming
+another item refuses by name. Either way, an already-consumed `--claim-id`,
+active or released, is refused before anything is written; release the old
+claim and pass a fresh `--claim-id` instead.
 A successful `--merged` release then reads the board once, lazily, to name
 what it freed: `freed: #a, #b` (or `freed: none`) for every open item whose
 last open blocker was this landing, and `next: #n score s: <title>` (or
@@ -582,9 +589,14 @@ child stays, and an identical re-run adopts it — matched by `record.parent`,
 never the `Parent:` prose line GitHub's own orphan recovery reads — instead
 of minting a second one. An issue-scoped `claim`'s body
 check reads a `state-ref` item the same way `board`/`next` already do.
-`release --merged` still refuses — state-ref cannot yet verify a merged pull
-request (#230 slice 6) — naming the offline path instead: land with
-`item close` plus `release --abandoned "landed as <sha>"`.
+`release --merged <sha|empty>` (issue #359) closes the item and releases the
+claim in one commit, one CAS (`protocol.LandingIntent`): a value names the
+first-parent trunk commit whose own `Work-Item:` trailer names this item, an
+empty value (bare `--merged`) picks the newest such commit; a commit not on
+that walk, carrying no trailer, or naming another item refuses by name
+before anything is written. `aco check <sha>` reads the same trailer,
+printing `check <pr>`'s own `declares Work-Item: ...`/`declares No-Item:
+...` answers — neither command ever contacts a forge for this.
 
 `aco item new --title TITLE [--kind task|feature|container] [--parent ITEM]
 [--origin FORGE#N] [--scope PATH]` creates a fresh item straight in
@@ -829,11 +841,8 @@ applies (named residuals, issue #292): the number in a refusal sentence
 (`protocol`/`cli`) — it names the number the caller typed, not a display
 choice; the branch and worktree naming scheme (`issue-<n>-<slug>`), which the
 coordination contract itself keys by number — renaming it is a rule change
-under the Rule-Gate; `next`'s own tie-break on the numeric id, stable but
-arbitrary, judged again only after a week of real use; and a merged
-release's own board read, which `state-ref` cannot perform yet (#230 slice
-6) — land offline with `item close` plus `release --abandoned "landed as
-<sha>"` until then.
+under the Rule-Gate; and `next`'s own tie-break on the numeric id, stable but
+arbitrary, judged again only after a week of real use.
 
 ### A week without a forge
 
@@ -869,18 +878,21 @@ same check `board`/`next` already report.
 
 Every following day repeats one loop: `aco board` or `aco next` names the
 next item, and `aco claim <item> --scope <paths>` opens the build from a
-linked isolated worktree. Once a build lands offline, there is no pull
-request for `release --merged` to verify (see above), so the claim is
-released first — `aco release --abandoned "landed as <sha>"` — and only then
-does `aco item close <item>` close it: a still-claimed item refuses `item
-close` by name ("release the claim first"), so closing an item is always the
-loop's last step, never its first. `aco status` shows the claim gone.
+linked isolated worktree. Once a build's commit carries a `Work-Item:`
+trailer and lands on the trunk (merge, squash, or `git rebase` all preserve
+the trailer), `aco release --merged` — no value needed, since the newest
+trunk commit naming this item is exactly the one that just landed — closes
+the item and releases the claim in one commit, one CAS; a merge or squash
+commit that never carries the trailer, or a build merged before the trailer
+was added, names the exact sha instead (`aco release --merged <sha>`).
+Abandoning a build with no landing at all still works the old way —
+`aco release --abandoned "<reason>"` leaves the item open for a future
+attempt. `aco status` shows the claim gone either way.
 
 ```bash
 aco claim aco-yyyyyy --scope src/widget.py
-# build, push, merge by hand
-aco release --abandoned "landed as <sha>"
-aco item close aco-yyyyyy
+# build, then a real git merge/squash/rebase carrying "Work-Item: aco-yyyyyy"
+aco release --merged
 aco status
 ```
 
