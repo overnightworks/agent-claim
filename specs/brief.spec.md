@@ -1,0 +1,164 @@
+# `aco brief`
+
+`aco brief <item>`: one dispatch brief composed from reads a lane step's body
+otherwise gets assembled from by hand -- the item's own body, its live issue
+claim, that claim's lane tip, and the files the lane touches against its
+base. This file owns the command's own argument, its printed section shape,
+when each section carries a value versus stays empty, and its `--json`
+object; `specs/claim-record.spec.md` owns the claim record's own fields this
+command reads (CLAIM-01, CLAIM-05, CLAIM-47), `specs/storage-pin.spec.md`
+owns the item-reference grammar `<item>` accepts (PIN-08) and the
+state-ref forge gate (PIN-04, PIN-05), and `specs/release.spec.md` owns the
+`--json` refusal object's own shape (REL-24). `<item>` is the argument as
+given; `<n>` its resolved number. A refusal reaching the shared collection
+point prints `ERROR: <sentence>` on stderr, exit `2`.
+
+## Behavior table
+
+| state \ trigger | `aco brief <item>` (text) | `aco brief <item> --json` |
+|---|---|---|
+| a live issue claim, lane branch resolves | BRIEF-01, BRIEF-02, BRIEF-11, BRIEF-05 | BRIEF-06, BRIEF-10 |
+| a live issue claim, lane branch gone | BRIEF-04 | BRIEF-06, BRIEF-10 |
+| no live issue claim | BRIEF-03 | BRIEF-06 |
+| `<item>` names no item at all | BRIEF-08 | BRIEF-08 |
+| a non-GitHub canonical remote | BRIEF-07 | BRIEF-07 |
+| `storage = "state-ref"` | BRIEF-09 | BRIEF-09 |
+
+## The four sections, always in this order
+
+- [ ] [BRIEF-01] `aco brief <item>` prints the body, a blank line, `CLAIM`, a blank line, `TIP`, a blank line, `TOUCHED` -- always these four headings in order (see E-BRIEF-01).
+- [ ] [BRIEF-02] Under a live issue claim, `CLAIM` is followed by one line `<agent> (<role>) branch=<branch> base=<base>[ <age>]`, branch before base (see E-BRIEF-01).
+- [ ] [BRIEF-11] That claim line's indented lines are one per scope path, then `  whole: <reason>` only when the claim carries one (see E-BRIEF-01).
+- [ ] [BRIEF-03] With no live issue claim, `CLAIM` prints exactly `no active claim`; `TIP` prints no value line at all; `TOUCHED` lists nothing (see E-BRIEF-02).
+- [ ] [BRIEF-04] With a live claim whose branch resolves neither locally nor as `origin/<branch>`, `TIP` prints `branch not found` and `TOUCHED` lists nothing (see E-BRIEF-03).
+- [ ] [BRIEF-05] With a live claim whose branch resolves, `TIP` prints that branch's own commit id, and `TOUCHED` lists one path per line from a `git diff --name-only <base>..<tip>` (see E-BRIEF-01).
+- [ ] [BRIEF-08] `<item>` naming no item at all prints one empty line for the missing body, then every section exactly as BRIEF-01..06 describe with no live claim -- never a refusal (see E-BRIEF-06).
+
+## `--json`
+
+- [ ] [BRIEF-06] `aco brief <item> --json` prints one object `{"body", "claim", "tip", "touched"}`, `"claim"` `null` with no live claim (see E-BRIEF-04).
+- [ ] [BRIEF-10] A non-`null` `"claim"` object is `{"agent", "role", "branch", "base", "scope", "whole", "age"}`, `"whole"` `null` without one (see E-BRIEF-04).
+
+## Forge resolution
+
+- [ ] [BRIEF-07] `aco brief <item>` on a canonical remote whose host has no forge adapter refuses `no forge adapter for host <host>`, exit `2`, before any forge resolution (see E-BRIEF-05).
+- [ ] [BRIEF-09] Under `storage = "state-ref"`, `aco brief <item>` resolves the state-ref forge like `item show`/`edit`/`close`; `--repo` there refuses the same as those (PIN-04, PIN-05).
+
+## Never
+
+- `aco brief` never refuses for an `<item>` naming no item at all: the forge's own `MISSING` reference carries no body, so `aco brief` prints one empty first line and proceeds through every other section exactly as BRIEF-01..06 describe (see E-BRIEF-06).
+- `aco brief` never matches a lane claim, only a live issue claim on the same number -- an unrelated lane branch claimed by someone else never appears in its `CLAIM` section.
+- `aco brief` never writes: it is a pure composition of three existing reads (the item's body, the store's live claims, and one local `git diff`), never a new data source and never a transition against the state ref.
+- `aco brief`'s claim line is never `aco status`'s own `CLAIMED`/`CONFLICT` line (CLAIM-01): it carries no verb, no identity prefix, no `claim=` field, and orders `branch=` before `base=`, the reverse of `status`'s own order.
+- `aco brief --json`'s claim object is never `aco status --json`'s own claim object (STAT-07, STAT-09): no `claim_id`, `resource`, `resource_value`, `overlaps`, or `old` key.
+
+## Examples
+
+`Setup: bare-remote` is a fresh work repository whose `origin` is a local bare
+repository with `main` at one commit, a git identity, `origin/HEAD`, a
+tracked `.agent-claim/board.toml` naming no `storage` key, and `ACO_AGENT` set
+to `Ada`; `<base>` and `<tip>` are the runner's own commit ids. A session
+reading an item's body also names a fixed, deterministic fake `gh` as a
+setup precondition.
+
+### E-BRIEF-01 -- a live claim, its lane tip, and the files it touches
+
+Setup: bare-remote, fake `gh`, issue `#42` body `The item's own body.`, a
+linked worktree on `ada/issue-42` already `aco claim 42 --scope README.md
+--whole "lane touches too much to split"`, one commit on `ada/issue-42`
+past `<base>` touching `README.md`, pushed to `origin`
+
+```console
+$ aco brief 42
+The item's own body.
+
+CLAIM
+Ada (builder) branch=ada/issue-42 base=<base> 0h 0m
+  README.md
+  whole: lane touches too much to split
+
+TIP
+<tip>
+
+TOUCHED
+README.md
+exit 0
+```
+
+### E-BRIEF-02 -- no live claim
+
+Setup: bare-remote, fake `gh`, issue `#42` body `No claim yet.`, no live claim
+
+```console
+$ aco brief 42
+No claim yet.
+
+CLAIM
+no active claim
+
+TIP
+
+TOUCHED
+exit 0
+```
+
+### E-BRIEF-03 -- a live claim whose branch is gone
+
+Setup: bare-remote, fake `gh`, issue `#42` body `Gone lane.`, a live claim on
+`#42` scoped to `README.md` whose branch `ada/issue-42-gone` was deleted
+after the claim opened
+
+```console
+$ aco brief 42
+Gone lane.
+
+CLAIM
+Ada (builder) branch=ada/issue-42-gone base=<base> 0h 0m
+  README.md
+
+TIP
+branch not found
+
+TOUCHED
+exit 0
+```
+
+### E-BRIEF-04 -- `--json`
+
+Setup: bare-remote, fake `gh`, issue `#42` body `The item's own body.`, a
+linked worktree on `ada/issue-42` already `aco claim 42 --scope README.md`,
+one commit on `ada/issue-42` past `<base>` touching `README.md`, pushed to
+`origin`
+
+```console
+$ aco brief 42 --json
+{"body": "The item's own body.", "claim": {"agent": "Ada", "role": "builder", "branch": "ada/issue-42", "base": "<base>", "scope": ["README.md"], "whole": null, "age": "0h 0m"}, "tip": "<tip>", "touched": ["README.md"]}
+exit 0
+```
+
+### E-BRIEF-05 -- forge-free refusal by host
+
+Setup: `origin` points at a non-GitHub remote, no other precondition
+
+```console
+$ aco brief 42
+2> ERROR: no forge adapter for host <host>
+exit 2
+```
+
+### E-BRIEF-06 -- an item number nothing carries
+
+Setup: bare-remote, fake `gh`, no issue or pull request `#81` exists, no live claim on `#81`
+
+```console
+$ aco brief 81
+
+
+CLAIM
+no active claim
+
+TIP
+
+TOUCHED
+exit 0
+```
