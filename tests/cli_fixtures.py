@@ -41,7 +41,6 @@ def _git_checkout(
         ("rev-parse", "--git-common-dir"): common_directory,
         ("status", "--porcelain"): dirty,
         ("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"): "refs/remotes/origin/main",
-        ("log", "--first-parent", "--reverse", "--format=%cI", "refs/remotes/origin/main"): "",
     }
 
 

@@ -1,13 +1,14 @@
 """Direct `checkout.py` behavior: remote/worktree/branch validation, the
-`_git_output` boundary, dirty-path reading, `versioned_paths`, trunk landing
-times, and remote-location parsing. `_validate_checkout` is exercised through
-`issue_claim._validate_checkout`, `cli.py`'s own re-export of the same
-function every `claim`/`rescope` command call site uses. Tests that drive
-these through `issue_claim.main([...])` stay in `tests/test_cli.py` as
+`_git_output` boundary, dirty-path reading, `versioned_paths`, trunk
+landings, and remote-location parsing. `_validate_checkout` is exercised
+through `issue_claim._validate_checkout`, `cli.py`'s own re-export of the
+same function every `claim`/`rescope` command call site uses. Tests that
+drive these through `issue_claim.main([...])` stay in `tests/test_cli.py` as
 CLI-wiring behavior."""
 
 from __future__ import annotations
 
+import re
 import subprocess
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -17,12 +18,12 @@ import pytest
 from board_fixtures import BASE, request
 from cli_fixtures import _fallback_git_output, _git_checkout, _real_git
 
-from agent_coordination import checkout, process
+from agent_coordination import board, checkout, process, protocol
 from agent_coordination import cli as issue_claim
 from agent_coordination.protocol import ClaimError, ClaimRequest
 
 _LIVE_VERSIONED_PATHS = checkout.versioned_paths
-_LIVE_TRUNK_LANDING_TIMES = checkout.trunk_landing_times
+_LIVE_TRUNK_LANDINGS = checkout.trunk_landings
 _LIVE_REMOTE_URL = checkout.remote_url
 
 
@@ -517,34 +518,43 @@ def test_versioned_paths_fails_loud_on_a_nonzero_git_exit(
         _LIVE_VERSIONED_PATHS()
 
 
-def test_trunk_landing_times_read_the_default_branch_not_the_work_branch(
+def _fake_trunk_log_record(*fields: str) -> str:
+    """One fake `git log -z` trunk-landing record: `fields` joined by
+    `checkout._TRUNK_LANDING_FIELD_SEPARATOR`, terminated by that same
+    separator -- real `git log -z` framing, where the record terminator and
+    the field separator are the same NUL byte."""
+    separator = checkout._TRUNK_LANDING_FIELD_SEPARATOR
+    return separator.join(fields) + separator
+
+
+def test_trunk_landings_read_the_named_remotes_trunk_not_the_work_branch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     observed: list[list[str]] = []
 
     def git_output(arguments: list[str]) -> str:
         observed.append(arguments)
-        if arguments[:3] == ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"]:
-            return "refs/remotes/origin/main"
-        if arguments[:4] == ["log", "--first-parent", "--reverse", "--format=%cI"]:
-            assert arguments[4] == "refs/remotes/origin/main"
-            return "2026-08-29T00:00:00+00:00\n2026-08-30T00:00:00Z"
+        if arguments[:3] == ["symbolic-ref", "--quiet", "refs/remotes/hub/HEAD"]:
+            return "refs/remotes/hub/main"
+        if arguments[0] == "log":
+            assert arguments[-3:] == ["-n", "20", "refs/remotes/hub/main"]
+            return _fake_trunk_log_record(
+                "sha1", "2026-08-29T00:00:00+00:00", "", ""
+            ) + _fake_trunk_log_record("sha2", "2026-08-30T00:00:00Z", "#10", "")
         raise AssertionError(arguments)
 
     monkeypatch.setattr(checkout, "_git_output", git_output)
-    times = _LIVE_TRUNK_LANDING_TIMES()
+    landings = _LIVE_TRUNK_LANDINGS("hub", 20)
 
-    assert times == (
-        datetime(2026, 8, 29, tzinfo=UTC),
-        datetime(2026, 8, 30, tzinfo=UTC),
+    assert landings == (
+        checkout.TrunkLanding("sha1", datetime(2026, 8, 29, tzinfo=UTC), None),
+        checkout.TrunkLanding(
+            "sha2", datetime(2026, 8, 30, tzinfo=UTC), board.TrunkWorkItemClassification((10,))
+        ),
     )
-    assert [
-        "log",
-        "--first-parent",
-        "--reverse",
-        "--format=%cI",
-        "refs/remotes/origin/main",
-    ] in observed
+    # Issue #304 proof 4: `hub`, never a hardcoded `origin`, reaches every
+    # git call this read makes.
+    assert not any("origin" in argument for call in observed for argument in call)
 
 
 def test_trunk_ref_fails_loud_when_no_candidate_branch_resolves(
@@ -559,21 +569,46 @@ def test_trunk_ref_fails_loud_when_no_candidate_branch_resolves(
 
     monkeypatch.setattr(checkout, "_git_output", git_output)
     with pytest.raises(ClaimError, match="cannot determine the main branch for ruling age"):
-        _LIVE_TRUNK_LANDING_TIMES()
+        _LIVE_TRUNK_LANDINGS("hub", 20)
 
 
-def test_trunk_landing_times_is_empty_when_trunk_has_no_first_parent_landings(
+def test_trunk_ref_falls_back_to_the_local_branch_name_when_remote_head_was_never_recorded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A clone that never ran `git remote set-head` still resolves through
+    the historical `{main, master}` guess (issue #238), generalized to the
+    caller's own remote name rather than `origin` alone (issue #304)."""
+
+    def git_output(arguments: list[str]) -> str:
+        if arguments == ["symbolic-ref", "--quiet", "refs/remotes/hub/HEAD"]:
+            raise ClaimError("unknown git failure")
+        if arguments == ["rev-parse", "--verify", "refs/remotes/hub/main"]:
+            raise ClaimError("fatal: no such ref")
+        if arguments == ["rev-parse", "--verify", "refs/remotes/hub/master"]:
+            raise ClaimError("fatal: no such ref")
+        if arguments == ["rev-parse", "--verify", "main"]:
+            return "deadbeef"
+        if arguments[0] == "log":
+            assert arguments[-1] == "main"
+            return ""
+        raise AssertionError(arguments)
+
+    monkeypatch.setattr(checkout, "_git_output", git_output)
+    assert _LIVE_TRUNK_LANDINGS("hub", 20) == ()
+
+
+def test_trunk_landings_is_empty_when_trunk_has_no_first_parent_landings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def git_output(arguments: list[str]) -> str:
         if arguments[:3] == ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"]:
             return "refs/remotes/origin/main"
-        if arguments[:4] == ["log", "--first-parent", "--reverse", "--format=%cI"]:
+        if arguments[0] == "log":
             return ""
         raise AssertionError(arguments)
 
     monkeypatch.setattr(checkout, "_git_output", git_output)
-    assert _LIVE_TRUNK_LANDING_TIMES() == ()
+    assert _LIVE_TRUNK_LANDINGS("origin", 20) == ()
 
 
 @pytest.mark.parametrize(
@@ -583,7 +618,7 @@ def test_trunk_landing_times_is_empty_when_trunk_has_no_first_parent_landings(
         pytest.param("2026-08-29T00:00:00", id="missing-offset"),
     ],
 )
-def test_trunk_landing_times_fails_loud_on_a_malformed_commit_timestamp(
+def test_trunk_landings_fails_loud_on_a_malformed_commit_timestamp(
     monkeypatch: pytest.MonkeyPatch, raw_commit_time: str
 ) -> None:
     """Neither an unparsable `%cI` line nor one git left offset-naive (both
@@ -593,50 +628,229 @@ def test_trunk_landing_times_fails_loud_on_a_malformed_commit_timestamp(
     def git_output(arguments: list[str]) -> str:
         if arguments[:3] == ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"]:
             return "refs/remotes/origin/main"
-        if arguments[:4] == ["log", "--first-parent", "--reverse", "--format=%cI"]:
-            return raw_commit_time
+        if arguments[0] == "log":
+            return _fake_trunk_log_record("sha1", raw_commit_time, "", "")
         raise AssertionError(arguments)
 
     monkeypatch.setattr(checkout, "_git_output", git_output)
     with pytest.raises(ClaimError, match="git returned a malformed trunk landing timestamp"):
-        _LIVE_TRUNK_LANDING_TIMES()
+        _LIVE_TRUNK_LANDINGS("origin", 20)
 
 
-def test_trunk_landing_times_count_a_five_commit_merge_once(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_trunk_landings_fails_loud_on_a_log_stream_that_is_not_nul_framed_records(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A raw `git log -z` stream always ends in the same NUL that separates
+    each record's own four fields (`_fake_trunk_log_record`); anything else
+    -- here, a caller that fed back plain newline-joined text -- is git (or
+    the fake) misbehaving, not a shape this reads silently."""
+
+    def git_output(arguments: list[str]) -> str:
+        if arguments[:3] == ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"]:
+            return "refs/remotes/origin/main"
+        if arguments[0] == "log":
+            return "sha1\x00not-nul-terminated"
+        raise AssertionError(arguments)
+
+    monkeypatch.setattr(checkout, "_git_output", git_output)
+    with pytest.raises(ClaimError, match="git returned a malformed trunk landing log"):
+        _LIVE_TRUNK_LANDINGS("origin", 20)
+
+
+def _minimal_pushed_repository(tmp_path: Path) -> Path:
+    """A `hub`-remote worktree with one `main`, empty of any commit -- the
+    common setup every real-`git` trunk-landing test that doesn't need the
+    shared five-proof history (`_trunk_history_repository`) builds on."""
+    remote = tmp_path / "remote.git"
+    remote.mkdir()
+    _real_git(remote, "init", "-q", "--bare", "-b", "main")
     repo = tmp_path / "repo"
     repo.mkdir()
+    _real_git(repo, "init", "-q", "-b", "main")
+    _real_git(repo, "config", "user.name", "Test")
+    _real_git(repo, "config", "user.email", "test@example.com")
+    _real_git(repo, "config", "commit.gpgsign", "false")
+    _real_git(repo, "remote", "add", "hub", str(remote))
+    return repo
 
-    def git(*arguments: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            ["git", *arguments],
-            cwd=repo,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
 
-    git("init", "-b", "main")
-    git("config", "user.name", "Test")
-    git("config", "user.email", "test@example.com")
-    git("config", "commit.gpgsign", "false")
-    (repo / "file.txt").write_text("0\n")
-    git("add", "file.txt")
-    git("commit", "-m", "initial")
-    git("checkout", "-b", "feature")
-    for index in range(1, 6):
-        (repo / "file.txt").write_text(f"{index}\n")
-        git("add", "file.txt")
-        git("commit", "-m", f"commit-{index}")
-    git("checkout", "main")
-    git("merge", "--no-ff", "-m", "merge feature", "feature")
-    git("checkout", "-b", "work")
+def _push_to_hub(repo: Path) -> None:
+    _real_git(repo, "push", "-q", "hub", "main")
+    _real_git(repo, "remote", "set-head", "hub", "main")
+
+
+@pytest.mark.parametrize(
+    "byte",
+    ["\x1f", "\x1e", "\x01"],
+    ids=["unit-separator", "record-separator", "start-of-heading"],
+)
+def test_trunk_landings_reads_a_control_byte_inside_a_trailer_value_as_one_literal_item(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, byte: str
+) -> None:
+    """Issue #304 review, finding B1: git never escapes `\\x1f`, `\\x1e`, or
+    `\\x01` inside a trailer value -- exactly the bytes the historical
+    `\\x1f`-separated framing used to split repeated trailer values -- so a
+    value that happens to contain one of them must read back as the one
+    literal value git actually recorded, never as two fabricated work items.
+    The NUL/newline framing reads it as data: `parse_item_reference` then
+    refuses that single literal value by name."""
+    repo = _minimal_pushed_repository(tmp_path)
+    (repo / "f.txt").write_text("content\n")
+    _real_git(repo, "add", "f.txt")
+    value = f"#12{byte}#13"
+    _real_git(repo, "commit", "-q", "-m", "change", "-m", f"Work-Item: {value}")
+    _push_to_hub(repo)
     monkeypatch.chdir(repo)
 
-    unrestricted = git("log", "--reverse", "--format=%cI").stdout.splitlines()
-    assert len(unrestricted) == 7
-    assert len(_LIVE_TRUNK_LANDING_TIMES()) == 2
+    with pytest.raises(
+        protocol.ClaimUnavailableError, match=re.escape(f"{value!r} is not an item reference")
+    ):
+        checkout.trunk_landings("hub", 20)
+
+
+def _trunk_history_repository(tmp_path: Path) -> Path:
+    """A worktree pushed to a `hub` remote (never `origin`, issue #304
+    proof 4) whose `main` carries, in first-parent order: a plain initial
+    commit, a merge commit trailer-classified `Work-Item: #10`, a squash
+    commit whose trailer block repeats `Work-Item:` twice, a commit landed
+    through a real `git rebase` and trailer-classified `No-Item: docs`, and
+    a commit whose `Work-Item:` line sits in prose, never its own trailer
+    block. A `sidebranch` ref never joins that first-parent line. One
+    history serves every one of the five proofs at once, since building a
+    real git repository per proof would only repeat the same setup."""
+    remote = tmp_path / "remote.git"
+    remote.mkdir()
+    _real_git(remote, "init", "-q", "--bare", "-b", "main")
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _real_git(repo, "init", "-q", "-b", "main")
+    _real_git(repo, "config", "user.name", "Test")
+    _real_git(repo, "config", "user.email", "test@example.com")
+    _real_git(repo, "config", "commit.gpgsign", "false")
+    (repo / "base.txt").write_text("base\n")
+    _real_git(repo, "add", "base.txt")
+    _real_git(repo, "commit", "-q", "-m", "initial")
+    _real_git(repo, "remote", "add", "hub", str(remote))
+
+    # A merge commit whose own message carries the trailer block.
+    _real_git(repo, "checkout", "-q", "-b", "feature")
+    (repo / "feature.txt").write_text("feature\n")
+    _real_git(repo, "add", "feature.txt")
+    _real_git(repo, "commit", "-q", "-m", "feature work")
+    _real_git(repo, "checkout", "-q", "main")
+    _real_git(
+        repo, "merge", "-q", "--no-ff", "-m", "Merge feature", "-m", "Work-Item: #10", "feature"
+    )
+
+    # A squash commit whose trailer block repeats `Work-Item:` -- every
+    # named item lands (issue #304).
+    _real_git(repo, "checkout", "-q", "-b", "squashed")
+    (repo / "squash.txt").write_text("one\n")
+    _real_git(repo, "add", "squash.txt")
+    _real_git(repo, "commit", "-q", "-m", "squash step 1")
+    (repo / "squash.txt").write_text("one\ntwo\n")
+    _real_git(repo, "add", "squash.txt")
+    _real_git(repo, "commit", "-q", "-m", "squash step 2")
+    _real_git(repo, "checkout", "-q", "main")
+    _real_git(repo, "merge", "-q", "--squash", "squashed")
+    _real_git(repo, "commit", "-q", "-m", "Squash landing", "-m", "Work-Item: #11\nWork-Item: #12")
+
+    # A commit landed through a real rebase, its trailer block preserved.
+    _real_git(repo, "checkout", "-q", "-b", "docslane", "feature")
+    (repo / "docs.txt").write_text("docs\n")
+    _real_git(repo, "add", "docs.txt")
+    _real_git(repo, "commit", "-q", "-m", "docs change", "-m", "No-Item: docs")
+    _real_git(repo, "rebase", "-q", "main")
+    _real_git(repo, "checkout", "-q", "main")
+    _real_git(repo, "merge", "-q", "--ff-only", "docslane")
+
+    # A `Work-Item:` line in prose, never its own trailer block -- not a
+    # landing (issue #304 proof 2).
+    (repo / "prose.txt").write_text("prose\n")
+    _real_git(repo, "add", "prose.txt")
+    _real_git(repo, "commit", "-q", "-m", "Prose change", "-m", "Explanation prose.\nWork-Item: #7")
+
+    # A side branch that never joins the trunk's first-parent line
+    # (issue #304 proof 3).
+    _real_git(repo, "checkout", "-q", "-b", "sidebranch")
+    (repo / "side.txt").write_text("side\n")
+    _real_git(repo, "add", "side.txt")
+    _real_git(repo, "commit", "-q", "-m", "side change", "-m", "Work-Item: #99")
+    _real_git(repo, "checkout", "-q", "main")
+
+    _real_git(repo, "push", "-q", "hub", "main")
+    _real_git(repo, "remote", "set-head", "hub", "main")
+    return repo
+
+
+def test_trunk_landings_classify_merge_squash_and_rebase_commits_from_their_trailer_block_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #304 proofs 1-3, against a real `file://`-reachable remote with
+    real merge, squash, and rebase history."""
+    repo = _trunk_history_repository(tmp_path)
+    monkeypatch.chdir(repo)
+
+    landings = checkout.trunk_landings("hub", 20)
+
+    assert [landing.classification for landing in landings] == [
+        None,  # the plain initial commit
+        board.TrunkWorkItemClassification((10,)),  # the merge commit
+        board.TrunkWorkItemClassification((11, 12)),  # the squash commit
+        board.NoItemClassification(board.NoItemKind.DOCS),  # the rebased commit
+        None,  # `Work-Item:` in prose, not a trailer (proof 2)
+    ]
+    side_sha = _real_git(repo, "rev-parse", "sidebranch").stdout.strip()
+    assert side_sha not in {landing.sha for landing in landings}  # proof 3
+
+    # `depth` bounds the walk to the most recent commits, oldest of those first.
+    assert [landing.classification for landing in checkout.trunk_landings("hub", 2)] == [
+        board.NoItemClassification(board.NoItemKind.DOCS),
+        None,
+    ]
+
+
+def test_trunk_landings_read_the_configured_remote_never_a_hardcoded_origin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #304 proof 4: a repository carrying both an `origin` remote
+    (behind by one commit) and its actual canonical `hub` remote reads
+    whichever one the caller names -- proving the remote is a real
+    parameter, never a hardcoded `origin`, rather than merely asserting the
+    literal is absent from the source."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _real_git(repo, "init", "-q", "-b", "main")
+    _real_git(repo, "config", "user.name", "Test")
+    _real_git(repo, "config", "user.email", "test@example.com")
+    _real_git(repo, "config", "commit.gpgsign", "false")
+    (repo / "f.txt").write_text("0\n")
+    _real_git(repo, "add", "f.txt")
+    _real_git(repo, "commit", "-q", "-m", "initial")
+
+    origin_remote = tmp_path / "origin.git"
+    origin_remote.mkdir()
+    _real_git(origin_remote, "init", "-q", "--bare", "-b", "main")
+    _real_git(repo, "remote", "add", "origin", str(origin_remote))
+    _real_git(repo, "push", "-q", "origin", "main")
+    _real_git(repo, "remote", "set-head", "origin", "main")
+
+    (repo / "f.txt").write_text("1\n")
+    _real_git(repo, "add", "f.txt")
+    _real_git(repo, "commit", "-q", "-m", "second commit")
+
+    hub_remote = tmp_path / "hub.git"
+    hub_remote.mkdir()
+    _real_git(hub_remote, "init", "-q", "--bare", "-b", "main")
+    _real_git(repo, "remote", "add", "hub", str(hub_remote))
+    _real_git(repo, "push", "-q", "hub", "main")
+    _real_git(repo, "remote", "set-head", "hub", "main")
+
+    monkeypatch.chdir(repo)
+
+    assert len(checkout.trunk_landings("origin", 20)) == 1
+    assert len(checkout.trunk_landings("hub", 20)) == 2
 
 
 @pytest.mark.parametrize(

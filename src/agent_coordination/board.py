@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 import tomllib
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
@@ -310,6 +310,27 @@ class NoItemKind(StrEnum):
     FIX = "fix"
 
 
+def parse_item_reference(value: str) -> int:
+    """One item reference -- `aco-xxxxxx` (`items.item_number`'s own hex
+    decode), `#n`, or the bare integer `n` -- parsed to the number every
+    forge port keys by (issue #285, decision D4: an id is identity, not just
+    display, so a fresh id `item new` prints is something every other
+    command can claim right back). The one owner for both every argparse
+    slot that means an item (`cli`'s `type=`) and a trunk commit's
+    `Work-Item:` trailer value (issue #304, `trunk_commit_classification`) --
+    a git trailer never carries the `OWNER/REPO#n` form `WORK_ITEM_VALUE_PATTERN`
+    accepts for a pull request body, since a commit is always local to the
+    repository whose history it lands on."""
+    if items.ITEM_ID_PATTERN.fullmatch(value) is not None:
+        return items.item_number(value)
+    digits = value.removeprefix("#")
+    if digits.isdigit():
+        return int(digits)
+    raise protocol.ClaimUnavailableError(
+        f"{value!r} is not an item reference; use aco-xxxxxx, #n, or the bare number n"
+    )
+
+
 @dataclass(frozen=True)
 class WorkItemClassification:
     item: IssueReference
@@ -327,6 +348,73 @@ class NoItemClassification:
 
 
 Classification = WorkItemClassification | NoItemClassification
+
+
+@dataclass(frozen=True)
+class TrunkWorkItemClassification:
+    """The work items one trunk commit's trailer block names as landed
+    (issue #304). A trailer block may repeat `Work-Item:`; every named item
+    is landed by that commit -- unlike a pull request body, which
+    `parse_pull_request_classification` refuses past a single `Work-Item:`
+    line, a commit's trailer block is already-landed history, not a
+    contract this repository is still enforcing."""
+
+    numbers: tuple[int, ...]
+
+
+TrunkClassification = TrunkWorkItemClassification | NoItemClassification
+
+
+def trunk_commit_classification(
+    work_item_values: tuple[str, ...], no_item_values: tuple[str, ...]
+) -> TrunkClassification | ClassificationDefect | None:
+    """A trunk commit's classification from its own trailer block alone
+    (issue #304): `work_item_values`/`no_item_values` are read through git's
+    own trailer parsing (`%(trailers:key=...,valueonly)`), so a `Work-Item:`
+    or `No-Item:` line elsewhere in the body -- prose, not a trailer --
+    never reaches here. `None` means the commit's trailer block named
+    neither: most trunk commits are not a dispatched slice's landing, and
+    that is not a defect worth surfacing the way an in-flight pull request's
+    malformed classification is.
+
+    A block naming both `Work-Item:` and `No-Item:`, or repeating
+    `No-Item:`, is contradictory rather than merely absent -- `check <pr>`
+    already refuses the equivalent shape in a pull request body
+    (`_single_classification_match`) -- so it refuses with a typed
+    `ClassificationDefect` instead of letting `Work-Item:` win by ordering
+    (issue #304 review, finding B2)."""
+    if work_item_values and no_item_values:
+        return ClassificationDefect(
+            "carries both `Work-Item:` and `No-Item:` trailers; a landed commit is one or the other"
+        )
+    if len(no_item_values) > 1:
+        return ClassificationDefect("carries more than one `No-Item:` trailer")
+    if work_item_values:
+        return TrunkWorkItemClassification(
+            tuple(parse_item_reference(value) for value in work_item_values)
+        )
+    if len(no_item_values) == 1 and no_item_values[0].lower() in {
+        kind.value for kind in NoItemKind
+    }:
+        return NoItemClassification(NoItemKind(no_item_values[0].lower()))
+    return None
+
+
+def trunk_landed_work_items(
+    classifications: Iterable[TrunkClassification | ClassificationDefect | None],
+) -> frozenset[int]:
+    """Item numbers a trunk commit's own trailer block names as landed
+    (issue #304): every `TrunkWorkItemClassification.numbers` value across
+    `classifications` (one `TrunkLanding.classification` per commit),
+    joined into the one set `build_board` unions into `landed_references` --
+    an item landed by a trailer-carrying merge commit is landed whether or
+    not a matching pull request body also named it."""
+    return frozenset(
+        number
+        for classification in classifications
+        if isinstance(classification, TrunkWorkItemClassification)
+        for number in classification.numbers
+    )
 
 
 @dataclass(frozen=True)
@@ -2209,6 +2297,11 @@ class BoardBuildInputs:
     repository: str
     now: datetime | None = None
     trunk_landings: tuple[datetime, ...] = ()
+    # Item numbers a trunk commit's own trailer block already names as
+    # landed (issue #304, `trunk_landed_work_items`) -- independent of
+    # `trunk_landings` above, which carries only each commit's timestamp for
+    # ruling-freshness, never its classification.
+    trunk_landed_work_items: frozenset[int] = frozenset()
     children: Mapping[int, tuple[ChildItem, ...]] = field(default_factory=dict)
     dependencies: Mapping[int, tuple[IssueDependency, ...]] = field(default_factory=dict)
     requests: int = 0
@@ -2275,7 +2368,8 @@ def build_board(inputs: BoardBuildInputs) -> Board:
         in_flight_references=_associated_issues(open_pull_requests, repository)
         | _touched_without_closing(open_pull_requests),
         landed_references=_associated_issues(recent_merged_pull_requests, repository)
-        | _touched_without_closing(recent_merged_pull_requests),
+        | _touched_without_closing(recent_merged_pull_requests)
+        | inputs.trunk_landed_work_items,
         open_branches=frozenset(pr.head_ref_name for pr in open_pull_requests),
         open_pull_requests_supported=inputs.open_pull_requests_supported,
         trunk_landings=inputs.trunk_landings,
@@ -2487,7 +2581,7 @@ def _kind_cell(item: BoardItem) -> str:
 def item_label(number: int, storage: Storage) -> str:
     """The one display form of `number` any narrative output prints under
     `storage` (issue #292): `items.format_item_id`'s `aco-xxxxxx` under
-    `storage = STATE_REF` -- an id `cli._parse_item_ref` already accepts
+    `storage = STATE_REF` -- an id `parse_item_reference` already accepts
     right back, so what a command prints is what the next command takes --
     unchanged `#n` under `storage = GITHUB`. `board` is the lowest layer
     that may import `items` (the Layers contract), and both `cli` and
