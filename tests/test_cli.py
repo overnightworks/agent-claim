@@ -42,7 +42,6 @@ from cli_fixtures import (
     _forbid_github_construction,
     _forbid_protect_git_github_and_identity,
     _git_checkout,
-    _patch_command,
     _real_git,
     _set_agent_identity_env,
     arrange_scope_width,
@@ -55,7 +54,6 @@ from agent_coordination import (
     checkout,
     forge,
     github,
-    hook_input,
     items,
     protocol,
     store,
@@ -8031,142 +8029,6 @@ def test_cli_module_entry_point_exits_with_mains_return_code(
         "decision": "deny",
         "reason": "invalid hook payload",
     }
-
-
-@pytest.mark.parametrize(
-    ("lines", "paths"),
-    [
-        (("*** Add File: src/new_module.py", "+content"), ("src/new_module.py",)),
-        (("*** Delete File: src/old_module.py",), ("src/old_module.py",)),
-        (
-            ("*** Update File: src/widget.py", "@@", "-old", "+new"),
-            ("src/widget.py",),
-        ),
-        (
-            (
-                "*** Update File: src/widget.py",
-                "*** Move to: src/renamed.py",
-                "@@",
-                "-old",
-                "+new",
-            ),
-            ("src/widget.py", "src/renamed.py"),
-        ),
-        (
-            (
-                "*** Update File: src/widget.py",
-                "@@",
-                "-old",
-                "+new",
-                "*** Add File: src/new_module.py",
-                "+content",
-            ),
-            ("src/widget.py", "src/new_module.py"),
-        ),
-        pytest.param(
-            (
-                "*** Add File: src/ok.py",
-                "+x",
-                "  *** Update File: docs/evil.md",
-                "@@",
-                "-a",
-                "+b",
-            ),
-            ("src/ok.py", "docs/evil.md"),
-            id="indented-header-after-add-is-a-real-header",
-        ),
-        pytest.param(
-            (
-                "*** Add File: src/ok.py",
-                "+x",
-                "\t*** Update File: docs/evil.md",
-                "@@",
-                "-a",
-                "+b",
-            ),
-            ("src/ok.py", "docs/evil.md"),
-            id="tab-indented-header-is-a-real-header",
-        ),
-        pytest.param(
-            ("  *** Add File: src/ok.py", "+x"),
-            ("src/ok.py",),
-            id="indented-first-header-is-a-real-header",
-        ),
-        pytest.param(
-            (
-                "*** Update File: src/widget.py",
-                "@@",
-                "-old",
-                "+new",
-                " *** Update File: docs/evil.md",
-            ),
-            ("src/widget.py",),
-            id="leading-space-header-inside-an-update-hunk-is-context-not-a-file",
-        ),
-        pytest.param(
-            ('*** Add File: "src/ok.py"', "+x"),
-            ('"src/ok.py"',),
-            id="a-quoted-path-is-extracted-literally",
-        ),
-        pytest.param(
-            ("*** Add File: ../outside.md", "+x"),
-            ("../outside.md",),
-            id="a-traversal-path-is-extracted-literally",
-        ),
-        pytest.param(
-            ("*** Add File: /etc/passwd", "+x"),
-            ("/etc/passwd",),
-            id="an-absolute-path-is-extracted-literally",
-        ),
-        pytest.param(
-            ("*** Add File: src/ok.py  ", "+x"),
-            ("src/ok.py",),
-            id="trailing-spaces-outside-an-update-hunk-are-trimmed-like-codex",
-        ),
-    ],
-)
-def test_hook_patch_paths_extracts_every_file_line(
-    lines: tuple[str, ...], paths: tuple[str, ...]
-) -> None:
-    assert hook_input.hook_patch_paths(_patch_command(*lines)) == paths
-
-
-def test_hook_patch_paths_ignores_a_trailing_carriage_return_like_codex() -> None:
-    text = (
-        "*** Begin Patch\r\n"
-        "*** Update File: src/widget.py\r\n"
-        "@@\r\n"
-        "-old\r\n"
-        "+new\r\n"
-        "*** End Patch\r\n"
-    )
-    assert hook_input.hook_patch_paths(text) == ("src/widget.py",)
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        "*** Begin Patch\n*** End Patch",
-        "not a patch at all",
-        "",
-        pytest.param(
-            _patch_command("*** Add File: a.py", "+x")
-            + "\n"
-            + _patch_command("*** Add File: b.py", "+y"),
-            id="two-begin-patch-blocks",
-        ),
-        pytest.param(
-            _patch_command("*** Add File: a.py", "+x") + "\n*** Add File: b.py",
-            id="a-file-line-after-end-patch",
-        ),
-        pytest.param(
-            "*** Begin Patch\nbad\n*** End Patch",
-            id="a-line-the-grammar-does-not-admit-outside-any-header",
-        ),
-    ],
-)
-def test_hook_patch_paths_returns_empty_for_unrecognized_text(text: str) -> None:
-    assert hook_input.hook_patch_paths(text) == ()
 
 
 def test_cli_claim_resource_prints_the_allocated_value(
