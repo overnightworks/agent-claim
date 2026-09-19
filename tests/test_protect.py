@@ -787,6 +787,17 @@ _BASH_WRITE_COMMAND_TEMPLATES: tuple[tuple[str, str], ...] = (
 )
 
 
+def _write_target_payload(target: Path) -> dict[str, object]:
+    return {"toolName": "write", "toolInput": {"path": str(target)}}
+
+
+def _bash_rm_target_payload(target: Path) -> dict[str, object]:
+    return {"toolName": "Bash", "toolInput": {"command": f"rm {target}"}}
+
+
+_TARGET_PATH_PAYLOAD_BUILDERS = (_write_target_payload, _bash_rm_target_payload)
+
+
 _BASH_OUTSIDE_SCOPE_PATH = "docs/widget.md"
 _BASH_INSIDE_SCOPE_PATH = "src/widget.py"
 
@@ -971,110 +982,6 @@ def test_protect_bash_allows_a_missing_or_non_string_command(
     _assert_protect_decision(capsys, decision="allow")
 
 
-def test_protect_bash_denies_a_checkout_with_no_commit_yet(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Gate G3 shared with every other mutating tool: a Bash-recognized path
-    in a checkout with no commit yet (an unborn branch) denies, since its
-    branch name could otherwise coincidentally match a still-live claim's."""
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
-    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
-    unborn = tmp_path / "unborn"
-    unborn.mkdir()
-    _real_git(unborn, "init", "-q", "-b", "codex/issue-72-widget")
-    monkeypatch.chdir(tmp_path)
-    _forbid_github_construction(monkeypatch)
-    target = unborn / "widget.py"
-
-    assert (
-        _protect_main(monkeypatch, {"toolName": "Bash", "toolInput": {"command": f"rm {target}"}})
-        == 2
-    )
-    _assert_protect_decision(capsys, decision="deny", reason=checkout.NO_COMMIT_CHECKOUT_REASON)
-
-
-def test_protect_bash_denies_not_main_for_a_real_checkout(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Gate G4 shared with every other mutating tool: a Bash-recognized path
-    in the shared main checkout denies `not main`, exactly like an `Edit`
-    path there."""
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
-    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
-    target = _real_main_checkout_target(tmp_path)
-    monkeypatch.chdir(tmp_path)
-    _forbid_github_construction(monkeypatch)
-
-    assert (
-        _protect_main(monkeypatch, {"toolName": "Bash", "toolInput": {"command": f"rm {target}"}})
-        == 2
-    )
-    _assert_protect_decision(capsys, decision="deny", reason="not main")
-
-
-def test_protect_bash_path_resolving_to_the_checkout_root_denies_path_required(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """The same `PATH_REQUIRED` edge case as an `Edit` path's own checkout-
-    root case: `work/subdir/..` queries git from the real descendant
-    `work/subdir`, so the checkout resolves fine, while the full path
-    resolves to `work` itself -- a repository-relative scope entry of `"."`,
-    which `protocol._valid_scope` refuses."""
-    _isolate_protect_home(monkeypatch, tmp_path)
-    work = tmp_path / "work"
-    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
-    _patch_protect_git(monkeypatch, work)
-    _forbid_github_construction(monkeypatch)
-    target = work / "subdir" / ".."
-
-    assert (
-        _protect_main(monkeypatch, {"toolName": "Bash", "toolInput": {"command": f"rm {target}"}})
-        == 2
-    )
-    _assert_protect_decision(capsys, decision="deny", reason="path required")
-
-
-def test_protect_bash_maps_a_store_error_to_cannot_reach_the_state_ref(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    _isolate_protect_home(monkeypatch, tmp_path)
-    work = tmp_path / "work"
-    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
-    _patch_protect_git(monkeypatch, work)
-
-    def fake_fetch_state(*, worktree: Path, remote: str) -> protocol.ClaimState:
-        raise ClaimError("unreachable")
-
-    monkeypatch.setattr(store, "fetch_state", fake_fetch_state)
-
-    assert (
-        _protect_main(
-            monkeypatch,
-            {
-                "toolName": "Bash",
-                "toolInput": {"command": "rm src/widget.py"},
-                "cwd": str(work),
-            },
-        )
-        == 2
-    )
-    _assert_protect_decision(
-        capsys, decision="deny", reason=f"cannot reach {store.STATE_REF}: unreachable"
-    )
-
-
 def test_protect_unknown_tool_name_denies_with_a_repair_sentence(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1165,10 +1072,12 @@ def test_protect_denies_not_main_for_a_custom_or_unresolved_default_branch(
     _assert_protect_decision(capsys, decision="deny", reason=expected_reason)
 
 
+@pytest.mark.parametrize("payload_for", _TARGET_PATH_PAYLOAD_BUILDERS, ids=["write", "bash-rm"])
 def test_protect_path_resolving_to_the_checkout_root_denies_path_required(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
+    payload_for: Callable[[Path], dict[str, object]],
 ) -> None:
     """`PATH_REQUIRED` fires when the payload path's own checkout resolves
     (issue #314 repeat gate, finding 2 fallout: the pre-fix fake answered
@@ -1178,23 +1087,15 @@ def test_protect_path_resolving_to_the_checkout_root_denies_path_required(
     itself resolves to exactly the checkout root: `work/subdir/..` queries
     git from the real descendant `work/subdir`, so the checkout resolves
     fine, while the full path resolves to `work` itself -- a repository-
-    relative scope entry of `"."`, which `protocol._valid_scope` refuses."""
+    relative scope entry of `"."`, which `protocol._valid_scope` refuses. A
+    Bash-recognized path runs the identical gate (issue #380)."""
     _isolate_protect_home(monkeypatch, tmp_path)
     work = tmp_path / "work"
     _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
     _patch_protect_git(monkeypatch, work)
     _forbid_github_construction(monkeypatch)
 
-    assert (
-        _protect_main(
-            monkeypatch,
-            {
-                "toolName": "write",
-                "toolInput": {"path": str(work / "subdir" / "..")},
-            },
-        )
-        == 2
-    )
+    assert _protect_main(monkeypatch, payload_for(work / "subdir" / "..")) == 2
     _assert_protect_decision(capsys, decision="deny", reason="path required")
 
 
@@ -1313,6 +1214,7 @@ def test_protect_non_claim_error_from_write_path_denies_json_without_traceback(
     }
 
 
+@pytest.mark.parametrize("payload_for", _TARGET_PATH_PAYLOAD_BUILDERS, ids=["write", "bash-rm"])
 @pytest.mark.parametrize(
     ("failure", "match"),
     [
@@ -1332,7 +1234,10 @@ def test_protect_maps_every_store_error_to_cannot_reach_the_state_ref(
     capsys: pytest.CaptureFixture[str],
     failure: protocol.ClaimError,
     match: str,
+    payload_for: Callable[[Path], dict[str, object]],
 ) -> None:
+    """Issue #380: a Bash-recognized path shares this same store-failure
+    mapping, since it reads the identical `_protect_cached_claim_state_or_denial`."""
     _isolate_protect_home(monkeypatch, tmp_path)
     work = tmp_path / "work"
     _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
@@ -1343,13 +1248,7 @@ def test_protect_maps_every_store_error_to_cannot_reach_the_state_ref(
 
     monkeypatch.setattr(store, "fetch_state", fake_fetch_state)
 
-    assert (
-        _protect_main(
-            monkeypatch,
-            {"toolName": "write", "toolInput": {"path": str(work / "src/widget.py")}},
-        )
-        == 2
-    )
+    assert _protect_main(monkeypatch, payload_for(work / "src/widget.py")) == 2
     captured = capsys.readouterr()
     payload = json.loads(captured.out)
     assert payload["decision"] == "deny"
@@ -1821,6 +1720,7 @@ def _real_worktree_on_default_branch_target(tmp_path: Path) -> Path:
     return worktree / "README.md"
 
 
+@pytest.mark.parametrize("payload_for", _TARGET_PATH_PAYLOAD_BUILDERS, ids=["write", "bash-rm"])
 @pytest.mark.parametrize(
     "build_target",
     [_real_main_checkout_target, _real_worktree_on_default_branch_target],
@@ -1831,6 +1731,7 @@ def test_protect_denies_not_main_for_a_real_checkout(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     build_target: Callable[[Path], Path],
+    payload_for: Callable[[Path], dict[str, object]],
 ) -> None:
     """Finding R3 and gate G4, against real checkouts rather than
     `_patch_protect_git`'s mock: a payload path in the real shared main
@@ -1840,7 +1741,8 @@ def test_protect_denies_not_main_for_a_real_checkout(
     -- `resolve_path_checkout`'s structural MAIN/LINKED_WORKTREE split alone
     stopped catching this once issue #314 dropped the old branch-name check,
     so a live claim matching that worktree's agent/branch/scope would
-    otherwise be honoured there exactly as if it were a real lane)."""
+    otherwise be honoured there exactly as if it were a real lane). A
+    Bash-recognized path runs the identical gate (issue #380)."""
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
@@ -1849,23 +1751,24 @@ def test_protect_denies_not_main_for_a_real_checkout(
     monkeypatch.chdir(tmp_path)
     _forbid_github_construction(monkeypatch)
 
-    assert (
-        _protect_main(monkeypatch, {"toolName": "write", "toolInput": {"path": str(target)}}) == 2
-    )
+    assert _protect_main(monkeypatch, payload_for(target)) == 2
     _assert_protect_decision(capsys, decision="deny", reason="not main")
 
 
+@pytest.mark.parametrize("payload_for", _TARGET_PATH_PAYLOAD_BUILDERS, ids=["write", "bash-rm"])
 def test_protect_denies_a_checkout_with_no_commit_yet(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
+    payload_for: Callable[[Path], dict[str, object]],
 ) -> None:
     """Gate G3: a freshly `git init`ed checkout with no commit yet -- an
     unborn branch -- still names a real branch (`git branch --show-current`
     reads the symbolic ref's target regardless of whether it resolves to a
     commit), so without a successful-HEAD requirement its name could
     coincidentally match a still-live claim's and be authorized despite
-    naming no real history."""
+    naming no real history. A Bash-recognized path runs the identical gate
+    (issue #380)."""
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
@@ -1877,9 +1780,7 @@ def test_protect_denies_a_checkout_with_no_commit_yet(
     _forbid_github_construction(monkeypatch)
     target = unborn / "widget.py"
 
-    assert (
-        _protect_main(monkeypatch, {"toolName": "write", "toolInput": {"path": str(target)}}) == 2
-    )
+    assert _protect_main(monkeypatch, payload_for(target)) == 2
     _assert_protect_decision(capsys, decision="deny", reason=checkout.NO_COMMIT_CHECKOUT_REASON)
 
 
