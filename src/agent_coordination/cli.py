@@ -1214,12 +1214,31 @@ def _resolve_toplevel() -> Path:
         ) from error
 
 
+def _board_config(toplevel: Path) -> board.BoardConfig:
+    """The repository's board configuration, refused before
+    `board.load_config` ever runs when `.agent-claim/board.toml` is not
+    actually tracked by git (#315): a `.gitignore` that ignores every
+    dot-directory keeps a freshly written pin off every worktree unless it
+    is force-added, and the prior silent `storage = github` default then
+    surfaced as the unrelated "no forge adapter for host ..." the moment a
+    forge command resolved a non-GitHub canonical remote. `board.load_config`
+    itself stays a pure filesystem reader (Layers contract) -- this is the
+    one place, reached by every store command, that can see whether git
+    actually tracks the pin."""
+    if not checkout.path_is_tracked(board.CONFIG_PATH.as_posix()):
+        raise protocol.ClaimUnavailableError(
+            f"{board.CONFIG_PATH} is not tracked in this checkout, so its "
+            f"storage pin cannot be trusted: git add -f {board.CONFIG_PATH}"
+        )
+    return board.load_config(toplevel / board.CONFIG_PATH)
+
+
 def _load_board_config(client: forge.BoardSource, toplevel: Path) -> board.BoardConfig:
     """The repository's board configuration, validated against what `client`
     can actually do (#150 §3): reading a body's dependencies requires
     `list_board_dependencies` at read-only or better, and the typed block is
     the one body grammar, so every repository needs it."""
-    config = board.load_config(toplevel / board.CONFIG_PATH)
+    config = _board_config(toplevel)
     if (
         client.capability(forge.ForgeOperation.LIST_BOARD_DEPENDENCIES)
         is forge.Capability.UNSUPPORTED
@@ -2176,7 +2195,7 @@ def _cmd_body(parsed: argparse.Namespace) -> int:
             raise protocol.ClaimUnavailableError(
                 "--kind and --parent apply only to --template, not --check"
             )
-        config = board.load_config(_resolve_toplevel() / board.CONFIG_PATH)
+        config = _board_config(_resolve_toplevel())
         defects = _body_shape_defects(_read_body_check_input(), storage=config.storage)
         return _body_check_report(defects, as_json=parsed.json)
     if parsed.json:
@@ -2240,7 +2259,7 @@ def _canonical_remote_name(toplevel: Path) -> str:
     target against it (`_resolved_forge_target` below); a forge-free command
     (`status`, `protect`, `bootstrap`, a lane `claim`/`rescope`/`release`)
     never does, so this alone is all it ever reads."""
-    return board.load_config(toplevel / board.CONFIG_PATH).canonical_remote
+    return _board_config(toplevel).canonical_remote
 
 
 def _canonical_remote_location(canonical_remote: str) -> checkout.RemoteLocation:
@@ -2319,7 +2338,7 @@ def _refuse_state_ref_merged_release(toplevel: Path) -> None:
     anymore, since it only ever reads and `state_board.StateRefBoard` has
     read `board`/`next`/`check` since #248.
     """
-    if board.load_config(toplevel / board.CONFIG_PATH).storage is board.Storage.STATE_REF:
+    if _board_config(toplevel).storage is board.Storage.STATE_REF:
         raise protocol.ClaimUnavailableError(STATE_REF_MERGED_LANDING_NOT_YET)
 
 
@@ -2407,7 +2426,7 @@ def _cmd_item_new(parsed: argparse.Namespace) -> int:
     directly, since `create_item` is not part of the generic `ForgeWriter`
     port every other write command narrows to."""
     toplevel = _resolve_toplevel()
-    config = board.load_config(toplevel / board.CONFIG_PATH)
+    config = _board_config(toplevel)
     if config.storage is not board.Storage.STATE_REF:
         raise protocol.ClaimUnavailableError(ITEM_NEW_GITHUB_REFUSAL)
     client = _state_ref_forge(parsed.repo, config.canonical_remote)
@@ -2459,7 +2478,7 @@ def _cmd_item_edit(parsed: argparse.Namespace) -> int:
     `update_item_body` are not part of the generic `ForgeWriter` port every
     other write command narrows to)."""
     toplevel = _resolve_toplevel()
-    config = board.load_config(toplevel / board.CONFIG_PATH)
+    config = _board_config(toplevel)
     if config.storage is not board.Storage.STATE_REF:
         raise protocol.ClaimUnavailableError(ITEM_EDIT_GITHUB_REFUSAL)
     body = _read_body_check_input()
@@ -2511,7 +2530,7 @@ def _cmd_item_close(parsed: argparse.Namespace) -> int:
     `freed:` line -- open items whose only open local blocker was this one
     (`_freed_item_numbers`, issue #256; nothing new)."""
     toplevel = _resolve_toplevel()
-    config = board.load_config(toplevel / board.CONFIG_PATH)
+    config = _board_config(toplevel)
     if config.storage is not board.Storage.STATE_REF:
         raise protocol.ClaimUnavailableError(ITEM_CLOSE_GITHUB_REFUSAL)
     number = parsed.item
@@ -3032,7 +3051,7 @@ class _LazyForge:
     def __call__(self) -> forge.ForgeReader:
         if self._resolved is None:
             toplevel = _resolve_toplevel()
-            config = board.load_config(toplevel / board.CONFIG_PATH)
+            config = _board_config(toplevel)
             canonical_remote = config.canonical_remote
             if config.storage is board.Storage.STATE_REF:
                 self._resolved = _state_ref_forge(self._repo, canonical_remote)
@@ -3272,7 +3291,7 @@ def _cmd_status(parsed: argparse.Namespace) -> int:
         # (README "status --path").
         if parsed.json:
             return _status_path_json(claims, parsed.path)
-        storage = board.load_config(_resolve_toplevel() / board.CONFIG_PATH).storage
+        storage = _board_config(_resolve_toplevel()).storage
         _status_path(claims, parsed.path, storage)
         return 0
     ages = _claim_ages(worktree, state)
@@ -3280,7 +3299,7 @@ def _cmd_status(parsed: argparse.Namespace) -> int:
     now = datetime.now(UTC)
     if parsed.json:
         return _status_json(claims, issue, ages, state.tip, now=now)
-    storage = board.load_config(_resolve_toplevel() / board.CONFIG_PATH).storage
+    storage = _board_config(_resolve_toplevel()).storage
     return _status(claims, issue, ages, storage, now=now)
 
 
@@ -3332,7 +3351,7 @@ def _board_html_page(
         claim_ages=_claim_ages(worktree, observed),
     )
     bodies = {issue.number: issue.body for issue in issues}
-    config = board.load_config(_resolve_toplevel() / board.CONFIG_PATH)
+    config = _board_config(_resolve_toplevel())
     # `_board`'s own `checkout.trunk_landings` read (issue #304) stays
     # private to its `BoardBuildInputs` classification; the Landungen
     # section needs each landed item's own commit identity too (issue #304
@@ -3375,7 +3394,7 @@ def _cmd_board(parsed: argparse.Namespace, session: _ReadSession) -> None:
     if parsed.json:
         print(board.board_json(projected))
         return
-    storage = board.load_config(_resolve_toplevel() / board.CONFIG_PATH).storage
+    storage = _board_config(_resolve_toplevel()).storage
     print(board.render(projected, storage=storage))
 
 
@@ -3383,7 +3402,7 @@ def _cmd_rulings(parsed: argparse.Namespace, session: _ReadSession) -> None:
     issues = session.forge().list_open_board_issues()
     projected = _observed_board(session, issues=issues)
     bodies = {issue.number: issue.body for issue in issues}
-    storage = board.load_config(_resolve_toplevel() / board.CONFIG_PATH).storage
+    storage = _board_config(_resolve_toplevel()).storage
     _rulings(projected, bodies, as_json=parsed.json, storage=storage)
 
 
@@ -3401,7 +3420,7 @@ def _cmd_next(parsed: argparse.Namespace, session: _ReadSession) -> int:
     chosen_container = _next_action_container_number(action)
     skipped = tuple(item for item in _unworkable(projected) if item.number != chosen_container)
     recovery = projected.recovery
-    storage = board.load_config(_resolve_toplevel() / board.CONFIG_PATH).storage
+    storage = _board_config(_resolve_toplevel()).storage
     if parsed.json:
         if action is None:
             _next_json(None, skipped, recovery, storage)
@@ -3461,7 +3480,7 @@ def _cmd_claim(parsed: argparse.Namespace, session: _WriteSession) -> int:
     checks: tuple[SliceCheck, ...] = ()
     target_issue: int | None = None
     replayed = None
-    storage = board.load_config(_resolve_toplevel() / board.CONFIG_PATH).storage
+    storage = _board_config(_resolve_toplevel()).storage
     if isinstance(requested.identity, protocol.IssueIdentity):
         target_issue = requested.identity.issue
         replayed = _matching_store_claim(observed, requested)
@@ -3571,7 +3590,7 @@ def _cmd_release(parsed: argparse.Namespace, session: _WriteSession) -> None:
     landing, hint = (
         (None, None) if client is None else _landing_report(client, identity, worktree, new_state)
     )
-    storage = board.load_config(_resolve_toplevel() / board.CONFIG_PATH).storage
+    storage = _board_config(_resolve_toplevel()).storage
     _print_release_result(
         ReleaseReport(
             selected, parsed.agent, resolved_role, outcome, client, landing, hint, storage
@@ -4140,7 +4159,9 @@ def _release_branch_for(parsed: argparse.Namespace) -> str | None:
 def _bootstrap_state() -> int:
     """Create `refs/aco/state` if proven absent; report the existing tip
     untouched when it is already there. Forge-free (issue #245): `--repo` is
-    meaningless here and unused."""
+    meaningless here and unused. `_canonical_remote_name` reads through
+    `_board_config` (#315), so an untracked `board.toml` refuses here too,
+    before this command's own first write."""
     canonical_remote = _canonical_remote_name(_resolve_toplevel())
     print(store.bootstrap(worktree=Path.cwd(), remote=canonical_remote))
     return 0

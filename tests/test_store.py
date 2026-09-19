@@ -16,6 +16,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from cli_fixtures import stub_board_config_tracked
 from test_cli import FakeForge
 
 from agent_coordination import cli as issue_claim
@@ -43,6 +44,18 @@ def _git_identity(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GIT_AUTHOR_EMAIL", "test@example.com")
     monkeypatch.setenv("GIT_COMMITTER_NAME", "Test")
     monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@example.com")
+
+
+@pytest.fixture(autouse=True)
+def _stub_board_config_tracked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every store-command test reads a tracked `board.toml` by default
+    (issue #315): the `bootstrap` proofs below drive a real `worktree` that
+    never `git add`s `.agent-claim/board.toml` -- it has no reason to carry
+    one, since `board.load_config` already defaults `canonical_remote` to
+    `"origin"`, the remote these tests add -- so a real `git ls-files` check
+    would otherwise always read "not tracked" here and refuse before
+    `bootstrap` gets to run at all."""
+    stub_board_config_tracked(monkeypatch)
 
 
 @pytest.fixture

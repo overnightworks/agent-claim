@@ -1173,10 +1173,15 @@ class TestCliStateRefForge:
     it (`test_lazy_forge_builds_a_state_ref_board_under_the_state_ref_pin`
     in `test_cli.py`)."""
 
-    def _pin_state_ref(self, tmp_path: Path) -> None:
+    def _pin_state_ref(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """Writes the state-ref pin, and stubs `path_is_tracked` to report it
+        tracked (#315): this fixture's `board.toml` sits beside `worktree`'s
+        real `.git`, never actually `git add`ed to it, so a real
+        `git ls-files` check would otherwise never see it."""
         config_dir = tmp_path / ".agent-claim"
         config_dir.mkdir()
         (config_dir / "board.toml").write_text('storage = "state-ref"\n')
+        monkeypatch.setattr(checkout, "path_is_tracked", lambda _path: True)
 
     def _live_state_ref_checkout(
         self,
@@ -1195,7 +1200,7 @@ class TestCliStateRefForge:
         _git("remote", "add", "origin", remote_url, cwd=worktree)
         _git("push", "origin", "main", cwd=worktree)
         _git("remote", "set-head", "origin", "main", cwd=worktree)
-        self._pin_state_ref(tmp_path)
+        self._pin_state_ref(monkeypatch, tmp_path)
         monkeypatch.setenv("PATH", _path_without_gh(tmp_path))
         monkeypatch.chdir(worktree)
 
@@ -1794,7 +1799,7 @@ class TestCliStateRefForge:
         _git("push", "origin", "main", cwd=worktree)
         _git("remote", "set-head", "origin", "main", cwd=worktree)
         store.bootstrap(worktree=worktree, remote=remote_url)
-        self._pin_state_ref(tmp_path)
+        self._pin_state_ref(monkeypatch, tmp_path)
         monkeypatch.setenv("PATH", _path_without_gh(tmp_path))
         monkeypatch.chdir(worktree)
 
@@ -1847,7 +1852,7 @@ class TestCliStateRefForge:
         _git("remote", "add", "origin", remote_url, cwd=worktree)
         _git("push", "origin", "main", cwd=worktree)
         store.bootstrap(worktree=worktree, remote=remote_url)
-        self._pin_state_ref(tmp_path)
+        self._pin_state_ref(monkeypatch, tmp_path)
         monkeypatch.setenv("PATH", _path_without_gh(tmp_path))
         monkeypatch.chdir(worktree)
 

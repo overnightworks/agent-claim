@@ -460,7 +460,12 @@ server, no token.
 ### Storage pin
 
 `storage = "github" | "state-ref"` (default `github`) names which adapter
-owns this repository's board and item data (issue #248, parent #230). Under
+owns this repository's board and item data (issue #248, parent #230). The
+default applies only once `.agent-claim/board.toml` is actually tracked by
+git; absent, untracked, or ignored (a `.gitignore` that ignores every
+dot-directory keeps a freshly written pin off a worktree), `bootstrap` and
+every store command refuse by name instead of silently reading `github`,
+naming the repair: `git add -f .agent-claim/board.toml` (issue #315). Under
 `github` (every repository today), items are GitHub issues, exactly as
 described throughout this document. Under `state-ref`, an item is instead a
 file `items/<id>.md` in the tree of `refs/aco/state` — its id the file name,
@@ -725,7 +730,7 @@ git remote add origin file:///srv/aco/repo.git
 git push origin main
 git remote set-head origin main
 printf 'storage = "state-ref"\n' > .agent-claim/board.toml
-git add .agent-claim && git commit -m "pin state-ref storage"
+git add -f .agent-claim/board.toml && git commit -m "pin state-ref storage"
 aco bootstrap
 ```
 
