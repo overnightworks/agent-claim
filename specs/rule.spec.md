@@ -2,10 +2,10 @@
 
 `aco rule ITEM --line N (--yes|--no|--later) [--note TEXT]`: moves one
 proposed `[[expectation]]` line to ruled, transcribing the operator's own
-word (`aco ask` proposes; this command decides). Its write, `rule_item`, is
-the one path both this CLI command and `board --serve`'s own `POST /rule`
-form call (issue #280); a refusal reads the identical sentence through
-either caller. This file owns the ruling's own refusals -- an already-ruled
+word (`aco ask` proposes; this command decides). This command and
+`board --serve`'s own `POST /rule` form (issue #280) share the one write
+path; a refusal reads the identical sentence through either caller. This
+file owns the ruling's own refusals -- an already-ruled
 line, an out-of-range one -- the `RULED` line and `--json` shape, and every
 refusal `aco ask` shares only by substituting `command` ("rule" where ask's
 own reads "ask"): a missing item, a pull-request target, a forge that
@@ -20,12 +20,12 @@ index `--line` names, the same index `aco ask`'s own `ASKED` line and
 | state \ trigger | `aco rule ITEM --line N OUTCOME` | `--json` | `--note TEXT` |
 |---|---|---|---|
 | a still-open line | RULE-01 | RULE-02 | RULE-03 |
-| that line already ruled | RULE-04 | RULE-04 | — |
-| `N` out of range | RULE-05 | RULE-05 | — |
-| this forge cannot write the body | RULE-06 | RULE-06 | — |
-| item does not exist | RULE-07 | RULE-07 | — |
-| item is a pull request | RULE-08 | RULE-08 | — |
-| item body malformed | ASK-05 (cited) | ASK-05 | — |
+| that line already ruled | RULE-04 | RULE-09 | — |
+| `N` out of range | RULE-05 | RULE-09 | — |
+| this forge cannot write the body | RULE-06 | RULE-09 | — |
+| item does not exist | RULE-07 | RULE-09 | — |
+| item is a pull request | RULE-08 | RULE-09 | — |
+| item body malformed | ASK-05 (cited) | RULE-09 | — |
 
 ## Ruling a line
 
@@ -43,15 +43,16 @@ the same sentence; RULE-07's sentence is identical for both commands.
 - [ ] [RULE-06] A forge whose `update_item_body` capability is not `READ_WRITE` refuses `this forge cannot update_item_body; rule by hand`, exit `2`, before any write.
 - [ ] [RULE-07] An item no reference resolves refuses `#<n> does not exist`, exit `2`, before any write.
 - [ ] [RULE-08] An item that is a pull request refuses `#<n> is a pull request, not an issue; rule needs an issue`, exit `2`, before any write.
+- [ ] [RULE-09] `--json` on a dispatched refusal (RULE-04..RULE-08, ASK-05) prints the `{"ok": false, "error": "<sentence>"}` envelope REL-24 owns, exit `2`.
 
 ## Never
 
 - `aco rule` never accepts two outcome flags, or none: `--yes`/`--no`/`--later` are one mutually exclusive, required group.
 - `aco rule` never changes a ruled line's own `ruling`: RULE-04 refuses before any write reaches it.
-- `aco rule` never rewrites a byte outside the ruled entry: the body's surrounding bytes stay exactly as written (`replace_agent_claim_block`).
+- `aco rule` never rewrites a byte outside the ruled entry: the body's surrounding bytes stay exactly as written.
 - The `RULED` line is always the bare `#<n>`, never the storage-aware `<label>` form `specs/landing-grammar.spec.md` defines for `aco next`/`release`'s own narrative lines.
 - `aco rule` reaches the same checkout-less refusal `specs/check.spec.md` owns (CHECK-10) before it ever resolves the forge or the item.
-- `board --serve`'s own `POST /rule` form is transport only: it calls this exact write, never a second one, so a line already ruled through the served board refuses the same RULE-04 sentence a CLI `aco rule` would (`tests/test_board_serve.py`).
+- `board --serve`'s own `POST /rule` form is transport only: it calls this exact write, never a second one, so a line already ruled through the served board refuses the same RULE-04 sentence a CLI `aco rule` would.
 
 ## Examples
 

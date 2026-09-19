@@ -64,9 +64,9 @@ is enough): <git detail>`.
 
 ## Never
 
-- `aco check` never writes: neither mode ever calls `update_item_body`, and the pull-request mode's own claims read is a pure fetch of the already-observed state ref.
+- `aco check` never writes: neither mode ever changes an item's body, and the pull-request mode's own claims read is a pure fetch of the already-observed state ref.
 - The issue mode of `check` never fetches the state ref: only the pull-request mode reads the live claims LAND-15/LAND-16 need.
-- Under `storage = "state-ref"`, `check <n>` never reaches the pull-request path: that adapter never reports a number as a landing, so every `<n>` resolves to ISSUE or MISSING.
+- Under `storage = "state-ref"`, `check <n>` never reaches the pull-request path: no number under that storage is ever reported as a landing, so every `<n>` resolves to ISSUE or MISSING.
 - `check`'s own subject line is always the bare `#<n>`, in every mode, never the storage-aware `<label>` form `specs/landing-grammar.spec.md` defines for `aco next`/`release`'s own narrative lines.
 - A refused classification, or a blocked/malformed/incomplete issue, is never exit `2`: only a refusal that never reaches the dispatch (CHECK-10, an unreachable forge) is.
 
@@ -75,19 +75,24 @@ is enough): <git detail>`.
 `Setup: bare-remote` is a fresh work repository whose `origin` is a local
 bare repository with `main` at one commit, a git identity, `origin/HEAD`,
 and `ACO_AGENT` set to `Ada`; `<owner>/<repo>` is the runner's own
-repository path. A session reading a pull request or an issue also names a
+repository path. Every session that reaches this command's own dispatch
+also needs `.agent-claim/board.toml` tracked (PIN-01), since that read
+comes before pull-request or issue mode ever run; the checkout-less
+session (E-CHECK-06) is the one exception, since it never reaches the
+dispatch at all. A session reading a pull request or an issue also names a
 fixed, deterministic fake `gh` as a setup precondition (the shape
 `specs/landing-grammar.spec.md` already uses); the checkout-less session
 needs neither a fake `gh` nor a checkout at all.
 
-### E-CHECK-01 — a pull request accepted, text and `--json`
+### E-CHECK-01 — `--json` on an accepted pull request
 
-Setup: bare-remote, fake `gh`, pull request `#57` by `Ada`, body `Work-Item: #42\n\nCloses #42`, an active claim on issue `#42` matching the pull request's head branch
+The text form's own literal is LAND-04's own fact, already driven by
+`specs/landing-grammar.spec.md`'s own E-LAND-02; this session drives only
+CHECK-01, this file's own `--json` envelope.
+
+Setup: bare-remote, `.agent-claim/board.toml` tracked, fake `gh`, pull request `#57` by `Ada`, body `Work-Item: #42\n\nCloses #42`, an active claim on issue `#42` matching the pull request's head branch
 
 ```console
-$ aco check 57
-PR #57 by Ada declares Work-Item: <owner>/<repo>#42
-exit 0
 $ aco check 57 --json
 {"ok": true, "kind": "pull_request", "number": 57}
 exit 0
@@ -95,7 +100,7 @@ exit 0
 
 ### E-CHECK-02 — a number in neither space
 
-Setup: bare-remote, fake `gh`, no issue or pull request `#81` exists in this repository
+Setup: bare-remote, `.agent-claim/board.toml` tracked, fake `gh`, no issue or pull request `#81` exists in this repository
 
 ```console
 $ aco check 81
@@ -108,7 +113,7 @@ exit 1
 
 ### E-CHECK-03 — a sound, unblocked issue
 
-Setup: bare-remote, fake `gh`, issue `#81` open, body a complete `agent-claim` block, no open `blocked_by` dependencies
+Setup: bare-remote, `.agent-claim/board.toml` tracked, fake `gh`, issue `#81` open, body a complete `agent-claim` block, no open `blocked_by` dependencies
 
 ```console
 $ aco check 81
@@ -118,7 +123,10 @@ exit 0
 
 ### E-CHECK-04 — a malformed issue body
 
-Setup: bare-remote, fake `gh`, issue `#81` open, body carrying no `agent-claim` block
+The defect text itself is BODY-01's own fact; this session drives only
+CHECK-06, this file's own `ISSUE #<n> ` wrapping around it.
+
+Setup: bare-remote, `.agent-claim/board.toml` tracked, fake `gh`, issue `#81` open, BODY-01's own defect (no `agent-claim` fence)
 
 ```console
 $ aco check 81
@@ -128,7 +136,7 @@ exit 1
 
 ### E-CHECK-05 — an issue blocked by a local and a foreign item
 
-Setup: bare-remote, fake `gh`, issue `#81` open with a complete body, open `blocked_by` dependencies on `#7` (same repository) and `other/repo#9`
+Setup: bare-remote, `.agent-claim/board.toml` tracked, fake `gh`, issue `#81` open with a complete body, open `blocked_by` dependencies on `#7` (same repository) and `other/repo#9`
 
 ```console
 $ aco check 81
