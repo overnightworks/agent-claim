@@ -5,6 +5,17 @@ claim state per repository: a compare-and-swap git ref, `refs/aco/state`, on
 the repository's own canonical remote. It is provider-neutral: Codex, Claude,
 Grok, people, and future agents use the same contract. Its command is `aco`.
 
+## What belongs in aco
+
+A capability belongs in `aco` only if it clears three tests (ruling
+19.09.2026): it helps a coding agent coordinate in a shared repository; it
+holds what an agent would forget or cannot know alone -- who holds what, what
+a landing freed, what's disjoint; and no native tool does it better -- git,
+`gh`, and GitLab own commits, branches, pull requests, and issue text. What
+fails is ballast: unbuilt, or removed once it fails. aco is meant for every
+repository: GitHub today, forges next. Workspace-recovery (`register`, `run`,
+`login`) stays: it restores the operator's project heads after a restart.
+
 ## Install and maintain
 
 ```bash
