@@ -500,6 +500,39 @@ legal value, `"block"` (below): an absent key means the same thing, and
 `"prose"` is refused by name — `board configuration <path> pins body_contract
 'prose': prose bodies are no longer supported`.
 
+### Estimates from measured lanes
+
+`aco board` (text, `--json`, and `--html`/`--serve`) also shows an estimate
+next to every open item that carries a top-level `size = "S"|"M"|"L"`
+(issue #357) — never an estimate for an unsized item, and never one derived
+from a claim's own scope or path count. The estimate comes from
+`store.claim_lifecycle`: one `git log --first-parent` walk of
+`refs/aco/state`'s own claim/rescope/release commits, read into each claim's
+`claimed_at`, `released_at` (`None` while still open — counted as an
+unfinished lane, never measured), and its rescope count. A claim's own item
+number matches it against that item's *current* size (a closed item's
+history stays unjoined, since a board build never re-fetches a closed
+body); `metrics.measure` (issue #308) then groups every completed claim's
+wall-clock duration (`released_at - claimed_at`, several claims per item
+summed) by size class and reports each class's median and 80th-percentile
+(nearest-rank) hours, plus `n` and whether `n` is below 3 ("weak" — the
+number is never withheld, only marked).
+
+The board's own `ESTIMATE` cell is `~4h (M, n=5)` for a class with three or
+more measured lanes, `schwach` for a sized item whose class has fewer than
+three (including zero), and `keine Größe` for an item with no `size` at
+all. A `Messungen (Stand <today>, seit <first event>)` section follows the
+table, one line per measured class (`n`, median, p80, weak, its own
+earliest/latest event date) plus, when any claim is still open, `<n> Lanes
+ohne Ende`; with nothing measured at all it reads `keine Messungen seit
+<today>` instead, and no item shows an estimate. `--json` carries the same
+two facts as `estimate` per item (`item`, `size`, `median_hours`, `n`,
+`weak`) and a top-level `measurements` object (`classes`, `unfinished`,
+`since`, `as_of`); `--html`/`--serve` show the identical numbers as a
+"Messungen" section and the estimate beside each item's own title. No new
+command reads or writes this: it is `board`'s own always-on projection,
+computed the same way regardless of storage pin.
+
 ### HTML board page
 
 `aco board --html [PATH]` (issue #276, parent #234) writes a static HTML
@@ -607,7 +640,11 @@ container skeleton instead) plus a `[record]` naming its kind and, with
 (`--json`: `{"item": "aco-xxxxxx", "number": n}`). `--scope PATH` (repeatable,
 issue #337) writes the block's own top-level `scope = [...]` -- the same
 grammar `claim --scope` validates against, canonicalized the same way -- so
-`claim <item>` can derive its scope straight from a freshly created item. It
+`claim <item>` can derive its scope straight from a freshly created item.
+`--size S|M|L` (issue #357) writes the block's own top-level `size = "…"` —
+a plain block field, never nested under `[record]` (that table is a
+`state-ref`-only extension, so a GitHub-stored item carries `size` the same
+way); absent by default, meaning no estimate. It
 refuses under `storage = "github"` by name ("items live on
 the forge; open the issue there") — aco is pulled from the forge, never
 governs it, so it never opens a GitHub issue itself. `--origin FORGE#N`
@@ -637,6 +674,14 @@ read" sentence `cut`/`rule`/`ask` already use. Prints one line, `EDITED
 aco-xxxxxx` (`--json`: `{"item", "number", "oid"}`). It refuses under `storage =
 "github"` by name ("forge issues are edited on the forge; aco never governs
 them") — a forge issue is edited on the forge, never through aco.
+
+`aco item edit ITEM --size S|M|L` (issue #357) is the one exception: it
+writes only the block's own top-level `size`, reads no stdin, and works
+under both storages — a `github`-stored item too — over the generic
+`ForgeWriter.update_item_body` port every storage already implements.
+Prints `EDITED #<n> size=<S|M|L>` (`--json`: `{"item", "size"}`). An invalid
+value (anything but `S`, `M`, or `L`) is refused by argparse before any
+write.
 
 `aco item close ITEM [--json]` closes a state-ref item: `state` moves to
 `"closed"` and `closed_at`/`updated_at` move to now, the item file itself and
@@ -947,6 +992,8 @@ frozen_until = { trigger = "named trigger", ruled_on = 2026-09-06 }
 
 scope = ["src/widget.py", "tests/test_widget.py"]
 
+size = "M"
+
 [[expectation]]
 text = "An operator sentence"
 default = "later"
@@ -965,7 +1012,10 @@ scope = ["src/agent_coordination/board.py"]
 
 `version`, `now`, `next`, and `done_when` are required; `now`/`next`/`done_when`
 may be the empty string (an unfilled skeleton — incomplete, but still a valid
-block). `frozen_until`, `scope`, `expectation`, and `slice` are optional; an
+block). `frozen_until`, `scope`, `size`, `expectation`, and `slice` are
+optional; `size`, when present, must be `"S"`, `"M"`, or `"L"` (issue #357,
+[Estimates from measured lanes](#estimates-from-measured-lanes) above) — any
+other value is `body malformed: size: size must be S, M, or L`. An
 explicit `slice = []` is a table intentionally left present but empty (it
 still counts as "has a table" for `cut --row`). Each `[[expectation]]` is
 either *proposed* (`default = "yes" | "no" | "later"`) or *ruled* (`ruling = "yes" | "no" | "later"`
