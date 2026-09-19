@@ -4225,6 +4225,9 @@ def _located_block_or_refuse(
     return board.locate_agent_claim_block(body)
 
 
+CUT_ROW_SCOPE_ALREADY_SET = "slice {index} already names a scope; edit the container instead"
+
+
 def _cut_row_scope(
     link: board.SliceRow | None, requested: tuple[str, ...] | None
 ) -> tuple[str, ...] | None:
@@ -4235,9 +4238,7 @@ def _cut_row_scope(
     linked row at all, `--scope` becomes the child's scope directly."""
     if link is not None and link.scope is not None:
         if requested is not None:
-            raise protocol.ClaimUnavailableError(
-                f"slice {link.index} already names a scope; edit the container instead"
-            )
+            raise protocol.ClaimUnavailableError(CUT_ROW_SCOPE_ALREADY_SET.format(index=link.index))
         return link.scope
     return requested
 

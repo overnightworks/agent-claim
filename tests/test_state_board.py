@@ -1672,7 +1672,7 @@ class TestCliStateRefForge:
                 "Slice C",
                 2,
                 None,
-                "slice 1 already names a scope; edit the container instead",
+                issue_claim.CUT_ROW_SCOPE_ALREADY_SET.format(index=1),
                 id="refuses-a-row-that-already-names-one",
             ),
             pytest.param(
