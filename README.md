@@ -269,11 +269,11 @@ own repository never enter into it.
 issue #298 (delete the remote ref, delete the local one, delete every
 worktree's `.git/aco/last-oid` stamp, `bootstrap`) with one command that
 cannot forget a step. Five steps, one printed line each, in this fixed order:
-export `refs/aco/state` as a `git bundle`; delete the remote ref with a
-`--force-with-lease` matching the tip reset just read; delete the local ref,
-only if one happens to exist; clear the lineage stamp and fetch anchor in
-every worktree `git worktree list` reports for this repository; bootstrap a
-fresh empty state. Without `--confirm` it prints the same five planned steps
+export the tip reset just read as a `git bundle`; delete the remote ref with
+a `--force-with-lease` matching that same tip; delete the local ref, only if
+one happens to exist; clear the lineage stamp and fetch anchor in every
+worktree `git worktree list` reports for this repository; bootstrap a fresh
+empty state. Without `--confirm` it prints the same five planned steps
 prefixed `would:` and changes nothing.
 
 **Operator ruling (15.09.2026, 16.09.2026)**: the export is mandatory before
@@ -285,11 +285,12 @@ reset over live work is data loss with no owner.
 The bundle is written to `--export-dir` (default: the repository's own parent
 directory) as `aco-state-<repo>-<date>-<short-sha>.bundle`, claimed atomically
 so a concurrent export can never truncate one another's file, and refuses to
-overwrite a same-named file left by an earlier export. Its printed line names
-the exact restore command -- `git fetch <bundle> refs/aco/state:refs/aco/state`,
-run against the remote that is to carry the restored ref -- because production
-never leaves `refs/aco/state` pointed anywhere locally: the bundle points it
-there only for the moment of export, then removes it again.
+overwrite a same-named file left by an earlier export. It is built from a
+private, per-worktree ref, never the shared `refs/aco/state` -- exporting
+never mutates, reads a race on, or leaves behind anything another linked
+worktree's own reset could see. Its printed line names the exact restore
+command, `git fetch <bundle> <the bundle's own ref>:refs/aco/state`, run
+against the remote that is to carry the restored ref.
 
 Order and failure behaviour: export, then the remote delete, then the local
 delete, then the stamps and anchors, then bootstrap -- each step's line
@@ -300,8 +301,10 @@ concluding anything: a lost response after the server actually applied the
 deletion is treated as done and reset continues; a ref confirmed still
 present -- rejected outright, or the lease no longer matching because the ref
 moved between reset's own read and its delete -- leaves the local ref exactly
-as it was and names the manual `git push --force-with-lease` that repairs it
-against the ref's *current* tip; an unreachable remote stops before any
+as it was and names re-running `aco reset --confirm` itself as the only
+repair, never a manual `git push --force-with-lease`: a tip the remote moved
+to has been through neither this reset's live-claim check nor its export, so
+only reset re-running both is safe; an unreachable remote stops before any
 delete runs and says the outcome is unknown rather than guessing. Whatever
 export ran stays on disk either way. `reset` is forge-free like `bootstrap`:
 `--repo` is meaningless for it.

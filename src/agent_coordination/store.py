@@ -127,12 +127,27 @@ _LINEAGE_STAMP_FILENAME = "last-oid"
 # across linked worktrees), the same worktree-private guarantee
 # `_lineage_stamp_path` already relies on, so anchoring here never touches
 # the shared local namespace `_fetch_to_fetch_head`'s own docstring
-# reserves for `STATE_REF` alone. Private (19.09.2026 gate follow-up):
-# `reset`'s own bundle export no longer reads it -- it points a transient
-# local `STATE_REF` at the export tip instead, so the bundle carries the
-# same logical ref name the remote uses -- leaving `fetch_state`'s own
-# anchoring the sole production writer and reader of this name.
+# reserves for `STATE_REF` alone. `fetch_state`'s own anchoring is the sole
+# production writer and reader of this name -- `export_state_bundle` below
+# has its own, separate ref in the same private namespace
+# (`EXPORT_BUNDLE_REF`), never this one.
 _FETCH_ANCHOR_REF = "refs/worktree/aco/state"
+
+# `export_state_bundle` points this at the leased tip and bundles it
+# (issue #298, 19.09.2026 REVISE findings 1+2): the previous implementation
+# pointed the *shared* `STATE_REF` at `tip` to give the bundle a name, but
+# that ref is shared across every linked worktree of this repository --
+# a concurrent reset elsewhere could repoint or delete it between this
+# write and the lease-guarded remote delete that follows, and a failed
+# export left it mutated with no restore of its previous value. This name
+# lives in the same worktree-private `refs/worktree/*` namespace
+# `_FETCH_ANCHOR_REF` already relies on, so no linked worktree ever
+# observes, races, or clobbers it, and nothing shared is written by an
+# export at all. `export_state_bundle` deletes it again before returning or
+# raising, in every case, so restoring a bundle reads this name back on the
+# bundle side of the fetch, not `STATE_REF`'s (`_reset_restore_command` in
+# `cli.py` builds the exact command).
+EXPORT_BUNDLE_REF = "refs/worktree/aco/reset-export"
 
 
 class PushTransport(Protocol):
@@ -1219,8 +1234,9 @@ def local_state_ref_exists(worktree: Path) -> bool:
     """Whether *this* worktree happens to hold a local `STATE_REF` (issue
     #298): production never creates one on an ordinary read
     (`_fetch_to_fetch_head` lands fetched objects in `FETCH_HEAD` alone),
-    but `export_state_bundle` below points one at the exported tip to give
-    the bundle a restorable name, and a foreign tool might leave one too --
+    nor does `export_state_bundle` below, which bundles its own private
+    `EXPORT_BUNDLE_REF` instead of `STATE_REF` (19.09.2026 REVISE findings
+    1+2) -- but a foreign tool might still leave a local `STATE_REF`, and
     `delete_state_ref`, the reset step right after export, deletes it only
     when this is true.
     """
@@ -1239,38 +1255,27 @@ def _export_failure(tip: ObjectId, destination: Path, detail: str) -> ClaimError
     return ClaimError(f"cannot export {STATE_REF} at {tip} to {destination}: {detail}")
 
 
-def export_state_bundle(*, worktree: Path, tip: ObjectId, destination: Path) -> Path:
-    """Bundle `STATE_REF` at `tip` into `destination` (issue #298 reset,
-    step 1 of 5): the sole mandatory-unless-`--no-export` write a reset
-    performs before anything is deleted.
+def _write_bundle_to_descriptor(
+    *, worktree: Path, tip: ObjectId, destination: Path, descriptor: int
+) -> None:
+    """Point `EXPORT_BUNDLE_REF` at `tip` and stream `git bundle create` for
+    it into the already-claimed file descriptor `descriptor`: the git
+    plumbing half of `export_state_bundle`'s write, kept separate so that
+    function's own body stays about claiming and publishing a file, not
+    about running git. Pointing `EXPORT_BUNDLE_REF` at `tip` is also this
+    step's own validation that `tip`'s objects actually reached this
+    worktree: `update-ref` itself refuses a `tip` git has never seen.
 
-    Claims `destination` atomically before a single byte is written to it
-    (19.09.2026 gate finding 3): `O_CREAT | O_EXCL` either wins the
-    filename outright or refuses loud on one a concurrent export already
-    created, so no writer can ever truncate another's bundle -- the
-    check-then-act window a plain `Path.exists()` guard left open is gone.
-
-    Points local `STATE_REF` at `tip` before bundling, so the bundle
-    carries the same logical ref the remote uses -- restoring reads it back
-    with `git fetch <bundle> refs/aco/state:refs/aco/state`, never a
-    per-worktree implementation ref. This write is also this function's own
-    validation that `tip`'s objects actually reached this worktree:
-    `update-ref` itself refuses a `tip` git has never seen. The ref stays
-    afterward, exactly as `local_state_ref_exists` documents -- the reset
-    step right after this one, `delete_state_ref`, is what removes it.
+    `descriptor` is always closed by the time this returns or raises --
+    successfully, via the `with os.fdopen(...)` below, or, on any earlier
+    failure, by the `except` clause here.
     """
     try:
-        descriptor = os.open(str(destination), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-    except FileExistsError:
-        raise ClaimError(f"{destination} already exists; refusing to overwrite an export") from None
-    except OSError as error:
-        raise _export_failure(tip, destination, str(error)) from error
-    try:
-        update = _run_git(worktree, ["update-ref", STATE_REF, str(tip)])
+        update = _run_git(worktree, ["update-ref", EXPORT_BUNDLE_REF, str(tip)])
         if update.exit_status != 0:
             detail = update.stderr.decode().strip() or _UNKNOWN_GIT_FAILURE
             raise _export_failure(tip, destination, detail)
-        result = _run_git(worktree, ["bundle", "create", "-", STATE_REF])
+        result = _run_git(worktree, ["bundle", "create", "-", EXPORT_BUNDLE_REF])
         if result.exit_status != 0:
             detail = (
                 result.stderr.decode().strip()
@@ -1283,9 +1288,86 @@ def export_state_bundle(*, worktree: Path, tip: ObjectId, destination: Path) -> 
     except BaseException:
         with suppress(OSError):
             os.close(descriptor)
-        with suppress(OSError):
-            destination.unlink()
         raise
+
+
+def export_state_bundle(*, worktree: Path, tip: ObjectId, destination: Path) -> Path:
+    """Bundle `tip` into `destination` (issue #298 reset, step 1 of 5): the
+    sole mandatory-unless-`--no-export` write a reset performs before
+    anything is deleted.
+
+    Bundles the private `EXPORT_BUNDLE_REF` (its own module comment has the
+    full rationale), never the shared `STATE_REF` (19.09.2026 REVISE
+    findings 1+2): nothing this function does is ever visible to another
+    linked worktree's concurrent reset, and the bundled tip is always
+    exactly the `tip` the caller leased -- never whatever a shared ref
+    happens to hold when the subprocess actually runs. The temporary ref is
+    deleted again before this function returns or raises, in every case;
+    restoring the bundle therefore reads `EXPORT_BUNDLE_REF`'s name on the
+    bundle side of the fetch, not `STATE_REF`'s (`git bundle list-heads`
+    names it, `_reset_restore_command` in `cli.py` builds the command).
+
+    Publishes atomically (19.09.2026 REVISE finding 4): the bundle is
+    written in full to a unique temporary file next to `destination` first
+    (`tempfile.mkstemp`, the same idiom `_write_lineage_stamp` uses), then
+    linked into place with `os.link`, whose no-clobber semantics are this
+    function's `destination`-already-exists check -- a reader can never
+    observe a half-written or empty `destination`, because nothing is ever
+    written at that path directly. Failing to remove the now-redundant
+    temporary file after a successful link raises loud, naming the path,
+    rather than passing silently -- the previous version suppressed exactly
+    this failure after claiming `destination` itself up front, which could
+    leave an empty file there with no error surfaced for it.
+    """
+    try:
+        descriptor, temp_name = tempfile.mkstemp(
+            dir=str(destination.parent), prefix=f".{destination.name}."
+        )
+    except OSError as error:
+        raise _export_failure(tip, destination, str(error)) from error
+    temporary = Path(temp_name)
+
+    write_error: BaseException | None = None
+    try:
+        _write_bundle_to_descriptor(
+            worktree=worktree, tip=tip, destination=destination, descriptor=descriptor
+        )
+    except BaseException as error:  # re-raised below, once cleanup has run -- never swallowed
+        write_error = error
+
+    cleanup = _run_git(worktree, ["update-ref", "-d", EXPORT_BUNDLE_REF])
+    if cleanup.exit_status != 0:
+        detail = cleanup.stderr.decode().strip() or _UNKNOWN_GIT_FAILURE
+        cleanup_error = ClaimError(
+            f"cannot clear temporary {EXPORT_BUNDLE_REF} after export: {detail}"
+        )
+        with suppress(OSError):
+            temporary.unlink()
+        raise cleanup_error from write_error
+
+    if write_error is not None:
+        with suppress(OSError):
+            temporary.unlink()
+        raise write_error
+
+    try:
+        os.link(temporary, destination)
+    except FileExistsError:
+        temporary.unlink()
+        raise ClaimError(f"{destination} already exists; refusing to overwrite an export") from None
+    except OSError as error:
+        with suppress(OSError):
+            temporary.unlink()
+        raise _export_failure(tip, destination, str(error)) from error
+
+    try:
+        temporary.unlink()
+    except OSError as error:
+        raise ClaimError(
+            f"exported {STATE_REF} at {tip} to {destination} but could not remove the "
+            f"now-redundant temporary file {temporary}: {error}"
+        ) from error
+
     return destination
 
 
@@ -1293,11 +1375,19 @@ def _repair_after_failed_remote_delete(
     worktree: Path, remote: str, expected_remote_tip: ObjectId, push_detail: str
 ) -> None:
     """A nonzero `--force-with-lease` push does not by itself say what
-    happened on `remote` (issue #298, 19.09.2026 gate finding 5): the
-    server can accept the deletion and still have the push report failure
-    afterward -- a lost response, not a rejection. Re-probes with
-    `ls-remote` and reports exactly what it finds instead of assuming the
-    worst.
+    happened on `remote`: the server can accept the deletion and still have
+    the push report failure afterward -- a lost response, not a rejection.
+    Re-probes with `ls-remote` and reports exactly what it finds instead of
+    assuming the worst.
+
+    Never recommends a manual `--force-with-lease` repair, in either
+    outcome (issue #298, 19.09.2026 REVISE finding 3): a re-probed tip that
+    differs from `expected_remote_tip` means the remote moved since this
+    reset last observed it, and that replacement tip has been through
+    neither of this reset's own safeguards -- it was never checked against
+    a live claim, nor exported. The only repair this function ever names is
+    re-running `aco reset --confirm` itself, which repeats both checks
+    against whatever it finds.
     """
     try:
         current = _ls_remote_state(worktree, remote)
@@ -1309,11 +1399,17 @@ def _repair_after_failed_remote_delete(
         ) from error
     if current is None:
         return  # deleted anyway: the server applied it before the push reported failure
+    if current != expected_remote_tip:
+        raise ClaimError(
+            f"cannot delete {STATE_REF} on {remote} (lease {expected_remote_tip}): {push_detail}; "
+            f"the remote moved to {current} -- re-run `aco reset --confirm`, which "
+            f"re-observes {remote}, re-validates against every live claim, and re-exports "
+            f"before deleting again; a manual lease against {current} would skip both checks"
+        )
     raise ClaimError(
         f"cannot delete {STATE_REF} on {remote} (lease {expected_remote_tip}): {push_detail}; "
-        f"{STATE_REF} is still present at {current} -- retry `aco reset --confirm` once the "
-        f"cause is fixed, or delete it by hand with `git push {remote} "
-        f"--force-with-lease={STATE_REF}:{current} :{STATE_REF}`"
+        f"{STATE_REF} is still present at {current}, unchanged from the lease -- re-run "
+        f"`aco reset --confirm` once the cause is fixed"
     )
 
 

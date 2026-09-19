@@ -4242,7 +4242,13 @@ def _reset_bundle_name(repository: str, today: date, tip: protocol.ObjectId) -> 
 
 
 def _reset_restore_command(destination: Path) -> str:
-    return f"git fetch {destination} {store.STATE_REF}:{store.STATE_REF}"
+    """`export_state_bundle` bundles `store.EXPORT_BUNDLE_REF`, never the
+    shared `store.STATE_REF` (issue #298, 19.09.2026 REVISE findings 1+2)
+    -- the bundle's own head therefore carries that name (`git bundle
+    list-heads` shows it), and the fetch renames it to `STATE_REF` on the
+    way in.
+    """
+    return f"git fetch {destination} {store.EXPORT_BUNDLE_REF}:{store.STATE_REF}"
 
 
 @dataclass(frozen=True)

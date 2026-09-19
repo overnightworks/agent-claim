@@ -10880,7 +10880,7 @@ def test_cli_reset_dry_run_prints_five_would_lines_and_changes_nothing(
     bundle_path = export_dir / f"aco-state-repo-2026-08-21-{tip[:12]}.bundle"
     assert capsys.readouterr().out.splitlines() == [
         f"would: export {store.STATE_REF} at {tip} to {bundle_path} "
-        f"(restore with: git fetch {bundle_path} {store.STATE_REF}:{store.STATE_REF})",
+        f"(restore with: git fetch {bundle_path} {store.EXPORT_BUNDLE_REF}:{store.STATE_REF})",
         f"would: delete {store.STATE_REF} on origin (lease {tip})",
         f"would: no local {store.STATE_REF} to delete",
         "would: clear lineage stamps and fetch anchors in 1 worktree",
@@ -10915,17 +10915,20 @@ def test_cli_reset_confirm_exports_a_verifiable_bundle_and_bootstraps_a_fresh_re
     bundle_path = export_dir / f"aco-state-repo-2026-08-21-{tip[:12]}.bundle"
     assert lines[0] == (
         f"exported {store.STATE_REF} at {tip} to {bundle_path} "
-        f"(restore with: git fetch {bundle_path} {store.STATE_REF}:{store.STATE_REF})"
+        f"(restore with: git fetch {bundle_path} {store.EXPORT_BUNDLE_REF}:{store.STATE_REF})"
     )
     assert lines[1] == f"deleted {store.STATE_REF} on origin (lease {tip})"
-    assert lines[2] == f"deleted local {store.STATE_REF}"
+    # `export_state_bundle` no longer touches the shared `STATE_REF` at all
+    # (19.09.2026 REVISE findings 1+2), so there is never a local one left
+    # for this step to delete.
+    assert lines[2] == f"no local {store.STATE_REF} to delete"
     assert lines[3] == "cleared lineage stamps and fetch anchors in 1 worktree"
     assert lines[4].startswith("bootstrapped a fresh empty state at ")
     fresh_tip = lines[4].removeprefix("bootstrapped a fresh empty state at ")
     assert fresh_tip != tip
     _real_git(repository, "bundle", "verify", str(bundle_path))
     heads = _real_git(repository, "bundle", "list-heads", str(bundle_path)).stdout
-    assert heads.strip() == f"{tip} {store.STATE_REF}"
+    assert heads.strip() == f"{tip} {store.EXPORT_BUNDLE_REF}"
     probe = _real_git(repository, "ls-remote", "--exit-code", str(bare_remote), store.STATE_REF)
     assert probe.stdout.split("\t")[0] == fresh_tip
     assert not store.local_state_ref_exists(repository)
@@ -11050,7 +11053,7 @@ def test_cli_reset_export_failure_leaves_the_ref_untouched(
     assert _lineage_observation(repository) == lineage_before
 
 
-def test_cli_reset_a_stale_lease_leaves_the_bundle_and_local_ref_intact_and_names_the_repair(
+def test_cli_reset_a_moved_remote_tip_leaves_the_bundle_intact_and_names_the_repair(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
     _use_real_store(monkeypatch)
@@ -11078,17 +11081,21 @@ def test_cli_reset_a_stale_lease_leaves_the_bundle_and_local_ref_intact_and_name
     err = capsys.readouterr().err
     assert "cannot delete" in err
     assert "lease" in err
-    # The repair line names a retry against the ref's *current* tip -- the
-    # one re-probed after the failed push, never the stale tip that push
-    # itself carried, which would only be rejected again (finding 5).
-    assert f"still present at {moved_tip}" in err
-    assert f"git push origin --force-with-lease={store.STATE_REF}:{moved_tip}" in err
+    # The repair line names the remote's *current* tip -- the one
+    # re-probed after the failed push, never the stale tip that push
+    # itself carried -- but never a manual lease command against it
+    # (19.09.2026 REVISE finding 3): that tip was never validated against a
+    # live claim, nor exported, so the only repair named is re-running
+    # `aco reset --confirm` itself, which repeats both checks.
+    assert f"the remote moved to {moved_tip}" in err
+    assert "re-run `aco reset --confirm`" in err
+    assert "--force-with-lease" not in err
     bundle_path = next(export_dir.iterdir())
     _real_git(repository, "bundle", "verify", str(bundle_path))
-    # The remote-deletion failure raises before `delete_state_ref` ever
-    # reaches its own local cleanup, so the local `STATE_REF` `export`
-    # pointed at the bundled tip is genuinely left intact, not removed.
-    assert store.local_state_ref_exists(repository)
+    # `export_state_bundle` never touches the shared `STATE_REF` at all
+    # (19.09.2026 REVISE findings 1+2), so the remote-deletion failure
+    # leaves nothing local to have been left behind either.
+    assert not store.local_state_ref_exists(repository)
     probe = _real_git(repository, "ls-remote", "--exit-code", str(bare_remote), store.STATE_REF)
     assert probe.stdout.split("\t")[0] != tip
 
@@ -11136,12 +11143,15 @@ def test_cli_reset_restore_from_the_bundle_into_a_fresh_repository_recovers_stat
 
     restored_remote = tmp_path / "restored-remote.git"
     _real_git(tmp_path, "init", "--bare", "-q", "-b", "main", str(restored_remote))
+    # The bundle carries `EXPORT_BUNDLE_REF`'s name, not `STATE_REF`'s
+    # (19.09.2026 REVISE findings 1+2) -- this is the exact command
+    # `_reset_restore_command` prints, proven end to end here.
     _real_git(
         restored_remote,
         "fetch",
         "-q",
         str(bundle_path),
-        f"{store.STATE_REF}:{store.STATE_REF}",
+        f"{store.EXPORT_BUNDLE_REF}:{store.STATE_REF}",
     )
     fresh_repository = tmp_path / "fresh"
     fresh_repository.mkdir()

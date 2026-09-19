@@ -3177,11 +3177,50 @@ def test_export_state_bundle_writes_a_bundle_git_bundle_verify_accepts(
     assert returned == destination
     _git("bundle", "verify", str(destination), cwd=worktree)
     heads = _git("bundle", "list-heads", str(destination), cwd=worktree).stdout
-    assert heads.strip() == f"{tip} {store.STATE_REF}"
-    # `export_state_bundle` points local `STATE_REF` at `tip` and leaves it
-    # there -- `delete_state_ref`, the reset step right after export, is
-    # what removes it (`local_state_ref_exists`'s own contract).
-    assert store.local_state_ref_exists(worktree)
+    assert heads.strip() == f"{tip} {store.EXPORT_BUNDLE_REF}"
+    # Bundles its own private ref, never the shared `STATE_REF` (19.09.2026
+    # REVISE findings 1+2): nothing local or shared survives an export.
+    assert not store.local_state_ref_exists(worktree)
+    assert (
+        store._run_git(
+            worktree, ["show-ref", "--verify", "--quiet", store.EXPORT_BUNDLE_REF]
+        ).exit_status
+        != 0
+    )
+    assert not list(destination.parent.glob(f".{destination.name}.*"))
+
+
+def test_export_state_bundle_never_touches_the_shared_state_ref(
+    bare_remote: Path, worktree: Path, tmp_path: Path
+) -> None:
+    """The previous implementation pointed the shared `STATE_REF` at `tip`
+    to give the bundle a name (issue #298, 19.09.2026 REVISE findings
+    1+2): `refs/aco/state` is visible from every linked worktree of a
+    repository, so a concurrent reset elsewhere could repoint or delete it
+    between that write and the lease-guarded remote delete that follows --
+    racing the bundle onto whatever tip it found rather than the one the
+    caller leased -- and a failed export left it mutated with no restore of
+    its previous value. `STATE_REF` set to a tip other than the one being
+    exported, right before the call, proves both facts at once: it must
+    survive byte-for-byte, and the bundle must still carry exactly the
+    leased `tip`, regardless."""
+    tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    store.fetch_state(worktree=worktree, remote=str(bare_remote))
+    foreign_tip = _push_custom_tree(
+        bare_remote,
+        worktree,
+        parent=tip,
+        files={store.SCHEMA_TOML_FILENAME: protocol.serialize_empty_schema_toml().encode()},
+    )
+    _git("update-ref", store.STATE_REF, foreign_tip, cwd=worktree)
+    destination = tmp_path / "export" / "state.bundle"
+    destination.parent.mkdir()
+
+    store.export_state_bundle(worktree=worktree, tip=tip, destination=destination)
+
+    assert _git("rev-parse", store.STATE_REF, cwd=worktree).stdout.strip() == foreign_tip
+    heads = _git("bundle", "list-heads", str(destination), cwd=worktree).stdout
+    assert heads.strip() == f"{tip} {store.EXPORT_BUNDLE_REF}"
 
 
 def test_export_state_bundle_refuses_to_overwrite_an_existing_destination(
@@ -3195,6 +3234,9 @@ def test_export_state_bundle_refuses_to_overwrite_an_existing_destination(
         store.export_state_bundle(worktree=worktree, tip=tip, destination=destination)
 
     assert destination.read_bytes() == b"an earlier export"
+    # The temporary file the bundle was actually written to (19.09.2026
+    # REVISE finding 4) must not survive a refused publish either.
+    assert not list(destination.parent.glob(f".{destination.name}.*"))
 
 
 def test_export_state_bundle_fails_loud_on_an_unwritable_destination_directory(
@@ -3218,10 +3260,12 @@ def test_export_state_bundle_fails_loud_on_an_unwritable_destination_directory(
 def test_export_state_bundle_fails_loud_when_git_bundle_create_itself_fails(
     monkeypatch: pytest.MonkeyPatch, bare_remote: Path, worktree: Path, tmp_path: Path
 ) -> None:
-    """The subprocess step between the atomically claimed file and the
-    write -- `git bundle create - STATE_REF` -- can fail on its own even
-    though the preceding `update-ref` already proved `tip` reachable; the
-    claimed file must still be removed rather than left behind empty."""
+    """The subprocess step between the claimed temporary file and its
+    publish -- `git bundle create - EXPORT_BUNDLE_REF` -- can fail on its
+    own even though the preceding `update-ref` already proved `tip`
+    reachable; the claimed temporary file must be removed rather than left
+    behind empty, and `destination` itself must never come to exist at all
+    (19.09.2026 REVISE finding 4)."""
     tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
     store.fetch_state(worktree=worktree, remote=str(bare_remote))
     destination = tmp_path / "state.bundle"
@@ -3240,15 +3284,52 @@ def test_export_state_bundle_fails_loud_when_git_bundle_create_itself_fails(
         store.export_state_bundle(worktree=worktree, tip=tip, destination=destination)
 
     assert not destination.exists()
+    assert not list(destination.parent.glob(f".{destination.name}.*"))
+
+
+def test_export_state_bundle_reports_a_failed_temporary_cleanup_after_a_successful_publish(
+    monkeypatch: pytest.MonkeyPatch, bare_remote: Path, worktree: Path, tmp_path: Path
+) -> None:
+    """The previous implementation claimed `destination` itself up front
+    and suppressed a failure to remove it again after the bundle-create
+    subprocess failed, which could leave an empty file there with no error
+    surfaced for that specific failure (19.09.2026 REVISE finding 4). The
+    redesign never writes `destination` directly -- it publishes a
+    completed temporary file into place with `os.link` -- so the
+    equivalent failure is now a *successful* publish whose now-redundant
+    temporary copy cannot be removed; that must raise loud, naming the
+    path, rather than pass silently, while the publish itself stands."""
+    tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    store.fetch_state(worktree=worktree, remote=str(bare_remote))
+    destination = tmp_path / "export" / "state.bundle"
+    destination.parent.mkdir()
+    real_unlink = Path.unlink
+
+    def fake_unlink(self: Path, missing_ok: bool = False) -> None:
+        if self.name.startswith(f".{destination.name}."):
+            raise OSError("simulated temporary-file cleanup failure")
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", fake_unlink)
+
+    with pytest.raises(protocol.ClaimError, match="could not remove the now-redundant temporary"):
+        store.export_state_bundle(worktree=worktree, tip=tip, destination=destination)
+
+    monkeypatch.setattr(Path, "unlink", real_unlink)
+    assert destination.exists()
+    _git("bundle", "verify", str(destination), cwd=worktree)
+    leftover = list(destination.parent.glob(f".{destination.name}.*"))
+    for stray in leftover:
+        stray.unlink()
 
 
 def test_export_state_bundle_refuses_a_tip_this_worktree_never_received(
     bare_remote: Path, worktree: Path, tmp_path: Path
 ) -> None:
-    """Pointing local `STATE_REF` at `tip` is this function's own validation
-    that `tip`'s objects actually reached this worktree -- `update-ref`
-    itself refuses a tip git has never seen, so a caller cannot silently
-    bundle the wrong state."""
+    """Pointing `EXPORT_BUNDLE_REF` at `tip` is this function's own
+    validation that `tip`'s objects actually reached this worktree --
+    `update-ref` itself refuses a tip git has never seen, so a caller
+    cannot silently bundle the wrong state."""
     store.bootstrap(worktree=worktree, remote=str(bare_remote))
     destination = tmp_path / "state.bundle"
 
@@ -3256,6 +3337,7 @@ def test_export_state_bundle_refuses_a_tip_this_worktree_never_received(
         store.export_state_bundle(worktree=worktree, tip=_PLACEHOLDER_TIP, destination=destination)
 
     assert not destination.exists()
+    assert not list(destination.parent.glob(f".{destination.name}.*"))
 
 
 def test_delete_state_ref_deletes_remote_and_local_when_local_ref_is_present(
@@ -3325,7 +3407,10 @@ def test_delete_state_ref_refuses_a_stale_lease_and_leaves_everything_intact(
     # The remote moves on after `stale_tip` was read but before the lease-guarded
     # delete runs -- the exact race `--force-with-lease` exists to catch.
     _push_custom_tree(
-        bare_remote, worktree, parent=stale_tip, files={"schema.toml": b"version = 2\n"}
+        bare_remote,
+        worktree,
+        parent=stale_tip,
+        files={store.SCHEMA_TOML_FILENAME: protocol.serialize_empty_schema_toml().encode()},
     )
     moved_tip = _state_ref_oid(bare_remote)
 
@@ -3380,15 +3465,21 @@ def test_delete_state_ref_treats_a_lost_leased_push_as_success_when_the_ref_is_a
     assert _state_ref_oid(bare_remote) is None
 
 
-def test_delete_state_ref_names_a_working_lease_repair_when_the_ref_is_still_present(
+def test_delete_state_ref_repair_names_the_moved_remote_tip_and_never_recommends_a_manual_lease(
     monkeypatch: pytest.MonkeyPatch, bare_remote: Path, worktree: Path
 ) -> None:
-    """A re-probed still-present ref names a retry against its *current*
-    tip, never the stale one the failed push carried -- a repair line built
-    from the stale tip would only be rejected again."""
+    """A re-probed tip that differs from the lease means the remote moved
+    since this reset last observed it (issue #298, 19.09.2026 REVISE
+    finding 3): the replacement tip was never checked against a live claim
+    nor exported, so the only repair the message may name is re-running
+    `aco reset --confirm` -- which repeats both checks -- never a manual
+    `--force-with-lease` command against a tip neither check has seen."""
     stale_tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
     _push_custom_tree(
-        bare_remote, worktree, parent=stale_tip, files={"schema.toml": b"version = 2\n"}
+        bare_remote,
+        worktree,
+        parent=stale_tip,
+        files={store.SCHEMA_TOML_FILENAME: protocol.serialize_empty_schema_toml().encode()},
     )
     moved_tip = _state_ref_oid(bare_remote)
     _fake_failed_remote_delete(monkeypatch)
@@ -3399,8 +3490,30 @@ def test_delete_state_ref_names_a_working_lease_repair_when_the_ref_is_still_pre
         )
 
     message = str(excinfo.value)
-    assert f"still present at {moved_tip}" in message
-    assert f"--force-with-lease={store.STATE_REF}:{moved_tip}" in message
+    assert f"the remote moved to {moved_tip}" in message
+    assert "re-run `aco reset --confirm`" in message
+    assert "--force-with-lease" not in message
+
+
+def test_delete_state_ref_repair_names_a_plain_retry_when_the_remote_tip_did_not_move(
+    monkeypatch: pytest.MonkeyPatch, bare_remote: Path, worktree: Path
+) -> None:
+    """The re-probe can also find the lease's own tip still present,
+    unmoved -- the push failed for some other reason. That case gets the
+    same instruction, worded for an unchanged remote rather than a moved
+    one, and never a manual lease either."""
+    tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    _fake_failed_remote_delete(monkeypatch)
+
+    with pytest.raises(protocol.ClaimError) as excinfo:
+        store.delete_state_ref(
+            worktree=worktree, remote=str(bare_remote), expected_remote_tip=protocol.ObjectId(tip)
+        )
+
+    message = str(excinfo.value)
+    assert f"still present at {tip}" in message
+    assert "re-run `aco reset --confirm`" in message
+    assert "--force-with-lease" not in message
 
 
 def test_delete_state_ref_reports_an_unknown_lease_outcome_when_the_remote_is_unreachable(
