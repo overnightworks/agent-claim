@@ -2081,8 +2081,9 @@ class TestCliStateRefForge:
         )
         second_sha = _head_sha(worktree)
         self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, item_files)
+        board_command = ["board"]
 
-        assert issue_claim.main(["board", "--json"]) == 0
+        assert issue_claim.main([*board_command, "--json"]) == 0
         payload = json.loads(capsys.readouterr().out)
         landings = {row["item"]: row for row in payload["landings"]}
         assert landings.keys() == {first_number, second_number}
@@ -2093,13 +2094,13 @@ class TestCliStateRefForge:
         first_date = datetime.fromisoformat(landings[first_number]["committed_at"]).date()
         second_date = datetime.fromisoformat(landings[second_number]["committed_at"]).date()
 
-        assert issue_claim.main(["board"]) == 0
+        assert issue_claim.main(board_command) == 0
         rendered_text = capsys.readouterr().out
         assert "LANDUNGEN" in rendered_text
         assert f"{first_id} {first_date} {first_sha[:7]}" in rendered_text
         assert f"{second_id} {second_date} {second_sha[:7]}" in rendered_text
 
-        assert issue_claim.main(["board", "--html"]) == 0
+        assert issue_claim.main([*board_command, "--html"]) == 0
         rendered_html = capsys.readouterr().out
         assert f"<li>{first_id} {first_date} <code>{first_sha[:7]}</code></li>" in rendered_html
         assert f"<li>{second_id} {second_date} <code>{second_sha[:7]}</code></li>" in rendered_html

@@ -2041,8 +2041,7 @@ def test_landing_rows_leaves_a_touched_but_not_closed_epic_unattributed() -> Non
     -- unlike `Stage.CODE_LANDED`, which does credit a corroborated touch
     (`test_an_epic_inherits_the_landed_stage_of_a_slice_that_did_not_close_it`).
     A slice pull request that only touches its epic must therefore leave the
-    epic with no landing row at all, "PR nicht zugeordnet", not a
-    `PullRequestLandingEvidence` guess."""
+    epic with no landing row at all, never a guessed `PullRequestLandingEvidence`."""
     epic = board_issue(71, "Epic touched but not closed", complete_contract("Cut the next slice."))
     slice_pull_request = board.PullRequest(
         131, "Slice 1", _slice_pull_request_body(71), "branch", merged_at="2026-08-19T00:00:00Z"
