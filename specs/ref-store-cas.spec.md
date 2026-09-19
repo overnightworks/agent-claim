@@ -63,9 +63,9 @@ transition), and which of the three causes applies.
 
 - [ ] [CAS-13] A transition whose push is rejected once, but whose commit actually landed (a lost response), is found by its own `operation_id` on retry, never pushed a second time.
 - [ ] [CAS-14] Two transitions on disjoint identities racing for the same tip both land: the loser re-fetches, re-applies its own `operation_id`'s intent, and lands cleanly -- CLAIM-01 owns the printed line.
-- [ ] [CAS-15] 32 stuck pushes refuse `refs/aco/state rejected 32 pushes to <remote> without the ref ever moving: a stale lock or missing push rights`, fix pointer `git update-ref -d refs/aco/state` (see E-CAS-03).
+- [ ] [CAS-15] 32 stuck pushes refuse `refs/aco/state rejected 32 pushes to <remote> without the ref ever moving: a stale lock or missing push rights`, fix `check <remote>'s refs/aco/state.lock` (see E-CAS-03).
 - [ ] [CAS-16] A transition rejected 32 times while the ref keeps moving refuses `refs/aco/state moved 32 times while retrying: another writer on <remote> keeps landing first; retry the command`.
-- [ ] [CAS-17] A ref moving once then sticking refuses `refs/aco/state moved 1 time while retrying, then rejected 31 pushes to <remote> without the ref moving after it last moved`, naming `refs/aco/state.lock`.
+- [ ] [CAS-17] A moved-then-stuck ref refuses `refs/aco/state moved 1 time while retrying, then rejected 31 pushes to <remote> without the ref moving after it last moved`, fix `refs/aco/state.lock` (see E-CAS-04).
 
 ### Work budget
 
@@ -185,5 +185,15 @@ Setup: bare-remote, bootstrapped, `refs/aco/state.lock` held on `origin` for the
 ```console
 $ aco claim 42 --scope README.md
 2> ERROR: refs/aco/state rejected 32 pushes to origin without the ref ever moving: a stale lock or missing push rights, not a race -- check origin's refs/aco/state.lock (delete it if stale) and push permissions; if the ref itself is stuck, `git update-ref -d refs/aco/state` on origin clears it
+exit 2
+```
+
+### E-CAS-04 — a race lands once, then the lock sticks
+
+Setup: bare-remote, bootstrapped, a competing writer lands one push to `refs/aco/state`, then `refs/aco/state.lock` stays held on `origin` for the rest of the run
+
+```console
+$ aco claim 42 --scope README.md
+2> ERROR: refs/aco/state moved 1 time while retrying, then rejected 31 pushes to origin without the ref moving after it last moved: another writer landed first, then a stale lock or missing push rights took over -- check origin's refs/aco/state.lock (delete it if stale) and push permissions; retrying the command only helps once that clears
 exit 2
 ```
