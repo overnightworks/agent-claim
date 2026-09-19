@@ -1,15 +1,26 @@
 # Landing grammar
 
-What a landing is, and the one grammar every reader classifies it from: a
-merge or squash commit's own trailer block on the trunk, and the matching
-`Work-Item:`/`No-Item:` line in a pull request body before it merges. This
-file owns that grammar, `aco check <pr>`'s classification, the parent-closing
-rule, what `aco release --merged` verifies, and the "Landungen" landing view
-`aco board`/`aco board --html` derive from it. Each command's own spec (none
-exist yet for `check`/`release`/`board`) would cite these IDs rather than
-restate them.
+What a landing is, and the two related classification grammars every reader
+tells it from: a merge or squash commit's own trailer block on the trunk,
+and the `Work-Item:`/`No-Item:` line in a pull request body before it
+merges -- the same two keys, but not the same value grammar (`## The trunk's
+own trailer block` vs. `## The pull request body's own grammar`, below).
+This file owns both grammars, `aco check <pr>`'s classification, the
+parent-closing rule, what `aco release --merged` verifies, and the
+"Landungen" landing view `aco board`/`aco board --html` derive from them.
+Each command's own spec (none exist yet for `check`/`release`/`board`) would
+cite these IDs rather than restate them.
 
-`<n>`/`<item>`/`<ref>` are issue or pull request numbers, `<sha>` a commit id,
+`<n>` is a bare issue or pull request number, always printed `#<n>`. `<item>`
+and `<ref>` are a parsed `Work-Item:` value or closing reference, always
+printed fully qualified as `<owner>/<repo>#n` -- even where the line or
+argument that named it used a bare `#n` -- because `IssueReference` resolves
+a bare number against the reading repository before printing it again.
+`<label>` is an item as `aco next`/`release`'s own narrative lines print it:
+`#<n>` under `storage = "github"` (this file's default assumption unless a
+criterion says otherwise), `aco-xxxxxx` under `storage = "state-ref"`
+(README "What is still different under `state-ref`"); `--json` output never
+uses `<label>` -- it is always the bare number. `<sha>` is a commit id,
 `<branch>` a git branch name, `<author>` a pull request's author, `<kind>`
 `docs` or `fix`. A trailer block is read through git's own trailer parsing
 (`%(trailers:key=...,valueonly)`), never by scanning the message body for a
@@ -59,9 +70,18 @@ matching line.
 - [ ] [LAND-02] A trailer block repeating `Work-Item:` (a squash commit carrying `Work-Item: #11` and `Work-Item: #12`) marks every named item `code-landed`, unlike a pull request body, which allows only one.
 - [ ] [LAND-03] A trailer value with a control byte (`#12\x1f#13`) reads as one literal value: `aco board` refuses `ERROR: '#12\x1f#13' is not an item reference; use aco-xxxxxx, #n, or the bare number n`, exit `2`.
 
-## The same grammar in a pull request body
+## The pull request body's own grammar
 
-- [ ] [LAND-04] A body carrying `Work-Item: #10` and a closing reference for #10 makes `aco check <pr>` print `PR #<n> by <author> declares Work-Item: #10`, exit `0`.
+A pull request body's `Work-Item:` value reads a narrower, stricter grammar
+than the trunk trailer's (above): only `OWNER/REPO#n` or `#n` -- never the
+bare `n` or `aco-xxxxxx` forms `parse_item_reference` accepts for a trunk
+trailer, and never trimmed by that function either. Here, the `Work-Item`/
+`No-Item` key and a `No-Item:` value are matched case-insensitively (`docs`,
+`Docs`, and `DOCS` all classify the same body, `No-Item: DOCS` included),
+and the value itself has its surrounding spaces and tabs trimmed before it
+is read (`parse_pull_request_classification`).
+
+- [ ] [LAND-04] A body carrying `Work-Item: #10` and a closing reference for #10 makes `aco check <pr>` print `PR #<n> by <author> declares Work-Item: <owner>/<repo>#10`, exit `0`.
 - [ ] [LAND-05] A body carrying `No-Item: docs` with an active issue-less lane claim on the pull request's head branch prints `PR #<n> by <author> declares No-Item: docs`, exit `0`.
 - [ ] [LAND-06] A body carrying neither `Work-Item:` nor `No-Item:` makes `check` print `REFUSED: pull request #<n> carries no \`Work-Item:\` or \`No-Item:\` line`, exit `1`.
 - [ ] [LAND-07] A `Work-Item:`/`No-Item:` line inside a fenced code block is documentation, not a declaration: a body carrying one only there refuses the same as LAND-06.
@@ -83,22 +103,25 @@ matching line.
 
 Parentage is GitHub's own sub-issue relation, read fresh for every `check`;
 nothing in a body names a parent to this grammar. "No further work" means the
-parent's own `Next` line reads `keiner`, `keine`, `nichts`, `none`, or `-`,
-case-insensitively.
+parent's own `Next` line reads `keiner`, `keine`, `nichts`, `none`, `-`, or
+is empty, case-insensitively (`_NO_FURTHER_WORK_VALUES`, which a fresh
+skeleton's `next = ""` also matches). A malformed body's own defect sentence
+is `specs/body-block.spec.md`'s own fact, cited here as `<body defect
+sentence>`, not restated.
 
 - [ ] [LAND-21] Closing a parent's last open child, its `Next` naming no further work, must also close the parent; not doing so refuses `closes the last open child of parent <ref>; close the parent too`, exit `1`.
 - [ ] [LAND-22] The same last-child landing, when the parent's `Next` line still names work, may pass without closing the parent: exit `0`.
 - [ ] [LAND-23] The same last-child landing may also close the completed parent in the same pull request: a body closing both the item and that parent passes, exit `0`.
 - [ ] [LAND-24] A landing leaving other open children behind, with no parent `Next` line, refuses `leaves parent <ref> open with <n> other open child/children, whose body carries no Next line`, exit `1`.
 - [ ] [LAND-25] The same landing, when the parent's `Next` line names work, passes without closing the parent: exit `0`.
-- [ ] [LAND-26] A parent whose own body is malformed or incomplete refuses `has parent <ref> with a <body defect sentence>`, exit `1`, before the last-child rule is ever evaluated (see `specs/body-block.spec.md`).
+- [ ] [LAND-26] A parent whose own body reads as malformed refuses `has parent <ref> with a <body defect sentence>`, exit `1`, before the last-child rule runs; a valid but incomplete parent proceeds to it.
 - [ ] [LAND-27] A recorded parent whose own kind is not `container` refuses `has parent <ref> of kind <kind>, which is not a container; only a container holds children`, exit `1`.
 - [ ] [LAND-28] A recorded parent living in another repository refuses `has parent <ref> in another repository, whose children this check cannot read`, exit `1`.
 
 ## What `release --merged` requires
 
 - [ ] [LAND-29] `release <n> --merged <pr>` succeeds only when the pull request is merged into the default branch, its classification names this claim's own item, and (for an issue) that item is already closed.
-- [ ] [LAND-49] A successful `--merged` release prints `freed: #a, #b` (or `freed: none`) and `next: #n score <s>: <title>` (or `next: none`); `--json` carries `freed`/`next` the same way.
+- [ ] [LAND-49] A successful `--merged` release prints `freed: <label>, <label>` (or `none`) and `next: <label> score <s>: <title>` (or `none`); `--json` carries `"freed": [n,...]` and `"next": n`/`null`.
 - [ ] [LAND-30] A pull request that is not merged refuses `pull request #<n> is not merged`, exit `2`, before anything is written.
 - [ ] [LAND-31] A pull request merged into a branch other than the default refuses `pull request #<n> merged into '<branch>', not the default branch '<default>'`, exit `2`.
 - [ ] [LAND-32] A pull request body carrying any classification defect (LAND-06..LAND-11) refuses `pull request #<n> <that same defect sentence>`, exit `2` — one grammar, read by both `check` and `release --merged`.
@@ -116,12 +139,12 @@ case-insensitively.
 
 - [ ] [LAND-41] `aco board` marks an item `code-landed` when a merged pull request carries a closing or landing keyword (`Lands`/`Implements` too) naming it — wider than `check`'s own closing reference.
 - [ ] [LAND-42] `aco board`/`--html` also mark an item `code-landed` from the trunk's own trailer block alone (LAND-01/LAND-02), independent of any pull request — one union, never two disagreeing sets.
-- [ ] [LAND-43] `aco board`'s `RECOVERY (close or re-project)` section lists every still-open issue a merged pull request's typed `Work-Item:` line already named.
+- [ ] [LAND-43] `aco board`'s `RECOVERY` names a still-open item there from a merged pull request's typed `Work-Item:` line (why one can be open there is CLAIM-52's fact, `specs/claim-record.spec.md`).
 - [ ] [LAND-51] `aco board`'s recovery reading is keyed on that typed `Work-Item:` line alone, never on the trunk trailer and never on an issue's update time.
-- [ ] [LAND-53] `aco next` names every recovery item first, each as `RECOVERY\n#<n>: close or re-project`, ahead of the item it recommends next.
+- [ ] [LAND-53] `aco next` names every recovery item first, each as `RECOVERY\n<label>: close or re-project`, ahead of the item it recommends next.
 - [ ] [LAND-44] A board source that cannot list merged pull requests at all prints ``landings are not derivable from this board source: recovery and code-landed stay empty`` after `RECOVERY` in text output.
 - [ ] [LAND-54] That same board source's `--json` carries `"landings_derivable": false` as a top-level field.
-- [ ] [LAND-45] `board --html`'s "Landungen" section pairs each `code-landed` item with the naming pull request (`PR #<n>: <title>`), else the trunk commit (`<date> <sha7>`), else `PR nicht zugeordnet`.
+- [ ] [LAND-45] `board --html`'s Landungen section pairs `code-landed` with the closing/declaring pull request (`PR #<n>: <title>`), narrower than LAND-41; else `<date> <sha7>`; else `PR nicht zugeordnet`.
 - [ ] [LAND-46] `board --html` shows `nicht ableitbar` in place of the "Landungen" list only once neither a pull request nor a trunk trailer resolves any row.
 
 ## Landing without a forge (ruled, not yet built — #297)
@@ -154,7 +177,7 @@ named here, not built by this spec.
 Setup: bare-remote, fake `gh`, a merge commit on `main` carrying `Work-Item: #10` in its own trailer block, issue `#10` open with no pull request naming it
 
 ```console
-$ aco board --json | python3 -c "import json,sys; print(json.load(sys.stdin)['items'][0]['stage'])"
+$ set -o pipefail && aco board --json | python3 -c "import json,sys; print(json.load(sys.stdin)['items'][0]['stage'])"
 code-landed
 exit 0
 ```
@@ -165,7 +188,7 @@ Setup: bare-remote, fake `gh`, pull request `#57` merged into `main`, body `Work
 
 ```console
 $ aco check 57
-PR #57 by Ada declares Work-Item: #42
+PR #57 by Ada declares Work-Item: <owner>/<repo>#42
 exit 0
 ```
 
@@ -195,6 +218,6 @@ Setup: bare-remote, fake `gh`, parent `#5` a container with one open child `#42`
 
 ```console
 $ aco check 57
-2> REFUSED: pull request #57 closes the last open child of parent #5; close the parent too
+2> REFUSED: pull request #57 closes the last open child of parent <owner>/<repo>#5; close the parent too
 exit 1
 ```
