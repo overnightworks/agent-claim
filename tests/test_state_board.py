@@ -1970,26 +1970,50 @@ class TestCliStateRefForge:
         parent_number = items.item_number("aco-abcdef")
         assert capsys.readouterr().err == f"ERROR: #{parent_number} does not exist\n"
 
-    def test_item_new_refuses_after_three_minting_collisions_and_writes_nothing(
+    @pytest.mark.parametrize(
+        ("cli_args", "expected_err_substring", "patch_minting_collision"),
+        [
+            pytest.param(
+                ["item", "new", "--title", "Collides"],
+                "could not mint a fresh item id",
+                True,
+                id="three-minting-collisions",
+            ),
+            pytest.param(
+                ["item", "new", "--title", "Bound to nothing", "--origin", "not-an-origin"],
+                "is not an origin",
+                False,
+                id="malformed-origin",
+            ),
+        ],
+    )
+    def test_item_new_refuses_and_writes_nothing(
         self,
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
         tmp_path: Path,
         bare_remote: Path,
         worktree: Path,
+        cli_args: list[str],
+        expected_err_substring: str,
+        patch_minting_collision: bool,
     ) -> None:
-        """Issue #285 proof 3: an injected minting collision against every
-        already-known id refuses by name after three attempts, and nothing
-        reaches the remote."""
+        """Issue #285 proof 3 / issue #316 proof 2: `item new` refuses --
+        on an injected minting collision against every already-known id
+        after three attempts, or on an `--origin` that does not match
+        `FORGE#N` (refused before `argparse` even reaches `item new`'s own
+        body) -- with a diagnostic naming the cause, and nothing reaches
+        the remote."""
         self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, _item_files())
-        monkeypatch.setattr(items.secrets, "token_hex", lambda _size: "000001")
+        if patch_minting_collision:
+            monkeypatch.setattr(items.secrets, "token_hex", lambda _size: "000001")
         remote_url = f"file://{bare_remote}"
         before = store.fetch_state(worktree=worktree, remote=remote_url)
 
-        status = issue_claim.main(["item", "new", "--title", "Collides"])
+        status = issue_claim.main(cli_args)
 
         assert status == 2
-        assert "could not mint a fresh item id" in capsys.readouterr().err
+        assert expected_err_substring in capsys.readouterr().err
         after = store.fetch_state(worktree=worktree, remote=remote_url)
         assert after.tip == before.tip
 
@@ -2062,30 +2086,6 @@ class TestCliStateRefForge:
             ]
         )
         assert claimed == 0
-
-    def test_item_new_refuses_a_malformed_origin_before_any_write(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
-        tmp_path: Path,
-        bare_remote: Path,
-        worktree: Path,
-    ) -> None:
-        """Issue #316 proof 2: an `--origin` that does not match `FORGE#N`
-        refuses with a sentence before `argparse` even reaches `item new`'s
-        own body, so nothing is fetched or pushed to the remote."""
-        self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, _item_files())
-        remote_url = f"file://{bare_remote}"
-        before = store.fetch_state(worktree=worktree, remote=remote_url)
-
-        status = issue_claim.main(
-            ["item", "new", "--title", "Bound to nothing", "--origin", "not-an-origin"]
-        )
-
-        assert status == 2
-        assert "is not an origin" in capsys.readouterr().err
-        after = store.fetch_state(worktree=worktree, remote=remote_url)
-        assert after.tip == before.tip
 
     def test_item_show_prints_the_header_and_body_byte_exact_for_a_closed_child(
         self,
