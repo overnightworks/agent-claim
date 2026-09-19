@@ -528,6 +528,82 @@ def test_fetch_state_rejects_an_invalid_id_entry(bare_remote: Path, worktree: Pa
         store.fetch_state(worktree=worktree, remote=str(bare_remote))
 
 
+def test_fetch_state_canonicalizes_a_stored_unsorted_scope_without_rewriting_the_ref(
+    bare_remote: Path, worktree: Path
+) -> None:
+    """A claim file written before issue #331 sorted every scope at
+    creation can still carry its paths in typed order on the real ref:
+    `parse_claim_toml` must project it through `protocol._valid_scope` on
+    read (REVISE finding 1) rather than expose the stored order verbatim.
+    `status`/`status --json` (`cli._print_claim_status_lines`,
+    `cli._status_json`) print straight from this same `ActiveClaim.scope`,
+    so canonicalizing it here is their canonical-order proof too -- there
+    is no second scope-ordering decision downstream for them to get wrong.
+
+    The read must never rewrite the ref, and a replayed claim intent (the
+    same identity, claimant, branch, and scope, differently typed) must
+    still match the now-canonical stored claim -- criterion 2's idempotent
+    replay, which a raw order mismatch used to break -- and a release by
+    claim id must still succeed regardless of the stored order.
+    """
+    schema_blob = _blob(worktree, b"version = 2\n")
+    sha = "c" * 40
+    claim_content = (
+        'claim_id = "a1"\n'
+        'agent = "Ada"\n'
+        'role = "builder"\n'
+        f'base = "{sha}"\n'
+        'branch = "claude/issue-42-cut"\n'
+        'scope = ["scripts/issue_claim.py", "docs/COORDINATION.md"]\n'
+        f'opened_commit = "{sha}"\n'
+    )
+    claim_blob = _blob(worktree, claim_content.encode())
+    claims_tree = _raw_tree(worktree, [("100644", "blob", claim_blob, "issue-42.toml")])
+    id_blob = _blob(worktree, b"")
+    ids_tree = _raw_tree(worktree, [("100644", "blob", id_blob, "a1")])
+    tip = _push_raw_state_tree(
+        bare_remote,
+        worktree,
+        [
+            ("100644", "blob", schema_blob, "schema.toml"),
+            ("040000", "tree", claims_tree, store.CLAIMS_DIRECTORY),
+            ("040000", "tree", ids_tree, store.IDS_DIRECTORY),
+        ],
+    )
+
+    state = store.fetch_state(worktree=worktree, remote=str(bare_remote))
+
+    canonical_scope = ("docs/COORDINATION.md", "scripts/issue_claim.py")
+    assert state.claims["issue-42"].scope == canonical_scope
+    assert state.consumed_ids == frozenset({protocol.ClaimId("a1")})
+    assert _state_ref_oid(bare_remote) == tip
+
+    replay = protocol.ClaimIntent(
+        identity=protocol.IssueIdentity(42),
+        agent="Ada",
+        role="builder",
+        base=protocol.ObjectId(sha),
+        branch="claude/issue-42-cut",
+        scope=protocol._valid_scope(["docs/COORDINATION.md", "scripts/issue_claim.py"]),
+        claim_id=protocol.ClaimId("a1"),
+        operation_id="op-replay",
+    )
+
+    assert protocol.apply(state, replay) == state
+
+    release = protocol.ReleaseIntent(
+        claim_id=protocol.ClaimId("a1"),
+        agent="Ada",
+        role="builder",
+        outcome=protocol.AbandonedRelease("done"),
+        operation_id="op-release",
+    )
+
+    released = protocol.apply(state, release)
+
+    assert "issue-42" not in released.claims
+
+
 def test_fetch_state_rejects_a_non_toml_entry_in_resources(
     bare_remote: Path, worktree: Path
 ) -> None:

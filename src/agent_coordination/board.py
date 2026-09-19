@@ -1544,12 +1544,13 @@ def _render_frozen_until(data: Mapping[str, object]) -> list[str]:
 
 
 def _render_scope_array(values: object) -> str:
-    """`values`'s scope entries as a canonical TOML array: sorted and
-    deduplicated, the one rendering `_render_scope` (top-level) and
-    `_render_slices` (per row) both call -- the same normalisation a live
-    claim's own scope keeps (`protocol._valid_scope` already refuses a
-    duplicate; sorting is this renderer's own canonical order)."""
-    entries = sorted(set(cast("list[str]", values)))
+    """`values`'s scope entries as a canonical TOML array: the one rendering
+    `_render_scope` (top-level) and `_render_slices` (per row) both call,
+    routed through `protocol._valid_scope` -- the one scope canonicalizer
+    (issue #331 REVISE finding 2), rather than a second sort/dedupe owner
+    here. Callable only once a schema check has already proven `values`
+    valid, so this never itself refuses a duplicate."""
+    entries = protocol._valid_scope(values)
     return "[" + ", ".join(_toml_string(value) for value in entries) + "]"
 
 

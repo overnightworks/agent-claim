@@ -656,13 +656,13 @@ def test_render_block_places_scope_before_expectation_and_slice_tables() -> None
     assert rendered.index("scope =") < rendered.index("[[slice]]")
 
 
-def test_render_block_renders_scope_sorted_and_deduplicated() -> None:
+def test_render_block_renders_scope_sorted() -> None:
     data = {
         "version": 1,
         "now": "N",
         "next": "X",
         "done_when": "D",
-        "scope": ["src/widget.py", "docs/plan.md", "docs/plan.md"],
+        "scope": ["src/widget.py", "docs/plan.md"],
         "slice": [{"index": 1, "title": "Row", "scope": ["b.py", "a.py"]}],
     }
 
@@ -670,6 +670,24 @@ def test_render_block_renders_scope_sorted_and_deduplicated() -> None:
 
     assert 'scope = ["docs/plan.md", "src/widget.py"]' in rendered
     assert 'scope = ["a.py", "b.py"]' in rendered
+
+
+def test_render_block_refuses_a_duplicate_scope_entry() -> None:
+    """`_render_scope_array` routes through `protocol._valid_scope` (issue
+    #331 REVISE finding 2), the one scope canonicalizer, rather than
+    silently deduplicating a second time: a duplicate it is ever handed --
+    never a real `cut`/`rule`/`ask` write, which all reuse an
+    already-validated body's own scope -- fails loud instead of vanishing."""
+    data = {
+        "version": 1,
+        "now": "N",
+        "next": "X",
+        "done_when": "D",
+        "scope": ["docs/plan.md", "docs/plan.md"],
+    }
+
+    with pytest.raises(protocol.InvalidClaimMarkerError, match="duplicate paths"):
+        board.render_block(data)
 
 
 def test_render_block_re_renders_a_canonical_scope_body_byte_exact() -> None:
