@@ -1,7 +1,0 @@
-claim_id = "a0be0989baa74a9d9b1d473fd80d9acf"
-agent = "Claude head (coordinator)"
-role = "builder"
-base = "f8bd0a60ecb7350ce20fd581c8eaf722e01e8bb9"
-branch = "claude/issue-338-spec-bootstrap-status"
-scope = ["scripts/spec_coverage_ratchet.txt", "specs/bootstrap.spec.md", "specs/status.spec.md"]
-opened_commit = "69482d667333b5d9bf2b9d3a8dc0db656bf80803"
