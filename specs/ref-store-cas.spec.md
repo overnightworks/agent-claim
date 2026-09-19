@@ -62,10 +62,10 @@ only in the remote, the attempt count (`8` for bootstrap, `32` for a live
 transition), and which of the three causes applies.
 
 - [ ] [CAS-13] A transition whose push is rejected once, but whose commit actually landed (a lost response), is found by its own `operation_id` on retry, never pushed a second time.
-- [ ] [CAS-14] Two transitions on disjoint identities racing for the same tip both land: the loser re-fetches, re-applies its intent onto the moved tip, and lands `CLAIMED issue #<n>: <claim-id>` (CLAIM-01).
-- [ ] [CAS-15] 32 rejected pushes with the ref never moving refuse `refs/aco/state rejected 32 pushes to <remote> without the ref ever moving`, naming a stale lock via `git update-ref -d refs/aco/state` (E-CAS-03).
+- [ ] [CAS-14] Two transitions on disjoint identities racing for the same tip both land: the loser re-fetches, re-applies its own `operation_id`'s intent, and lands cleanly -- CLAIM-01 owns the printed line.
+- [ ] [CAS-15] 32 stuck pushes refuse `refs/aco/state rejected 32 pushes to <remote> without the ref ever moving: a stale lock or missing push rights`, fix pointer `git update-ref -d refs/aco/state` (see E-CAS-03).
 - [ ] [CAS-16] A transition rejected 32 times while the ref keeps moving refuses `refs/aco/state moved 32 times while retrying: another writer on <remote> keeps landing first; retry the command`.
-- [ ] [CAS-17] A transition whose ref moves once then sticks refuses `refs/aco/state moved 1 time while retrying, then rejected 31 pushes to <remote> without the ref moving`, naming the same repair as CAS-15.
+- [ ] [CAS-17] A ref moving once then sticking refuses `refs/aco/state moved 1 time while retrying, then rejected 31 pushes to <remote> without the ref moving after it last moved`, naming `refs/aco/state.lock`.
 
 ### Work budget
 
@@ -101,7 +101,7 @@ tree's structural shape before that content is ever parsed.
 - [ ] [CAS-30] An `ids/` entry that is not a bare, claim-id-shaped blob refuses `ids/<name> at <tip> is not a claim id`.
 - [ ] [CAS-31] A `resources/` entry that is not a `.toml` blob refuses `resources/<name> at <tip> is not a resource file`.
 - [ ] [CAS-32] An `items/` entry that is not a blob refuses `items/<name> at <tip> is not a file`.
-- [ ] [CAS-33] A blob content read that cannot be decoded as the archive git itself produced refuses `cannot read the state tree at <tip>: <detail>`.
+- [ ] [CAS-33] A state-tree content read whose own `git archive` invocation fails refuses `cannot read the state tree at <tip>: <detail>`.
 
 ## Resource records
 
@@ -140,9 +140,10 @@ below is proposed wording from #298's own ruling, ratcheted with owner
 ## Examples
 
 `Setup: bare-remote` is a fresh work repository whose `origin` is a local
-bare repository with `main` at one commit, a git identity, `origin/HEAD`,
-and `ACO_AGENT` set to `Ada`; `<remote>`, `<tmp>`, and `<home>` are the
-runner's own paths.
+bare repository with `main` at one commit, a git identity, `origin/HEAD`, a
+tracked `.agent-claim/board.toml` naming no `storage` key (the default
+`github` pin, `specs/storage-pin.spec.md` PIN-01/PIN-02), and `ACO_AGENT` set
+to `Ada`; `<remote>`, `<tmp>`, and `<home>` are the runner's own paths.
 
 ### E-CAS-01 — bootstrap, idempotent, and its own commit trailer
 
@@ -167,7 +168,8 @@ exit 0
 Setup: bare-remote, bootstrapped, a second, freshly initialized reader checkout
 
 ```console
-$ git fetch --quiet origin refs/aco/state
+$ aco status
+UNCLAIMED repository
 exit 0
 $ git for-each-ref refs/aco/state
 exit 0

@@ -18,9 +18,13 @@ reaches `ERROR: <sentence>` on stderr, exit `2`, unless noted otherwise.
 | `.agent-claim/board.toml` untracked, absent, or ignored | PIN-01 | PIN-01 | PIN-01 | PIN-01 | — |
 | `storage` unset (default `github`) | PIN-02 | PIN-09 | PIN-10, PIN-11 | — | PIN-08 |
 | `storage` names an unrecognized value | PIN-03 | PIN-03 | PIN-03 | PIN-03 | — |
-| `storage = "state-ref"` | PIN-04, PIN-05 | PIN-18..21 | PIN-22..28 | PIN-12 | PIN-08 |
+| `storage = "state-ref"` | PIN-04\*, PIN-05\* | PIN-18..21 | PIN-22..28 | PIN-12 | PIN-08 |
 | a state-ref item file itself is malformed | PIN-13..17 | — | — | — | — |
 | a fresh item id, minted | PIN-06, PIN-07 | PIN-06, PIN-07 | — | — | — |
+
+\* PIN-04/PIN-05 gate only a command that resolves this repository's item
+forge, a narrower set than "any store command" -- see `## Never` for the
+exact commands that never do.
 
 ## The pin and its precondition
 
@@ -30,8 +34,8 @@ reaches `ERROR: <sentence>` on stderr, exit `2`, unless noted otherwise.
 
 ## `storage = "state-ref"` is forge-free
 
-- [ ] [PIN-04] Under `storage = "state-ref"`, `--repo` refuses `--repo is meaningless under storage = state-ref`.
-- [ ] [PIN-05] Under `storage = "state-ref"`, a checkout with no `origin/HEAD` set refuses `cannot resolve the default branch; run aco from a checkout with origin/HEAD set`.
+- [ ] [PIN-04] Under `storage = "state-ref"`, a command resolving the item forge refuses `--repo` with `--repo is meaningless under storage = state-ref`.
+- [ ] [PIN-05] Under `storage = "state-ref"`, that same command with no `origin/HEAD` set refuses `cannot resolve the default branch; run aco from a checkout with origin/HEAD set`.
 
 ## Item identity: `aco-xxxxxx` versus `#n`
 
@@ -73,7 +77,8 @@ reaches `ERROR: <sentence>` on stderr, exit `2`, unless noted otherwise.
 
 ## Never
 
-- `aco item new`/`edit`/`close` never reach a GitHub API call: every one of them is refused by name under `storage = "github"` before `_state_ref_forge` is ever built.
+- `aco item new`/`edit`/`close` never reach a GitHub API call: every one of them is refused by name under `storage = "github"` before the item forge is ever resolved.
+- Under `storage = "state-ref"`, `aco status`, `aco protect`, `aco bootstrap`, `aco rescope`, `aco release`, and a lane or already-observed `aco claim` never resolve the item forge, so PIN-04/PIN-05 never gate them.
 - `--repo` never selects a repository under `storage = "state-ref"`: there is no host-based target to override.
 - `aco item edit`/`close` never overwrite a concurrent writer's change: a stale expected oid refuses by name instead (`specs/ref-store-cas.spec.md`, CAS-20), and the item's stored bytes stay exactly what the last landed write left.
 - `aco item close` never deletes an item file or any of its other bytes: only `state`, `closed_at`, and `updated_at` move.
@@ -120,6 +125,15 @@ version = 1
 now = ""
 next = ""
 done_when = ""
+
+[record]
+title = "Reset export"
+state = "open"
+kind = "task"
+labels = []
+blocked_by = []
+created_at = "<created_at>"
+updated_at = "<updated_at>"
 ```
 exit 0
 ````
