@@ -3,6 +3,6 @@ agent = "Claude head (coordinator)"
 role = "builder"
 base = "e347d7876896533eac129b6bbef5289616ca7b1c"
 branch = "claude/issue-371-landings-view"
-scope = ["README.md", "specs/board.spec.md", "specs/landing-grammar.spec.md", "src/agent_coordination/board.py", "src/agent_coordination/board_html.py", "src/agent_coordination/checkout.py", "src/agent_coordination/cli.py", "src/agent_coordination/github.py", "src/agent_coordination/state_board.py", "tests/test_board.py", "tests/test_board_html.py", "tests/test_cli.py", "tests/test_state_board.py"]
+scope = ["README.md", "scripts/test_budget_ratchet.txt", "specs/board.spec.md", "specs/landing-grammar.spec.md", "src/agent_coordination/board.py", "src/agent_coordination/board_html.py", "src/agent_coordination/checkout.py", "src/agent_coordination/cli.py", "src/agent_coordination/github.py", "src/agent_coordination/state_board.py", "tests/board_fixtures.py", "tests/board_html_golden.html", "tests/test_board.py", "tests/test_board_html.py", "tests/test_cli.py", "tests/test_state_board.py"]
 opened_commit = "3e2ad35cc87a48d49cb3e592890112563c5e7b57"
 whole_reason = "one landings projection across board, html, cli, the two adapters, their tests, two specs and the README"
