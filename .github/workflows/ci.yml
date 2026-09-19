@@ -46,6 +46,33 @@ jobs:
           name: coverage-report
           path: coverage.xml
 
+  gates:
+    name: Test-efficiency gates (test-budget, similar-methods, test-inventory)
+    runs-on: ubuntu-latest
+    steps:
+      # Every gate measures against a merge-base, so the branch point must be reachable
+      # (issue #319: the base-selection concept -- a change gate measures against the tree
+      # it lands on).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+      - run: uv sync --locked --group dev
+      # similar_methods.py deliberately performs no network I/O of its own (a measurement
+      # command stays offline); test_budget.py and test_inventory.py self-heal a missing
+      # ref, but fetching once here keeps all three gates on the same known-fetched base.
+      - name: Fetch the pull request's base branch
+        if: github.event_name == 'pull_request'
+        run: git fetch origin "${GITHUB_BASE_REF}"
+      - name: Test budget (tests/ size and duplication vs the merge-base)
+        run: uv run --locked python scripts/test_budget.py --ci
+      - name: Similar methods (cross-file near-duplicate functions vs the merge-base)
+        run: uv run --locked python scripts/similar_methods.py --ci
+      - name: Test inventory (rewritten-module assert-literal coverage vs the merge-base)
+        run: uv run --locked python scripts/test_inventory.py --ci
+
   secrets:
     name: Secret scan
     runs-on: ubuntu-latest

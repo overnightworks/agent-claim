@@ -1,0 +1,3 @@
+# Ledger for scripts/similar_methods.py. One "relpath:qualname — reason" per line, either
+# side of an accepted pair (issue #319). Empty today: no pair in src/ or tests/ has been
+# reviewed and deliberately accepted as a duplicate shape. Written by hand when one is.
