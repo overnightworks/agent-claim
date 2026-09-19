@@ -273,8 +273,8 @@ export `refs/aco/state` as a `git bundle`; delete the remote ref with a
 `--force-with-lease` matching the tip reset just read; delete the local ref,
 only if one happens to exist; clear the lineage stamp and fetch anchor in
 every worktree `git worktree list` reports for this repository; bootstrap a
-fresh empty state. Without `--confirm` it prints the same five lines prefixed
-`would:` and changes nothing.
+fresh empty state. Without `--confirm` it prints the same five planned steps
+prefixed `would:` and changes nothing.
 
 **Operator ruling (15.09.2026, 16.09.2026)**: the export is mandatory before
 anything is deleted, unless `--no-export` says otherwise; `--confirm` is
@@ -283,23 +283,28 @@ outright, `--confirm` or not -- there is no `--force` past it, because a
 reset over live work is data loss with no owner.
 
 The bundle is written to `--export-dir` (default: the repository's own parent
-directory) as `aco-state-<repo>-<date>-<short-sha>.bundle`, and refuses to
+directory) as `aco-state-<repo>-<date>-<short-sha>.bundle`, claimed atomically
+so a concurrent export can never truncate one another's file, and refuses to
 overwrite a same-named file left by an earlier export. Its printed line names
-the exact restore command -- `git fetch <bundle> refs/worktree/aco/state:refs/aco/state`,
+the exact restore command -- `git fetch <bundle> refs/aco/state:refs/aco/state`,
 run against the remote that is to carry the restored ref -- because production
-never points `refs/aco/state` itself anywhere locally; the bundle's one head is
-named after the fetch anchor that already held the exported tip's objects.
+never leaves `refs/aco/state` pointed anywhere locally: the bundle points it
+there only for the moment of export, then removes it again.
 
 Order and failure behaviour: export, then the remote delete, then the local
 delete, then the stamps and anchors, then bootstrap -- each step's line
 prints only once that step has completed. An export failure (an unwritable
 export directory, a same-named bundle already there) stops everything before
-any delete runs. A remote-deletion failure -- rejected outright, or the lease
-no longer matching because the ref moved between reset's own read and its
-delete -- leaves the local ref exactly as it was and names the manual `git
-push --force-with-lease` that repairs it; whatever export ran stays on disk
-either way. `reset` is forge-free like `bootstrap`: `--repo` is meaningless
-for it.
+any delete runs. A remote-deletion failure re-probes the remote before
+concluding anything: a lost response after the server actually applied the
+deletion is treated as done and reset continues; a ref confirmed still
+present -- rejected outright, or the lease no longer matching because the ref
+moved between reset's own read and its delete -- leaves the local ref exactly
+as it was and names the manual `git push --force-with-lease` that repairs it
+against the ref's *current* tip; an unreachable remote stops before any
+delete runs and says the outcome is unknown rather than guessing. Whatever
+export ran stays on disk either way. `reset` is forge-free like `bootstrap`:
+`--repo` is meaningless for it.
 
 ## Checking one number
 

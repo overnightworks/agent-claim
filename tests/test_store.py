@@ -402,7 +402,7 @@ def test_fetch_state_reads_via_fetch_head_without_creating_the_shared_state_ref(
     assert _git("for-each-ref", store.STATE_REF, cwd=reader).stdout == ""
     fetch_head = (reader / ".git" / "FETCH_HEAD").read_text()
     assert fetch_head.startswith(created)
-    anchor = _git("rev-parse", store.FETCH_ANCHOR_REF, cwd=reader).stdout.strip()
+    anchor = _git("rev-parse", store._FETCH_ANCHOR_REF, cwd=reader).stdout.strip()
     assert anchor == created
 
 
@@ -3142,6 +3142,28 @@ def test_commit_transition_refuses_a_missing_state_ref(worktree: Path, tmp_path:
 # `local_state_ref_exists`) `cli.py`'s reset command plans and reports from.
 
 
+def test_local_state_ref_exists_for_reset_fails_loud_on_a_git_failure_other_than_a_missing_ref(
+    monkeypatch: pytest.MonkeyPatch, worktree: Path
+) -> None:
+    """`git show-ref --verify --quiet`'s own documented "no such ref"
+    outcome is exit 1 with empty output (issue #298, 19.09.2026 gate
+    finding 4) -- any other nonzero exit, a corrupt ref or a repository
+    failure, must fail loud rather than be read as the ref's absence."""
+    real_run_captured = process.run_captured
+
+    def fake_run_captured(arguments: list[str]) -> process.CapturedResult:
+        if "show-ref" in arguments:
+            return process.CapturedResult(
+                exit_status=128, stdout=b"", stderr=b"fatal: simulated repository failure"
+            )
+        return real_run_captured(arguments)
+
+    monkeypatch.setattr(store.process, "run_captured", fake_run_captured)
+
+    with pytest.raises(protocol.ClaimError, match="cannot check"):
+        store.local_state_ref_exists(worktree)
+
+
 def test_export_state_bundle_writes_a_bundle_git_bundle_verify_accepts(
     bare_remote: Path, worktree: Path, tmp_path: Path
 ) -> None:
@@ -3155,8 +3177,11 @@ def test_export_state_bundle_writes_a_bundle_git_bundle_verify_accepts(
     assert returned == destination
     _git("bundle", "verify", str(destination), cwd=worktree)
     heads = _git("bundle", "list-heads", str(destination), cwd=worktree).stdout
-    assert heads.strip() == f"{tip} {store.FETCH_ANCHOR_REF}"
-    assert not store.local_state_ref_exists(worktree)
+    assert heads.strip() == f"{tip} {store.STATE_REF}"
+    # `export_state_bundle` points local `STATE_REF` at `tip` and leaves it
+    # there -- `delete_state_ref`, the reset step right after export, is
+    # what removes it (`local_state_ref_exists`'s own contract).
+    assert store.local_state_ref_exists(worktree)
 
 
 def test_export_state_bundle_refuses_to_overwrite_an_existing_destination(
@@ -3167,9 +3192,7 @@ def test_export_state_bundle_refuses_to_overwrite_an_existing_destination(
     destination.write_bytes(b"an earlier export")
 
     with pytest.raises(protocol.ClaimError, match="already exists"):
-        store.export_state_bundle(
-            worktree=worktree, tip=protocol.ObjectId(tip), destination=destination
-        )
+        store.export_state_bundle(worktree=worktree, tip=tip, destination=destination)
 
     assert destination.read_bytes() == b"an earlier export"
 
@@ -3192,15 +3215,44 @@ def test_export_state_bundle_fails_loud_on_an_unwritable_destination_directory(
     assert not destination.exists()
 
 
-def test_export_state_bundle_refuses_a_tip_the_worktree_never_anchored(
+def test_export_state_bundle_fails_loud_when_git_bundle_create_itself_fails(
+    monkeypatch: pytest.MonkeyPatch, bare_remote: Path, worktree: Path, tmp_path: Path
+) -> None:
+    """The subprocess step between the atomically claimed file and the
+    write -- `git bundle create - STATE_REF` -- can fail on its own even
+    though the preceding `update-ref` already proved `tip` reachable; the
+    claimed file must still be removed rather than left behind empty."""
+    tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    store.fetch_state(worktree=worktree, remote=str(bare_remote))
+    destination = tmp_path / "state.bundle"
+    real_run_captured = process.run_captured
+
+    def fake_run_captured(arguments: list[str]) -> process.CapturedResult:
+        if "bundle" in arguments and "create" in arguments:
+            return process.CapturedResult(
+                exit_status=1, stdout=b"", stderr=b"simulated bundle create failure"
+            )
+        return real_run_captured(arguments)
+
+    monkeypatch.setattr(store.process, "run_captured", fake_run_captured)
+
+    with pytest.raises(protocol.ClaimError, match="cannot export"):
+        store.export_state_bundle(worktree=worktree, tip=tip, destination=destination)
+
+    assert not destination.exists()
+
+
+def test_export_state_bundle_refuses_a_tip_this_worktree_never_received(
     bare_remote: Path, worktree: Path, tmp_path: Path
 ) -> None:
-    """A caller that skips its own `fetch_state` first, or passes a tip that
-    is not the one it anchored, must not silently bundle the wrong state."""
+    """Pointing local `STATE_REF` at `tip` is this function's own validation
+    that `tip`'s objects actually reached this worktree -- `update-ref`
+    itself refuses a tip git has never seen, so a caller cannot silently
+    bundle the wrong state."""
     store.bootstrap(worktree=worktree, remote=str(bare_remote))
     destination = tmp_path / "state.bundle"
 
-    with pytest.raises(protocol.ClaimError, match="is not anchored"):
+    with pytest.raises(protocol.ClaimError, match="cannot export"):
         store.export_state_bundle(worktree=worktree, tip=_PLACEHOLDER_TIP, destination=destination)
 
     assert not destination.exists()
@@ -3279,28 +3331,96 @@ def test_delete_state_ref_refuses_a_stale_lease_and_leaves_everything_intact(
 
     with pytest.raises(protocol.ClaimError, match=r"cannot delete .*lease"):
         store.delete_state_ref(
-            worktree=worktree,
-            remote=str(bare_remote),
-            expected_remote_tip=protocol.ObjectId(stale_tip),
+            worktree=worktree, remote=str(bare_remote), expected_remote_tip=stale_tip
         )
 
     assert _state_ref_oid(bare_remote) == moved_tip
     assert store.local_state_ref_exists(worktree)
 
 
-def test_list_worktrees_lists_every_linked_worktree_of_the_repository(tmp_path: Path) -> None:
-    main_repo = tmp_path / "main"
-    main_repo.mkdir()
-    _git("init", "-b", "main", cwd=main_repo)
-    (main_repo / "README").write_text("placeholder\n")
-    _git("add", "README", cwd=main_repo)
-    _git("commit", "-m", "initial", cwd=main_repo)
-    linked = tmp_path / "linked"
-    _git("worktree", "add", "-b", "lane", str(linked), cwd=main_repo)
+def _fake_failed_remote_delete(
+    monkeypatch: pytest.MonkeyPatch, *, also_break_ls_remote: bool = False
+) -> None:
+    """A `--force-with-lease` push that always reports failure, standing in
+    for a lost response after the remote actually applied it (issue #298,
+    19.09.2026 gate finding 5) -- every real git subprocess still runs
+    except `push`, and, when `also_break_ls_remote` is set, the repair's own
+    re-probe too, reproducing an unreachable remote."""
+    real_run_captured = process.run_captured
 
-    worktrees = store.list_worktrees(main_repo)
+    def fake_run_captured(arguments: list[str]) -> process.CapturedResult:
+        if "push" in arguments:
+            return process.CapturedResult(
+                exit_status=1, stdout=b"", stderr=b"simulated lost push response"
+            )
+        if also_break_ls_remote and "ls-remote" in arguments:
+            return process.CapturedResult(
+                exit_status=128, stdout=b"", stderr=b"simulated network failure"
+            )
+        return real_run_captured(arguments)
 
-    assert set(worktrees) == {main_repo, linked}
+    monkeypatch.setattr(store.process, "run_captured", fake_run_captured)
+
+
+def test_delete_state_ref_treats_a_lost_leased_push_as_success_when_the_ref_is_already_gone(
+    monkeypatch: pytest.MonkeyPatch, bare_remote: Path, worktree: Path
+) -> None:
+    """The exact race finding 5 names: the server accepts the deletion, then
+    the push's own response is lost. A re-probe finds the ref honestly
+    gone, so `delete_state_ref` must not report failure for it."""
+    tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    _git("update-ref", "-d", store.STATE_REF, cwd=bare_remote)
+    _fake_failed_remote_delete(monkeypatch)
+
+    deleted_local = store.delete_state_ref(
+        worktree=worktree, remote=str(bare_remote), expected_remote_tip=protocol.ObjectId(tip)
+    )
+
+    assert deleted_local is False
+    assert _state_ref_oid(bare_remote) is None
+
+
+def test_delete_state_ref_names_a_working_lease_repair_when_the_ref_is_still_present(
+    monkeypatch: pytest.MonkeyPatch, bare_remote: Path, worktree: Path
+) -> None:
+    """A re-probed still-present ref names a retry against its *current*
+    tip, never the stale one the failed push carried -- a repair line built
+    from the stale tip would only be rejected again."""
+    stale_tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    _push_custom_tree(
+        bare_remote, worktree, parent=stale_tip, files={"schema.toml": b"version = 2\n"}
+    )
+    moved_tip = _state_ref_oid(bare_remote)
+    _fake_failed_remote_delete(monkeypatch)
+
+    with pytest.raises(protocol.ClaimError) as excinfo:
+        store.delete_state_ref(
+            worktree=worktree, remote=str(bare_remote), expected_remote_tip=stale_tip
+        )
+
+    message = str(excinfo.value)
+    assert f"still present at {moved_tip}" in message
+    assert f"--force-with-lease={store.STATE_REF}:{moved_tip}" in message
+
+
+def test_delete_state_ref_reports_an_unknown_lease_outcome_when_the_remote_is_unreachable(
+    monkeypatch: pytest.MonkeyPatch, bare_remote: Path, worktree: Path
+) -> None:
+    tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    _fake_failed_remote_delete(monkeypatch, also_break_ls_remote=True)
+
+    with pytest.raises(protocol.ClaimError, match="outcome unknown"):
+        store.delete_state_ref(worktree=worktree, remote=str(bare_remote), expected_remote_tip=tip)
+
+
+def test_list_worktrees_lists_every_linked_worktree_of_the_repository(
+    worktree: Path, tmp_path: Path
+) -> None:
+    linked = _linked_worktrees(worktree, tmp_path, ("lane",))["lane"]
+
+    worktrees = store.list_worktrees(worktree)
+
+    assert set(worktrees) == {worktree, linked}
 
 
 def test_list_worktrees_fails_loud_outside_a_repository(tmp_path: Path) -> None:
@@ -3312,32 +3432,25 @@ def test_list_worktrees_fails_loud_outside_a_repository(tmp_path: Path) -> None:
 
 
 def test_clear_lineage_stamps_clears_every_worktrees_stamp_and_anchor(
-    tmp_path: Path, bare_remote: Path
+    worktree: Path, tmp_path: Path, bare_remote: Path
 ) -> None:
-    main_repo = tmp_path / "main"
-    main_repo.mkdir()
-    _git("init", "-b", "main", cwd=main_repo)
-    (main_repo / "README").write_text("placeholder\n")
-    _git("add", "README", cwd=main_repo)
-    _git("commit", "-m", "initial", cwd=main_repo)
-    linked = tmp_path / "linked"
-    _git("worktree", "add", "-b", "lane", str(linked), cwd=main_repo)
-    store.bootstrap(worktree=main_repo, remote=str(bare_remote))
+    linked = _linked_worktrees(worktree, tmp_path, ("lane",))["lane"]
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
     # `bootstrap`'s own push never anchors (only a `fetch_state` read does);
     # an explicit read in each worktree is what a real `aco reset` run
     # observes both of them with beforehand.
-    store.fetch_state(worktree=main_repo, remote=str(bare_remote))
+    store.fetch_state(worktree=worktree, remote=str(bare_remote))
     store.fetch_state(worktree=linked, remote=str(bare_remote))
-    for worktree_path in (main_repo, linked):
+    for worktree_path in (worktree, linked):
         assert store._read_lineage_stamp(worktree_path) is not None
-        assert _has_ref(worktree_path, store.FETCH_ANCHOR_REF)
+        assert _has_ref(worktree_path, store._FETCH_ANCHOR_REF)
 
-    cleared = store.clear_lineage_stamps(worktree=main_repo)
+    cleared = store.clear_lineage_stamps(worktree=worktree)
 
-    assert set(cleared) == {main_repo, linked}
-    for worktree_path in (main_repo, linked):
+    assert set(cleared) == {worktree, linked}
+    for worktree_path in (worktree, linked):
         assert store._read_lineage_stamp(worktree_path) is None
-        assert not _has_ref(worktree_path, store.FETCH_ANCHOR_REF)
+        assert not _has_ref(worktree_path, store._FETCH_ANCHOR_REF)
 
 
 def test_clear_lineage_stamps_fails_loud_when_an_anchor_cannot_be_cleared(
@@ -3352,29 +3465,22 @@ def test_clear_lineage_stamps_fails_loud_when_an_anchor_cannot_be_cleared(
             store.clear_lineage_stamps(worktree=worktree)
     finally:
         lock_path.unlink()
-    assert _has_ref(worktree, store.FETCH_ANCHOR_REF)
+    assert _has_ref(worktree, store._FETCH_ANCHOR_REF)
 
 
 def test_clear_lineage_stamps_lets_a_bootstrap_after_a_ref_rewrite_succeed_in_every_worktree(
-    tmp_path: Path, bare_remote: Path
+    worktree: Path, tmp_path: Path, bare_remote: Path
 ) -> None:
     """The one behaviour reset exists to unblock: without clearing every
     worktree's stamp and anchor first, `fetch_state`'s own lineage guard
     refuses a `bootstrap` that recreates `STATE_REF` from nothing (`store.py`
     `_check_lineage`), in every worktree that had ever observed the old ref."""
-    main_repo = tmp_path / "main"
-    main_repo.mkdir()
-    _git("init", "-b", "main", cwd=main_repo)
-    (main_repo / "README").write_text("placeholder\n")
-    _git("add", "README", cwd=main_repo)
-    _git("commit", "-m", "initial", cwd=main_repo)
-    linked = tmp_path / "linked"
-    _git("worktree", "add", "-b", "lane", str(linked), cwd=main_repo)
-    store.bootstrap(worktree=main_repo, remote=str(bare_remote))
+    linked = _linked_worktrees(worktree, tmp_path, ("lane",))["lane"]
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
     store.fetch_state(worktree=linked, remote=str(bare_remote))
     _git("update-ref", "-d", store.STATE_REF, cwd=bare_remote)
 
-    store.clear_lineage_stamps(worktree=main_repo)
-    fresh_tip = store.bootstrap(worktree=main_repo, remote=str(bare_remote))
+    store.clear_lineage_stamps(worktree=worktree)
+    fresh_tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
 
     assert store.fetch_state(worktree=linked, remote=str(bare_remote)).tip == fresh_tip

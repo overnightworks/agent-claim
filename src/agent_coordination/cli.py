@@ -4242,7 +4242,7 @@ def _reset_bundle_name(repository: str, today: date, tip: protocol.ObjectId) -> 
 
 
 def _reset_restore_command(destination: Path) -> str:
-    return f"git fetch {destination} {store.FETCH_ANCHOR_REF}:{store.STATE_REF}"
+    return f"git fetch {destination} {store.STATE_REF}:{store.STATE_REF}"
 
 
 @dataclass(frozen=True)
@@ -4360,6 +4360,19 @@ def _execute_reset(*, worktree: Path, remote: str, plan: ResetPlan) -> None:
     print(_reset_bootstrap_line(tip=fresh_tip))
 
 
+def _reset_observation() -> tuple[Path, str, protocol.ClaimState]:
+    """`reset`'s own state read (issue #298, 19.09.2026 gate finding 1):
+    `store.read_state_for_reset` instead of `_store_observation`'s ordinary
+    `fetch_state`, so a broken lineage -- exactly what `reset` exists to
+    recover from -- never blocks it, and so a dry run, a live-claim
+    refusal, or a failed export writes no per-worktree stamp or anchor
+    (finding 2)."""
+    canonical_remote = _canonical_remote_name(_resolve_toplevel())
+    worktree = Path.cwd()
+    state = store.read_state_for_reset(worktree=worktree, remote=canonical_remote)
+    return worktree, canonical_remote, state
+
+
 def _reset_state(parsed: argparse.Namespace) -> int:
     """`reset` (issue #298): exports `STATE_REF`, deletes it on the remote
     with a lease and locally if present, clears every worktree's lineage
@@ -4368,7 +4381,7 @@ def _reset_state(parsed: argparse.Namespace) -> int:
     printing its claim lines instead of touching anything: a reset over live
     work is data loss with no owner.
     """
-    worktree, remote, state = _store_observation()
+    worktree, remote, state = _reset_observation()
     if state.claims:
         storage = board.load_config(_resolve_toplevel() / board.CONFIG_PATH).storage
         ages = _claim_ages(worktree, state)
