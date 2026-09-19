@@ -2028,6 +2028,10 @@ class TestCliStateRefForge:
         header_line = capsys.readouterr().out.splitlines()[0]
         assert header_line.endswith("· origin gitlab#514")
 
+        shown_json = issue_claim.main(["item", "show", printed, "--json"])
+        assert shown_json == 0
+        assert json.loads(capsys.readouterr().out)["origin"] == "gitlab#514"
+
         filled_body = _github_body(_Projection("Build it.", "Ship it.", "It ships."))
         monkeypatch.setattr(sys, "stdin", io.StringIO(filled_body))
         edited = issue_claim.main(["item", "edit", printed])

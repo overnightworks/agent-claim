@@ -34,12 +34,21 @@ from .protocol import ClaimUnavailableError, MalformedStateTreeError
 # key, so a rename of the file is the only way its id ever changes.
 ITEM_ID_PATTERN = re.compile(r"aco-[0-9a-f]{6}")
 ITEM_FILENAME_SUFFIX = ".md"
-# `--origin`'s own grammar (issue #316, parent #230): a lowercase forge name
-# and the number that forge itself uses for the issue -- the one shape
-# `aco pull <forge>#<n>` (#230 slice 5) will later split back out of
-# `record.origin`, so this is that read side's one owner too, not just the
-# write side's.
-ORIGIN_PATTERN = re.compile(r"[a-z][a-z0-9-]*#[1-9][0-9]*")
+# The one origin grammar (issue #316, parent #230): a lowercase forge name or
+# host/owner/repo path -- one or more `[a-z][a-z0-9-]*` segments joined by `.`
+# or `/` -- then `#` and the number that forge itself uses for the issue.
+# `--origin`'s argparse `type=` (`parse_origin`) and the persisted
+# `[record].origin` field (`board._record_relation_defects`) both validate
+# against this one pattern, so a stored malformed origin is exactly as
+# rejected as a malformed `--origin` flag. This is also the one owner
+# `aco pull <forge>#<n>` (#230 slice 5) will later split `record.origin`
+# back out through.
+ORIGIN_PATTERN = re.compile(r"[a-z][a-z0-9-]*(?:[./][a-z][a-z0-9-]*)*#[1-9]\d*")
+# The one hint text for a malformed origin, shared by `parse_origin`'s
+# argparse refusal and `board._record_relation_defects`' record defect, so a
+# bad `--origin` flag and a bad stored `record.origin` read the same
+# sentence rather than two independently worded rules for one grammar.
+ORIGIN_GRAMMAR_HINT = "forge#n or host/owner/repo#n, e.g. gitlab#514"
 # Refuse rather than silently widen (issue #283, ruling 16.09.2026): an id
 # never grows a seventh hex character just because the id space (16.7
 # million values per repository) is filling up. Three tries against real
@@ -134,7 +143,7 @@ def parse_origin(value: str) -> str:
     raises from an argparse `type=`, so `main`'s existing `parse_args` guard
     catches this one too without a second exception class to catch."""
     if ORIGIN_PATTERN.fullmatch(value) is None:
-        raise ClaimUnavailableError(f"{value!r} is not an origin; use FORGE#N, e.g. gitlab#514")
+        raise ClaimUnavailableError(f"{value!r} is not an origin; use {ORIGIN_GRAMMAR_HINT}")
     return value
 
 

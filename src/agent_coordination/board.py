@@ -938,8 +938,12 @@ def _record_relation_defects(value: dict[str, object]) -> list[ContractDefect]:
     if parent is not None and not isinstance(parent, str):
         defects.append(ContractDefect("record.parent", "record.parent must be an item id string"))
     origin = value.get("origin")
-    if origin is not None and not isinstance(origin, str):
-        defects.append(ContractDefect("record.origin", "record.origin must be a string"))
+    if origin is not None and (
+        not isinstance(origin, str) or items.ORIGIN_PATTERN.fullmatch(origin) is None
+    ):
+        defects.append(
+            ContractDefect("record.origin", f"record.origin must be {items.ORIGIN_GRAMMAR_HINT}")
+        )
     for key_name in ("created_at", "updated_at"):
         defect = _record_timestamp_defect(value.get(key_name), key_name)
         if defect is not None:
