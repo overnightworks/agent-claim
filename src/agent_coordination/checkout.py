@@ -22,12 +22,15 @@ CLAUDE_SESSION_ID_ENV = "CLAUDE_SESSION_ID"
 # launch-failure shapes -- a missing executable, a timeout, and any other
 # OS-level launch failure -- to the same `ClaimError` text (issue #315 Sonar
 # S1192; issue #314 gate G's follow-up folds `versioned_paths` and
-# `path_is_tracked` into this one owner too, F1). `_git_output`,
+# `path_is_tracked` into this one owner too, F1). `process.run_git` and
+# `process.git_failure_detail` (issue #372) own the argv shape and the
+# stderr/stdout/fallback reading `store.py` needs the same way; the
+# `ClaimError` translation stays here because `checkout` and `store` sit on
+# one import-linter layer and neither may import the other. `_git_output`,
 # `versioned_paths`, and `path_is_tracked` each interpret a successful
 # launch's exit status their own way.
 _GIT_MISSING_EXECUTABLE_ERROR = "git is required for issue claims"
 _GIT_TIMED_OUT_ERROR = "git timed out while validating the build checkout"
-_UNKNOWN_GIT_FAILURE_DETAIL = "unknown git failure"
 
 
 def _git_run(arguments: list[str], *, directory: Path | None = None) -> process.CapturedResult:
@@ -43,9 +46,8 @@ def _git_run(arguments: list[str], *, directory: Path | None = None) -> process.
     uncaught traceback out of `protect`'s hook boundary. Interpreting a
     successful launch's exit status is each caller's own job.
     """
-    command = ["git", *(["-C", str(directory)] if directory is not None else []), *arguments]
     try:
-        return process.run_captured(command)
+        return process.run_git(arguments, directory=directory)
     except process.ExecutableMissingError as error:
         raise ClaimError(_GIT_MISSING_EXECUTABLE_ERROR) from error
     except process.ProcessTimedOutError as error:
@@ -54,21 +56,13 @@ def _git_run(arguments: list[str], *, directory: Path | None = None) -> process.
         raise ClaimError(f"git failed to launch: {error}") from error
 
 
-def _git_failure_detail(result: process.CapturedResult) -> str:
-    return (
-        result.stderr.decode().strip()
-        or result.stdout.decode().strip()
-        or _UNKNOWN_GIT_FAILURE_DETAIL
-    )
-
-
 def _git_output(arguments: list[str], *, directory: Path | None = None) -> str:
     """`git arguments`'s stdout, in `directory` when given via `-C` (issue
     #314) or the calling process's own cwd otherwise; a nonzero exit fails
     closed."""
     result = _git_run(arguments, directory=directory)
     if result.exit_status != 0:
-        raise ClaimError(_git_failure_detail(result))
+        raise ClaimError(process.git_failure_detail(result))
     # Trailing-only: every caller wants the one newline `git` appends after its
     # output trimmed, but `git status --porcelain`'s short format is
     # significant in its *leading* column (` M path` names a modified file by
@@ -158,7 +152,7 @@ def versioned_paths(*, directory: Path | None = None) -> tuple[str, ...]:
     precondition, unaffected by #314)."""
     result = _git_run(["ls-files", "-z", "--full-name"], directory=directory)
     if result.exit_status != 0:
-        raise ClaimError(_git_failure_detail(result))
+        raise ClaimError(process.git_failure_detail(result))
     return tuple(dict.fromkeys(path for path in result.stdout.decode().split("\0") if path))
 
 
@@ -183,7 +177,7 @@ def path_is_tracked(path: str, *, directory: Path | None = None) -> bool:
         return True
     if result.exit_status == 1:
         return False
-    raise ClaimError(_git_failure_detail(result))
+    raise ClaimError(process.git_failure_detail(result))
 
 
 def paths_under_scope(paths: tuple[str, ...], scope: tuple[str, ...]) -> tuple[str, ...]:

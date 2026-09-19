@@ -138,10 +138,6 @@ _MAX_PUSH_ATTEMPTS = 8
 # different-key loser.
 _MAX_TRANSITION_ATTEMPTS = 32
 
-# The fallback detail every git-transport failure message falls back to when
-# git's own stderr/stdout carried nothing readable.
-_UNKNOWN_GIT_FAILURE = "unknown git failure"
-
 _LINEAGE_STAMP_DIRECTORY = "aco"
 _LINEAGE_STAMP_FILENAME = "last-oid"
 
@@ -208,7 +204,7 @@ class GitPushTransport:
 
 def _run_git(worktree: Path, arguments: list[str]) -> process.CapturedResult:
     try:
-        return process.run_captured(["git", "-C", str(worktree), *arguments])
+        return process.run_git(arguments, directory=worktree)
     except process.ExecutableMissingError as error:
         raise ClaimError("git is required for the claim state store") from error
     except process.ProcessTimedOutError as error:
@@ -216,7 +212,7 @@ def _run_git(worktree: Path, arguments: list[str]) -> process.CapturedResult:
 
 
 def _run_git_with_input(worktree: Path, arguments: list[str], *, input_data: bytes) -> str:
-    command = ["git", "-C", str(worktree), *arguments]
+    command = process.git_command(arguments, directory=worktree)
     try:
         result = process.run_bounded(command, input_data=input_data)
     except process.ExecutableMissingError as error:
@@ -629,12 +625,9 @@ def _ls_remote_state(worktree: Path, remote: str) -> ObjectId | None:
         return ObjectId(oid)
     if result.exit_status == _LS_REMOTE_EXIT_NO_MATCH:
         return None
-    detail = (
-        result.stderr.decode().strip() or result.stdout.decode().strip() or _UNKNOWN_GIT_FAILURE
-    )
     raise ClaimError(
         f"cannot reach {remote} {STATE_REF}: auth or transport failure "
-        f"(ls-remote exited {result.exit_status}): {detail}"
+        f"(ls-remote exited {result.exit_status}): {process.git_failure_detail(result)}"
     )
 
 
@@ -647,7 +640,7 @@ def _fetch_to_fetch_head(worktree: Path, remote: str) -> None:
     """
     result = _run_git(worktree, ["fetch", remote, STATE_REF])
     if result.exit_status != 0:
-        detail = result.stderr.decode().strip() or _UNKNOWN_GIT_FAILURE
+        detail = process.git_failure_detail(result)
         raise ClaimError(f"cannot fetch {remote} {STATE_REF}: {detail}")
 
 
@@ -665,7 +658,7 @@ def _anchor_fetched_tip(worktree: Path, tip: ObjectId) -> None:
     #237 finding 25)."""
     result = _run_git(worktree, ["update-ref", _FETCH_ANCHOR_REF, str(tip)])
     if result.exit_status != 0:
-        detail = result.stderr.decode().strip() or _UNKNOWN_GIT_FAILURE
+        detail = process.git_failure_detail(result)
         raise ClaimError(f"cannot anchor fetched tip {tip}: {detail}")
 
 
@@ -752,7 +745,7 @@ def _read_state_archive(
         command.extend(["--", *paths])
     result = _run_git(worktree, command)
     if result.exit_status != 0:
-        detail = result.stderr.decode().strip() or _UNKNOWN_GIT_FAILURE
+        detail = process.git_failure_detail(result)
         raise MalformedStateTreeError(f"cannot read the state tree at {tip}: {detail}")
     try:
         with tarfile.open(fileobj=BytesIO(result.stdout), mode="r:") as archive:
@@ -1017,7 +1010,7 @@ def _find_operation_id(
     range_argument = f"{since}..{until}" if since is not None else str(until)
     listing = _run_git(worktree, ["log", "--format=%H", range_argument])
     if listing.exit_status != 0:
-        detail = listing.stderr.decode().strip() or _UNKNOWN_GIT_FAILURE
+        detail = process.git_failure_detail(listing)
         raise ClaimError(
             f"cannot search {range_argument} for operation_id {operation_id}: {detail}"
         )
@@ -1594,10 +1587,9 @@ def local_state_ref_exists(worktree: Path) -> bool:
         return True
     if result.exit_status == _SHOW_REF_EXIT_MISSING and not result.stdout and not result.stderr:
         return False
-    detail = (
-        result.stderr.decode().strip() or result.stdout.decode().strip() or _UNKNOWN_GIT_FAILURE
+    raise ClaimError(
+        f"cannot check {STATE_REF} in {worktree}: {process.git_failure_detail(result)}"
     )
-    raise ClaimError(f"cannot check {STATE_REF} in {worktree}: {detail}")
 
 
 def _export_failure(tip: ObjectId, destination: Path, detail: str) -> ClaimError:
@@ -1622,16 +1614,11 @@ def _write_bundle_to_descriptor(
     try:
         update = _run_git(worktree, ["update-ref", EXPORT_BUNDLE_REF, str(tip)])
         if update.exit_status != 0:
-            detail = update.stderr.decode().strip() or _UNKNOWN_GIT_FAILURE
+            detail = process.git_failure_detail(update)
             raise _export_failure(tip, destination, detail)
         result = _run_git(worktree, ["bundle", "create", "-", EXPORT_BUNDLE_REF])
         if result.exit_status != 0:
-            detail = (
-                result.stderr.decode().strip()
-                or result.stdout.decode().strip()
-                or _UNKNOWN_GIT_FAILURE
-            )
-            raise _export_failure(tip, destination, detail)
+            raise _export_failure(tip, destination, process.git_failure_detail(result))
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(result.stdout)
     except BaseException:
@@ -1679,20 +1666,20 @@ def _delete_export_ref(worktree: Path) -> str | None:
     Catches `(ClaimError, OSError, ValueError)` rather than only
     `ClaimError` (issue #298, the third and sixth 19.09.2026 gate REVISEs):
     `_run_git` only wraps `ExecutableMissingError`/`ProcessTimedOutError`
-    into `ClaimError`, so a raw `OSError` from `process.run_captured`'s own
+    into `ClaimError`, so a raw `OSError` from `process.run_git`'s own
     `subprocess.run` (a descriptor exhausted) would otherwise escape before
-    the temporary file's own cleanup below ever runs, and the nonzero-exit
-    branch's own `stderr.decode()` below can raise `UnicodeDecodeError` --
-    a `ValueError` subclass -- on invalid UTF-8 in git's own stderr. This is
-    the concrete failure family that can actually reach this call, not a
-    stand-in for "anything": nothing here is swallowed, the caught error is
-    carried verbatim into the leftover description `_clear_export_artifacts`
-    returns and, from there, into the raised `ClaimError` and its
-    `__cause__`."""
+    the temporary file's own cleanup below ever runs, and
+    `process.git_failure_detail`'s own `stderr.decode()` on the nonzero-exit
+    branch can raise `UnicodeDecodeError` -- a `ValueError` subclass -- on
+    invalid UTF-8 in git's own stderr. This is the concrete failure family
+    that can actually reach this call, not a stand-in for "anything":
+    nothing here is swallowed, the caught error is carried verbatim into the
+    leftover description `_clear_export_artifacts` returns and, from there,
+    into the raised `ClaimError` and its `__cause__`."""
     try:
         result = _run_git(worktree, ["update-ref", "-d", EXPORT_BUNDLE_REF])
         if result.exit_status != 0:
-            return result.stderr.decode().strip() or _UNKNOWN_GIT_FAILURE
+            return process.git_failure_detail(result)
     except (ClaimError, OSError, ValueError) as error:
         return str(error)
     return None
@@ -1856,17 +1843,14 @@ def delete_state_ref(*, worktree: Path, remote: str, expected_remote_tip: Object
             worktree, ["push", remote, f"--force-with-lease={lease}", f":{STATE_REF}"]
         )
         if result.exit_status != 0:
-            detail = (
-                result.stderr.decode().strip()
-                or result.stdout.decode().strip()
-                or _UNKNOWN_GIT_FAILURE
+            _repair_after_failed_remote_delete(
+                worktree, remote, expected_remote_tip, process.git_failure_detail(result)
             )
-            _repair_after_failed_remote_delete(worktree, remote, expected_remote_tip, detail)
     if not local_state_ref_exists(worktree):
         return False
     result = _run_git(worktree, ["update-ref", "-d", STATE_REF])
     if result.exit_status != 0:
-        detail = result.stderr.decode().strip() or _UNKNOWN_GIT_FAILURE
+        detail = process.git_failure_detail(result)
         raise ClaimError(f"cannot delete local {STATE_REF}: {detail}")
     return True
 
@@ -1889,6 +1873,6 @@ def clear_lineage_stamps(*, worktree: Path) -> tuple[Path, ...]:
         _lineage_stamp_path(path).unlink(missing_ok=True)
         result = _run_git(path, ["update-ref", "-d", _FETCH_ANCHOR_REF])
         if result.exit_status != 0:
-            detail = result.stderr.decode().strip() or _UNKNOWN_GIT_FAILURE
+            detail = process.git_failure_detail(result)
             raise ClaimError(f"cannot clear {_FETCH_ANCHOR_REF} in {path}: {detail}")
     return worktrees
