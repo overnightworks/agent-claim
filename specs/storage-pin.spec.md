@@ -18,13 +18,19 @@ reaches `ERROR: <sentence>` on stderr, exit `2`, unless noted otherwise.
 | `.agent-claim/board.toml` untracked, absent, or ignored | PIN-01 | PIN-01 | PIN-01 | PIN-01 | — |
 | `storage` unset (default `github`) | PIN-02 | PIN-09 | PIN-10, PIN-11 | — | PIN-08 |
 | `storage` names an unrecognized value | PIN-03 | PIN-03 | PIN-03 | PIN-03 | — |
-| `storage = "state-ref"` | PIN-04\*, PIN-05\* | PIN-18..21 | PIN-22..28 | PIN-12 | PIN-08 |
+| `storage = "state-ref"` | PIN-04\*, PIN-05\* | PIN-18..21 | PIN-22..28 | —\*\* | PIN-08 |
 | a state-ref item file itself is malformed | PIN-13..17 | — | — | — | — |
 | a fresh item id, minted | PIN-06, PIN-07 | PIN-06, PIN-07 | — | — | — |
 
 \* PIN-04/PIN-05 gate only a command that resolves this repository's item
 forge, a narrower set than "any store command" -- see `## Never` for the
 exact commands that never do.
+
+\*\* `release --merged` under `storage = "state-ref"` is no longer a pin
+precondition (PIN-12, retired): `<sha|empty>` verifies and closes the named
+issue itself, and only an issue-less lane still refuses -- that grammar,
+including the surviving refusal, is `specs/landing-grammar.spec.md`'s own
+(LAND-47, LAND-52, LAND-56, LAND-59), not restated here.
 
 ## The pin and its precondition
 
@@ -48,7 +54,7 @@ exact commands that never do.
 - [ ] [PIN-09] `aco item new` under `storage = "github"` refuses `items live on the forge; open the issue there` (see E-PIN-05).
 - [ ] [PIN-10] `aco item edit ITEM` under `storage = "github"` refuses `forge issues are edited on the forge; aco never governs them`.
 - [ ] [PIN-11] `aco item close ITEM` under `storage = "github"` refuses `the forge closes its issues; aco never governs them`.
-- [ ] [PIN-12] `aco release --merged` under `storage = "state-ref"` refuses, naming the offline path `item close` and `release --abandoned "landed as <sha>"` (see E-PIN-06).
+- PIN-12 (retired 19.09.2026, issue #359): the outright `release --merged` refusal it named under `storage = "state-ref"` no longer exists; `--merged <sha|empty>` verifies and closes the named issue itself (`specs/landing-grammar.spec.md` LAND-47/LAND-52/LAND-59), and only an issue-less lane still refuses (LAND-56).
 
 ## The state-ref item file, one layer above the block
 
@@ -155,16 +161,6 @@ Setup: bare-remote, `.agent-claim/board.toml` tracked with no `storage` key
 ```console
 $ aco item new --title "Reset export"
 2> ERROR: items live on the forge; open the issue there
-exit 2
-```
-
-### E-PIN-06 — `release --merged` refused under state-ref
-
-Setup: bare-remote, bootstrapped, `storage = "state-ref"` tracked, a live lane claim
-
-```console
-$ aco release --merged
-2> ERROR: state-ref cannot verify a merged pull request yet (#230 slice 6); land offline with `item close` and `release --abandoned "landed as <sha>"` until then
 exit 2
 ```
 

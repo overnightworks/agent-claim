@@ -46,6 +46,7 @@ from .protocol import (
     ClaimTransitionIntent,
     ClaimUnavailableError,
     ItemWriteIntent,
+    LandingIntent,
     MalformedStateTreeError,
     ObjectId,
     OperationAlreadyApplied,
@@ -88,12 +89,14 @@ _STATE_TOP_LEVEL_NAMES = frozenset(
 )
 
 # The transition each intent type carries, for the commit message trailer
-# (§1 "Commit message"): `intent: claim` / `rescope` / `release` / `item_write`.
+# (§1 "Commit message"): `intent: claim` / `rescope` / `release` / `item_write`
+# / `landing` (issue #359, `LandingIntent`'s atomic close-and-release).
 _INTENT_LABELS: dict[type[ClaimTransitionIntent], str] = {
     ClaimIntent: "claim",
     RescopeIntent: "rescope",
     ReleaseIntent: "release",
     ItemWriteIntent: "item_write",
+    LandingIntent: "landing",
 }
 
 # `git ls-remote --exit-code` (git(1)): 2 is "no matching refs" -- the only
@@ -1084,17 +1087,18 @@ def _write_incremental_state_tree(
 
 def _transition_message(subject: str, intent: ClaimTransitionIntent) -> str:
     """The commit message trailer for one transition (§1 "Commit message";
-    widened for item writes, issue #279): every intent carries
-    `operation_id`, the one field `_find_operation_id`'s replay search reads
-    back; a claim-shaped intent also names its `claim_id`, an item write its
-    `item_id` instead -- the two are mutually exclusive identifiers, never a
-    shared field.
+    widened for item writes, issue #279; widened again for atomic landings,
+    issue #359): every intent carries `operation_id`, the one field
+    `_find_operation_id`'s replay search reads back; a claim-shaped intent
+    also names its `claim_id`, an item write its `item_id` instead, and a
+    landing -- the one intent that is both -- names both.
     """
-    subject_field = (
-        f"item_id: {intent.item_id}"
-        if isinstance(intent, ItemWriteIntent)
-        else f"claim_id: {intent.claim_id}"
-    )
+    if isinstance(intent, LandingIntent):
+        subject_field = f"item_id: {intent.item_id}\nclaim_id: {intent.claim_id}"
+    elif isinstance(intent, ItemWriteIntent):
+        subject_field = f"item_id: {intent.item_id}"
+    else:
+        subject_field = f"claim_id: {intent.claim_id}"
     return (
         f"{subject}\n\n"
         f"operation_id: {intent.operation_id}\n"
@@ -1111,9 +1115,9 @@ def commit_transition(
     remote: str = DEFAULT_CANONICAL_REMOTE,
     transport: PushTransport | None = None,
 ) -> ClaimState:
-    """Fetch, apply, and push one claim/rescope/release/item-write transition
-    (issue #176, slice C2; item writes, issue #279): the production caller
-    of `protocol.apply`.
+    """Fetch, apply, and push one claim/rescope/release/item-write/landing
+    transition (issue #176, slice C2; item writes, issue #279; atomic
+    landings, issue #359): the production caller of `protocol.apply`.
 
     Unlike `push_tree`'s fixed bootstrap tree, a transition's result depends
     on the state it is applied to, so every retry attempt re-fetches and

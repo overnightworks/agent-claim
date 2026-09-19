@@ -2,12 +2,19 @@
 branch validation, claim conflict/overlap, and the wide-scope trip rule.
 Tests that drive these through `issue_claim.main([...])` stay in
 `tests/test_cli.py` as CLI-wiring behavior; `protocol.apply` and its TOML
-codecs are `tests/test_store.py`'s own (the store's pure counterpart)."""
+codecs are `tests/test_store.py`'s own (the store's pure counterpart) --
+except `LandingIntent` (issue #359), whose one job is exactly the atomic
+close-and-release this module owns describing, so its own `apply` proof
+lives here instead."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import replace
+
 import pytest
 from board_fixtures import _active_claim, request
+from test_store import _STATE_WITH_TIP, _claim_intent
 
 from agent_coordination import protocol
 from agent_coordination.protocol import (
@@ -263,3 +270,133 @@ def test_wide_scope_trip_names_the_condition_in_the_rule_s_priority_order() -> N
         )
         is None
     )
+
+
+# --- `LandingIntent`: the atomic close-and-release (issue #359) ------------
+
+_LANDING_ITEM_ID = "aco-000001"
+_LANDING_ITEM_OID = protocol.ObjectId("d" * 40)
+_LANDING_ITEM_NEW_OID = protocol.ObjectId("e" * 40)
+_LANDING_COMMIT = protocol.ObjectId("1" * 40)
+
+
+def test_landed_release_reason_names_the_commit() -> None:
+    assert protocol.LandedRelease(_LANDING_COMMIT).reason == f"landed {_LANDING_COMMIT}"
+
+
+def _landing_intent(
+    *,
+    item_id: str = _LANDING_ITEM_ID,
+    item_expected: protocol.ObjectId = _LANDING_ITEM_OID,
+    item_new_oid: protocol.ObjectId = _LANDING_ITEM_NEW_OID,
+    claim_id: str = "a1",
+    agent: str = "Ada",
+    role: str = "builder",
+    outcome: protocol.LandedRelease | None = None,
+    operation_id: str = "op-2",
+    coordinator_override: bool = False,
+) -> protocol.LandingIntent:
+    return protocol.LandingIntent(
+        item_id=item_id,
+        item_expected=item_expected,
+        item_new_oid=item_new_oid,
+        claim_id=protocol.ClaimId(claim_id),
+        agent=agent,
+        role=role,
+        outcome=outcome if outcome is not None else protocol.LandedRelease(_LANDING_COMMIT),
+        operation_id=operation_id,
+        coordinator_override=coordinator_override,
+    )
+
+
+def _claimed_state_with_item() -> protocol.ClaimState:
+    claimed = protocol.apply(_STATE_WITH_TIP, _claim_intent())
+    return replace(claimed, items={_LANDING_ITEM_ID: _LANDING_ITEM_OID})
+
+
+def test_apply_landing_intent_closes_the_item_and_releases_the_claim_in_one_transition() -> None:
+    """Issue #359: one `apply` call both moves the item's blob oid and
+    removes the claim -- the atomicity a landing needs (never one without
+    the other) is exactly this being a single `ClaimState` transition, not
+    two intents applied in sequence."""
+    with_item = _claimed_state_with_item()
+
+    landed = protocol.apply(with_item, _landing_intent())
+
+    assert "issue-42" not in landed.claims
+    assert landed.items == {_LANDING_ITEM_ID: _LANDING_ITEM_NEW_OID}
+    assert protocol.ClaimId("a1") in landed.consumed_ids
+
+
+def test_apply_landing_intent_allows_a_coordinator_override() -> None:
+    with_item = _claimed_state_with_item()
+
+    landed = protocol.apply(
+        with_item,
+        _landing_intent(agent="Coordinator", role="coordinator", coordinator_override=True),
+    )
+
+    assert "issue-42" not in landed.claims
+    assert landed.items == {_LANDING_ITEM_ID: _LANDING_ITEM_NEW_OID}
+
+
+@pytest.mark.parametrize(
+    ("build_intent", "match"),
+    [
+        pytest.param(
+            lambda: _landing_intent(claim_id="nonexistent"),
+            "no active claim to release",
+            id="no-such-claim",
+        ),
+        pytest.param(
+            lambda: _landing_intent(agent="Grace"),
+            "only the original claimant may release",
+            id="wrong-claimant-no-override",
+        ),
+        pytest.param(
+            lambda: _landing_intent(coordinator_override=True),
+            "requires role coordinator",
+            id="override-without-coordinator-role",
+        ),
+        pytest.param(
+            lambda: _landing_intent(item_expected=protocol.ObjectId("f" * 40)),
+            "written since it was read",
+            id="stale-item-oid",
+        ),
+    ],
+)
+def test_apply_landing_intent_refuses(
+    build_intent: Callable[[], protocol.LandingIntent], match: str
+) -> None:
+    """Every way a landing refuses before it ever touches `refs/aco/state`
+    (issue #359): a claim id that names no live claim, a non-claimant with
+    no coordinator override, an override without the coordinator role --
+    all three `ReleaseIntent`'s own sentences, proven exactly in
+    `test_store.py` (`test_apply_release_intent_refuses_releasing_a_claim_that_does_not_exist`,
+    `test_apply_release_intent_refuses_a_non_claimant_without_override`,
+    `test_apply_release_intent_refuses_a_coordinator_override_without_coordinator_role`)
+    -- and, the one check `LandingIntent` adds beyond `ReleaseIntent`, a
+    stale item oid, which leaves the claim live rather than releasing it
+    anyway."""
+    with_item = _claimed_state_with_item()
+    intent = build_intent()
+
+    with pytest.raises(protocol.ClaimUnavailableError, match=match):
+        protocol.apply(with_item, intent)
+
+    # A refused landing changes nothing: still claimed, item still at its
+    # original oid.
+    assert "issue-42" in with_item.claims
+    assert with_item.items == {_LANDING_ITEM_ID: _LANDING_ITEM_OID}
+
+
+def test_apply_landing_intent_refuses_against_a_missing_state_ref() -> None:
+    """A `LandingIntent` needs a real state-ref tip to close its item and
+    release its claim against -- `protocol.EMPTY_STATE` (`tip is None`, no
+    bootstrap yet) refuses before either half runs, the same precondition
+    every other transition shape enforces."""
+    assert protocol.EMPTY_STATE.tip is None
+    intent = _landing_intent()
+
+    with pytest.raises(protocol.ClaimError, match="does not exist yet"):
+        protocol.apply(protocol.EMPTY_STATE, intent)

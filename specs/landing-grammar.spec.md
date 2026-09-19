@@ -9,7 +9,10 @@ This file owns both grammars, `aco check <pr>`'s classification, the
 parent-closing rule, what `aco release --merged` verifies, and the
 "Landungen" landing view `aco board`/`aco board --html` derive from them.
 Each command's own spec (none exist yet for `check`/`release`/`board`) would
-cite these IDs rather than restate them.
+cite these IDs rather than restate them. `aco check <sha>` and, under
+`storage = "state-ref"`, `release --merged <sha|empty>` (issue #359) read
+the trunk's own trailer block directly and need no forge at all: a commit's
+trailer is local history, unlike a pull request's classification.
 
 `<n>` is a bare issue or pull request number, always printed `#<n>`. `<item>`
 and `<ref>` are a parsed `Work-Item:` value or closing reference, always
@@ -28,14 +31,15 @@ matching line.
 
 ## Behavior table
 
-| state \ trigger | trunk trailer (`aco board`) | `aco check <pr>` | `aco release --merged <pr>` | Landungen (`aco board`/`--html`) |
+| state \ trigger | trunk trailer (`aco board`) | `aco check <pr>` \| `aco check <sha>` | `aco release --merged <pr>` \| `--merged <sha\|empty>` (state-ref) | Landungen (`aco board`/`--html`) |
 |---|---|---|---|---|
-| single `Work-Item:` trailer | LAND-01 | — | — | LAND-42 |
-| repeated `Work-Item:` trailer | LAND-02 | — | — | LAND-42 |
+| single `Work-Item:` trailer | LAND-01 | LAND-48 | LAND-47, LAND-52, LAND-59 | LAND-42 |
+| repeated `Work-Item:` trailer | LAND-02 | LAND-48 | LAND-52, LAND-59 | LAND-42 |
 | control byte inside a trailer value | LAND-03 | — | — | — |
 | valid `Work-Item:` + closing reference | — | LAND-04 | LAND-29, LAND-49 | LAND-41 |
 | valid `No-Item:` + lane claim | — | LAND-05 | LAND-37 | — |
-| no classification line | — | LAND-06 | LAND-32 | — |
+| no classification / no trailer | — | LAND-06, LAND-58 | LAND-32, LAND-52 | — |
+| contradictory trunk trailer (both, or repeated `No-Item:`) | — (lands nothing, LAND-42) | LAND-60 | LAND-61 | — |
 | classification line inside a fenced block | — | LAND-07 | — | — |
 | two classification lines | — | LAND-08 | LAND-32 | — |
 | two `Work-Item:` lines | — | LAND-09 | LAND-32 | — |
@@ -43,7 +47,8 @@ matching line.
 | malformed/unknown `No-Item:` kind | — | LAND-11 | LAND-32 | — |
 | cross-repository head branch | — | LAND-12 | — | — |
 | wrong target branch | — | LAND-13 | LAND-31 | — |
-| foreign-repository work item | — | LAND-14 | — | — |
+| foreign-repository work item | — | LAND-14 | LAND-52 | — |
+| commit outside the first-parent trunk | — | LAND-57 | LAND-52 | — |
 | no active claim on the head branch | — | LAND-15, LAND-16 | — | — |
 | `No-Item:` PR carrying a closing reference | — | LAND-17 | — | — |
 | missing/extra closing reference | — | LAND-18, LAND-19 | — | — |
@@ -55,20 +60,24 @@ matching line.
 | malformed/wrong-kind/foreign parent | — | LAND-26, LAND-27, LAND-28 | — | — |
 | pull request not merged | — | — | LAND-30 | — |
 | PR names a different item / kind mismatch | — | — | LAND-33, LAND-34, LAND-35 | — |
-| work item still open | — | — | LAND-36 | — |
+| work item still open | — | — | LAND-55 | — |
 | forge unreachable right after the release commits | — | — | LAND-38, LAND-50 | — |
 | `--abandoned` outcome | — | — | LAND-39 | — |
-| under `storage = "state-ref"` (today) | — | — | LAND-40 | — |
+| issue-less lane, `storage = "state-ref"` | — | — | LAND-56 | — |
 | still-open item a merged PR already declared | — | — | — | LAND-43, LAND-51, LAND-53 |
 | `landings_derivable` is false | — | — | — | LAND-44, LAND-46, LAND-54 |
 | a `code-landed` row with no resolved pull request | — | — | — | LAND-45 |
-| ruled but not built (`storage = "state-ref"`, #297) | LAND-47, LAND-52 | LAND-48 | LAND-47, LAND-52 | — |
 
 ## The trunk's own trailer block
 
 - [ ] [LAND-01] A merge or squash commit whose own trailer block carries `Work-Item: #10` marks #10 `code-landed` in `aco board`'s STAGE column, whether or not any pull request body also names it.
 - [ ] [LAND-02] A trailer block repeating `Work-Item:` (a squash commit carrying `Work-Item: #11` and `Work-Item: #12`) marks every named item `code-landed`, unlike a pull request body, which allows only one.
 - [ ] [LAND-03] A trailer value with a control byte (`#12\x1f#13`) reads as one literal value: `aco board` refuses `ERROR: '#12\x1f#13' is not an item reference; use aco-xxxxxx, #n, or the bare number n`, exit `2`.
+- [ ] [LAND-48] `aco check <sha>` reads `<sha>`'s own trailer: `Work-Item:` prints `<sha> declares Work-Item: #<n>`, `No-Item:` prints `<sha> declares No-Item: <kind>`, exit `0`.
+- [ ] [LAND-57] A `<sha>` outside the walked first-parent trunk refuses `<sha> is not on the first-parent trunk`, exit `1`.
+- [ ] [LAND-58] A trunk `<sha>` carrying neither trailer refuses `<sha> carries no \`Work-Item:\` or \`No-Item:\` trailer`, exit `1`.
+- [ ] [LAND-60] A trunk `<sha>` whose trailer block is contradictory -- both `Work-Item:` and `No-Item:`, or `No-Item:` repeated -- makes `check <sha>` refuse `REFUSED: <sha> <that defect sentence>`, exit `1`.
+- [ ] [LAND-61] That same contradictory `<sha>` makes `release --merged <sha>` refuse `ERROR: <sha> <that defect sentence>`, exit `2`, before any write.
 
 ## The pull request body's own grammar
 
@@ -120,7 +129,7 @@ sentence>`, not restated.
 
 ## What `release --merged` requires
 
-- [ ] [LAND-29] `release <n> --merged <pr>` succeeds only when the pull request is merged into the default branch, its classification names this claim's own item, and (for an issue) that item is already closed.
+- [ ] [LAND-29] `release <n> --merged <pr>` succeeds once the pull request is merged into default and names this item; LAND-55 closes a still-open one rather than requiring it closed first.
 - [ ] [LAND-49] A successful `--merged` release prints `freed: <label>, <label>` (or `none`) and `next: <label> score <s>: <title>` (or `none`); `--json` carries `"freed": [n,...]` and `"next": n`/`null`.
 - [ ] [LAND-30] A pull request that is not merged refuses `pull request #<n> is not merged`, exit `2`, before anything is written.
 - [ ] [LAND-31] A pull request merged into a branch other than the default refuses `pull request #<n> merged into '<branch>', not the default branch '<default>'`, exit `2`.
@@ -128,12 +137,17 @@ sentence>`, not restated.
 - [ ] [LAND-33] A pull request naming a different work item than the one being released refuses `pull request #<n> names Work-Item: <ref>, not work item #<n>`, exit `2`.
 - [ ] [LAND-34] A pull request declaring `No-Item:` while an issue is being released refuses `pull request #<n> names No-Item: <kind>, not work item #<n>`, exit `2`.
 - [ ] [LAND-35] A pull request declaring `Work-Item:` while an issue-less lane is being released refuses `pull request #<n> names <ref>; an issue-less lane needs a No-Item line`, exit `2`.
-- [ ] [LAND-36] An issue whose work item is not yet closed on the forge refuses `work item #<n> is open, not closed`, exit `2`, even once its landing pull request is fully verified.
+- [ ] [LAND-55] A still-open work item, once its landing pull request verifies, is closed by this release: a comment `landed by PR #<n>`, then the close — never a refusal (replaces retired LAND-36).
+- LAND-36 (retired 19.09.2026, issue #359): "work item #<n> is open, not closed" no longer exists; a still-open item is closed instead (LAND-55).
 - [ ] [LAND-37] `release --merged <pr>` for an issue-less lane, against a body carrying only `No-Item: docs`, releases the claim without requiring or reading any closing reference.
 - [ ] [LAND-38] A forge outage after the release committed prints `hint: could not read the board to report what this landing freed (<error>); run \`aco board\` once the forge is reachable`.
 - [ ] [LAND-50] The release LAND-38 reports on never undoes or fails on that hiccup: its claim stays released and its exit code stays `0`, exactly as a reachable forge would have produced.
 - [ ] [LAND-39] `--abandoned "<reason>"` never verifies a pull request or reads the board: it prints `RELEASED ...` alone, with no `freed`/`next` line and no `hint` line, ever.
-- [ ] [LAND-40] `release --merged` under state-ref refuses ``state-ref cannot verify a merged pull request yet (#230 slice 6); land offline with `item close` and `release --abandoned "landed as <sha>"` until then``.
+- [ ] [LAND-47] Under `storage = "state-ref"`, `release --merged <sha|empty>` reads the trunk walk (LAND-01/LAND-02); empty picks the newest commit naming this claim's item.
+- [ ] [LAND-52] That commit must sit on the walked trunk and carry a `Work-Item:` trailer naming this item, or the release refuses by name, exit `2`, before any write.
+- [ ] [LAND-59] On success, `release --merged <sha>` closes the item and releases the claim in one commit, reporting `freed:`/`next:` as LAND-49 does.
+- [ ] [LAND-56] `--merged` requires an issue number under `storage = "state-ref"`, refusing `--merged under storage = state-ref requires an issue number; an issue-less lane has no item to close`, exit `2`.
+- LAND-40 (retired 19.09.2026, issue #359): the state-ref `--merged` refusal it named no longer exists; LAND-47/LAND-52 are the real grammar.
 
 ## The Landungen view
 
@@ -147,16 +161,10 @@ sentence>`, not restated.
 - [ ] [LAND-45] `board --html`'s Landungen section pairs `code-landed` with the closing/declaring pull request (`PR #<n>: <title>`), narrower than LAND-41; else `<date> <sha7>`; else `PR nicht zugeordnet`.
 - [ ] [LAND-46] `board --html` shows `nicht ableitbar` in place of the "Landungen" list only once neither a pull request nor a trunk trailer resolves any row.
 
-## Landing without a forge (ruled, not yet built — #297)
-
-- [ ] [LAND-47] Under state-ref, `release --merged <sha|empty>` reads the trunk walk of LAND-01/LAND-02; an empty value picks the newest trunk commit whose own trailer names this item.
-- [ ] [LAND-52] That commit must sit on the trunk and carry a `Work-Item:` trailer naming this item, or the release refuses by name; on success it closes the item and reports `freed:`/`next:` as LAND-49 does today.
-- [ ] [LAND-48] Under state-ref, `check <sha>` reads a commit's own trailer through the same grammar `check <pr>` reads a body with (LAND-04/LAND-06), printing the same `work-item`/`no-item` answers.
-
 ## Never
 
 - A trunk commit's own `No-Item:` trailer never marks any issue `code-landed`; only a `Work-Item:` trailer does.
-- A trunk commit's contradictory trailer block — both `Work-Item:` and `No-Item:`, or `No-Item:` repeated — is never read as a landing and never refuses any command; it simply lands nothing, the same as a commit that carries neither.
+- A trunk commit's contradictory trailer block — both `Work-Item:` and `No-Item:`, or `No-Item:` repeated — is never read as a landing by the trunk trailer walk itself (LAND-42): it lands nothing there, the same as a commit that carries neither. `check <sha>` and `release --merged <sha>` (issue #359, LAND-60/LAND-61) read that same commit directly, and do refuse it by name — never letting `Work-Item:` win by ordering.
 - A `Work-Item:` reference sitting in a commit's ordinary message prose, outside its own trailer block, is never read as a landing.
 - The trunk walk never follows a side branch: only the first-parent line a merge or squash commit sits on counts, and it never reads a hardcoded `origin` — only the repository's own configured canonical remote.
 - `check`/`release --merged` never read a body's `Advances #n` line as a declaration or a closing reference: a dispatched slice is its own item, and only its own pull request closes it.
@@ -202,14 +210,16 @@ $ aco check 58
 exit 1
 ```
 
-### E-LAND-04 — `release --merged` requires the item closed first
+### E-LAND-04 — `release --merged` closes a still-open work item itself
 
 Setup: bare-remote, fake `gh`, pull request `#57` merged, body `Work-Item: #42\n\nCloses #42`, issue `#42` claimed and still open on the forge
 
 ```console
 $ aco release 42 --merged 57
-2> ERROR: work item #42 is open, not closed
-exit 2
+RELEASED issue #42: <claim-id>
+freed: none
+next: none
+exit 0
 ```
 
 ### E-LAND-05 — a last-child landing that must also close its parent
@@ -220,4 +230,66 @@ Setup: bare-remote, fake `gh`, parent `#5` a container with one open child `#42`
 $ aco check 57
 2> REFUSED: pull request #57 closes the last open child of parent <owner>/<repo>#5; close the parent too
 exit 1
+```
+
+### E-LAND-47 — a merge landing closes its item and releases the claim under state-ref
+
+Setup: bare-remote, `storage = "state-ref"`, `main` carrying a merge commit whose trailer names `aco-00000a` (`#10`), item `#10` open and claimed
+
+```console
+$ aco release 10 --merged
+RELEASED issue aco-00000a: <claim-id>
+freed: none
+next: none
+exit 0
+```
+
+### E-LAND-52 — a commit off the first-parent trunk refuses
+
+Setup: bare-remote, `storage = "state-ref"`, item `#10` open and claimed, `<sha>` a commit on a side branch never merged into `main`
+
+```console
+$ aco release 10 --merged <sha>
+2> ERROR: <sha> is not on the first-parent trunk
+exit 2
+```
+
+### E-LAND-48 — `check <sha>` reads a trunk commit's own trailer
+
+Setup: bare-remote, `main` carrying a commit whose trailer reads `Work-Item: #20`
+
+```console
+$ aco check <sha>
+<sha> declares Work-Item: #20
+exit 0
+```
+
+### E-LAND-56 — `release --merged` with no issue number under state-ref refuses
+
+Setup: bare-remote, `storage = "state-ref"`, a live issue-less lane claim
+
+```console
+$ aco release --merged
+2> ERROR: --merged under storage = state-ref requires an issue number; an issue-less lane has no item to close
+exit 2
+```
+
+### E-LAND-60 — a contradictory trunk trailer refuses `check <sha>`
+
+Setup: bare-remote, `main` carrying a commit whose trailer reads `Work-Item: #20` and `No-Item: docs`
+
+```console
+$ aco check <sha>
+2> REFUSED: <sha> carries both `Work-Item:` and `No-Item:` trailers; a landed commit is one or the other
+exit 1
+```
+
+### E-LAND-61 — the same contradictory trailer refuses `release --merged <sha>`
+
+Setup: bare-remote, `storage = "state-ref"`, item `#20` open and claimed, `main` carrying a commit whose trailer reads `Work-Item: #20` and `No-Item: docs`
+
+```console
+$ aco release 20 --merged <sha>
+2> ERROR: <sha> carries both `Work-Item:` and `No-Item:` trailers; a landed commit is one or the other
+exit 2
 ```

@@ -433,6 +433,51 @@ def test_github_adapter_updates_an_item_body() -> None:
     ]
 
 
+def test_github_adapter_closes_a_landed_item_with_a_comment_first() -> None:
+    """Issue #359 Card 1/CI: `close_landed_item`'s own two `_run` calls --
+    the comment lands first, the close second, exactly the order its own
+    docstring promises."""
+    observed: list[tuple[list[str], bytes | None]] = []
+
+    def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
+        observed.append((arguments, input_data))
+        return ""
+
+    client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
+
+    client.close_landed_item(79, pull_request=101)
+
+    assert observed == [
+        (
+            ["api", f"repos/{REPOSITORY}/issues/79/comments", "--input", "-"],
+            json.dumps({"body": github.landing_comment(101)}).encode("utf-8"),
+        ),
+        (
+            ["api", "--method", "PATCH", f"repos/{REPOSITORY}/issues/79", "--input", "-"],
+            json.dumps({"state": "closed"}).encode("utf-8"),
+        ),
+    ]
+
+
+def test_github_adapter_closing_a_landed_item_never_reaches_close_when_the_comment_fails() -> None:
+    """The comment lands first (issue #359 Card 1): a transient failure
+    there must never reach the close call, leaving the issue open with no
+    record of why it is about to close -- worse than leaving it open with
+    the comment already explaining the pending landing."""
+    calls: list[list[str]] = []
+
+    def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
+        calls.append(arguments)
+        raise forge.ForgeError("HTTP 500 comment failed")
+
+    client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
+
+    with pytest.raises(forge.ForgeError, match="comment failed"):
+        client.close_landed_item(79, pull_request=101)
+
+    assert calls == [["api", f"repos/{REPOSITORY}/issues/79/comments", "--input", "-"]]
+
+
 def test_recent_merged_pull_requests_refuses_a_window_that_ends_before_it_starts() -> None:
     """A fixed far-future `since` -- never `datetime.now(UTC)`-relative -- so
     this stays deterministic regardless of when the suite runs: a real-clock

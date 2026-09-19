@@ -5,7 +5,6 @@
 #
 # Seeded on 19.09.2026 with the ruled but not yet built criteria of the first
 # two contract specs (#326), each with the item that owns building it.
-
-LAND-47  # #297
-LAND-48  # #297
-LAND-52  # #297
+#
+# LAND-47/LAND-48/LAND-52 landed as issue #359 (atomic state-ref landing,
+# release --merged <sha|empty>, check <sha>) and left this ratchet.

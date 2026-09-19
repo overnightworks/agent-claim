@@ -110,7 +110,22 @@ class AbandonedRelease:
         return f"abandoned: {self.explanation}"
 
 
-ReleaseOutcome = MergedRelease | AbandonedRelease
+@dataclass(frozen=True)
+class LandedRelease:
+    """A claim released because its item's own trunk commit named it (issue
+    #359): the `storage = "state-ref"` counterpart of `MergedRelease` for a
+    repository with no forge pull request to verify -- `commit` is the
+    first-parent trunk commit `release --merged <sha|empty>` resolved
+    (LAND-47/LAND-52, `specs/landing-grammar.spec.md`)."""
+
+    commit: ObjectId
+
+    @property
+    def reason(self) -> str:
+        return f"landed {self.commit}"
+
+
+ReleaseOutcome = MergedRelease | AbandonedRelease | LandedRelease
 
 
 @dataclass(frozen=True)
@@ -902,7 +917,33 @@ class ItemWriteIntent:
     operation_id: str
 
 
-ClaimTransitionIntent = ClaimIntent | RescopeIntent | ReleaseIntent | ItemWriteIntent
+@dataclass(frozen=True)
+class LandingIntent:
+    """A `release --merged <sha|empty>` transition under `storage =
+    "state-ref"` (issue #359): closes one state-ref item's blob -- the same
+    oid-based CAS `ItemWriteIntent` uses -- and releases the claim that
+    names it -- the same authorization and CAS discipline `ReleaseIntent`
+    uses -- as one transition, one commit, one CAS, so a landing can never
+    close its item without releasing the claim, or release the claim while
+    leaving its item open. Replay-safe like every other intent, entirely
+    through `store.commit_transition`'s own generic `operation_id` replay
+    search: nothing further is needed here for that.
+    """
+
+    item_id: str
+    item_expected: ObjectId
+    item_new_oid: ObjectId
+    claim_id: ClaimId
+    agent: str
+    role: str
+    outcome: LandedRelease
+    operation_id: str
+    coordinator_override: bool = False
+
+
+ClaimTransitionIntent = (
+    ClaimIntent | RescopeIntent | ReleaseIntent | ItemWriteIntent | LandingIntent
+)
 
 
 def _same_identity(left: ClaimIdentity, right: ClaimIdentity) -> bool:
@@ -915,7 +956,7 @@ def _same_identity(left: ClaimIdentity, right: ClaimIdentity) -> bool:
 
 
 def _same_claimant(
-    current: ActiveClaim, intent: ClaimIntent | RescopeIntent | ReleaseIntent
+    current: ActiveClaim, intent: ClaimIntent | RescopeIntent | ReleaseIntent | LandingIntent
 ) -> bool:
     """Whether `intent` names the same claimant as `current`: same agent and
     role, compared as a tuple so "same claimant" stays one named domain
@@ -1072,9 +1113,12 @@ def _apply_rescope_intent(state: ClaimState, intent: RescopeIntent) -> ClaimStat
     return replace(state, claims=MappingProxyType(new_claims))
 
 
-def _authorize_release(current: ActiveClaim, intent: ReleaseIntent) -> None:
+def _authorize_release(current: ActiveClaim, intent: ReleaseIntent | LandingIntent) -> None:
     """Raises unless `intent` may release `current`: the original claimant,
-    or an explicit coordinator override by role coordinator."""
+    or an explicit coordinator override by role coordinator. Shared by
+    `ReleaseIntent` and `LandingIntent` (issue #359): a landing's own claim
+    release is authorized exactly the way an ordinary release is, never a
+    second rule."""
     if intent.coordinator_override:
         if intent.role != COORDINATOR_ROLE:
             raise ClaimUnavailableError("a coordinator override requires role coordinator")
@@ -1114,17 +1158,48 @@ def _apply_item_write_intent(state: ClaimState, intent: ItemWriteIntent) -> Clai
     return replace(state, items=MappingProxyType(new_items))
 
 
+def _apply_landing_intent(state: ClaimState, intent: LandingIntent) -> ClaimState:
+    """Closes `intent.item_id`'s blob and releases `intent.claim_id`'s claim
+    in the one `ClaimState` transition a landing commits (issue #359): the
+    item write's own CAS (`ItemWriteIntent`'s discipline) and the claim
+    release's own authorization (`ReleaseIntent`'s discipline), never
+    letting one half succeed without the other since both land in the same
+    returned state, written to `refs/aco/state` as the one commit
+    `store.commit_transition` builds from it."""
+    if state.tip is None:
+        raise ClaimError(MISSING_STATE_REF)
+    found = _live_claim_by_id(state, intent.claim_id)
+    if found is None:
+        raise ClaimUnavailableError(f"claim id {intent.claim_id!r} has no active claim to release")
+    key, current = found
+    _authorize_release(current, intent)
+    current_item_oid = state.items.get(intent.item_id)
+    if current_item_oid != intent.item_expected:
+        raise ClaimUnavailableError(
+            f"item {intent.item_id!r} was written since it was read "
+            f"(expected {intent.item_expected}, found {current_item_oid!r}); re-read and retry"
+        )
+    new_claims = {
+        existing_key: claim for existing_key, claim in state.claims.items() if existing_key != key
+    }
+    new_items = {**state.items, intent.item_id: intent.item_new_oid}
+    return replace(state, claims=MappingProxyType(new_claims), items=MappingProxyType(new_items))
+
+
 def apply(state: ClaimState, intent: ClaimTransitionIntent) -> ClaimState:
     """The pure claim-state transition (issue #176 §1; item writes, issue
-    #279): the sole writer of `ClaimState.claims`/`consumed_ids`/
-    `resources`/`items`. Assumes `state.tip` is already real -- `store.py`
-    never calls this against `EMPTY_STATE`."""
+    #279; atomic landings, issue #359): the sole writer of
+    `ClaimState.claims`/`consumed_ids`/`resources`/`items`. Assumes
+    `state.tip` is already real -- `store.py` never calls this against
+    `EMPTY_STATE`."""
     if isinstance(intent, ClaimIntent):
         return _apply_claim_intent(state, intent)
     if isinstance(intent, RescopeIntent):
         return _apply_rescope_intent(state, intent)
     if isinstance(intent, ReleaseIntent):
         return _apply_release_intent(state, intent)
+    if isinstance(intent, LandingIntent):
+        return _apply_landing_intent(state, intent)
     return _apply_item_write_intent(state, intent)
 
 

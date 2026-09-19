@@ -68,6 +68,13 @@ GITHUB_HOST = "github.com"
 GITHUB_REMOTE_PATTERN = re.compile(r"github\.com[:/]([^/\s]+)/([^/\s]+?)(?:\.git)?$")
 
 
+def landing_comment(pull_request: int) -> str:
+    """The one comment body `close_landed_item` posts naming the pull
+    request that landed an item (issue #359 Card 1) -- named once so a
+    test can assert the exact text without a second copy of it."""
+    return f"landed by PR #{pull_request}"
+
+
 def github_command_environment() -> dict[str, str]:
     environment = os.environ.copy()
     environment.update(GH_QUIET_ENVIRONMENT)
@@ -896,4 +903,32 @@ class GitHubForge:
                 "-",
             ],
             input_data=json.dumps({"body": body}).encode("utf-8"),
+        )
+
+    def close_landed_item(self, number: int, *, pull_request: int) -> None:
+        """Closes `number` itself instead of refusing (issue #359 Card 1):
+        `release --merged <pr>` used to require the item already closed on
+        the forge; now it closes a still-open one here -- not part of the
+        generic `ForgeWriter` port, since `storage = "state-ref"` closes its
+        own item through `state_board.StateRefBoard.prepare_landing`'s
+        atomic `protocol.LandingIntent` instead, never through a forge
+        write at all. The comment lands first: a transient failure between
+        the two calls then leaves an open issue explaining the pull request
+        that is about to close it, never a closed issue with no record of
+        why.
+        """
+        self._run(
+            ["api", f"repos/{self.repository}/issues/{number}/comments", "--input", "-"],
+            input_data=json.dumps({"body": landing_comment(pull_request)}).encode("utf-8"),
+        )
+        self._run(
+            [
+                "api",
+                "--method",
+                "PATCH",
+                f"repos/{self.repository}/issues/{number}",
+                "--input",
+                "-",
+            ],
+            input_data=json.dumps({"state": "closed"}).encode("utf-8"),
         )

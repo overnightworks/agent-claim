@@ -1167,6 +1167,62 @@ class TestStateRefBoardWrites:
         assert child_number in {child.number for child in refreshed.list_children(CONTAINER_NUMBER)}
 
 
+class TestStateRefBoardAtomicLanding:
+    """`prepare_landing`/`mark_landed` (issue #359): the staged half of
+    `close_item`'s own composition, reused by `release --merged <sha>`'s
+    atomic `protocol.LandingIntent` instead of `close_item`'s own immediate
+    write -- proven directly against the fake-oid fixture (`state_ref_board`),
+    never `self._writer`, since neither method ever calls it."""
+
+    def test_prepare_landing_composes_the_same_closing_write_as_close_item_but_writes_nothing(
+        self, state_ref_board: StateRefBoard
+    ) -> None:
+        before = state_ref_board.item_reference(CHILD_B_NUMBER)
+        assert before.state is forge.ItemState.OPEN
+        expected_oid = state_ref_board.item_oid(CHILD_B_NUMBER)
+
+        write = state_ref_board.prepare_landing(CHILD_B_NUMBER)
+
+        assert write.item_id == CHILD_B_ID
+        assert write.expected == expected_oid
+        record = _decoded_record(write.content.decode("utf-8"), CHILD_B_ID)
+        assert record.state is items.RecordState.CLOSED
+        assert record.closed_at is not None
+        assert record.closed_at == record.updated_at
+        # Nothing was written: this same instance still reports the item open,
+        # and its own oid is unchanged.
+        assert state_ref_board.item_reference(CHILD_B_NUMBER).state is forge.ItemState.OPEN
+        assert state_ref_board.item_oid(CHILD_B_NUMBER) == expected_oid
+
+    def test_prepare_landing_refuses_an_already_closed_item(self) -> None:
+        closed_at = "2026-09-01T00:00:00Z"
+        closed_body = _state_ref_body(
+            _CHILD_A_PROJECTION,
+            _record(title="Slice A", state="closed", kind="task", closed_at=closed_at),
+        )
+        adapter = _state_ref_board({f"{CHILD_A_ID}.md": closed_body.encode()})
+
+        with pytest.raises(
+            ClaimUnavailableError, match=f"already closed \\(closed on {closed_at}\\)"
+        ):
+            adapter.prepare_landing(CHILD_A_NUMBER)
+
+    def test_mark_landed_folds_the_committed_write_into_the_in_memory_view(
+        self, state_ref_board: StateRefBoard
+    ) -> None:
+        write = state_ref_board.prepare_landing(CHILD_B_NUMBER)
+        committed_oid = _fake_oid("landed")
+
+        state_ref_board.mark_landed(write, committed_oid)
+
+        after = state_ref_board.item_reference(CHILD_B_NUMBER)
+        assert after.state is forge.ItemState.CLOSED
+        assert state_ref_board.item_oid(CHILD_B_NUMBER) == committed_oid
+        assert CHILD_B_NUMBER not in {
+            issue.number for issue in state_ref_board.list_open_board_issues()
+        }
+
+
 def _run_ok(arguments: list[str], capsys: pytest.CaptureFixture[str]) -> str:
     """Run `arguments` through `main`, asserting success, and return the
     captured stdout -- the one shape every README-sequence step in

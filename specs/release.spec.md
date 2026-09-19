@@ -1,15 +1,15 @@
 # Release
 
-`aco release` ends one live claim, `--merged <pr>` or `--abandoned REASON`,
-and reports what that ending changed. This file owns the command's own
-flags, its identity/branch resolution, which live claim it selects, its
+`aco release` ends one live claim, `--merged <pr|sha|empty>` or `--abandoned
+REASON`, and reports what that ending changed. This file owns the command's
+own flags, its identity/branch resolution, which live claim it selects, its
 `RELEASED ...` line and `--json` shape, and when the shared `freed`/`next`/
 `hint` facts appear at all. It never restates what a `--merged` release
-verifies against the pull request (`specs/landing-grammar.spec.md`,
-`## What release --merged requires`), the exact `freed`/`next` line and
-`--json` shapes (`specs/landing-grammar.spec.md` LAND-49), the state-ref pin
-refusal (LAND-40, `specs/storage-pin.spec.md` PIN-12), the missing-state-ref
-sentence (`specs/ref-store-cas.spec.md` CAS-03), or a claimant refusal
+verifies against the pull request or, under `storage = "state-ref"`, the
+trunk walk (`specs/landing-grammar.spec.md`, `## What release --merged
+requires`), the exact `freed`/`next` line and `--json` shapes
+(`specs/landing-grammar.spec.md` LAND-49), the missing-state-ref sentence
+(`specs/ref-store-cas.spec.md` CAS-03), or a claimant refusal
 (`specs/claim-record.spec.md` CLAIM-16, CLAIM-17, CLAIM-38..CLAIM-40) --
 each is cited by ID.
 
@@ -26,7 +26,7 @@ never storage-aware. A refusal reaching the shared collection point prints
 
 ## Behavior table
 
-| state \ trigger | `aco release` (either outcome) | `--merged <pr>` | `--abandoned REASON` |
+| state \ trigger | `aco release` (either outcome) | `--merged <pr\|sha\|empty>` | `--abandoned REASON` |
 |---|---|---|---|
 | neither or both outcome flags given | REL-01 | REL-01 | REL-01 |
 | `REASON` blank, padded, multiline, or over 512 characters | — | — | REL-02 |
@@ -43,8 +43,8 @@ never storage-aware. A refusal reaching the shared collection point prints
 | `--coordinator-override --role coordinator` | REL-13 (CLAIM-40) | REL-13 | REL-13 |
 | `--role` omitted | REL-14 | REL-14 | REL-14 |
 | `refs/aco/state` not yet bootstrapped | REL-15 (CAS-03) | REL-15 | REL-15 |
-| pull request verification | — | LAND-29..40, 49, 50 | — |
-| `storage = "state-ref"` | — | REL-17 (LAND-40, PIN-12) | — |
+| pull request verification | — | LAND-29..39, 49, 50, 55 | — |
+| `storage = "state-ref"` trunk verification | — | REL-17 (LAND-47, LAND-52, LAND-56, LAND-59) | — |
 | released item's own body contract | REL-23 | REL-23 | REL-23 |
 | successful release, text output | REL-18 | REL-18 | REL-18 |
 | successful release, `--json` | REL-19 | REL-19 | REL-19 |
@@ -83,13 +83,9 @@ spec would cite REL-03 rather than restate it.
 
 ## What a `--merged` release verifies and never checks
 
-- [ ] [REL-16] `release --merged <pr>`'s forge verification runs before anything is written; it is `specs/landing-grammar.spec.md`'s grammar (LAND-29..40, LAND-49, LAND-50), nothing added here.
-- [ ] [REL-17] `release --merged` under `storage = "state-ref"` refuses without ever contacting the forge (LAND-40, PIN-12's shared sentence; see `specs/storage-pin.spec.md` E-PIN-06).
+- [ ] [REL-16] `release --merged <pr>`'s forge verification runs before anything is written; it is `specs/landing-grammar.spec.md`'s grammar (LAND-29..39, LAND-49, LAND-50, LAND-55), nothing added here.
+- [ ] [REL-17] `release --merged` under `storage = "state-ref"` reads `<sha|empty>` against the local trunk walk, never a pull request or forge (LAND-47, LAND-52, LAND-56, LAND-59, `specs/landing-grammar.spec.md`).
 - [ ] [REL-23] `release` never reads the released item's own body contract, unlike issue-mode `claim` (`specs/body-block.spec.md` BODY-52).
-
-Ruled but not yet built: a future `release --merged <sha|empty>` under
-`storage = "state-ref"` is LAND-47/LAND-52 (`specs/landing-grammar.spec.md`,
-owned by #297) -- REL-17 stands until that lands.
 
 ## The `RELEASED` line and `--json`
 

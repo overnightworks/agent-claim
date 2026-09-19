@@ -26,6 +26,36 @@ def _real_git(repository: Path, *arguments: str) -> subprocess.CompletedProcess[
     )
 
 
+def _real_repository_with_bare_remote(
+    tmp_path: Path, *, remote_name: str = "origin"
+) -> tuple[Path, Path]:
+    """A real `git init`-ed worktree, commit identity configured, with a
+    real bare `remote_name` remote pointing at a sibling bare repository --
+    the one raw-git skeleton every trunk-history or trailer-classification
+    fixture in this suite builds its own commits onto (`test_checkout.py`'s
+    and `test_cli.py`'s own real-repository proofs, issue #359 CI), instead
+    of each hand-rolling the same `init`/`config`/`remote add` sequence."""
+    remote = tmp_path / "remote.git"
+    remote.mkdir()
+    _real_git(remote, "init", "-q", "--bare", "-b", "main")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _real_git(repo, "init", "-q", "-b", "main")
+    _real_git(repo, "config", "user.name", "Test")
+    _real_git(repo, "config", "user.email", "test@example.com")
+    _real_git(repo, "config", "commit.gpgsign", "false")
+    _real_git(repo, "remote", "add", remote_name, str(remote))
+    return repo, remote
+
+
+def _push_repository_trunk(repo: Path, remote_name: str) -> None:
+    """`repo`'s current `main` pushed to `remote_name`, with `<remote_name>/HEAD`
+    resolved -- the trailing half of the skeleton every trunk-history
+    fixture repeats once its own commits are built (issue #359 CI)."""
+    _real_git(repo, "push", "-q", remote_name, "main")
+    _real_git(repo, "remote", "set-head", remote_name, "main")
+
+
 def stub_board_config_tracked(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every store-command test reads a tracked `board.toml` by default
     (issue #315), whichever of `test_cli.py`'s faked worktree, `test_protect.py`'s
