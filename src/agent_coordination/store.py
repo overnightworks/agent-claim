@@ -20,6 +20,7 @@ transition's already-committed parent tree still carries unchanged (issue
 from __future__ import annotations
 
 import os
+import sys
 import tarfile
 import tempfile
 import uuid
@@ -1426,7 +1427,6 @@ def export_state_bundle(*, worktree: Path, tip: ObjectId, destination: Path) -> 
         raise _export_failure(tip, destination, str(error)) from error
     temporary = Path(temp_name)
 
-    primary_error: BaseException | None = None
     try:
         _write_and_publish_bundle(
             worktree=worktree,
@@ -1435,14 +1435,11 @@ def export_state_bundle(*, worktree: Path, tip: ObjectId, destination: Path) -> 
             descriptor=descriptor,
             temporary=temporary,
         )
-    except BaseException as error:  # cleanup below always runs regardless -- never swallowed
-        primary_error = error
-
-    leftovers = _clear_export_artifacts(worktree=worktree, temporary=temporary)
-    if leftovers:
-        raise _export_cleanup_failure(tip, destination, leftovers, primary_error) from primary_error
-    if primary_error is not None:
-        raise primary_error
+    finally:
+        leftovers = _clear_export_artifacts(worktree=worktree, temporary=temporary)
+        if leftovers:
+            primary = sys.exc_info()[1]
+            raise _export_cleanup_failure(tip, destination, leftovers, primary) from primary
     return destination
 
 
