@@ -1,7 +1,0 @@
-claim_id = "ab2e68242e6d4f2889cab0da7b2016a6"
-agent = "Claude head (coordinator)"
-role = "builder"
-base = "6da259b6fa45c32f0a9d26306d8195989bf9f06e"
-branch = "docs/scope-test"
-scope = ["README.md"]
-opened_commit = "6986b77c926abe1a73a832685cc4e4b8d00dc3d5"
