@@ -17,7 +17,6 @@ from . import board, forge, process, protocol
 from .protocol import REPOSITORY_PATTERN, ClaimError
 
 _Page = TypeVar("_Page")
-TIMESTAMP_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 # gh 2.45 colorizes --jq output when it believes stdout is a TTY.
 ANSI_ESCAPE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 MAX_RECENT_MERGED_PULL_REQUESTS = 1000
@@ -425,9 +424,9 @@ class GitHubForge:
             or not all(isinstance(label, str) for label in labels)
             or not isinstance(body, str)
             or not isinstance(created_at, str)
-            or TIMESTAMP_PATTERN.fullmatch(created_at) is None
+            or protocol.RFC3339_TIMESTAMP_PATTERN.fullmatch(created_at) is None
             or not isinstance(updated_at, str)
-            or TIMESTAMP_PATTERN.fullmatch(updated_at) is None
+            or protocol.RFC3339_TIMESTAMP_PATTERN.fullmatch(updated_at) is None
             or (kind_raw is not None and not isinstance(kind_raw, str))
             or not self._valid_children_progress(children_closed, children_total)
             or isinstance(blocked_by_count, bool)
@@ -468,7 +467,10 @@ class GitHubForge:
             or not isinstance(body, str)
             or not isinstance(head_ref_name, str)
             or (merged_at is not None and not isinstance(merged_at, str))
-            or (isinstance(merged_at, str) and TIMESTAMP_PATTERN.fullmatch(merged_at) is None)
+            or (
+                isinstance(merged_at, str)
+                and protocol.RFC3339_TIMESTAMP_PATTERN.fullmatch(merged_at) is None
+            )
         ):
             raise forge.ForgeMalformedResponseError(
                 "GitHub returned a malformed board pull request"
@@ -499,7 +501,10 @@ class GitHubForge:
             or not isinstance(login, str)
             or not login
             or (merged_at is not None and not isinstance(merged_at, str))
-            or (isinstance(merged_at, str) and TIMESTAMP_PATTERN.fullmatch(merged_at) is None)
+            or (
+                isinstance(merged_at, str)
+                and protocol.RFC3339_TIMESTAMP_PATTERN.fullmatch(merged_at) is None
+            )
         ):
             raise forge.ForgeMalformedResponseError(MALFORMED_PULL_REQUEST)
         return forge.Landing(
@@ -676,7 +681,10 @@ class GitHubForge:
             or re.fullmatch(REPOSITORY_PATTERN, repository) is None
             or not isinstance(is_pull_request, bool)
             or (closed_at is not None and not isinstance(closed_at, str))
-            or (isinstance(closed_at, str) and TIMESTAMP_PATTERN.fullmatch(closed_at) is None)
+            or (
+                isinstance(closed_at, str)
+                and protocol.RFC3339_TIMESTAMP_PATTERN.fullmatch(closed_at) is None
+            )
             or (blocker_state is board.BlockerState.CLOSED and closed_at is None)
         ):
             raise forge.ForgeMalformedResponseError(self.MALFORMED_BOARD_DEPENDENCY)

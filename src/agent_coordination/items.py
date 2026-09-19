@@ -26,7 +26,11 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TypeAlias, cast
 
-from .protocol import ClaimUnavailableError, MalformedStateTreeError
+from .protocol import (
+    RFC3339_TIMESTAMP_FORMAT,
+    ClaimUnavailableError,
+    MalformedStateTreeError,
+)
 
 # `aco-` plus six lowercase hex characters (issue #248, parent #230 ruling
 # 15.09.2026): a short random id, never a counter, never reused. The
@@ -59,10 +63,6 @@ ORIGIN_GRAMMAR_HINT = "forge#n or host/owner/repo#n, e.g. gitlab#514"
 # randomness is already astronomically unlikely to collide even once; a
 # fourth would only mask a broken randomness source.
 _MAX_MINT_ATTEMPTS = 3
-# The RFC 3339 UTC, second-precision shape `board.RECORD_TIMESTAMP_PATTERN`
-# reads back -- named once here, the `[record]` timestamp fields' own write
-# side, rather than each caller formatting its own `datetime`.
-_RECORD_TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 # `cast`'s type argument for every `ItemRecord` field `board.py`'s schema
 # leaves optional: named once as a real type, not a repeated string literal,
 # so the four call sites below share one owner.
@@ -199,8 +199,9 @@ def mint_item_id(
 
 def format_record_timestamp(moment: datetime) -> str:
     """`moment`, in the RFC 3339 UTC second-precision shape every `[record]`
-    timestamp field uses (`board.RECORD_TIMESTAMP_PATTERN`)."""
-    return moment.astimezone(UTC).strftime(_RECORD_TIMESTAMP_FORMAT)
+    timestamp field uses (`protocol.RFC3339_TIMESTAMP_PATTERN`'s
+    write-side format)."""
+    return moment.astimezone(UTC).strftime(RFC3339_TIMESTAMP_FORMAT)
 
 
 def record_table(record: ItemRecord) -> dict[str, object]:

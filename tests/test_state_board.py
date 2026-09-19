@@ -951,7 +951,7 @@ class TestStateRefBoardWrites:
         after_record = _decoded_record(after.body, CHILD_A_ID)
         assert replace(after_record, updated_at=before_record.updated_at) == before_record
         assert after_record.updated_at != before_record.updated_at
-        assert board.RECORD_TIMESTAMP_PATTERN.fullmatch(after_record.updated_at)
+        assert protocol.RFC3339_TIMESTAMP_PATTERN.fullmatch(after_record.updated_at)
 
     def _full_delivered_record_body(self) -> str:
         return _state_ref_body(

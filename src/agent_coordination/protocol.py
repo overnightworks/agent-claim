@@ -9,7 +9,7 @@ from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import PurePosixPath, PureWindowsPath
 from types import MappingProxyType
-from typing import Protocol, TypeVar
+from typing import Protocol, TypeVar, cast
 
 # Named refusal when a write-path command would otherwise create
 # `refs/aco/state` as a side effect (issue #176 done-when 1). One owner so
@@ -27,6 +27,13 @@ RESOURCE_NAME_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9._-]{0,63}")
 COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
 BRANCH_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,254}")
 REPOSITORY_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_.-]{1,100}")
+# RFC 3339 UTC, second precision -- the one timestamp shape a forge issue's
+# `created_at`/`updated_at`, a state-ref item's `[record]` fields, and this
+# repository's git-object clock all share (issue #378). Owned here, the one
+# module `github`, `board`, and `items` can each import without breaking
+# the Layers contract.
+RFC3339_TIMESTAMP_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
+RFC3339_TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 MAX_SCOPE_ENTRIES = 256
 MAX_SCOPE_PATH_LENGTH = 512
 WIDE_SCOPE_PATH_LIMIT = 3
@@ -1221,23 +1228,36 @@ def apply(state: ClaimState, intent: ClaimTransitionIntent) -> ClaimState:
 
 # --- `claims/<key>.toml` and `resources/<name>.toml` codecs -----------------
 #
-# Hand-written, not a TOML-writing library: every field reaching here already
-# passed `_valid_branch`/`_valid_scope`/`CLAIM_ID_PATTERN`/`ObjectId`, which
-# between them exclude control characters and backslashes, so the one
-# genuinely free-form input -- a scope path -- only ever needs `"` escaped to
-# stay a valid TOML basic string. A whole dependency for that single escape
-# would remove less complexity than it adds.
+# Hand-written, not a TOML-writing library: `toml_string` is this
+# repository's one TOML basic-string writer (issue #378), living here
+# because this module sits below `board` in the Layers contract --
+# `board.py`'s renderers import it rather than keeping a second escape
+# table and drifting from what `tomllib.loads` (the reader) accepts back.
+# It escapes every control character TOML's basic-string grammar forbids
+# unescaped, not only backslash and quote: a value carrying a tab or a
+# newline would otherwise round-trip into TOML that `tomllib.loads` (the
+# reader) refuses to parse back.
 
-_TOML_STRING_ESCAPES = {"\\": "\\\\", '"': '\\"'}
+_TOML_STRING_ESCAPES = {
+    "\\": "\\\\",
+    '"': '\\"',
+    "\b": "\\b",
+    "\t": "\\t",
+    "\n": "\\n",
+    "\f": "\\f",
+    "\r": "\\r",
+}
 
 
-def _toml_string(value: str) -> str:
-    escaped = "".join(_TOML_STRING_ESCAPES.get(character, character) for character in value)
+def toml_string(value: object) -> str:
+    """A TOML basic string for `value` -- the writer's one escaping path,
+    matching what `tomllib.loads` (the reader) accepts back unchanged."""
+    escaped = "".join(_TOML_STRING_ESCAPES.get(char, char) for char in cast(str, value))
     return f'"{escaped}"'
 
 
 def _toml_string_array(values: tuple[str, ...]) -> str:
-    return "[" + ", ".join(_toml_string(value) for value in values) + "]"
+    return "[" + ", ".join(toml_string(value) for value in values) + "]"
 
 
 def _toml_int_array(values: tuple[int, ...]) -> str:
@@ -1247,18 +1267,18 @@ def _toml_int_array(values: tuple[int, ...]) -> str:
 def serialize_claim_toml(claim: ActiveClaim) -> str:
     """The `claims/<key>.toml` content for one live claim (§1)."""
     lines = [
-        f"claim_id = {_toml_string(claim.claim_id)}",
-        f"agent = {_toml_string(claim.agent)}",
-        f"role = {_toml_string(claim.role)}",
-        f"base = {_toml_string(claim.base)}",
-        f"branch = {_toml_string(claim.branch)}",
+        f"claim_id = {toml_string(claim.claim_id)}",
+        f"agent = {toml_string(claim.agent)}",
+        f"role = {toml_string(claim.role)}",
+        f"base = {toml_string(claim.base)}",
+        f"branch = {toml_string(claim.branch)}",
         f"scope = {_toml_string_array(claim.scope)}",
-        f"opened_commit = {_toml_string(claim.opened_commit)}",
+        f"opened_commit = {toml_string(claim.opened_commit)}",
     ]
     if claim.whole_reason is not None:
-        lines.append(f"whole_reason = {_toml_string(claim.whole_reason)}")
+        lines.append(f"whole_reason = {toml_string(claim.whole_reason)}")
     if claim.resource is not None:
-        lines.append(f"resource_name = {_toml_string(claim.resource.name)}")
+        lines.append(f"resource_name = {toml_string(claim.resource.name)}")
         lines.append(f"resource_value = {claim.resource.value}")
     return "\n".join(lines) + "\n"
 

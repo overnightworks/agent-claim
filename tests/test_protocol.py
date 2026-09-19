@@ -9,6 +9,7 @@ lives here instead."""
 
 from __future__ import annotations
 
+import tomllib
 from collections.abc import Callable
 from dataclasses import replace
 
@@ -145,6 +146,19 @@ def test_claim_scope_is_recorded_and_serialized_in_canonical_order() -> None:
         'scope = ["docs/COORDINATION.md", "scripts/issue_claim.py"]'
         in protocol.serialize_claim_toml(_active_claim(scope=scope))
     )
+
+
+def test_serialize_claim_toml_escapes_control_characters_the_reader_accepts_back() -> None:
+    """`toml_string` (issue #378) escapes every control character TOML's
+    basic-string grammar forbids literal, not only backslash and quote: a
+    claim field carrying a tab or a newline still round-trips through
+    `tomllib.loads` (the reader `claims/<key>.toml` is read back with)
+    instead of producing TOML the reader refuses to parse."""
+    claim = _active_claim(agent="Grok sess-1\twith a tab\nand a newline")
+
+    decoded = tomllib.loads(protocol.serialize_claim_toml(claim))
+
+    assert decoded["agent"] == "Grok sess-1\twith a tab\nand a newline"
 
 
 def test_scope_overlap_is_repository_wide_and_path_aware() -> None:
