@@ -51,7 +51,7 @@ never storage-aware. A refusal reaching the shared collection point prints
 | landing board read resolves | — | REL-20 | — |
 | landing board read hits an unreachable forge | — | REL-22 | — |
 | no landing to report | — | — | REL-21 |
-| any refusal above, with `--json` | REL-24 | REL-24 | REL-24 |
+| any refusal past the parser, with `--json` | REL-24 | REL-24 | REL-24 |
 
 ## Flags and outcome
 
@@ -96,12 +96,12 @@ owned by #297) -- REL-17 stands until that lands.
 `specs/landing-grammar.spec.md` LAND-49 owns `freed`/`next`'s exact shape;
 this file owns only when they appear at all.
 
-- [ ] [REL-18] A successful release always prints `RELEASED <subject>: <claim-id>` first; for `--abandoned`, that line is the whole output (see E-REL-01).
+- [ ] [REL-18] Without `--json`, a successful release always prints `RELEASED <subject>: <claim-id>` first; `--abandoned`, that line is the whole output (see E-REL-01).
 - [ ] [REL-19] `--json` on a successful release prints one object: `issue`, `lane`, `branch`, `claim_id`, `agent`, `role`, `reason` (`"merged #<n>"` or `"abandoned: <explanation>"`) (see E-REL-05).
 - [ ] [REL-20] A resolved `--merged` landing adds LAND-49's `freed:`/`next:` lines after `RELEASED` in text, or its keys to `--json`, present only then (see E-REL-02).
 - [ ] [REL-21] `--abandoned` never resolves the forge, reads the board, or prints `freed`/`next`/`hint` (LAND-39); its `--json` object carries neither key.
 - [ ] [REL-22] A `--merged` release whose post-commit board read fails prints LAND-38's `hint:` line, on stdout in text or stderr with `--json`; `freed`/`next` omitted (LAND-50) (see E-REL-06).
-- [ ] [REL-24] Any release refusal with `--json` also prints `{"ok": false, "error": "<sentence>"}` to stdout, exit `2`, the same sentence stderr's `ERROR:` line carries (see E-REL-07).
+- [ ] [REL-24] A release refusal past the parser (every ID but REL-01) with `--json` also prints `{"ok": false, "error": "<sentence>"}`, exit `2` (see E-REL-07).
 
 ## Never
 
