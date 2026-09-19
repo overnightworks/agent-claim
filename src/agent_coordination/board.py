@@ -12,7 +12,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import cast
 
-from . import items, protocol
+from . import items, metrics, protocol
 
 DEFAULT_PRIORITY_LABELS = ("security", "data", "ci", "product", "ux", "cleanup")
 CONFIG_PATH = Path(".agent-claim/board.toml")
@@ -117,8 +117,16 @@ _SLICE_TITLE_VON_PATTERN = re.compile(
 # fence's info string is ordinary documentation.
 AGENT_CLAIM_FENCE_INFO = "agent-claim"
 BLOCK_TOP_LEVEL_KEYS = frozenset(
-    {"version", "now", "next", "done_when", "frozen_until", "scope", "expectation", "slice"}
+    {"version", "now", "next", "done_when", "frozen_until", "scope", "size", "expectation", "slice"}
 )
+# A work item's own size class (issue #357), read straight from
+# `metrics.Size` -- the one owner of the three letters and their order --
+# rather than a second enum here. A top-level block key, not a `[record]`
+# one: `[record]` is a `Storage.STATE_REF`-only table (BODY-15), while an
+# estimate is offered for every item regardless of storage, and this
+# module may never import `github`/`state_board` to give a GitHub-stored
+# item a second write path.
+SIZE_VALUES = frozenset(size.value for size in metrics.Size)
 BLOCK_VERSION = 1
 BLOCK_EXPECTATION_DEFAULTS = frozenset({"yes", "no", "later"})
 # A ruling transcribes the operator's word (#240): "later" is a legitimate
@@ -563,6 +571,45 @@ class BoardItem:
     actionable: bool
     actionable_reason: str | None
     read_state: BodyReadState
+    # This item's own top-level `size` (issue #357), exactly `ParsedBody.size`
+    # -- carried here too so a renderer can tell "no size at all" apart from
+    # "sized, but its class has no measured lane yet", which `estimate`
+    # alone (`None` in both cases) cannot.
+    size: metrics.Size | None
+    # This item's own size class's measured estimate (issue #357), or
+    # `None` when the item names no size, or names one no measured lane has
+    # reached yet -- an unmeasured class is exactly as unestimated as an
+    # unsized item, never a guessed number.
+    estimate: metrics.Estimate | None
+
+
+@dataclass(frozen=True)
+class SizeClassMeasurement:
+    """One size class's own row in the board's measurements section (issue
+    #357): `metrics.SizeClassStats`' median/p80/n/weak, plus the first and
+    last measured lane's own timestamp -- dates `metrics.py` never computes
+    (it holds no clock), so `board.py` joins them from the same lane events
+    `metrics.measure` read to build `stats`."""
+
+    stats: metrics.SizeClassStats
+    first_event_at: datetime
+    last_event_at: datetime
+
+
+@dataclass(frozen=True)
+class Measurements:
+    """The board's own measured-lane section (issue #357): `classes` is
+    `metrics.MetricsReport.classes` plus each class's own date range,
+    `unfinished` is `metrics.MetricsReport.incomplete` (a still-open claim,
+    counted but never measured), and `since` is the earliest lane event
+    this build read at all -- `None` only when there is none, the one case
+    the board's own "keine Messungen seit <Datum>" sentence reads a
+    render-time date instead."""
+
+    classes: tuple[SizeClassMeasurement, ...]
+    unfinished: int
+    since: datetime | None
+    as_of: date
 
 
 @dataclass(frozen=True)
@@ -588,6 +635,7 @@ class Board:
     uncut: tuple[UncutSlices, ...]
     repository: str
     requests: int
+    measurements: Measurements
     # False for a board source that cannot list merged pull requests at all
     # (issue #248): `recovery` and `Stage.CODE_LANDED` then stay
     # structurally empty rather than temporarily so, and `render`/
@@ -792,6 +840,10 @@ class ParsedBody:
     scope: tuple[str, ...] | None
     slices: tuple[SliceRow, ...]
     read_state: BodyReadState
+    # The block's own top-level `size` (issue #357), or `None` for a body
+    # that names no size at all -- absent means "no estimate", never a
+    # default class a reader would have to guess.
+    size: metrics.Size | None = None
     # The validated `[record]` table (issue #248), or `None` for every body
     # parsed under `Storage.GITHUB` and every state-ref body without one --
     # `items.py` is the one reader that ever looks at this field.
@@ -941,6 +993,12 @@ def _block_scope_defects(data: dict[str, object]) -> list[ContractDefect]:
         return []
     defect = _scope_value_defect("scope", data["scope"])
     return [defect] if defect is not None else []
+
+
+def _block_size_defect(data: dict[str, object]) -> ContractDefect | None:
+    if "size" not in data or data["size"] in SIZE_VALUES:
+        return None
+    return ContractDefect("size", "size must be S, M, or L")
 
 
 def _canonical_scope(value: object) -> tuple[str, ...]:
@@ -1308,6 +1366,9 @@ def _block_schema_defects(data: dict[str, object], storage: Storage) -> tuple[Co
     defects.extend(_block_projection_defects(data))
     defects.extend(_block_frozen_until_defects(data))
     defects.extend(_block_scope_defects(data))
+    size_defect = _block_size_defect(data)
+    if size_defect is not None:
+        defects.append(size_defect)
     expectations, expectation_defect = _block_array_or_defect(data, "expectation")
     defects.append(expectation_defect) if expectation_defect else defects.extend(
         _block_expectation_defects(expectations)
@@ -1423,6 +1484,7 @@ def _valid_block_parsed_body(data: dict[str, object], storage: Storage) -> Parse
         scope=_canonical_scope(data["scope"]) if "scope" in data else None,
         slices=_block_slices(data),
         read_state=BodyReadState.VALID,
+        size=metrics.Size(data["size"]) if "size" in data else None,
         record=cast("Mapping[str, object] | None", record),
     )
 
@@ -1565,6 +1627,12 @@ def _render_scope(data: Mapping[str, object]) -> list[str]:
     return ["", f"scope = {_render_scope_array(data['scope'])}"]
 
 
+def _render_size(data: Mapping[str, object]) -> list[str]:
+    if "size" not in data:
+        return []
+    return ["", f"size = {_toml_string(data['size'])}"]
+
+
 def _render_expectations(data: Mapping[str, object]) -> list[str]:
     lines: list[str] = []
     for expectation in cast(_JsonRows, data.get("expectation", [])):
@@ -1648,6 +1716,7 @@ def render_block(data: Mapping[str, object], newline: str = "\n") -> str:
     lines.extend(f"{key} = {_toml_string(data[key])}" for key in ("now", "next", "done_when"))
     lines.extend(_render_frozen_until(data))
     lines.extend(_render_scope(data))
+    lines.extend(_render_size(data))
     lines.extend(_render_expectations(data))
     lines.extend(_render_slices(data))
     lines.extend(_render_record(data))
@@ -2203,6 +2272,7 @@ class _BoardBuildContext:
     container_progress: dict[int, ContainerProgress]
     child_container: dict[int, int]
     repository: str
+    estimate_by_number: Mapping[int, metrics.Estimate]
 
 
 def _board_stage(
@@ -2376,6 +2446,8 @@ def _board_item(
         actionable=actionable_reason is None,
         actionable_reason=actionable_reason,
         read_state=parsed.read_state,
+        size=parsed.size,
+        estimate=context.estimate_by_number.get(issue.number),
     )
 
 
@@ -2408,6 +2480,63 @@ class BoardBuildInputs:
     # booleans instead of one storage-shaped flag.
     open_pull_requests_supported: bool = True
     landings_derivable: bool = True
+    # Every claim's own ref-history lifecycle (issue #357,
+    # `store.claim_lifecycle`): `size`/`landed_at` still `None` exactly as
+    # that reader leaves them -- `build_board` is the one place both are
+    # already known (an open item's own current size; a trunk landing's own
+    # date), so it joins them before ever calling `metrics.measure`.
+    lane_events: tuple[metrics.LaneEvent, ...] = ()
+    # A landed item's own commit date (issue #304's own trailer block,
+    # `board.TrunkWorkItemClassification`), keyed by item number -- read
+    # once by the caller from `checkout.trunk_landings` (a layer `board.py`
+    # may never import) and handed in as plain data.
+    landed_at_by_item: Mapping[int, datetime] = field(default_factory=dict)
+
+
+def _item_number_or_none(value: str) -> int | None:
+    return int(value) if value.isdigit() else None
+
+
+def _joined_lane_event(
+    event: metrics.LaneEvent,
+    size_by_number: Mapping[int, metrics.Size | None],
+    landed_at_by_item: Mapping[int, datetime],
+) -> metrics.LaneEvent:
+    """`event`, its `size` and `landed_at` filled in from this build's own
+    already-fetched data (issue #357): a historical claim's size is read
+    from its item's *current* size -- the only one a board build ever
+    fetches, since a closed item's body is never read -- and its landing
+    date from the trunk commit that named it, when one already did. A lane
+    claim (`docs/`/`fix/`, no issue number) never matches either mapping
+    and is returned unchanged, still counted by `metrics.measure` but never
+    sorted into a size class."""
+    number = _item_number_or_none(event.item)
+    if number is None:
+        return event
+    return replace(event, size=size_by_number.get(number), landed_at=landed_at_by_item.get(number))
+
+
+def _class_measurement(
+    stats: metrics.SizeClassStats, events: Iterable[metrics.LaneEvent]
+) -> SizeClassMeasurement:
+    measured = [
+        event for event in events if event.size is stats.size and event.released_at is not None
+    ]
+    return SizeClassMeasurement(
+        stats=stats,
+        first_event_at=min(event.claimed_at for event in measured),
+        last_event_at=max(cast(datetime, event.released_at) for event in measured),
+    )
+
+
+def _measurements(
+    events: tuple[metrics.LaneEvent, ...], report: metrics.MetricsReport, observed_at: datetime
+) -> Measurements:
+    since = min((event.claimed_at for event in events), default=None)
+    classes = tuple(_class_measurement(stats, events) for stats in report.classes)
+    return Measurements(
+        classes=classes, unfinished=report.incomplete, since=since, as_of=observed_at.date()
+    )
 
 
 def build_board(inputs: BoardBuildInputs) -> Board:
@@ -2444,6 +2573,18 @@ def build_board(inputs: BoardBuildInputs) -> Board:
         for container_number, progress in container_progress.items()
         for child in progress.open_children
     }
+    size_by_number = {number: parsed.size for number, parsed in parsed_bodies.items()}
+    joined_events = tuple(
+        _joined_lane_event(event, size_by_number, inputs.landed_at_by_item)
+        for event in inputs.lane_events
+    )
+    open_items = tuple(
+        metrics.OpenItem(item=str(issue.number), size=size_by_number[issue.number], container=None)
+        for issue in issues
+    )
+    report = metrics.measure(joined_events, open_items)
+    measurements = _measurements(joined_events, report, observed_at)
+    estimate_by_number = {int(estimate.item): estimate for estimate in report.estimates}
     context = _BoardBuildContext(
         contracts=contracts,
         parsed_bodies=parsed_bodies,
@@ -2468,6 +2609,7 @@ def build_board(inputs: BoardBuildInputs) -> Board:
         container_progress=container_progress,
         child_container=child_container,
         repository=repository,
+        estimate_by_number=estimate_by_number,
     )
     landed_work_items = declared_work_items(recent_merged_pull_requests, repository)
     ordered = tuple(
@@ -2497,6 +2639,7 @@ def build_board(inputs: BoardBuildInputs) -> Board:
         uncut=uncut,
         repository=repository,
         requests=inputs.requests,
+        measurements=measurements,
         landings_derivable=inputs.landings_derivable,
     )
 
@@ -2827,7 +2970,21 @@ def board_json(board: Board) -> str:
                     _project_blocker_references(child, "blocked_by", repository)
     for finding in cast(_JsonRows, payload["uncut"]):
         _project_uncut_row_scope(finding)
+    _project_measurements(cast("dict[str, object]", payload["measurements"]))
     return json.dumps(payload, default=lambda value: value.value)
+
+
+def _project_measurements(measurements: dict[str, object]) -> None:
+    """`Measurements`' own `datetime`/`date` fields, turned into ISO text
+    (issue #357) -- everything else in `payload["measurements"]` (`n`,
+    `median_hours`, `p80_hours`, `weak`, the `Size` string) is already
+    JSON-ready, since `metrics.py` carries no clock of its own."""
+    measurements["as_of"] = cast(date, measurements["as_of"]).isoformat()
+    since = cast("datetime | None", measurements["since"])
+    measurements["since"] = None if since is None else since.astimezone(UTC).isoformat()
+    for entry in cast(_JsonRows, measurements["classes"]):
+        for key in ("first_event_at", "last_event_at"):
+            entry[key] = cast(datetime, entry[key]).astimezone(UTC).isoformat()
 
 
 def _kind_cell(item: BoardItem) -> str:
@@ -2836,6 +2993,51 @@ def _kind_cell(item: BoardItem) -> str:
     if item.container is not None:
         return f"{item.kind.value} {item.container.closed}/{item.container.total}"
     return item.kind.value
+
+
+NO_SIZE_CELL = "keine Größe"
+WEAK_ESTIMATE_CELL = "schwach"
+
+
+def estimate_cell(item: BoardItem) -> str:
+    """`item`'s own board cell (issue #357): `keine Größe` when the item
+    names none at all, `schwach` when it does but its class has fewer than
+    `metrics.WEAK_SAMPLE_THRESHOLD` measured lanes (zero included -- a class
+    with no measured lane at all carries no `Estimate` either, exactly as
+    weak as one that does but says so through `Estimate.weak`), else the
+    measured median rounded to the hour."""
+    if item.size is None:
+        return NO_SIZE_CELL
+    if item.estimate is None or item.estimate.weak:
+        return WEAK_ESTIMATE_CELL
+    estimate = item.estimate
+    return f"~{round(estimate.median_hours)}h ({estimate.size.value}, n={estimate.n})"
+
+
+def _class_measurement_line(entry: SizeClassMeasurement) -> str:
+    stats = entry.stats
+    weak = " (schwach)" if stats.weak else ""
+    return (
+        f"{stats.size.value}: n={stats.n}, median {round(stats.median_hours)}h, "
+        f"p80 {round(stats.p80_hours)}h{weak}, "
+        f"{entry.first_event_at.date().isoformat()}..{entry.last_event_at.date().isoformat()}"
+    )
+
+
+def measurements_lines(measurements: Measurements) -> list[str]:
+    """`Measurements`, rendered as the board's own "Messungen"/"keine
+    Messungen" lines (issue #357) -- the one text `render`, `board_html.py`,
+    and `board --json`'s human-facing callers all read from, rather than
+    each formatting `Measurements` its own way."""
+    as_of = measurements.as_of.isoformat()
+    if not measurements.classes:
+        return [f"keine Messungen seit {as_of}"]
+    since = measurements.since.date().isoformat() if measurements.since is not None else as_of
+    lines = [f"Messungen (Stand {as_of}, seit {since})"]
+    lines.extend(_class_measurement_line(entry) for entry in measurements.classes)
+    if measurements.unfinished:
+        lines.append(f"{measurements.unfinished} Lanes ohne Ende")
+    return lines
 
 
 def item_label(number: int, storage: Storage) -> str:
@@ -2870,6 +3072,7 @@ def render(board: Board, *, storage: Storage = Storage.GITHUB) -> str:
             "ACTIONABLE",
             "BLOCKERS",
             "UNBLOCKS",
+            "ESTIMATE",
             "TITLE",
         ),
         *(
@@ -2893,6 +3096,7 @@ def render(board: Board, *, storage: Storage = Storage.GITHUB) -> str:
                 )
                 or "-",
                 str(item.unblocks_count),
+                estimate_cell(item),
                 item.title,
             )
             for item in board.items
@@ -2909,10 +3113,12 @@ def render(board: Board, *, storage: Storage = Storage.GITHUB) -> str:
     containers = "\n".join(_container_lines(board, storage)) or "none"
     uncut = "\n".join(_uncut_line(finding, storage) for finding in board.uncut) or "none"
     landings_note = "" if board.landings_derivable else f"\n{LANDINGS_NOT_DERIVABLE_LINE}"
+    measurements = "\n".join(measurements_lines(board.measurements))
     return (
         f"{table}\n\nREADY NOW\n{ready}\n\nSTALE\n{stale}\n\nRECOVERY ({RECOVERY_STEP})\n{recovery}"
         f"{landings_note}"
-        f"\n\nCONTAINERS\n{containers}\n\nUNCUT\n{uncut}\n\nrequests: {board.requests}"
+        f"\n\nCONTAINERS\n{containers}\n\nUNCUT\n{uncut}\n\nMESSUNGEN\n{measurements}"
+        f"\n\nrequests: {board.requests}"
     )
 
 
