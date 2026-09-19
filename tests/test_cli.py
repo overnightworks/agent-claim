@@ -1672,6 +1672,120 @@ def test_next_pulls_an_unruled_item_and_names_only_unworkable_ones_as_skipped(
     }
 
 
+def _redirect_toplevel(monkeypatch: pytest.MonkeyPatch, toplevel: Path) -> None:
+    """Point `_resolve_toplevel()` (`rev-parse --show-toplevel`) at a real
+    repository this test built itself (issue #322), taking precedence over
+    the module's autouse `_isolate_git_toplevel` fake -- every other real
+    git call `start`'s own worktree creation runs still reaches real git,
+    unlike a fully faked `checkout._git_output`."""
+    real_git_output = checkout._git_output
+
+    def fake(arguments: list[str], *, directory: Path | None = None) -> str:
+        if arguments == ["rev-parse", "--show-toplevel"] and directory is None:
+            return str(toplevel)
+        return real_git_output(arguments, directory=directory)
+
+    monkeypatch.setattr(checkout, "_git_output", fake)
+
+
+def _start_scenario(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, agent: str = "Codex Sol"
+) -> Path:
+    """A real bare-remote-backed repository (issue #322), item #314 open
+    with a titled, scoped body, and this test's own toplevel redirected onto
+    it -- `start`'s own worktree creation runs real git, unlike every other
+    claim test in this module, which never builds one at all."""
+    repo, _remote = _real_repository_with_bare_remote(tmp_path)
+    (repo / "base.txt").write_text("base\n")
+    _real_git(repo, "add", "base.txt")
+    _real_git(repo, "commit", "-q", "-m", "initial")
+    _push_repository_trunk(repo, "origin")
+    issue = board_issue(314, "Fresh Slug Title", complete_contract("Build it.", scope=["src/x.py"]))
+    client = FakeForge(board_issues=(issue,))
+    client.issue_references[314] = forge.ItemReference(
+        forge.ItemState.OPEN, issue.title, issue.body
+    )
+    monkeypatch.setattr(github, "GitHubForge", lambda _repository: client)
+    _patch_store_write(monkeypatch)
+    _set_agent_identity_env(monkeypatch, {checkout.ACO_AGENT_ENV: agent})
+    _redirect_toplevel(monkeypatch, repo)
+    return repo
+
+
+_START_WORKTREE_NAME = "issue-314-fresh-slug-title"
+_START_BRANCH = "codex/issue-314-fresh-slug-title"
+
+
+def test_start_creates_the_linked_worktree_and_claims_it(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    repo = _start_scenario(monkeypatch, tmp_path)
+    monkeypatch.chdir(repo)
+
+    assert issue_claim.main(["--repo", REPOSITORY, "start", "314"]) == 0
+
+    worktree = repo.parent / f"{repo.name}-worktrees" / _START_WORKTREE_NAME
+    assert capsys.readouterr().out == (
+        f"worktree: {worktree}\n"
+        f"branch: {_START_BRANCH}\n"
+        "CLAIMED issue #314: start-314\n"
+        "0 of 4 versioned files (0%); overlaps no other open claims\n"
+    )
+    resolved = checkout.resolve_path_checkout(worktree)
+    assert resolved is not None
+    assert resolved.branch == _START_BRANCH
+    assert resolved.kind is checkout.CheckoutKind.LINKED_WORKTREE
+    live = store.fetch_state(worktree=Path("."), remote="origin").claims
+    assert protocol.claim_key(protocol.IssueIdentity(314), _START_BRANCH) in live
+    assert Path.cwd() == repo
+
+
+def test_start_resumes_an_existing_worktree_by_only_claiming(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    repo = _start_scenario(monkeypatch, tmp_path)
+    monkeypatch.chdir(repo)
+    assert issue_claim.main(["--repo", REPOSITORY, "start", "314"]) == 0
+    capsys.readouterr()
+    worktree = repo.parent / f"{repo.name}-worktrees" / _START_WORKTREE_NAME
+
+    assert issue_claim.main(["--repo", REPOSITORY, "start", "314"]) == 0
+
+    assert "CLAIMED issue #314: start-314\n" in capsys.readouterr().out
+    assert len(store.fetch_state(worktree=Path("."), remote="origin").claims) == 1
+    assert checkout.resolve_path_checkout(worktree) is not None
+    assert Path.cwd() == repo
+
+
+@pytest.mark.parametrize(
+    ("closed", "message"),
+    [
+        pytest.param(True, "issue #314 is closed", id="closed"),
+        pytest.param(False, "issue #314 does not exist here", id="missing"),
+    ],
+)
+def test_start_refuses_a_closed_or_missing_item(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    closed: bool,
+    message: str,
+) -> None:
+    repo = _start_scenario(monkeypatch, tmp_path)
+    monkeypatch.chdir(repo)
+    client = FakeForge()
+    if closed:
+        client.closed_issues.add(314)
+    else:
+        client.issue_references[314] = forge.ItemReference(forge.ItemState.MISSING, None, None)
+    monkeypatch.setattr(github, "GitHubForge", lambda _repository: client)
+
+    assert issue_claim.main(["--repo", REPOSITORY, "start", "314"]) == 2
+
+    assert capsys.readouterr().err == f"ERROR: {message}\n"
+    assert not (repo.parent / f"{repo.name}-worktrees").exists()
+
+
 def test_claim_accepts_an_item_with_no_dependencies(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -2034,6 +2148,7 @@ def test_help_lists_commands_in_their_stable_registration_order() -> None:
         "board",
         "rulings",
         "next",
+        "start",
         "claim",
         "release",
         "rescope",
@@ -10963,6 +11078,145 @@ def test_release_merged_empty_refuses_when_no_trunk_commit_names_the_item(
     )
     remaining = store.fetch_state(worktree=Path("."), remote="origin").claims
     assert len(remaining) == len(_LANDING_ITEM_NUMBERS)
+
+
+_CLEANUP_BRANCH = "codex/issue-72-cleanup"
+_CLEANUP_WORKTREE_NAME = "issue-72-cleanup"
+
+
+def _release_cleanup_repository(tmp_path: Path, *, merge_into_main: bool = True) -> Path:
+    """A real bare-remote-backed repository (issue #322) with `_CLEANUP_BRANCH`
+    diverged from `main` by one commit, merged into it through a real merge
+    commit unless `merge_into_main` is `False` -- `release --merged`'s own
+    cleanup walks real worktrees and a real merge-base ancestry check,
+    unlike every other release test in this module, which never builds real
+    git state at all."""
+    repo, _remote = _real_repository_with_bare_remote(tmp_path)
+    (repo / "base.txt").write_text("base\n")
+    _real_git(repo, "add", "base.txt")
+    _real_git(repo, "commit", "-q", "-m", "initial")
+    _real_git(repo, "checkout", "-q", "-b", _CLEANUP_BRANCH)
+    (repo / "feature.txt").write_text("feature\n")
+    _real_git(repo, "add", "feature.txt")
+    _real_git(repo, "commit", "-q", "-m", "feature work")
+    _real_git(repo, "checkout", "-q", "main")
+    if merge_into_main:
+        _real_git(repo, "merge", "-q", "--no-ff", "-m", "Merge feature", _CLEANUP_BRANCH)
+    _push_repository_trunk(repo, "origin")
+    return repo
+
+
+def _release_cleanup_scenario(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    merge_into_main: bool = True,
+    link_worktree: bool = True,
+) -> Path:
+    """`repo`'s own would-be lane worktree path -- linked to `_CLEANUP_BRANCH`
+    unless `link_worktree` is `False` -- a claimed issue #72 on that branch,
+    and a merged, closing pull request #12 ready for `release --merged` to
+    verify."""
+    repo = _release_cleanup_repository(tmp_path, merge_into_main=merge_into_main)
+    worktree = repo.parent / f"{repo.name}-worktrees" / _CLEANUP_WORKTREE_NAME
+    if link_worktree:
+        worktree.parent.mkdir(parents=True)
+        _real_git(repo, "worktree", "add", "-q", str(worktree), _CLEANUP_BRANCH)
+    standing = request(
+        "landing", "Ada", issue=WORK_ITEM_ISSUE, branch=_CLEANUP_BRANCH, scope=("src",)
+    )
+    client = FakeForge()
+    client.landings[12] = landing_pull_request(
+        body=f"Work-Item: #{WORK_ITEM_ISSUE}\n\nCloses #{WORK_ITEM_ISSUE}",
+        merged=True,
+        head_ref_name=_CLEANUP_BRANCH,
+    )
+    client.closed_issues.add(WORK_ITEM_ISSUE)
+    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
+    monkeypatch.setattr(issue_claim, "_fetch_issue_reference", _LIVE_FETCH_ISSUE_REFERENCE)
+    _patch_store_write(monkeypatch, _store_claim_from_request(standing))
+    _set_agent_identity_env(monkeypatch, {checkout.ACO_AGENT_ENV: "Ada"})
+    _redirect_toplevel(monkeypatch, repo)
+    monkeypatch.chdir(repo)
+    return worktree
+
+
+def test_release_merged_removes_a_clean_merged_lane_worktree_and_branch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    worktree = _release_cleanup_scenario(monkeypatch, tmp_path)
+
+    assert issue_claim.main(["--repo", REPOSITORY, "release", "72", "--merged", "12"]) == 0
+
+    assert not worktree.exists()
+    assert checkout.branch_exists(_CLEANUP_BRANCH) is False
+
+
+def test_release_merged_keep_worktree_leaves_the_lane_alone(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    worktree = _release_cleanup_scenario(monkeypatch, tmp_path)
+
+    status = issue_claim.main(
+        ["--repo", REPOSITORY, "release", "72", "--merged", "12", "--keep-worktree"]
+    )
+
+    assert status == 0
+    assert worktree.exists()
+    assert checkout.branch_exists(_CLEANUP_BRANCH) is True
+
+
+def test_release_merged_keeps_a_dirty_lane_worktree(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    worktree = _release_cleanup_scenario(monkeypatch, tmp_path)
+    (worktree / "scratch.txt").write_text("uncommitted\n")
+
+    assert issue_claim.main(["--repo", REPOSITORY, "release", "72", "--merged", "12"]) == 0
+
+    assert worktree.exists()
+    assert checkout.branch_exists(_CLEANUP_BRANCH) is True
+
+
+def test_release_merged_from_inside_the_lane_worktree_keeps_it_and_says_so(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    worktree = _release_cleanup_scenario(monkeypatch, tmp_path)
+    _redirect_toplevel(monkeypatch, worktree)
+    monkeypatch.chdir(worktree)
+
+    assert issue_claim.main(["--repo", REPOSITORY, "release", "72", "--merged", "12"]) == 0
+
+    assert worktree.exists()
+    assert "worktree: kept, this release ran from inside it\n" in capsys.readouterr().out
+
+
+def test_release_merged_leaves_nothing_to_clean_up_when_no_worktree_ever_linked_the_branch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Issue #322: the released branch is real and already merged, but no
+    linked worktree was ever built for it (the claim came from a plain
+    checkout) -- cleanup finds nothing to remove and the release itself
+    still succeeds."""
+    _release_cleanup_scenario(monkeypatch, tmp_path, link_worktree=False)
+
+    assert issue_claim.main(["--repo", REPOSITORY, "release", "72", "--merged", "12"]) == 0
+
+    assert checkout.branch_exists(_CLEANUP_BRANCH) is True
+
+
+def test_release_merged_keeps_a_lane_worktree_not_yet_merged_locally(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Issue #322: the forge reports the pull request merged, but this
+    checkout has not itself learned that -- `branch_merged_into_default`
+    reads `False`, so cleanup declines rather than guessing."""
+    worktree = _release_cleanup_scenario(monkeypatch, tmp_path, merge_into_main=False)
+
+    assert issue_claim.main(["--repo", REPOSITORY, "release", "72", "--merged", "12"]) == 0
+
+    assert worktree.exists()
+    assert checkout.branch_exists(_CLEANUP_BRANCH) is True
 
 
 def test_release_abandoned_records_why_the_lane_stopped(
