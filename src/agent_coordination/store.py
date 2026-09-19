@@ -20,6 +20,7 @@ transition's already-committed parent tree still carries unchanged (issue
 from __future__ import annotations
 
 import os
+import sys
 import tarfile
 import tempfile
 import uuid
@@ -127,8 +128,27 @@ _LINEAGE_STAMP_FILENAME = "last-oid"
 # across linked worktrees), the same worktree-private guarantee
 # `_lineage_stamp_path` already relies on, so anchoring here never touches
 # the shared local namespace `_fetch_to_fetch_head`'s own docstring
-# reserves for `STATE_REF` alone.
+# reserves for `STATE_REF` alone. `fetch_state`'s own anchoring is the sole
+# production writer and reader of this name -- `export_state_bundle` below
+# has its own, separate ref in the same private namespace
+# (`EXPORT_BUNDLE_REF`), never this one.
 _FETCH_ANCHOR_REF = "refs/worktree/aco/state"
+
+# `export_state_bundle` points this at the leased tip and bundles it
+# (issue #298, 19.09.2026 REVISE findings 1+2): the previous implementation
+# pointed the *shared* `STATE_REF` at `tip` to give the bundle a name, but
+# that ref is shared across every linked worktree of this repository --
+# a concurrent reset elsewhere could repoint or delete it between this
+# write and the lease-guarded remote delete that follows, and a failed
+# export left it mutated with no restore of its previous value. This name
+# lives in the same worktree-private `refs/worktree/*` namespace
+# `_FETCH_ANCHOR_REF` already relies on, so no linked worktree ever
+# observes, races, or clobbers it, and nothing shared is written by an
+# export at all. `export_state_bundle` deletes it again before returning or
+# raising, in every case, so restoring a bundle reads this name back on the
+# bundle side of the fetch, not `STATE_REF`'s (`_reset_restore_command` in
+# `cli.py` builds the exact command).
+EXPORT_BUNDLE_REF = "refs/worktree/aco/reset-export"
 
 
 class PushTransport(Protocol):
@@ -651,6 +671,27 @@ def fetch_state(*, worktree: Path, remote: str = DEFAULT_CANONICAL_REMOTE) -> Cl
     return state
 
 
+def read_state_for_reset(*, worktree: Path, remote: str = DEFAULT_CANONICAL_REMOTE) -> ClaimState:
+    """Read `STATE_REF` on `remote` for `reset` alone (issue #298, 19.09.2026
+    gate finding 1): the one read in this module that skips `fetch_state`'s
+    own lineage guard, anchor, and stamp.
+
+    `reset` exists to recover from exactly what `_check_lineage` refuses -- a
+    rewritten or deleted ref this worktree's own stamp disagrees with -- so
+    it reads and acts on whatever tip is on `remote` right now, never
+    against this worktree's history. And because a dry run, a live-claim
+    refusal, or a failed export must change nothing durable (finding 2),
+    this performs no per-worktree write at all: no `_anchor_fetched_tip`, no
+    `_write_lineage_stamp`.
+    """
+    probed = _ls_remote_state(worktree, remote)
+    if probed is None:
+        return EMPTY_STATE
+    _fetch_to_fetch_head(worktree, remote)
+    tip = _read_fetch_head(worktree)
+    return _parse_state_tree(worktree, tip)
+
+
 def _commit_tree(
     worktree: Path, *, tree_oid: ObjectId, parent: ObjectId | None, message: str
 ) -> ObjectId:
@@ -1163,3 +1204,343 @@ def bootstrap(
         transport=transport or GitPushTransport(),
     )
     return result.tip if isinstance(result, OperationAlreadyApplied) else result
+
+
+_WORKTREE_LIST_PATH_PREFIX = "worktree "
+
+
+def list_worktrees(worktree: Path) -> tuple[Path, ...]:
+    """Every worktree `git worktree list` reports for this repository (issue
+    #298): `reset`'s own plan and `clear_lineage_stamps` below both need the
+    full set -- a lineage stamp or fetch anchor left behind in even one
+    linked worktree survives the reset and trips the next `fetch_state` it
+    runs there."""
+    result = _run_git(worktree, ["worktree", "list", "--porcelain"])
+    if result.exit_status != 0:
+        raise ClaimError(result.stderr.decode().strip() or "cannot list worktrees")
+    return tuple(
+        Path(line.removeprefix(_WORKTREE_LIST_PATH_PREFIX))
+        for line in result.stdout.decode().splitlines()
+        if line.startswith(_WORKTREE_LIST_PATH_PREFIX)
+    )
+
+
+# `git show-ref --verify --quiet` (git(1)): exit 1 with empty output is the
+# one documented "no such ref" outcome; any other nonzero exit (a corrupt
+# ref, a repository failure) must fail loud, never be read as absence.
+_SHOW_REF_EXIT_MISSING = 1
+
+
+def local_state_ref_exists(worktree: Path) -> bool:
+    """Whether *this* worktree happens to hold a local `STATE_REF` (issue
+    #298): production never creates one on an ordinary read
+    (`_fetch_to_fetch_head` lands fetched objects in `FETCH_HEAD` alone),
+    nor does `export_state_bundle` below, which bundles its own private
+    `EXPORT_BUNDLE_REF` instead of `STATE_REF` (19.09.2026 REVISE findings
+    1+2) -- but a foreign tool might still leave a local `STATE_REF`, and
+    `delete_state_ref`, the reset step right after export, deletes it only
+    when this is true.
+    """
+    result = _run_git(worktree, ["show-ref", "--verify", "--quiet", STATE_REF])
+    if result.exit_status == 0:
+        return True
+    if result.exit_status == _SHOW_REF_EXIT_MISSING and not result.stdout and not result.stderr:
+        return False
+    detail = (
+        result.stderr.decode().strip() or result.stdout.decode().strip() or _UNKNOWN_GIT_FAILURE
+    )
+    raise ClaimError(f"cannot check {STATE_REF} in {worktree}: {detail}")
+
+
+def _export_failure(tip: ObjectId, destination: Path, detail: str) -> ClaimError:
+    return ClaimError(f"cannot export {STATE_REF} at {tip} to {destination}: {detail}")
+
+
+def _write_bundle_to_descriptor(
+    *, worktree: Path, tip: ObjectId, destination: Path, descriptor: int
+) -> None:
+    """Point `EXPORT_BUNDLE_REF` at `tip` and stream `git bundle create` for
+    it into the already-claimed file descriptor `descriptor`: the git
+    plumbing half of `export_state_bundle`'s write, kept separate so that
+    function's own body stays about claiming and publishing a file, not
+    about running git. Pointing `EXPORT_BUNDLE_REF` at `tip` is also this
+    step's own validation that `tip`'s objects actually reached this
+    worktree: `update-ref` itself refuses a `tip` git has never seen.
+
+    `descriptor` is always closed by the time this returns or raises --
+    successfully, via the `with os.fdopen(...)` below, or, on any earlier
+    failure, by the `except` clause here.
+    """
+    try:
+        update = _run_git(worktree, ["update-ref", EXPORT_BUNDLE_REF, str(tip)])
+        if update.exit_status != 0:
+            detail = update.stderr.decode().strip() or _UNKNOWN_GIT_FAILURE
+            raise _export_failure(tip, destination, detail)
+        result = _run_git(worktree, ["bundle", "create", "-", EXPORT_BUNDLE_REF])
+        if result.exit_status != 0:
+            detail = (
+                result.stderr.decode().strip()
+                or result.stdout.decode().strip()
+                or _UNKNOWN_GIT_FAILURE
+            )
+            raise _export_failure(tip, destination, detail)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(result.stdout)
+    except BaseException:
+        with suppress(OSError):
+            os.close(descriptor)
+        raise
+
+
+def _write_and_publish_bundle(
+    *, worktree: Path, tip: ObjectId, destination: Path, descriptor: int, temporary: Path
+) -> None:
+    """Write `tip`'s bundle into the already-claimed temporary file, then
+    publish it into `destination` (issue #298 reset, the write half of
+    `export_state_bundle`'s step 1 of 5).
+
+    Publishes atomically: the bundle is written in full to `temporary` first
+    (`tempfile.mkstemp`, the same idiom `_write_lineage_stamp` uses), then
+    linked into place with `os.link`, whose no-clobber semantics are this
+    function's `destination`-already-exists check -- a reader can never
+    observe a half-written or empty `destination`, because nothing is ever
+    written at that path directly. Removing `temporary` again, whether this
+    succeeds or raises, is the caller's job (`export_state_bundle`'s
+    unconditional cleanup), not this function's -- so every path out of here
+    leaves `temporary` exactly where it found it.
+    """
+    _write_bundle_to_descriptor(
+        worktree=worktree, tip=tip, destination=destination, descriptor=descriptor
+    )
+    try:
+        os.link(temporary, destination)
+    except FileExistsError:
+        raise ClaimError(f"{destination} already exists; refusing to overwrite an export") from None
+    except OSError as error:
+        raise _export_failure(tip, destination, str(error)) from error
+
+
+def _delete_export_ref(worktree: Path) -> str | None:
+    """Delete the temporary `EXPORT_BUNDLE_REF`, reporting failure as a
+    description rather than raising: `_clear_export_artifacts` below must
+    still attempt the temporary file's own removal even when this fails, so
+    neither cleanup step can skip the other. Deleting an already-absent ref
+    is a documented no-op (`git-update-ref`(1)), so a `tip` that never
+    reached `update-ref` in the first place costs nothing here.
+
+    Catches `(ClaimError, OSError, ValueError)` rather than only
+    `ClaimError` (issue #298, the third and sixth 19.09.2026 gate REVISEs):
+    `_run_git` only wraps `ExecutableMissingError`/`ProcessTimedOutError`
+    into `ClaimError`, so a raw `OSError` from `process.run_captured`'s own
+    `subprocess.run` (a descriptor exhausted) would otherwise escape before
+    the temporary file's own cleanup below ever runs, and the nonzero-exit
+    branch's own `stderr.decode()` below can raise `UnicodeDecodeError` --
+    a `ValueError` subclass -- on invalid UTF-8 in git's own stderr. This is
+    the concrete failure family that can actually reach this call, not a
+    stand-in for "anything": nothing here is swallowed, the caught error is
+    carried verbatim into the leftover description `_clear_export_artifacts`
+    returns and, from there, into the raised `ClaimError` and its
+    `__cause__`."""
+    try:
+        result = _run_git(worktree, ["update-ref", "-d", EXPORT_BUNDLE_REF])
+        if result.exit_status != 0:
+            return result.stderr.decode().strip() or _UNKNOWN_GIT_FAILURE
+    except (ClaimError, OSError, ValueError) as error:
+        return str(error)
+    return None
+
+
+def _clear_export_artifacts(*, worktree: Path, temporary: Path) -> tuple[str, ...]:
+    """Remove the temporary export ref and the temporary file, each
+    attempted independently of whether the other fails (issue #298, the
+    second, third and sixth 19.09.2026 gate REVISEs): a broken `git`
+    invocation while clearing `EXPORT_BUNDLE_REF` -- the
+    `(ClaimError, OSError, ValueError)` family `_delete_export_ref`
+    documents -- must never skip the temporary file's removal, and an
+    `OSError` removing the temporary file must never skip clearing the
+    ref. Returns a description of every artifact that could not be
+    removed, or an empty tuple once both are confirmed gone."""
+    leftovers: list[str] = []
+    ref_failure = _delete_export_ref(worktree)
+    if ref_failure is not None:
+        leftovers.append(f"the temporary export ref {EXPORT_BUNDLE_REF} ({ref_failure})")
+    try:
+        temporary.unlink()
+    except OSError as error:
+        leftovers.append(f"the now-redundant temporary file {temporary} ({error})")
+    return tuple(leftovers)
+
+
+def _export_cleanup_failure(
+    tip: ObjectId,
+    destination: Path,
+    leftovers: tuple[str, ...],
+    primary_error: BaseException | None,
+) -> ClaimError:
+    artifacts = " and ".join(leftovers)
+    if primary_error is None:
+        return ClaimError(
+            f"exported {STATE_REF} at {tip} to {destination} but could not remove {artifacts}"
+        )
+    return ClaimError(
+        f"cannot export {STATE_REF} at {tip} to {destination}: {primary_error}; also could "
+        f"not remove {artifacts}"
+    )
+
+
+def export_state_bundle(*, worktree: Path, tip: ObjectId, destination: Path) -> Path:
+    """Bundle `tip` into `destination` (issue #298 reset, step 1 of 5): the
+    sole mandatory-unless-`--no-export` write a reset performs before
+    anything is deleted.
+
+    Bundles the private `EXPORT_BUNDLE_REF` (`_write_bundle_to_descriptor`'s
+    own docstring has the full rationale), never the shared `STATE_REF`:
+    nothing this function does is ever visible to another linked worktree's
+    concurrent reset, and the bundled tip is always exactly the `tip` the
+    caller leased -- never whatever a shared ref happens to hold when the
+    subprocess actually runs. Restoring the bundle therefore reads
+    `EXPORT_BUNDLE_REF`'s name on the bundle side of the fetch, not
+    `STATE_REF`'s (`git bundle list-heads` names it, `_reset_restore_command`
+    in `cli.py` builds the command).
+
+    Cleanup of the temporary export ref and the temporary file is
+    unconditional and the two are independent of each other (issue #298,
+    the second 19.09.2026 gate REVISE): whatever happened while writing or
+    publishing the bundle -- success, or a failure raised at any point --
+    both cleanups are always attempted, via `_clear_export_artifacts`, and a
+    failure in one never skips the other. The previous version ran the ref
+    cleanup as a plain statement ahead of the temporary file's own cleanup,
+    so an exception from that one git invocation (not just a nonzero exit)
+    skipped the temporary file's removal entirely, and both cleanups
+    suppressed their own `OSError`/nonzero-exit without naming what was left
+    behind. When a cleanup failure happens, the artifact it could not remove
+    is named in the raised error, together with the write/publish failure
+    that preceded it when there was one, carried as that error's cause
+    (`raise ... from`); when cleanup succeeds but the write or publish
+    itself failed, that original error is re-raised unchanged.
+    """
+    try:
+        descriptor, temp_name = tempfile.mkstemp(
+            dir=str(destination.parent), prefix=f".{destination.name}."
+        )
+    except OSError as error:
+        raise _export_failure(tip, destination, str(error)) from error
+    temporary = Path(temp_name)
+
+    try:
+        _write_and_publish_bundle(
+            worktree=worktree,
+            tip=tip,
+            destination=destination,
+            descriptor=descriptor,
+            temporary=temporary,
+        )
+    finally:
+        leftovers = _clear_export_artifacts(worktree=worktree, temporary=temporary)
+        if leftovers:
+            primary = sys.exc_info()[1]
+            raise _export_cleanup_failure(tip, destination, leftovers, primary) from primary
+    return destination
+
+
+def _repair_after_failed_remote_delete(
+    worktree: Path, remote: str, expected_remote_tip: ObjectId, push_detail: str
+) -> None:
+    """A nonzero `--force-with-lease` push does not by itself say what
+    happened on `remote`: the server can accept the deletion and still have
+    the push report failure afterward -- a lost response, not a rejection.
+    Re-probes with `ls-remote` and reports exactly what it finds instead of
+    assuming the worst.
+
+    Never recommends a manual `--force-with-lease` repair, in either
+    outcome (issue #298, 19.09.2026 REVISE finding 3): a re-probed tip that
+    differs from `expected_remote_tip` means the remote moved since this
+    reset last observed it, and that replacement tip has been through
+    neither of this reset's own safeguards -- it was never checked against
+    a live claim, nor exported. The only repair this function ever names is
+    re-running `aco reset --confirm` itself, which repeats both checks
+    against whatever it finds.
+    """
+    try:
+        current = _ls_remote_state(worktree, remote)
+    except ClaimError as error:
+        raise ClaimError(
+            f"cannot delete {STATE_REF} on {remote} (lease {expected_remote_tip}): "
+            f"{push_detail}; outcome unknown -- verify with `git ls-remote {remote} "
+            f"{STATE_REF}` before retrying `aco reset --confirm`"
+        ) from error
+    if current is None:
+        return  # deleted anyway: the server applied it before the push reported failure
+    if current != expected_remote_tip:
+        raise ClaimError(
+            f"cannot delete {STATE_REF} on {remote} (lease {expected_remote_tip}): {push_detail}; "
+            f"the remote moved to {current} -- re-run `aco reset --confirm`, which "
+            f"re-observes {remote}, re-validates against every live claim, and re-exports "
+            f"before deleting again; a manual lease against {current} would skip both checks"
+        )
+    raise ClaimError(
+        f"cannot delete {STATE_REF} on {remote} (lease {expected_remote_tip}): {push_detail}; "
+        f"{STATE_REF} is still present at {current}, unchanged from the lease -- re-run "
+        f"`aco reset --confirm` once the cause is fixed"
+    )
+
+
+def delete_state_ref(*, worktree: Path, remote: str, expected_remote_tip: ObjectId | None) -> bool:
+    """Delete `STATE_REF` on `remote`, then locally if present (issue #298
+    reset, steps 2-3 of 5): never `--force` -- a matching
+    `--force-with-lease` refuses the moment `expected_remote_tip` is stale,
+    which is the whole point of reading it before deleting rather than
+    trusting whatever is there when the push actually runs.
+
+    `expected_remote_tip` is `None` only when `STATE_REF` is already proven
+    absent on `remote` (nothing to delete there); the local ref, if any, is
+    still cleaned up in that case. A nonzero push re-probes the remote
+    before concluding anything (`_repair_after_failed_remote_delete`): a
+    ref confirmed still present raises before the local ref is ever
+    touched, so a failed remote step never leaves local and remote in the
+    one combination reset must not produce -- local gone while remote
+    survives -- but a ref the re-probe finds already gone is treated as
+    deleted and the local cleanup below still runs.
+    """
+    if expected_remote_tip is not None:
+        lease = f"{STATE_REF}:{expected_remote_tip}"
+        result = _run_git(
+            worktree, ["push", remote, f"--force-with-lease={lease}", f":{STATE_REF}"]
+        )
+        if result.exit_status != 0:
+            detail = (
+                result.stderr.decode().strip()
+                or result.stdout.decode().strip()
+                or _UNKNOWN_GIT_FAILURE
+            )
+            _repair_after_failed_remote_delete(worktree, remote, expected_remote_tip, detail)
+    if not local_state_ref_exists(worktree):
+        return False
+    result = _run_git(worktree, ["update-ref", "-d", STATE_REF])
+    if result.exit_status != 0:
+        detail = result.stderr.decode().strip() or _UNKNOWN_GIT_FAILURE
+        raise ClaimError(f"cannot delete local {STATE_REF}: {detail}")
+    return True
+
+
+def clear_lineage_stamps(*, worktree: Path) -> tuple[Path, ...]:
+    """Delete the lineage stamp and the per-worktree fetch anchor
+    (`_FETCH_ANCHOR_REF`) in every worktree of this repository (issue #298
+    reset, step 4 of 5), before `bootstrap` re-creates `STATE_REF` from
+    nothing.
+
+    Both must go in every worktree, not just this one: `fetch_state`'s own
+    lineage guard (`_check_lineage` above) refuses a fresh bootstrap tip as
+    unrelated to whatever a worktree last observed, and a stale anchor keeps
+    the old, now-orphaned objects reachable there for a later `git gc` to
+    spare and a later fetch to see as a second, disconnected line of
+    history.
+    """
+    worktrees = list_worktrees(worktree)
+    for path in worktrees:
+        _lineage_stamp_path(path).unlink(missing_ok=True)
+        result = _run_git(path, ["update-ref", "-d", _FETCH_ANCHOR_REF])
+        if result.exit_status != 0:
+            detail = result.stderr.decode().strip() or _UNKNOWN_GIT_FAILURE
+            raise ClaimError(f"cannot clear {_FETCH_ANCHOR_REF} in {path}: {detail}")
+    return worktrees

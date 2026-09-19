@@ -263,6 +263,52 @@ failure) fails loud instead of either printing or writing. It is forge-free
 (see "Scope and boundaries" below), so `--repo` and the canonical remote's
 own repository never enter into it.
 
+## Reset
+
+`aco reset --confirm` replaces the hand procedure this repository used before
+issue #298 (delete the remote ref, delete the local one, delete every
+worktree's `.git/aco/last-oid` stamp, `bootstrap`) with one command that
+cannot forget a step. Five steps, one printed line each, in this fixed order:
+export the tip reset just read as a `git bundle`; delete the remote ref with
+a `--force-with-lease` matching that same tip; delete the local ref, only if
+one happens to exist; clear the lineage stamp and fetch anchor in every
+worktree `git worktree list` reports for this repository; bootstrap a fresh
+empty state. Without `--confirm` it prints the same five planned steps
+prefixed `would:` and changes nothing.
+
+**Operator ruling (15.09.2026, 16.09.2026)**: the export is mandatory before
+anything is deleted, unless `--no-export` says otherwise; `--confirm` is
+required to do anything for real; and a live claim always refuses the reset
+outright, `--confirm` or not -- there is no `--force` past it, because a
+reset over live work is data loss with no owner.
+
+The bundle is written to `--export-dir` (default: the repository's own parent
+directory) as `aco-state-<repo>-<date>-<short-sha>.bundle`, claimed atomically
+so a concurrent export can never truncate one another's file, and refuses to
+overwrite a same-named file left by an earlier export. It is built from a
+private, per-worktree ref, never the shared `refs/aco/state` -- exporting
+never mutates, reads a race on, or leaves behind anything another linked
+worktree's own reset could see. Its printed line names the exact restore
+command, `git fetch <bundle> <the bundle's own ref>:refs/aco/state`, run
+against the remote that is to carry the restored ref.
+
+Order and failure behaviour: export, then the remote delete, then the local
+delete, then the stamps and anchors, then bootstrap -- each step's line
+prints only once that step has completed. An export failure (an unwritable
+export directory, a same-named bundle already there) stops everything before
+any delete runs. A remote-deletion failure re-probes the remote before
+concluding anything: a lost response after the server actually applied the
+deletion is treated as done and reset continues; a ref confirmed still
+present -- rejected outright, or the lease no longer matching because the ref
+moved between reset's own read and its delete -- leaves the local ref exactly
+as it was and names re-running `aco reset --confirm` itself as the only
+repair, never a manual `git push --force-with-lease`: a tip the remote moved
+to has been through neither this reset's live-claim check nor its export, so
+only reset re-running both is safe; an unreachable remote stops before any
+delete runs and says the outcome is unknown rather than guessing. Whatever
+export ran stays on disk either way. `reset` is forge-free like `bootstrap`:
+`--repo` is meaningless for it.
+
 ## Checking one number
 
 `aco check <n>` reads one number of the current checkout's repository (or
@@ -1082,7 +1128,7 @@ stdout -- so a scripted `--json` caller reads a machine-readable refusal on
 the stream it already parses, without a script watching stderr too. No new
 vocabulary: this is the same `ok`/`refused` discriminator `check` already
 uses, not an error code, a retryable flag, or a mutation-state field. A
-command without a `--json` option (`bootstrap`, `protect`) is unaffected;
+command without a `--json` option (`bootstrap`, `reset`, `protect`) is unaffected;
 `protect` already prints JSON on every outcome through its own error path
 and this collection point never runs for it. **Deliberate boundary**: an
 argparse failure (a missing issue number, an unknown flag) happens before any
@@ -1121,7 +1167,7 @@ own git directory: no provider configuration, and never `~/.claude`, `~/.codex`,
 project-to-session mapping under the XDG configuration path described above;
 it does not change provider configuration.
 
-`status`, `protect`, `bootstrap`, and a lane `claim`/`rescope`/`release`
+`status`, `protect`, `bootstrap`, `reset`, and a lane `claim`/`rescope`/`release`
 (the issueless `docs/`/`fix/` kind) are forge-free: they read and write only
 `refs/aco/state` on the checkout's `canonical_remote`, never resolving a
 repository or invoking `gh`, so a canonical remote on any host -- GitHub,

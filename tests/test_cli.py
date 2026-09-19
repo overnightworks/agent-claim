@@ -10783,3 +10783,420 @@ def test_item_show_refuses_an_unknown_id(
 
     assert status == 2
     assert capsys.readouterr().err == f"ERROR: #42 does not exist in {REPOSITORY}\n"
+
+
+# `reset` (issue #298): real bare `file://` remotes and real checkouts
+# throughout -- `_reset_state` orchestrates `store`'s own git chokepoint end
+# to end, so a mock of `store` would only prove this file's own fakes agree
+# with each other, never that a real lease, a real bundle, or a real
+# lineage stamp behaves as the printed line claims. Captured at import time,
+# before the file's own autouse `_stub_store_write` ever runs, so each
+# `reset` test can hand the real functions straight back to `store`.
+_REAL_STORE_FETCH_STATE = store.fetch_state
+_REAL_STORE_COMMIT_TRANSITION = store.commit_transition
+_REAL_STORE_CLAIM_AGES = store.claim_ages
+
+
+def _use_real_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Undo this file's autouse in-memory `store` fake for one `reset` test:
+    `reset` proves real git behaviour end to end, never the fake's own
+    agreement with itself."""
+    monkeypatch.setattr(store, "fetch_state", _REAL_STORE_FETCH_STATE)
+    monkeypatch.setattr(store, "commit_transition", _REAL_STORE_COMMIT_TRANSITION)
+    monkeypatch.setattr(store, "claim_ages", _REAL_STORE_CLAIM_AGES)
+
+
+def _reset_repository(tmp_path: Path) -> tuple[Path, Path]:
+    """A real checkout with a real `origin` remote pointing at a real bare
+    repository. `board.toml` is never written: `_isolate_git_toplevel`
+    (conftest) resolves the repository's toplevel to `tmp_path`, where no
+    `.agent-claim/board.toml` exists, so `board.load_config` falls back to
+    its own default `canonical_remote = "origin"` -- exactly this remote's
+    name."""
+    bare_remote = tmp_path / "remote.git"
+    _real_git(tmp_path, "init", "--bare", "-q", "-b", "main", str(bare_remote))
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    _real_git(repository, "init", "-q", "-b", "main")
+    _real_git(repository, "config", "user.email", "test@example.com")
+    _real_git(repository, "config", "user.name", "Test")
+    (repository / "README.md").write_text("hello\n")
+    _real_git(repository, "add", "README.md")
+    _real_git(repository, "commit", "-q", "-m", "initial")
+    _real_git(repository, "remote", "add", "origin", str(bare_remote))
+    return repository, bare_remote
+
+
+def _real_claim_intent(issue: int) -> protocol.ClaimIntent:
+    return protocol.ClaimIntent(
+        identity=protocol.IssueIdentity(issue),
+        agent="Codex Sol",
+        role="builder",
+        base=protocol.ObjectId("c" * 40),
+        branch=f"codex/issue-{issue}-reset",
+        scope=(f"src/issue-{issue}.py",),
+        claim_id=protocol.ClaimId(f"claim-{issue}"),
+        operation_id=f"op-{issue}",
+    )
+
+
+def _force_advance_state_ref(repository: Path, bare_remote: Path, tip: str) -> str:
+    """Simulate someone else's push landing on `STATE_REF` between reset's
+    own read of `tip` and its lease-guarded delete -- the exact race
+    `--force-with-lease` exists to catch."""
+    tree = _real_git(repository, "rev-parse", f"{tip}^{{tree}}").stdout.strip()
+    new_commit = _real_git(repository, "commit-tree", tree, "-p", tip, "-m", "moved").stdout.strip()
+    _real_git(repository, "push", "--force", str(bare_remote), f"{new_commit}:{store.STATE_REF}")
+    return new_commit
+
+
+def _lineage_observation(repository: Path) -> tuple[protocol.ObjectId | None, str | None]:
+    """This worktree's lineage stamp and fetch anchor -- the two
+    per-worktree values a reset dry run, a live-claim refusal, or a failed
+    export must leave byte-identical to whatever `fetch_state` last wrote
+    (issue #298, 19.09.2026 gate finding 2)."""
+    stamp = store._read_lineage_stamp(repository)
+    anchor = store._run_git(repository, ["rev-parse", store._FETCH_ANCHOR_REF])
+    return stamp, anchor.stdout.decode().strip() if anchor.exit_status == 0 else None
+
+
+def test_cli_reset_dry_run_prints_five_would_lines_and_changes_nothing(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    _use_real_store(monkeypatch)
+    repository, bare_remote = _reset_repository(tmp_path)
+    tip = store.bootstrap(worktree=repository, remote=str(bare_remote))
+    store.fetch_state(worktree=repository, remote=str(bare_remote))
+    lineage_before = _lineage_observation(repository)
+    assert lineage_before != (None, None)
+    export_dir = tmp_path / "export"
+    export_dir.mkdir()
+    monkeypatch.chdir(repository)
+    monkeypatch.setattr(issue_claim, "datetime", FixedDateTime)
+
+    status = issue_claim.main(["reset", "--export-dir", str(export_dir)])
+
+    assert status == 0
+    bundle_path = export_dir / f"aco-state-repo-2026-08-21-{tip[:12]}.bundle"
+    assert capsys.readouterr().out.splitlines() == [
+        f"would: export {store.STATE_REF} at {tip} to {bundle_path} "
+        f"(restore with: git fetch {bundle_path} {store.EXPORT_BUNDLE_REF}:{store.STATE_REF})",
+        f"would: delete {store.STATE_REF} on origin (lease {tip})",
+        f"would: no local {store.STATE_REF} to delete",
+        "would: clear lineage stamps and fetch anchors in 1 worktree",
+        "would: bootstrap a fresh empty state",
+    ]
+    assert not bundle_path.exists()
+    assert (
+        _real_git(
+            repository, "ls-remote", "--exit-code", str(bare_remote), store.STATE_REF
+        ).stdout.split("\t")[0]
+        == tip
+    )
+    assert not store.local_state_ref_exists(repository)
+    assert _lineage_observation(repository) == lineage_before
+
+
+def test_cli_reset_confirm_exports_a_verifiable_bundle_and_bootstraps_a_fresh_ref(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    _use_real_store(monkeypatch)
+    repository, bare_remote = _reset_repository(tmp_path)
+    tip = store.bootstrap(worktree=repository, remote=str(bare_remote))
+    export_dir = tmp_path / "export"
+    export_dir.mkdir()
+    monkeypatch.chdir(repository)
+    monkeypatch.setattr(issue_claim, "datetime", FixedDateTime)
+
+    status = issue_claim.main(["reset", "--confirm", "--export-dir", str(export_dir)])
+
+    assert status == 0
+    lines = capsys.readouterr().out.splitlines()
+    bundle_path = export_dir / f"aco-state-repo-2026-08-21-{tip[:12]}.bundle"
+    assert lines[0] == (
+        f"exported {store.STATE_REF} at {tip} to {bundle_path} "
+        f"(restore with: git fetch {bundle_path} {store.EXPORT_BUNDLE_REF}:{store.STATE_REF})"
+    )
+    assert lines[1] == f"deleted {store.STATE_REF} on origin (lease {tip})"
+    # `export_state_bundle` no longer touches the shared `STATE_REF` at all
+    # (19.09.2026 REVISE findings 1+2), so there is never a local one left
+    # for this step to delete.
+    assert lines[2] == f"no local {store.STATE_REF} to delete"
+    assert lines[3] == "cleared lineage stamps and fetch anchors in 1 worktree"
+    assert lines[4].startswith("bootstrapped a fresh empty state at ")
+    fresh_tip = lines[4].removeprefix("bootstrapped a fresh empty state at ")
+    assert fresh_tip != tip
+    _real_git(repository, "bundle", "verify", str(bundle_path))
+    heads = _real_git(repository, "bundle", "list-heads", str(bundle_path)).stdout
+    assert heads.strip() == f"{tip} {store.EXPORT_BUNDLE_REF}"
+    probe = _real_git(repository, "ls-remote", "--exit-code", str(bare_remote), store.STATE_REF)
+    assert probe.stdout.split("\t")[0] == fresh_tip
+    assert not store.local_state_ref_exists(repository)
+
+
+def test_cli_reset_refuses_when_a_claim_is_live_and_touches_nothing(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    _use_real_store(monkeypatch)
+    repository, bare_remote = _reset_repository(tmp_path)
+    store.bootstrap(worktree=repository, remote=str(bare_remote))
+    store.commit_transition(
+        worktree=repository,
+        remote=str(bare_remote),
+        subject="claim issue 42",
+        intent=_real_claim_intent(42),
+    )
+    tip_before = _real_git(repository, "ls-remote", str(bare_remote), store.STATE_REF).stdout.split(
+        "\t"
+    )[0]
+    lineage_before = _lineage_observation(repository)
+    assert lineage_before != (None, None)
+    export_dir = tmp_path / "export"
+    export_dir.mkdir()
+    monkeypatch.chdir(repository)
+
+    status = issue_claim.main(["reset", "--confirm", "--export-dir", str(export_dir)])
+
+    assert status == 2
+    out = capsys.readouterr().out
+    assert "CLAIMED issue #42" in out
+    assert "codex/issue-42-reset" in out
+    tip_after = _real_git(repository, "ls-remote", str(bare_remote), store.STATE_REF).stdout.split(
+        "\t"
+    )[0]
+    assert tip_after == tip_before
+    assert list(export_dir.iterdir()) == []
+    assert not store.local_state_ref_exists(repository)
+    assert _lineage_observation(repository) == lineage_before
+
+
+def test_cli_reset_no_export_skips_the_bundle_but_still_resets(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    _use_real_store(monkeypatch)
+    repository, bare_remote = _reset_repository(tmp_path)
+    tip = store.bootstrap(worktree=repository, remote=str(bare_remote))
+    export_dir = tmp_path / "export"
+    export_dir.mkdir()
+    monkeypatch.chdir(repository)
+
+    status = issue_claim.main(
+        ["reset", "--confirm", "--no-export", "--export-dir", str(export_dir)]
+    )
+
+    assert status == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == f"skipped export (--no-export): {store.STATE_REF} at {tip} not saved"
+    assert list(export_dir.iterdir()) == []
+
+
+def test_cli_reset_dry_run_reports_nothing_to_export_or_delete_when_the_ref_never_existed(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    _use_real_store(monkeypatch)
+    repository, _bare_remote = _reset_repository(tmp_path)
+    monkeypatch.chdir(repository)
+
+    status = issue_claim.main(["reset"])
+
+    assert status == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == f"would: nothing to export: {store.STATE_REF} does not exist on origin"
+    assert lines[1] == f"would: nothing to delete on origin: {store.STATE_REF} does not exist"
+
+
+def test_cli_reset_confirm_deletes_a_local_ref_a_foreign_tool_left_behind(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    _use_real_store(monkeypatch)
+    repository, bare_remote = _reset_repository(tmp_path)
+    tip = store.bootstrap(worktree=repository, remote=str(bare_remote))
+    _real_git(repository, "update-ref", store.STATE_REF, tip)
+    export_dir = tmp_path / "export"
+    export_dir.mkdir()
+    monkeypatch.chdir(repository)
+
+    status = issue_claim.main(["reset", "--confirm", "--export-dir", str(export_dir)])
+
+    assert status == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[2] == f"deleted local {store.STATE_REF}"
+    assert not store.local_state_ref_exists(repository)
+    probe = _real_git(repository, "ls-remote", "--exit-code", str(bare_remote), store.STATE_REF)
+    assert probe.stdout.split("\t")[0] != tip
+
+
+def test_cli_reset_export_failure_leaves_the_ref_untouched(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    _use_real_store(monkeypatch)
+    repository, bare_remote = _reset_repository(tmp_path)
+    tip = store.bootstrap(worktree=repository, remote=str(bare_remote))
+    store.fetch_state(worktree=repository, remote=str(bare_remote))
+    lineage_before = _lineage_observation(repository)
+    assert lineage_before != (None, None)
+    readonly_export_dir = tmp_path / "readonly"
+    readonly_export_dir.mkdir()
+    readonly_export_dir.chmod(0o500)
+    monkeypatch.chdir(repository)
+
+    try:
+        status = issue_claim.main(["reset", "--confirm", "--export-dir", str(readonly_export_dir)])
+    finally:
+        readonly_export_dir.chmod(0o700)
+
+    assert status == 2
+    assert "cannot export" in capsys.readouterr().err
+    probe = _real_git(repository, "ls-remote", "--exit-code", str(bare_remote), store.STATE_REF)
+    assert probe.stdout.split("\t")[0] == tip
+    assert not store.local_state_ref_exists(repository)
+    assert _lineage_observation(repository) == lineage_before
+
+
+def test_cli_reset_a_moved_remote_tip_leaves_the_bundle_intact_and_names_the_repair(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    _use_real_store(monkeypatch)
+    repository, bare_remote = _reset_repository(tmp_path)
+    tip = store.bootstrap(worktree=repository, remote=str(bare_remote))
+    export_dir = tmp_path / "export"
+    export_dir.mkdir()
+    monkeypatch.chdir(repository)
+    real_export = store.export_state_bundle
+    moved_tip = ""
+
+    def export_then_move_remote(
+        *, worktree: Path, tip: protocol.ObjectId, destination: Path
+    ) -> Path:
+        nonlocal moved_tip
+        result = real_export(worktree=worktree, tip=tip, destination=destination)
+        moved_tip = _force_advance_state_ref(repository, bare_remote, tip)
+        return result
+
+    monkeypatch.setattr(store, "export_state_bundle", export_then_move_remote)
+
+    status = issue_claim.main(["reset", "--confirm", "--export-dir", str(export_dir)])
+
+    assert status == 2
+    err = capsys.readouterr().err
+    assert "cannot delete" in err
+    assert "lease" in err
+    # The repair line names the remote's *current* tip -- the one
+    # re-probed after the failed push, never the stale tip that push
+    # itself carried -- but never a manual lease command against it
+    # (19.09.2026 REVISE finding 3): that tip was never validated against a
+    # live claim, nor exported, so the only repair named is re-running
+    # `aco reset --confirm` itself, which repeats both checks.
+    assert f"the remote moved to {moved_tip}" in err
+    assert "re-run `aco reset --confirm`" in err
+    assert "--force-with-lease" not in err
+    bundle_path = next(export_dir.iterdir())
+    _real_git(repository, "bundle", "verify", str(bundle_path))
+    # `export_state_bundle` never touches the shared `STATE_REF` at all
+    # (19.09.2026 REVISE findings 1+2), so the remote-deletion failure
+    # leaves nothing local to have been left behind either.
+    assert not store.local_state_ref_exists(repository)
+    probe = _real_git(repository, "ls-remote", "--exit-code", str(bare_remote), store.STATE_REF)
+    assert probe.stdout.split("\t")[0] != tip
+
+
+def test_cli_reset_restore_from_the_bundle_into_a_fresh_repository_recovers_status(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """`reset` always refuses over a live claim, so the "old state" it can
+    ever legitimately reset past is one whose claims have all already been
+    released -- this claims, then releases, one issue before resetting, and
+    proves the restored bundle carries that exact history forward (its
+    `tip`, not just a same-shaped fresh one) rather than only an
+    equally-empty `aco status` a plain bootstrap would print too.
+    """
+    _use_real_store(monkeypatch)
+    repository, bare_remote = _reset_repository(tmp_path)
+    store.bootstrap(worktree=repository, remote=str(bare_remote))
+    store.commit_transition(
+        worktree=repository,
+        remote=str(bare_remote),
+        subject="claim issue 42",
+        intent=_real_claim_intent(42),
+    )
+    store.commit_transition(
+        worktree=repository,
+        remote=str(bare_remote),
+        subject="release issue 42",
+        intent=protocol.ReleaseIntent(
+            claim_id=protocol.ClaimId("claim-42"),
+            agent="Codex Sol",
+            role="builder",
+            outcome=protocol.AbandonedRelease("test cleanup"),
+            operation_id="op-42-release",
+        ),
+    )
+    pre_reset_tip = store.fetch_state(worktree=repository, remote=str(bare_remote)).tip
+    export_dir = tmp_path / "export"
+    export_dir.mkdir()
+    monkeypatch.chdir(repository)
+
+    status = issue_claim.main(["reset", "--confirm", "--export-dir", str(export_dir)])
+    assert status == 0
+    capsys.readouterr()
+    bundle_path = next(export_dir.iterdir())
+
+    restored_remote = tmp_path / "restored-remote.git"
+    _real_git(tmp_path, "init", "--bare", "-q", "-b", "main", str(restored_remote))
+    # The bundle carries `EXPORT_BUNDLE_REF`'s name, not `STATE_REF`'s
+    # (19.09.2026 REVISE findings 1+2) -- this is the exact command
+    # `_reset_restore_command` prints, proven end to end here.
+    _real_git(
+        restored_remote,
+        "fetch",
+        "-q",
+        str(bundle_path),
+        f"{store.EXPORT_BUNDLE_REF}:{store.STATE_REF}",
+    )
+    fresh_repository = tmp_path / "fresh"
+    fresh_repository.mkdir()
+    _real_git(fresh_repository, "init", "-q", "-b", "main")
+    _real_git(fresh_repository, "remote", "add", "origin", str(restored_remote))
+    monkeypatch.chdir(fresh_repository)
+
+    status = issue_claim.main(["status"])
+
+    assert status == 0
+    assert "UNCLAIMED repository" in capsys.readouterr().out
+    restored_state = store.fetch_state(worktree=fresh_repository, remote=str(restored_remote))
+    assert restored_state.tip == pre_reset_tip
+    assert protocol.ClaimId("claim-42") in restored_state.consumed_ids
+
+
+def test_cli_reset_recovers_from_a_deleted_ref_this_worktree_had_already_observed(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """The one scenario reset exists to unblock (issue #298, 19.09.2026 gate
+    finding 1): this worktree fetched `STATE_REF` once and stamped it, then
+    the ref was deleted directly on the remote -- exactly what an ordinary
+    `fetch_state`'s own `_check_lineage`/absent-ref guard refuses on the
+    next read. `reset` must still recover, and must clear the stale stamp
+    so an ordinary read works again afterward."""
+    _use_real_store(monkeypatch)
+    repository, bare_remote = _reset_repository(tmp_path)
+    store.bootstrap(worktree=repository, remote=str(bare_remote))
+    store.fetch_state(worktree=repository, remote=str(bare_remote))
+    assert store._read_lineage_stamp(repository) is not None
+    _real_git(bare_remote, "update-ref", "-d", store.STATE_REF)
+    with pytest.raises(protocol.StateLineageError):
+        store.fetch_state(worktree=repository, remote=str(bare_remote))
+    export_dir = tmp_path / "export"
+    export_dir.mkdir()
+    monkeypatch.chdir(repository)
+
+    status = issue_claim.main(["reset", "--confirm", "--export-dir", str(export_dir)])
+
+    assert status == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == f"nothing to export: {store.STATE_REF} does not exist on origin"
+    assert lines[1] == f"nothing to delete on origin: {store.STATE_REF} does not exist"
+    assert lines[2] == f"no local {store.STATE_REF} to delete"
+    assert lines[3] == "cleared lineage stamps and fetch anchors in 1 worktree"
+    assert lines[4].startswith("bootstrapped a fresh empty state at ")
+    fresh_state = store.fetch_state(worktree=repository, remote=str(bare_remote))
+    assert fresh_state.tip is not None
