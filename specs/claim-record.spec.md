@@ -37,7 +37,7 @@ runner's own values; `<agent>` and `<role>` are the claimant's.
 | foreign claim, coordinator override | CLAIM-51 | — | CLAIM-38, CLAIM-39, CLAIM-40 |
 | hand-corrupted claim file | CLAIM-06..CLAIM-08, CLAIM-59..CLAIM-63 | CLAIM-06..CLAIM-08, CLAIM-59..CLAIM-63 | — |
 | hand-corrupted claim key | CLAIM-09, CLAIM-56, CLAIM-64..CLAIM-66 | CLAIM-09, CLAIM-56, CLAIM-64..CLAIM-66 | — |
-| item naming its own scope | CLAIM-53, CLAIM-54, CLAIM-55 | — | — |
+| item naming its own scope | CLAIM-53, CLAIM-54, CLAIM-55, CLAIM-67 | — | — |
 
 ## The record and its key
 
@@ -76,8 +76,8 @@ runner's own values; `<agent>` and `<role>` are the claimant's.
 - [ ] [CLAIM-13] Repeating an interrupted claim with the same claim id, agent, role, branch and scope returns that same live claim and writes no second record, exit `0`.
 - [ ] [CLAIM-14] A claim id already on the ledger with different fields refuses `claim id '<claim-id>' is already on this ledger, active or released; release it, then claim again with a fresh claim id`.
 - [ ] [CLAIM-15] A released claim id stays terminal: claiming with it again refuses with that same `already on this ledger, active or released` sentence, exit `2`.
-- [ ] [CLAIM-16] `aco rescope` against a claim id with no live claim refuses `claim id '<claim-id>' has no active claim to rescope`, exit `2`.
-- [ ] [CLAIM-17] `aco release` against a claim id with no live claim refuses `claim id '<claim-id>' has no active claim to release`, exit `2`.
+- [ ] [CLAIM-16] `aco rescope` against a claim id with no live claim on its identity/branch, including a mismatched `--claim-id`, refuses the wording `rescope.spec.md` owns (RESC-14), exit `2`.
+- [ ] [CLAIM-17] `aco release` against a claim id with no live claim on its identity/branch, including a mismatched `--claim-id`, refuses the wording `release.spec.md` owns (REL-09, REL-10), exit `2`.
 
 ## Scope grammar
 
@@ -133,9 +133,10 @@ runner's own values; `<agent>` and `<role>` are the claimant's.
 
 ## The item's own scope
 
-- [ ] [CLAIM-53] Issue-mode `aco claim 42` without `--scope` takes the item's own `scope` into the record and prints the same `CLAIMED issue #42` line as an explicit scope would; the same set given in a different order is accepted too, and a live claim already on #42 takes its own stored scope outright, without reading the body again.
+- [ ] [CLAIM-53] Issue-mode `aco claim 42` without `--scope` takes the item's own `scope` into the record and prints the same `CLAIMED issue #42` line an explicit scope would (see E-CLAIM-06).
 - [ ] [CLAIM-54] A `--scope` set differing from the item's own `scope` refuses `claim scope differs from the item's scope; correct the item first`, exit `2`, so no reader claims a false disjointness.
 - [ ] [CLAIM-55] An item naming no `scope` refuses issue-mode `aco claim 42` without `--scope` with `item names no scope; pass --scope`, exit `2`.
+- [ ] [CLAIM-67] An explicit `--scope` matching the item's own `scope` as a set, reordered, still claims: CLAIM-54 refuses only a genuine mismatch, never a reordering.
 
 ## Never
 
@@ -149,7 +150,10 @@ runner's own values; `<agent>` and `<role>` are the claimant's.
 `Setup: bare-remote` is a fresh work repository whose `origin` is a local bare
 repository with `main` at one commit, a git identity, `origin/HEAD`, and
 `ACO_AGENT` set to `Ada`; `<remote>`, `<tmp>` and `<home>` are the runner's own
-paths, `<sha>`, `<oid>` and `<claim-id>` the values the session itself produced.
+paths, `<sha>`, `<oid>` and `<claim-id>` the values the session itself
+produced, and `<worktree>` the runner's own linked-worktree directory -- an
+`--add`/`--drop` example names a path under it, since `rescope` accepts only
+an absolute path (RESC-01).
 
 ### E-CLAIM-01 — the golden claim, seen in the state ref
 
@@ -217,12 +221,27 @@ exit 0
 Setup: bare-remote, bootstrapped, a live claim on issue `#42` scoped to `README.md`
 
 ```console
-$ aco rescope 42 --add AGENTS.md
+$ aco rescope 42 --add <worktree>/AGENTS.md
 RESCOPED issue #42: <claim-id>
 exit 0
 $ aco status
 CLAIMED issue #42: Ada (builder) base=<sha> branch=ada/issue-42 claim=<claim-id> 0h 0m
   README.md
   AGENTS.md
+exit 0
+```
+
+### E-CLAIM-06 — an omitted `--scope` takes the item's own scope, then replays from the record
+
+Setup: bare-remote, bootstrapped, a linked worktree on `ada/issue-42`, item `#42`'s body carries `scope = ["AGENTS.md", "README.md"]`
+
+```console
+$ aco claim 42
+CLAIMED issue #42: <claim-id>
+2 of 6 versioned files (33%); overlaps no other open claims
+exit 0
+$ aco claim 42 --claim-id <claim-id>
+CLAIMED issue #42: <claim-id>
+2 of 6 versioned files (33%); overlaps no other open claims
 exit 0
 ```
