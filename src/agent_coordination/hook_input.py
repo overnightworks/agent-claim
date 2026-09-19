@@ -9,14 +9,31 @@ from __future__ import annotations
 
 from enum import Enum, auto
 
+_ENVIRONMENT_ID_PREFIX = "*** Environment ID: "
 _BEGIN_PATCH_MARKER = "*** Begin Patch"
 _END_PATCH_MARKER = "*** End Patch"
+_END_OF_FILE_MARKER = "*** End of File"
 _ADD_FILE_PREFIX = "*** Add File: "
 _DELETE_FILE_PREFIX = "*** Delete File: "
 _UPDATE_FILE_PREFIX = "*** Update File: "
 _MOVE_TO_PREFIX = "*** Move to: "
 _FILE_LINE_PREFIXES = (_ADD_FILE_PREFIX, _DELETE_FILE_PREFIX, _UPDATE_FILE_PREFIX)
 _ADD_LINE_PREFIX = "+"
+_REMOVE_LINE_PREFIX = "-"
+_CONTEXT_LINE_PREFIX = " "
+_HUNK_MARKER_PREFIX = "@@"
+# The only line shapes Codex's hunk body admits once inside an Update File
+# hunk (issue #237 finding 28a): a hunk-position marker, a context,
+# addition, or removal line, or the literal end-of-file marker. Anything
+# else is unrecognized -- `_update_hunk_line` used to accept it as inert
+# content, which risks under-reporting a path a line we do not understand
+# still causes Codex to touch.
+_UPDATE_HUNK_CONTENT_PREFIXES = (
+    _HUNK_MARKER_PREFIX,
+    _CONTEXT_LINE_PREFIX,
+    _ADD_LINE_PREFIX,
+    _REMOVE_LINE_PREFIX,
+)
 
 
 class _PatchState(Enum):
@@ -46,6 +63,24 @@ def _state_after_file_header(prefix: str) -> tuple[_PatchState, bool]:
     return _PatchState.UPDATE_FILE, True
 
 
+def _file_header_outcome(
+    header_line: str, prefix: str, paths: list[str]
+) -> tuple[_PatchState, bool]:
+    """A recognised `Add`/`Delete`/`Update File:` header's path and the
+    state it leaves the parser in.
+
+    A header naming no path at all (issue #237 finding 28c's "empty path")
+    can never reach here: every prefix ends in the one space that would
+    separate it from an empty path, and that trailing space is exactly what
+    `.strip()`/`.rstrip()` removes from `header_line` before matching, so
+    `_matched_file_prefix` never matches an empty-path header in the first
+    place -- it falls through to the callers' own "unrecognized line"
+    refusal instead.
+    """
+    paths.append(header_line[len(prefix) :])
+    return _state_after_file_header(prefix)
+
+
 def _outside_update_hunk_line(
     line: str, state: _PatchState, paths: list[str]
 ) -> tuple[_PatchState, bool] | None:
@@ -58,8 +93,7 @@ def _outside_update_hunk_line(
         return _PatchState.ENDED, False
     prefix = _matched_file_prefix(header_line)
     if prefix is not None:
-        paths.append(header_line[len(prefix) :])
-        return _state_after_file_header(prefix)
+        return _file_header_outcome(header_line, prefix, paths)
     if state is _PatchState.ADD_FILE and line.startswith(_ADD_LINE_PREFIX):
         return state, False
     return None
@@ -67,21 +101,33 @@ def _outside_update_hunk_line(
 
 def _update_hunk_line(
     line: str, move_to_available: bool, paths: list[str]
-) -> tuple[_PatchState, bool]:
+) -> tuple[_PatchState, bool] | None:
     """Handles one line inside an Update hunk, where only an unindented
     header ends it (Codex right-trims only, so a leading space keeps a
-    header-shaped line as diff context rather than a new file)."""
+    header-shaped line as diff context rather than a new file).
+
+    Returns `None` for a line the hunk grammar does not admit at all (issue
+    #237 finding 28a): neither a header, a `Move to`, nor one of the hunk's
+    own content shapes (`_UPDATE_HUNK_CONTENT_PREFIXES`, or the literal
+    `*** End of File` marker) -- swallowing it as inert content would risk
+    missing a path Codex's own parser recognises differently.
+    """
     header_line = line.rstrip()
     if header_line == _END_PATCH_MARKER:
         return _PatchState.ENDED, False
     prefix = _matched_file_prefix(header_line)
     if prefix is not None:
-        paths.append(header_line[len(prefix) :])
-        return _state_after_file_header(prefix)
+        return _file_header_outcome(header_line, prefix, paths)
     if move_to_available and header_line.startswith(_MOVE_TO_PREFIX):
+        # Same reasoning as `_file_header_outcome`: `_MOVE_TO_PREFIX` ends in
+        # the space an empty path would need, and `.rstrip()` already
+        # removed it above, so this never matches an empty-path `Move to`
+        # either -- it falls through to the final "unrecognized" refusal.
         paths.append(header_line[len(_MOVE_TO_PREFIX) :])
         return _PatchState.UPDATE_FILE, False
-    return _PatchState.UPDATE_FILE, False
+    if header_line == _END_OF_FILE_MARKER or header_line.startswith(_UPDATE_HUNK_CONTENT_PREFIXES):
+        return _PatchState.UPDATE_FILE, False
+    return None
 
 
 def hook_patch_paths(text: str) -> tuple[str, ...]:
@@ -96,7 +142,10 @@ def hook_patch_paths(text: str) -> tuple[str, ...]:
     that merely looks like a header stays diff context. An
     `*** Update File: <path>` line immediately followed by
     `*** Move to: <path>` -- the patch grammar's rename form -- contributes
-    both paths.
+    both paths. A leading `*** Environment ID: ...` line (issue #237 finding
+    28b) is accepted before `Begin Patch`, the same start line Codex's own
+    streaming parser admits there -- without it, every patch Codex prefixes
+    with its own environment id was denied outright for lacking a path.
 
     Returns an empty tuple when `text` does not fully match that grammar --
     missing `Begin`/`End Patch`, content the grammar does not admit in its
@@ -105,22 +154,23 @@ def hook_patch_paths(text: str) -> tuple[str, ...]:
     out of a patch it cannot confidently parse.
     """
     lines = text.split("\n")
-    if not lines or lines[0].strip() != _BEGIN_PATCH_MARKER:
+    start_index = 1 if lines and lines[0].startswith(_ENVIRONMENT_ID_PREFIX) else 0
+    if len(lines) <= start_index or lines[start_index].strip() != _BEGIN_PATCH_MARKER:
         return ()
 
     paths: list[str] = []
     state: _PatchState = _PatchState.STARTED
     move_to_available = False
 
-    for line in lines[1:]:
+    for line in lines[start_index + 1 :]:
         if state is _PatchState.ENDED:
             if line.strip():
                 return ()
             continue
         if state is _PatchState.UPDATE_FILE:
-            state, move_to_available = _update_hunk_line(line, move_to_available, paths)
-            continue
-        outcome = _outside_update_hunk_line(line, state, paths)
+            outcome = _update_hunk_line(line, move_to_available, paths)
+        else:
+            outcome = _outside_update_hunk_line(line, state, paths)
         if outcome is None:
             return ()
         state, move_to_available = outcome

@@ -261,10 +261,35 @@ class _AcceptThenRaiseTransport:
 
 
 class _AlwaysRejectingTransport:
-    """A `PushTransport` that never lands a push -- exhausts the retry loop."""
+    """A `PushTransport` that never lands a push -- exhausts the retry loop
+    without the ref ever moving (issue #237 finding 22's stuck-lock case)."""
 
     def push(self, *, worktree: Path, remote: str, ref: str, new_oid: protocol.ObjectId) -> None:
         raise protocol.PushRejectedError("simulated permanent rejection")
+
+
+class _AlwaysRacingTransport:
+    """A `PushTransport` where a concurrent writer always lands first: each
+    call pushes one real, distinct commit onto the ref before raising, so
+    every retry attempt observes it having genuinely moved (issue #237
+    finding 22's race case, as opposed to `_AlwaysRejectingTransport`'s
+    stuck ref)."""
+
+    def __init__(self) -> None:
+        self._real = store.GitPushTransport()
+        self._rivals = 0
+
+    def push(self, *, worktree: Path, remote: str, ref: str, new_oid: protocol.ObjectId) -> None:
+        self._rivals += 1
+        current = store._ls_remote_state(worktree, remote)
+        rival_commit = store._commit_tree(
+            worktree,
+            tree_oid=store._write_bootstrap_tree(worktree),
+            parent=current,
+            message=f"rival write\n\noperation_id: rival-{self._rivals}\n",
+        )
+        self._real.push(worktree=worktree, remote=remote, ref=ref, new_oid=rival_commit)
+        raise protocol.PushRejectedError("simulated concurrent writer")
 
 
 def test_bootstrap_creates_the_empty_state_tree_on_a_proven_empty_remote(
@@ -312,9 +337,13 @@ def test_state_ref_is_never_checked_out(bare_remote: Path, worktree: Path) -> No
     assert local_refs.stdout == ""
 
 
-def test_fetch_state_reads_via_fetch_head_without_creating_a_local_ref(
+def test_fetch_state_reads_via_fetch_head_without_creating_the_shared_state_ref(
     bare_remote: Path, worktree: Path, tmp_path: Path
 ) -> None:
+    """`fetch_state` never creates `STATE_REF` itself in the local, shared
+    ref namespace (`_fetch_to_fetch_head`'s own contract) -- it anchors the
+    fetched tip under `refs/worktree/...` instead (issue #237 finding 25),
+    git's own per-worktree namespace, never the one `STATE_REF` reserves."""
     created = store.bootstrap(worktree=worktree, remote=str(bare_remote))
     reader = tmp_path / "reader"
     reader.mkdir()
@@ -326,6 +355,8 @@ def test_fetch_state_reads_via_fetch_head_without_creating_a_local_ref(
     assert _git("for-each-ref", store.STATE_REF, cwd=reader).stdout == ""
     fetch_head = (reader / ".git" / "FETCH_HEAD").read_text()
     assert fetch_head.startswith(created)
+    anchor = _git("rev-parse", store._FETCH_ANCHOR_REF, cwd=reader).stdout.strip()
+    assert anchor == created
 
 
 @pytest.mark.parametrize(
@@ -697,9 +728,14 @@ def test_push_retry_finds_the_operation_id_after_an_accept_then_raise_and_does_n
     assert result.tip == _state_ref_oid(bare_remote)
 
 
-def test_push_retry_exhausts_and_fails_loud_when_the_ref_never_stops_moving(
+def test_push_retry_exhausts_and_names_a_stuck_lock_when_the_ref_never_moves(
     bare_remote: Path, worktree: Path
 ) -> None:
+    """Issue #237 finding 22: every attempt was rejected without the ref
+    ever advancing (`_AlwaysRejectingTransport` never touches the remote),
+    so exhaustion names a stuck lock or missing rights on `remote`, never
+    "moved N times" -- that phrase would blame a race that never happened.
+    """
     # Bootstrapping first gives `observed.tip` a real value, so every retry's
     # `_commit_tree` builds onto a non-None parent -- the ordinary case once
     # the ref already exists, not just the from-empty case slice C1 mostly
@@ -713,7 +749,7 @@ def test_push_retry_exhausts_and_fails_loud_when_the_ref_never_stops_moving(
     )
     transport = _AlwaysRejectingTransport()
 
-    with pytest.raises(protocol.ClaimUnavailableError, match="moved 8 times"):
+    with pytest.raises(protocol.ClaimUnavailableError, match="rejected 8 pushes") as raised:
         store.push_tree(
             worktree=worktree,
             remote=str(bare_remote),
@@ -721,6 +757,35 @@ def test_push_retry_exhausts_and_fails_loud_when_the_ref_never_stops_moving(
             pending=pending,
             transport=transport,
         )
+    assert "without the ref ever moving" in str(raised.value)
+
+
+def test_push_retry_exhausts_and_names_a_race_when_the_ref_keeps_moving(
+    bare_remote: Path, worktree: Path
+) -> None:
+    """Issue #237 finding 22's other half: a concurrent writer's commit
+    genuinely lands first on every attempt (`_AlwaysRacingTransport`
+    actually advances the ref each time), so exhaustion names a real race,
+    never the stuck-lock repair sentence that would misdiagnose it.
+    """
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    observed = store.fetch_state(worktree=worktree, remote=str(bare_remote))
+    pending = store.PendingCommit(
+        tree_oid=store._write_bootstrap_tree(worktree),
+        message="bootstrap empty claim state\n\noperation_id: never-applied\n",
+        operation_id="never-applied",
+    )
+    transport = _AlwaysRacingTransport()
+
+    with pytest.raises(protocol.ClaimUnavailableError, match="moved 8 times") as raised:
+        store.push_tree(
+            worktree=worktree,
+            remote=str(bare_remote),
+            observed=observed,
+            pending=pending,
+            transport=transport,
+        )
+    assert "stuck" not in str(raised.value) and "lock" not in str(raised.value)
 
 
 def test_git_push_transport_raises_on_a_non_fast_forward_push(
@@ -776,6 +841,11 @@ def test_fetch_to_fetch_head_fails_loud_when_the_ref_is_missing(
 ) -> None:
     with pytest.raises(protocol.ClaimError, match="cannot fetch"):
         store._fetch_to_fetch_head(worktree, str(bare_remote))
+
+
+def test_anchor_fetched_tip_fails_loud_on_an_unresolvable_tip(worktree: Path) -> None:
+    with pytest.raises(protocol.ClaimError, match="cannot anchor fetched tip"):
+        store._anchor_fetched_tip(worktree, _PLACEHOLDER_TIP)
 
 
 def test_tree_oid_fails_loud_on_an_unresolvable_commit(worktree: Path) -> None:
@@ -1064,6 +1134,30 @@ def test_claim_ages_reads_the_committer_date_of_each_claim_from_one_log_walk(
     assert git_call_spy["log"] == 1
 
 
+def test_claim_ages_survives_a_gc_prune_of_the_just_fetched_history(
+    bare_remote: Path, worktree: Path
+) -> None:
+    """Issue #237 finding 25, reproduced: `_fetch_to_fetch_head` lands the
+    fetched commits only in `FETCH_HEAD`, which is not a ref and roots
+    nothing once the fetch subprocess exits -- a `git gc --prune=now` run
+    against this same checkout right after `fetch_state` returns collected
+    every commit `claim_ages`'s own `git log` walk needs next, in the
+    audit's reproduced incident (nothing else in this worktree references
+    the state ref's history). `fetch_state` now anchors the fetched tip in
+    its own per-worktree ref namespace, so the walk survives the same
+    prune.
+    """
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    claim = _committed_claim(bare_remote, worktree, issue=1)
+    state = store.fetch_state(worktree=worktree, remote=str(bare_remote))
+    assert state.tip is not None
+    _git("gc", "--prune=now", cwd=worktree)
+
+    ages = store.claim_ages(worktree=worktree, tip=state.tip, claims=(claim,))
+
+    assert ages[claim.claim_id].tzinfo is not None
+
+
 def test_claim_ages_returns_empty_without_a_git_call_for_no_live_claims(
     bare_remote: Path, worktree: Path, git_call_spy: Counter[str]
 ) -> None:
@@ -1312,14 +1406,18 @@ def test_commit_transition_same_key_second_racer_names_the_holder(
         )
 
 
-def test_commit_transition_a_different_key_loser_that_exhausts_retries_names_no_holder(
+def test_commit_transition_a_different_key_loser_that_exhausts_retries_names_a_stuck_lock(
     bare_remote: Path, worktree: Path
 ) -> None:
+    """Issue #237 finding 22: the ref never actually moves under
+    `_AlwaysRejectingTransport`, so exhaustion names a stuck lock, never
+    "held by X" (there is no other real claim here to be held by) and never
+    a race (it never moved)."""
     store.bootstrap(worktree=worktree, remote=str(bare_remote))
     transport = _AlwaysRejectingTransport()
 
     intent = _issue_claim_intent(42)
-    with pytest.raises(protocol.ClaimUnavailableError, match="moved 32 times; retry the command"):
+    with pytest.raises(protocol.ClaimUnavailableError, match="rejected 32 pushes") as raised:
         store.commit_transition(
             worktree=worktree,
             remote=str(bare_remote),
@@ -1327,6 +1425,29 @@ def test_commit_transition_a_different_key_loser_that_exhausts_retries_names_no_
             intent=intent,
             transport=transport,
         )
+    assert "without the ref ever moving" in str(raised.value)
+    assert "held by" not in str(raised.value)
+
+
+def test_commit_transition_a_different_key_loser_that_exhausts_retries_names_a_race(
+    bare_remote: Path, worktree: Path
+) -> None:
+    """Issue #237 finding 22's other half: a concurrent writer's commit
+    genuinely lands first every attempt, so exhaustion names the race, not
+    the stuck-lock repair sentence."""
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    transport = _AlwaysRacingTransport()
+
+    intent = _issue_claim_intent(42)
+    with pytest.raises(protocol.ClaimUnavailableError, match="moved 32 times") as raised:
+        store.commit_transition(
+            worktree=worktree,
+            remote=str(bare_remote),
+            subject="claim issue 42",
+            intent=intent,
+            transport=transport,
+        )
+    assert "stuck" not in str(raised.value) and "lock" not in str(raised.value)
 
 
 def test_commit_transition_lost_response_does_not_apply_twice(
@@ -1807,6 +1928,7 @@ def test_fetch_state_git_call_count_is_independent_of_claim_count(
     assert dict(git_call_spy) == {
         "ls-remote": 1,
         "fetch": 1,
+        "update-ref": 1,
         "rev-parse": 4,
         "ls-tree": 1,
         "archive": 1,
@@ -1841,6 +1963,7 @@ def test_fetch_state_populates_items_from_the_one_existing_ls_tree_call(
     assert dict(git_call_spy) == {
         "ls-remote": 1,
         "fetch": 1,
+        "update-ref": 1,
         "rev-parse": 4,
         "ls-tree": 1,
         "archive": 1,
@@ -1875,6 +1998,7 @@ def test_status_git_call_count_is_independent_of_claim_count(
     assert dict(git_call_spy) == {
         "ls-remote": 1,
         "fetch": 1,
+        "update-ref": 1,
         "rev-parse": 4,
         "ls-tree": 1,
         "archive": 1,
@@ -2552,6 +2676,16 @@ def test_claim_key_issue_and_lane_prefixes_never_collide() -> None:
         pytest.param("issue-abc", "malformed issue number", id="issue-not-a-number"),
         pytest.param("lane-%2", "malformed percent-escape", id="lane-incomplete-escape"),
         pytest.param("lane-%zz", "malformed percent-escape", id="lane-invalid-escape"),
+        # Issue #237 finding 23: `_percent_encode_branch` never emits a
+        # literal byte outside `_LANE_KEY_UNRESERVED` -- these two hand-
+        # corrupted blobs carry one anyway, a shape `claim_key` itself would
+        # never produce, so `parse_claim_key` must refuse them rather than
+        # silently decoding a key `serialize_claim_toml`'s writer never
+        # wrote.
+        pytest.param(
+            "lane-feature/branch", "unescaped reserved character", id="lane-unescaped-slash"
+        ),
+        pytest.param("lane-café", "unescaped reserved character", id="lane-unescaped-unicode"),
     ],
 )
 def test_parse_claim_key_rejects_a_malformed_key(key: str, match: str) -> None:
