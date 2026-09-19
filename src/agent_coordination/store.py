@@ -128,7 +128,7 @@ _LINEAGE_STAMP_FILENAME = "last-oid"
 # `_lineage_stamp_path` already relies on, so anchoring here never touches
 # the shared local namespace `_fetch_to_fetch_head`'s own docstring
 # reserves for `STATE_REF` alone.
-_FETCH_ANCHOR_REF = "refs/worktree/aco/state"
+FETCH_ANCHOR_REF = "refs/worktree/aco/state"
 
 
 class PushTransport(Protocol):
@@ -348,7 +348,7 @@ def _anchor_fetched_tip(worktree: Path, tip: ObjectId) -> None:
     after fetching it, so a `git gc --prune=now` run against this checkout
     cannot collect the objects `FETCH_HEAD` alone leaves unreachable (issue
     #237 finding 25)."""
-    result = _run_git(worktree, ["update-ref", _FETCH_ANCHOR_REF, str(tip)])
+    result = _run_git(worktree, ["update-ref", FETCH_ANCHOR_REF, str(tip)])
     if result.exit_status != 0:
         detail = result.stderr.decode().strip() or _UNKNOWN_GIT_FAILURE
         raise ClaimError(f"cannot anchor fetched tip {tip}: {detail}")
@@ -1163,3 +1163,128 @@ def bootstrap(
         transport=transport or GitPushTransport(),
     )
     return result.tip if isinstance(result, OperationAlreadyApplied) else result
+
+
+_WORKTREE_LIST_PATH_PREFIX = "worktree "
+
+
+def list_worktrees(worktree: Path) -> tuple[Path, ...]:
+    """Every worktree `git worktree list` reports for this repository (issue
+    #298): `reset`'s own plan and `clear_lineage_stamps` below both need the
+    full set -- a lineage stamp or fetch anchor left behind in even one
+    linked worktree survives the reset and trips the next `fetch_state` it
+    runs there."""
+    result = _run_git(worktree, ["worktree", "list", "--porcelain"])
+    if result.exit_status != 0:
+        raise ClaimError(result.stderr.decode().strip() or "cannot list worktrees")
+    return tuple(
+        Path(line.removeprefix(_WORKTREE_LIST_PATH_PREFIX))
+        for line in result.stdout.decode().splitlines()
+        if line.startswith(_WORKTREE_LIST_PATH_PREFIX)
+    )
+
+
+def local_state_ref_exists(worktree: Path) -> bool:
+    """Whether *this* worktree happens to hold a local `STATE_REF` (issue
+    #298): production never creates one (`_fetch_to_fetch_head` lands
+    fetched objects in `FETCH_HEAD` alone), but `export_state_bundle` below
+    points one at the exported tip to give the bundle a restorable name, and
+    a foreign tool might leave one too -- `delete_state_ref` deletes it only
+    when this is true."""
+    result = _run_git(worktree, ["show-ref", "--verify", "--quiet", STATE_REF])
+    return result.exit_status == 0
+
+
+def export_state_bundle(*, worktree: Path, tip: ObjectId, destination: Path) -> Path:
+    """Bundle `STATE_REF` at `tip` into `destination` (issue #298 reset,
+    step 1 of 5): the sole mandatory-unless-`--no-export` write a reset
+    performs before anything is deleted.
+
+    `tip`'s objects are already reachable in `worktree`, anchored at
+    `FETCH_ANCHOR_REF` by the caller's own preceding `fetch_state` -- this
+    bundles straight from that name rather than ever pointing `STATE_REF`
+    itself at anything locally, so a failure here (an unwritable
+    destination) leaves this worktree exactly as it was, not even a
+    same-tip local ref behind. Restoring reads the bundle's one ref by that
+    same name: `git fetch <bundle> FETCH_ANCHOR_REF:STATE_REF`. Refuses
+    outright rather than silently replacing a same-named export from an
+    earlier run.
+    """
+    if destination.exists():
+        raise ClaimError(f"{destination} already exists; refusing to overwrite an export")
+    anchored = _run_git(worktree, ["rev-parse", FETCH_ANCHOR_REF])
+    if anchored.exit_status != 0 or ObjectId(anchored.stdout.decode().strip()) != tip:
+        raise ClaimError(
+            f"{FETCH_ANCHOR_REF} is not anchored at {tip} in {worktree}; "
+            "fetch state before exporting"
+        )
+    result = _run_git(worktree, ["bundle", "create", str(destination), FETCH_ANCHOR_REF])
+    if result.exit_status != 0:
+        detail = (
+            result.stderr.decode().strip() or result.stdout.decode().strip() or _UNKNOWN_GIT_FAILURE
+        )
+        raise ClaimError(f"cannot export {STATE_REF} at {tip} to {destination}: {detail}")
+    return destination
+
+
+def delete_state_ref(*, worktree: Path, remote: str, expected_remote_tip: ObjectId | None) -> bool:
+    """Delete `STATE_REF` on `remote`, then locally if present (issue #298
+    reset, steps 2-3 of 5): never `--force` -- a matching
+    `--force-with-lease` refuses the moment `expected_remote_tip` is stale,
+    which is the whole point of reading it before deleting rather than
+    trusting whatever is there when the push actually runs.
+
+    `expected_remote_tip` is `None` only when `STATE_REF` is already proven
+    absent on `remote` (nothing to delete there); the local ref, if any, is
+    still cleaned up in that case. A remote failure -- rejected, or the
+    lease no longer matching -- raises before the local ref is ever touched,
+    so a failed remote step never leaves local and remote in the one
+    combination reset must not produce: local gone while remote survives.
+    """
+    if expected_remote_tip is not None:
+        lease = f"{STATE_REF}:{expected_remote_tip}"
+        result = _run_git(
+            worktree, ["push", remote, f"--force-with-lease={lease}", f":{STATE_REF}"]
+        )
+        if result.exit_status != 0:
+            detail = (
+                result.stderr.decode().strip()
+                or result.stdout.decode().strip()
+                or _UNKNOWN_GIT_FAILURE
+            )
+            raise ClaimError(
+                f"cannot delete {STATE_REF} on {remote} (lease {expected_remote_tip}): "
+                f"{detail}; nothing was deleted -- retry `aco reset --confirm` once the "
+                f"cause is fixed, or delete it by hand with `git push {remote} "
+                f"--force-with-lease={lease} :{STATE_REF}`"
+            )
+    if not local_state_ref_exists(worktree):
+        return False
+    result = _run_git(worktree, ["update-ref", "-d", STATE_REF])
+    if result.exit_status != 0:
+        detail = result.stderr.decode().strip() or _UNKNOWN_GIT_FAILURE
+        raise ClaimError(f"cannot delete local {STATE_REF}: {detail}")
+    return True
+
+
+def clear_lineage_stamps(*, worktree: Path) -> tuple[Path, ...]:
+    """Delete the lineage stamp and the per-worktree fetch anchor
+    (`FETCH_ANCHOR_REF`) in every worktree of this repository (issue #298
+    reset, step 4 of 5), before `bootstrap` re-creates `STATE_REF` from
+    nothing.
+
+    Both must go in every worktree, not just this one: `fetch_state`'s own
+    lineage guard (`_check_lineage` above) refuses a fresh bootstrap tip as
+    unrelated to whatever a worktree last observed, and a stale anchor keeps
+    the old, now-orphaned objects reachable there for a later `git gc` to
+    spare and a later fetch to see as a second, disconnected line of
+    history.
+    """
+    worktrees = list_worktrees(worktree)
+    for path in worktrees:
+        _lineage_stamp_path(path).unlink(missing_ok=True)
+        result = _run_git(path, ["update-ref", "-d", FETCH_ANCHOR_REF])
+        if result.exit_status != 0:
+            detail = result.stderr.decode().strip() or _UNKNOWN_GIT_FAILURE
+            raise ClaimError(f"cannot clear {FETCH_ANCHOR_REF} in {path}: {detail}")
+    return worktrees

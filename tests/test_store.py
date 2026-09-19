@@ -121,6 +121,15 @@ def worktree(tmp_path: Path) -> Path:
     return checkout
 
 
+def _has_ref(worktree: Path, ref: str) -> bool:
+    result = subprocess.run(
+        ["git", "-C", str(worktree), "show-ref", "--verify", "--quiet", ref],
+        check=False,
+        capture_output=True,
+    )
+    return result.returncode == 0
+
+
 def _state_ref_oid(remote: Path) -> str | None:
     result = subprocess.run(
         ["git", "ls-remote", "--exit-code", str(remote), store.STATE_REF],
@@ -393,7 +402,7 @@ def test_fetch_state_reads_via_fetch_head_without_creating_the_shared_state_ref(
     assert _git("for-each-ref", store.STATE_REF, cwd=reader).stdout == ""
     fetch_head = (reader / ".git" / "FETCH_HEAD").read_text()
     assert fetch_head.startswith(created)
-    anchor = _git("rev-parse", store._FETCH_ANCHOR_REF, cwd=reader).stdout.strip()
+    anchor = _git("rev-parse", store.FETCH_ANCHOR_REF, cwd=reader).stdout.strip()
     assert anchor == created
 
 
@@ -3126,3 +3135,246 @@ def test_commit_transition_refuses_a_missing_state_ref(worktree: Path, tmp_path:
             subject="claim issue 42",
             intent=intent,
         )
+
+
+# `reset` (issue #298): `export_state_bundle`, `delete_state_ref`, and
+# `clear_lineage_stamps`, plus the two small reads (`list_worktrees`,
+# `local_state_ref_exists`) `cli.py`'s reset command plans and reports from.
+
+
+def test_export_state_bundle_writes_a_bundle_git_bundle_verify_accepts(
+    bare_remote: Path, worktree: Path, tmp_path: Path
+) -> None:
+    tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    store.fetch_state(worktree=worktree, remote=str(bare_remote))
+    destination = tmp_path / "export" / "state.bundle"
+    destination.parent.mkdir()
+
+    returned = store.export_state_bundle(worktree=worktree, tip=tip, destination=destination)
+
+    assert returned == destination
+    _git("bundle", "verify", str(destination), cwd=worktree)
+    heads = _git("bundle", "list-heads", str(destination), cwd=worktree).stdout
+    assert heads.strip() == f"{tip} {store.FETCH_ANCHOR_REF}"
+    assert not store.local_state_ref_exists(worktree)
+
+
+def test_export_state_bundle_refuses_to_overwrite_an_existing_destination(
+    bare_remote: Path, worktree: Path, tmp_path: Path
+) -> None:
+    tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    destination = tmp_path / "state.bundle"
+    destination.write_bytes(b"an earlier export")
+
+    with pytest.raises(protocol.ClaimError, match="already exists"):
+        store.export_state_bundle(
+            worktree=worktree, tip=protocol.ObjectId(tip), destination=destination
+        )
+
+    assert destination.read_bytes() == b"an earlier export"
+
+
+def test_export_state_bundle_fails_loud_on_an_unwritable_destination_directory(
+    bare_remote: Path, worktree: Path, tmp_path: Path
+) -> None:
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    tip = store.fetch_state(worktree=worktree, remote=str(bare_remote)).tip
+    assert tip is not None
+    readonly_dir = tmp_path / "readonly"
+    readonly_dir.mkdir()
+    destination = readonly_dir / "state.bundle"
+    readonly_dir.chmod(0o500)
+    try:
+        with pytest.raises(protocol.ClaimError, match="cannot export"):
+            store.export_state_bundle(worktree=worktree, tip=tip, destination=destination)
+    finally:
+        readonly_dir.chmod(0o700)
+    assert not destination.exists()
+
+
+def test_export_state_bundle_refuses_a_tip_the_worktree_never_anchored(
+    bare_remote: Path, worktree: Path, tmp_path: Path
+) -> None:
+    """A caller that skips its own `fetch_state` first, or passes a tip that
+    is not the one it anchored, must not silently bundle the wrong state."""
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    destination = tmp_path / "state.bundle"
+
+    with pytest.raises(protocol.ClaimError, match="is not anchored"):
+        store.export_state_bundle(worktree=worktree, tip=_PLACEHOLDER_TIP, destination=destination)
+
+    assert not destination.exists()
+
+
+def test_delete_state_ref_deletes_remote_and_local_when_local_ref_is_present(
+    bare_remote: Path, worktree: Path
+) -> None:
+    tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    _git("update-ref", store.STATE_REF, tip, cwd=worktree)
+
+    deleted_local = store.delete_state_ref(
+        worktree=worktree, remote=str(bare_remote), expected_remote_tip=protocol.ObjectId(tip)
+    )
+
+    assert deleted_local is True
+    assert _state_ref_oid(bare_remote) is None
+    assert not store.local_state_ref_exists(worktree)
+
+
+def test_delete_state_ref_fails_loud_when_the_local_ref_cannot_be_deleted(
+    bare_remote: Path, worktree: Path
+) -> None:
+    tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    _git("update-ref", store.STATE_REF, tip, cwd=worktree)
+    lock_path = store._git_dir(worktree) / "refs" / "aco" / "state.lock"
+    lock_path.touch()
+    try:
+        with pytest.raises(protocol.ClaimError, match="cannot delete local"):
+            store.delete_state_ref(
+                worktree=worktree, remote=str(bare_remote), expected_remote_tip=None
+            )
+    finally:
+        lock_path.unlink()
+    assert store.local_state_ref_exists(worktree)
+
+
+def test_delete_state_ref_returns_false_without_a_local_ref_to_delete(
+    bare_remote: Path, worktree: Path
+) -> None:
+    tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
+
+    deleted_local = store.delete_state_ref(
+        worktree=worktree, remote=str(bare_remote), expected_remote_tip=protocol.ObjectId(tip)
+    )
+
+    assert deleted_local is False
+    assert _state_ref_oid(bare_remote) is None
+
+
+def test_delete_state_ref_accepts_a_missing_remote_ref_and_still_clears_a_local_one(
+    bare_remote: Path, worktree: Path
+) -> None:
+    tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    _git("update-ref", store.STATE_REF, tip, cwd=worktree)
+
+    deleted_local = store.delete_state_ref(
+        worktree=worktree, remote=str(bare_remote), expected_remote_tip=None
+    )
+
+    assert deleted_local is True
+    assert not store.local_state_ref_exists(worktree)
+
+
+def test_delete_state_ref_refuses_a_stale_lease_and_leaves_everything_intact(
+    bare_remote: Path, worktree: Path
+) -> None:
+    stale_tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    _git("update-ref", store.STATE_REF, stale_tip, cwd=worktree)
+    # The remote moves on after `stale_tip` was read but before the lease-guarded
+    # delete runs -- the exact race `--force-with-lease` exists to catch.
+    _push_custom_tree(
+        bare_remote, worktree, parent=stale_tip, files={"schema.toml": b"version = 2\n"}
+    )
+    moved_tip = _state_ref_oid(bare_remote)
+
+    with pytest.raises(protocol.ClaimError, match=r"cannot delete .*lease"):
+        store.delete_state_ref(
+            worktree=worktree,
+            remote=str(bare_remote),
+            expected_remote_tip=protocol.ObjectId(stale_tip),
+        )
+
+    assert _state_ref_oid(bare_remote) == moved_tip
+    assert store.local_state_ref_exists(worktree)
+
+
+def test_list_worktrees_lists_every_linked_worktree_of_the_repository(tmp_path: Path) -> None:
+    main_repo = tmp_path / "main"
+    main_repo.mkdir()
+    _git("init", "-b", "main", cwd=main_repo)
+    (main_repo / "README").write_text("placeholder\n")
+    _git("add", "README", cwd=main_repo)
+    _git("commit", "-m", "initial", cwd=main_repo)
+    linked = tmp_path / "linked"
+    _git("worktree", "add", "-b", "lane", str(linked), cwd=main_repo)
+
+    worktrees = store.list_worktrees(main_repo)
+
+    assert set(worktrees) == {main_repo, linked}
+
+
+def test_list_worktrees_fails_loud_outside_a_repository(tmp_path: Path) -> None:
+    not_a_repo = tmp_path / "not-a-repo"
+    not_a_repo.mkdir()
+
+    with pytest.raises(protocol.ClaimError):
+        store.list_worktrees(not_a_repo)
+
+
+def test_clear_lineage_stamps_clears_every_worktrees_stamp_and_anchor(
+    tmp_path: Path, bare_remote: Path
+) -> None:
+    main_repo = tmp_path / "main"
+    main_repo.mkdir()
+    _git("init", "-b", "main", cwd=main_repo)
+    (main_repo / "README").write_text("placeholder\n")
+    _git("add", "README", cwd=main_repo)
+    _git("commit", "-m", "initial", cwd=main_repo)
+    linked = tmp_path / "linked"
+    _git("worktree", "add", "-b", "lane", str(linked), cwd=main_repo)
+    store.bootstrap(worktree=main_repo, remote=str(bare_remote))
+    # `bootstrap`'s own push never anchors (only a `fetch_state` read does);
+    # an explicit read in each worktree is what a real `aco reset` run
+    # observes both of them with beforehand.
+    store.fetch_state(worktree=main_repo, remote=str(bare_remote))
+    store.fetch_state(worktree=linked, remote=str(bare_remote))
+    for worktree_path in (main_repo, linked):
+        assert store._read_lineage_stamp(worktree_path) is not None
+        assert _has_ref(worktree_path, store.FETCH_ANCHOR_REF)
+
+    cleared = store.clear_lineage_stamps(worktree=main_repo)
+
+    assert set(cleared) == {main_repo, linked}
+    for worktree_path in (main_repo, linked):
+        assert store._read_lineage_stamp(worktree_path) is None
+        assert not _has_ref(worktree_path, store.FETCH_ANCHOR_REF)
+
+
+def test_clear_lineage_stamps_fails_loud_when_an_anchor_cannot_be_cleared(
+    bare_remote: Path, worktree: Path
+) -> None:
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    store.fetch_state(worktree=worktree, remote=str(bare_remote))
+    lock_path = store._git_dir(worktree) / "refs" / "worktree" / "aco" / "state.lock"
+    lock_path.touch()
+    try:
+        with pytest.raises(protocol.ClaimError, match="cannot clear"):
+            store.clear_lineage_stamps(worktree=worktree)
+    finally:
+        lock_path.unlink()
+    assert _has_ref(worktree, store.FETCH_ANCHOR_REF)
+
+
+def test_clear_lineage_stamps_lets_a_bootstrap_after_a_ref_rewrite_succeed_in_every_worktree(
+    tmp_path: Path, bare_remote: Path
+) -> None:
+    """The one behaviour reset exists to unblock: without clearing every
+    worktree's stamp and anchor first, `fetch_state`'s own lineage guard
+    refuses a `bootstrap` that recreates `STATE_REF` from nothing (`store.py`
+    `_check_lineage`), in every worktree that had ever observed the old ref."""
+    main_repo = tmp_path / "main"
+    main_repo.mkdir()
+    _git("init", "-b", "main", cwd=main_repo)
+    (main_repo / "README").write_text("placeholder\n")
+    _git("add", "README", cwd=main_repo)
+    _git("commit", "-m", "initial", cwd=main_repo)
+    linked = tmp_path / "linked"
+    _git("worktree", "add", "-b", "lane", str(linked), cwd=main_repo)
+    store.bootstrap(worktree=main_repo, remote=str(bare_remote))
+    store.fetch_state(worktree=linked, remote=str(bare_remote))
+    _git("update-ref", "-d", store.STATE_REF, cwd=bare_remote)
+
+    store.clear_lineage_stamps(worktree=main_repo)
+    fresh_tip = store.bootstrap(worktree=main_repo, remote=str(bare_remote))
+
+    assert store.fetch_state(worktree=linked, remote=str(bare_remote)).tip == fresh_tip

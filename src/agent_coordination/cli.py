@@ -281,6 +281,25 @@ def _add_bootstrap_parser(commands: argparse._SubParsersAction) -> None:
     commands.add_parser("bootstrap", help="create refs/aco/state if it does not exist yet")
 
 
+def _add_reset_parser(commands: argparse._SubParsersAction) -> None:
+    reset = commands.add_parser(
+        "reset",
+        help="export refs/aco/state, delete it remotely and locally, and bootstrap fresh",
+    )
+    reset.add_argument(
+        "--confirm", action="store_true", help="perform the reset; omit for a dry run"
+    )
+    reset.add_argument(
+        "--no-export", action="store_true", help="skip the otherwise-mandatory bundle export"
+    )
+    reset.add_argument(
+        "--export-dir",
+        type=Path,
+        metavar="DIR",
+        help="directory for the export bundle (default: the repository's parent directory)",
+    )
+
+
 def _add_status_parser(commands: argparse._SubParsersAction) -> None:
     status = commands.add_parser("status", help="show repository-wide build claims")
     status.add_argument(
@@ -694,6 +713,7 @@ def _add_run_at_login_parser(commands: argparse._SubParsersAction) -> None:
 
 _SUBPARSER_BUILDERS: tuple[Callable[[argparse._SubParsersAction], None], ...] = (
     _add_bootstrap_parser,
+    _add_reset_parser,
     _add_status_parser,
     _add_board_parser,
     _add_rulings_parser,
@@ -4167,11 +4187,219 @@ def _bootstrap_state() -> int:
     return 0
 
 
+# A short, still-practically-unique prefix of an `ObjectId`'s 40 hex
+# characters (git's own `--short` abbreviation depends on the repository's
+# object count, which the bundle filename has no reason to vary with).
+_RESET_BUNDLE_SHA_LENGTH = 12
+
+
+class ResetStep(StrEnum):
+    """The five lines `reset` prints, in the one order the dry run and the
+    real run share (plan review, 19.09.2026): export, delete the remote
+    ref, delete the local one if present, clear every worktree's lineage
+    stamp and fetch anchor, bootstrap fresh."""
+
+    EXPORT = "export"
+    DELETE_REMOTE = "delete_remote"
+    DELETE_LOCAL = "delete_local"
+    CLEAR_STAMPS = "clear_stamps"
+    BOOTSTRAP = "bootstrap"
+
+
+RESET_STEP_ORDER: tuple[ResetStep, ...] = (
+    ResetStep.EXPORT,
+    ResetStep.DELETE_REMOTE,
+    ResetStep.DELETE_LOCAL,
+    ResetStep.CLEAR_STAMPS,
+    ResetStep.BOOTSTRAP,
+)
+
+
+@dataclass(frozen=True)
+class ResetExportTarget:
+    tip: protocol.ObjectId
+    destination: Path
+
+
+@dataclass(frozen=True)
+class ResetPlan:
+    """Every fact `reset`'s five lines are built from, read once before
+    anything is exported or deleted (plan review, 19.09.2026). The dry run
+    prints this verbatim with a `would: ` prefix; the real run prints the
+    same per-step text as each action completes -- the two share the exact
+    same line-building functions below, so they cannot say different things
+    about the same reset."""
+
+    remote: str
+    remote_tip: protocol.ObjectId | None
+    export_target: ResetExportTarget | None
+    local_ref_present: bool
+    worktree_count: int
+
+
+def _reset_bundle_name(repository: str, today: date, tip: protocol.ObjectId) -> str:
+    return f"aco-state-{repository}-{today.isoformat()}-{tip[:_RESET_BUNDLE_SHA_LENGTH]}.bundle"
+
+
+def _reset_restore_command(destination: Path) -> str:
+    return f"git fetch {destination} {store.FETCH_ANCHOR_REF}:{store.STATE_REF}"
+
+
+@dataclass(frozen=True)
+class ResetExportConfig:
+    """`--no-export`/`--export-dir`, resolved once (issue #298): keeps
+    `_build_reset_plan` under the five-argument ceiling without folding an
+    unrelated pair of facts into `worktree` or `remote`."""
+
+    enabled: bool
+    directory: Path
+
+
+def _resolved_reset_export_config(parsed: argparse.Namespace, toplevel: Path) -> ResetExportConfig:
+    directory = parsed.export_dir if parsed.export_dir is not None else toplevel.parent
+    return ResetExportConfig(enabled=not parsed.no_export, directory=directory)
+
+
+def _build_reset_plan(
+    *,
+    worktree: Path,
+    remote: str,
+    state: protocol.ClaimState,
+    export: ResetExportConfig,
+    today: date,
+) -> ResetPlan:
+    export_target = None
+    if export.enabled and state.tip is not None:
+        destination = export.directory / _reset_bundle_name(worktree.name, today, state.tip)
+        export_target = ResetExportTarget(tip=state.tip, destination=destination)
+    return ResetPlan(
+        remote=remote,
+        remote_tip=state.tip,
+        export_target=export_target,
+        local_ref_present=store.local_state_ref_exists(worktree),
+        worktree_count=len(store.list_worktrees(worktree)),
+    )
+
+
+def _reset_export_line(plan: ResetPlan, *, done: bool) -> str:
+    if plan.export_target is None:
+        if plan.remote_tip is None:
+            return f"nothing to export: {store.STATE_REF} does not exist on {plan.remote}"
+        return f"skipped export (--no-export): {store.STATE_REF} at {plan.remote_tip} not saved"
+    verb = "exported" if done else "export"
+    restore = _reset_restore_command(plan.export_target.destination)
+    return (
+        f"{verb} {store.STATE_REF} at {plan.export_target.tip} to "
+        f"{plan.export_target.destination} (restore with: {restore})"
+    )
+
+
+def _reset_delete_remote_line(plan: ResetPlan, *, done: bool) -> str:
+    if plan.remote_tip is None:
+        return f"nothing to delete on {plan.remote}: {store.STATE_REF} does not exist"
+    verb = "deleted" if done else "delete"
+    return f"{verb} {store.STATE_REF} on {plan.remote} (lease {plan.remote_tip})"
+
+
+def _reset_delete_local_line(*, present: bool, done: bool) -> str:
+    if not present:
+        return f"no local {store.STATE_REF} to delete"
+    verb = "deleted" if done else "delete"
+    return f"{verb} local {store.STATE_REF}"
+
+
+def _reset_clear_stamps_line(*, worktree_count: int, done: bool) -> str:
+    verb = "cleared" if done else "clear"
+    plural = "" if worktree_count == 1 else "s"
+    return f"{verb} lineage stamps and fetch anchors in {worktree_count} worktree{plural}"
+
+
+def _reset_bootstrap_line(*, tip: protocol.ObjectId | None) -> str:
+    if tip is None:
+        return "bootstrap a fresh empty state"
+    return f"bootstrapped a fresh empty state at {tip}"
+
+
+def _print_reset_dry_run(plan: ResetPlan) -> None:
+    lines: dict[ResetStep, str] = {
+        ResetStep.EXPORT: _reset_export_line(plan, done=False),
+        ResetStep.DELETE_REMOTE: _reset_delete_remote_line(plan, done=False),
+        ResetStep.DELETE_LOCAL: _reset_delete_local_line(
+            present=plan.local_ref_present, done=False
+        ),
+        ResetStep.CLEAR_STAMPS: _reset_clear_stamps_line(
+            worktree_count=plan.worktree_count, done=False
+        ),
+        ResetStep.BOOTSTRAP: _reset_bootstrap_line(tip=None),
+    }
+    for step in RESET_STEP_ORDER:
+        print(f"would: {lines[step]}")
+
+
+def _execute_reset(*, worktree: Path, remote: str, plan: ResetPlan) -> None:
+    """Export -> delete remote -> delete local -> clear stamps -> bootstrap
+    (issue #298), each step printed the moment it completes. An export
+    failure raises before anything else runs; a remote-deletion failure
+    (rejected, or the lease gone stale) raises with the local ref left
+    exactly as it was, and whatever export ran left on disk."""
+    if plan.export_target is not None:
+        store.export_state_bundle(
+            worktree=worktree,
+            tip=plan.export_target.tip,
+            destination=plan.export_target.destination,
+        )
+    print(_reset_export_line(plan, done=True))
+    local_deleted = store.delete_state_ref(
+        worktree=worktree, remote=remote, expected_remote_tip=plan.remote_tip
+    )
+    print(_reset_delete_remote_line(plan, done=True))
+    print(_reset_delete_local_line(present=local_deleted, done=True))
+    cleared_worktrees = store.clear_lineage_stamps(worktree=worktree)
+    print(_reset_clear_stamps_line(worktree_count=len(cleared_worktrees), done=True))
+    fresh_tip = store.bootstrap(worktree=worktree, remote=remote)
+    print(_reset_bootstrap_line(tip=fresh_tip))
+
+
+def _reset_state(parsed: argparse.Namespace) -> int:
+    """`reset` (issue #298): exports `STATE_REF`, deletes it on the remote
+    with a lease and locally if present, clears every worktree's lineage
+    stamp and fetch anchor, and bootstraps a fresh empty state. Forge-free,
+    like `bootstrap`. A live claim always refuses -- `--confirm` or not --
+    printing its claim lines instead of touching anything: a reset over live
+    work is data loss with no owner.
+    """
+    worktree, remote, state = _store_observation()
+    if state.claims:
+        storage = board.load_config(_resolve_toplevel() / board.CONFIG_PATH).storage
+        ages = _claim_ages(worktree, state)
+        _status(tuple(state.claims.values()), None, ages, storage)
+        return 2
+    export = _resolved_reset_export_config(parsed, _resolve_toplevel())
+    plan = _build_reset_plan(
+        worktree=worktree,
+        remote=remote,
+        state=state,
+        export=export,
+        today=datetime.now(UTC).date(),
+    )
+    if not parsed.confirm:
+        _print_reset_dry_run(plan)
+        return 0
+    _execute_reset(worktree=worktree, remote=remote, plan=plan)
+    return 0
+
+
+_FORGE_FREE_COMMANDS: dict[str, Callable[[argparse.Namespace], int]] = {
+    "bootstrap": lambda _parsed: _bootstrap_state(),
+    "reset": _reset_state,
+}
+
+
 def _dispatch(parsed: argparse.Namespace) -> int:
     if parsed.command in {"claim", "release", "rescope"}:
         parsed.agent = checkout._resolved_agent(parsed.agent)
-    if parsed.command == "bootstrap":
-        return _bootstrap_state()
+    if parsed.command in _FORGE_FREE_COMMANDS:
+        return _FORGE_FREE_COMMANDS[parsed.command](parsed)
     if parsed.command == "item":
         if parsed.item_command == "new":
             return _cmd_item_new(parsed)
