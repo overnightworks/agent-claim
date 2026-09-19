@@ -1,8 +1,0 @@
-claim_id = "7d13d1aed2574aa7935ff41ca3f0a56e"
-agent = "Claude head (coordinator)"
-role = "builder"
-base = "c080a8f8f2a04338d84116097ea6e0d450a443bc"
-branch = "claude/issue-304-trunk-evidence"
-scope = ["src/agent_coordination/checkout.py", "src/agent_coordination/board.py", "src/agent_coordination/store.py", "src/agent_coordination/cli.py", "tests/test_checkout.py", "tests/test_board.py"]
-opened_commit = "b2712243e266c09552b6306416d165f1488fa255"
-whole_reason = "one trunk reader with its classification owner and the callers it replaces, plus two test modules; splitting leaves a reader nothing classifies"
