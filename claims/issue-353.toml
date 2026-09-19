@@ -1,8 +1,0 @@
-claim_id = "6e90fea9b248485da813c97144942f9f"
-agent = "Claude head (coordinator)"
-role = "builder"
-base = "a07debe99e90365860c28acb35fa1b1e8ab38971"
-branch = "claude/issue-353-spec-body-brief-cut"
-scope = ["scripts/spec_coverage_ratchet.txt", "specs/body.spec.md", "specs/brief.spec.md", "specs/cut.spec.md"]
-opened_commit = "2b064897719c11913900b1d0d543fbaba677ec2b"
-whole_reason = "three command specs of one wave plus the shared append-only ratchet"
