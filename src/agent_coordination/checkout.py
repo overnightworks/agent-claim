@@ -641,3 +641,158 @@ def _resolved_agent(explicit: str | None) -> str:
         "agent identity is required: pass --agent or set "
         f"{ACO_AGENT_ENV}, {GROK_SESSION_ID_ENV}, or {CLAUDE_SESSION_ID_ENV}"
     )
+
+
+# One owner for `start`'s own path/branch naming scheme (issue #322): the
+# same `<repo>-worktrees/issue-<n>-<slug>` / `<prefix>/issue-<n>-<slug>`
+# shape `ISOLATED_WORKTREE_RECIPE` already spells out by hand, so a lane
+# directory `start` creates looks exactly like one a person typed.
+_SLUG_MAX_LENGTH = 40
+_SLUG_COLLAPSE_PATTERN = re.compile(r"[^a-z0-9]+")
+
+
+def slug_from_title(title: str) -> str:
+    """`start`'s own worktree/branch slug, derived from an item's title when
+    `--slug` is not given (issue #322): lowercased, every run of characters
+    outside `[a-z0-9]` collapsed to one hyphen, at most 40 characters, with
+    no leading or trailing hyphen. Refuses when nothing usable survives (a
+    title that is empty or pure punctuation), rather than emitting a
+    trailing-bare `issue-<n>-` path silently."""
+    collapsed = _SLUG_COLLAPSE_PATTERN.sub("-", title.strip().lower()).strip("-")
+    slug = collapsed[:_SLUG_MAX_LENGTH].rstrip("-")
+    if not slug:
+        raise ClaimError("no usable slug in this item's title: pass --slug explicitly")
+    return slug
+
+
+def branch_prefix_for_identity() -> str:
+    """`start`'s own branch prefix (issue #322) -- my inclination, not a
+    settled decision: read from the same identity signals `_resolved_agent`
+    reads, in the same precedence, since it is the same acting identity,
+    only rendered as a short git-branch-safe token instead of a full agent
+    name. The first word of `ACO_AGENT`, lowercased, when set (`"Claude head
+    (coordinator)"` -> `"claude"`); otherwise `"grok"` from
+    `GROK_SESSION_ID`, or `"claude"` from `CLAUDE_SESSION_ID`; refused when
+    none resolves, since a worktree/branch scheme needs a real name, never a
+    guess."""
+    configured = os.environ.get(ACO_AGENT_ENV, "").strip()
+    if configured:
+        return configured.split()[0].lower()
+    if os.environ.get(GROK_SESSION_ID_ENV):
+        return "grok"
+    if os.environ.get(CLAUDE_SESSION_ID_ENV):
+        return "claude"
+    raise ClaimError(
+        "branch prefix is required: set ACO_AGENT, GROK_SESSION_ID, or CLAUDE_SESSION_ID"
+    )
+
+
+def branch_exists(branch: str) -> bool:
+    """Whether the calling process's own checkout already has a local
+    branch named `branch` (issue #322) -- `start`'s naming-collision guard,
+    read the same `-C`-free way `_validate_worktree_branch` reads the
+    checkout's own current branch, since `start` always runs from the
+    repository whose sibling worktree it is about to create, never from an
+    arbitrary resolved directory."""
+    result = _git_run(["show-ref", "--verify", "--quiet", f"refs/heads/{branch}"])
+    if result.exit_status == 0:
+        return True
+    if result.exit_status == 1:
+        return False
+    raise ClaimError(process.git_failure_detail(result))
+
+
+def create_linked_worktree(path: Path, *, branch: str, remote: str) -> None:
+    """Fetch `remote` and create a linked worktree at `path` on a fresh
+    `branch`, from `remote`'s own trunk (issue #322): the two-step
+    `git fetch`/`git worktree add` dance `ISOLATED_WORKTREE_RECIPE` used to
+    spell out for a person to type by hand, run through this module's own
+    `_git_run` chokepoint so `start` opens no new subprocess call site."""
+    fetch = _git_run(["fetch", remote])
+    if fetch.exit_status != 0:
+        raise ClaimError(process.git_failure_detail(fetch))
+    start_point = _trunk_ref(remote)
+    result = _git_run(["worktree", "add", str(path), "-b", branch, start_point])
+    if result.exit_status != 0:
+        raise ClaimError(process.git_failure_detail(result))
+
+
+# One owner for `resolve_or_create_worktree`'s two naming-collision repair
+# clauses (Sonar S1192): a stray branch with no worktree of its own and an
+# existing worktree checked out on the wrong branch share the identical fix.
+_CHOOSE_A_DIFFERENT_WORKTREE_REPAIR = "remove it, or pass --slug to choose a different worktree"
+
+
+def resolve_or_create_worktree(path: Path, branch: str, *, remote: str) -> None:
+    """Create `path`'s linked worktree and `branch` when nothing sits there
+    yet, or validate a prior `start`'s own worktree for resume (issue #322):
+    refuses by name when `branch` is already taken by something that is not
+    this worktree, or when a worktree already at `path` is dirty."""
+    existing = resolve_path_checkout(path)
+    if existing is None:
+        if branch_exists(branch):
+            raise ClaimError(
+                f"branch {branch!r} already exists and is not this item's worktree; "
+                f"{_CHOOSE_A_DIFFERENT_WORKTREE_REPAIR}"
+            )
+        create_linked_worktree(path, branch=branch, remote=remote)
+        return
+    if existing.branch != branch:
+        raise ClaimError(
+            f"worktree {path} exists on branch {existing.branch!r}, not {branch!r}; "
+            f"{_CHOOSE_A_DIFFERENT_WORKTREE_REPAIR}"
+        )
+    dirty = _git_output(["status", "--porcelain"], directory=path)
+    if dirty:
+        named = named_with_overflow_count(_dirty_paths(dirty))
+        raise ClaimError(f"worktree {path} is dirty: {named}; commit or clean it before resuming")
+
+
+def worktree_on_branch(paths: tuple[Path, ...], branch: str) -> Path | None:
+    """The one path among `paths` (`store.list_worktrees`'s own listing)
+    whose own checked-out branch is `branch`, or `None` when none matches
+    (issue #322) -- `release --merged`'s own cleanup finds the lane's
+    linked worktree by the branch its claim already names, not by `start`'s
+    naming scheme, since a claim's worktree may predate `start` or have
+    been resumed under a different `--slug`."""
+    for candidate in paths:
+        found = resolve_path_checkout(candidate)
+        if found is not None and found.branch == branch:
+            return candidate
+    return None
+
+
+def remove_linked_worktree(path: Path, *, branch: str) -> None:
+    """Remove a landed lane's linked worktree and its own local branch
+    (issue #322): `git worktree remove` first -- git refuses to delete a
+    branch still checked out anywhere -- then `git branch -d`, both through
+    this module's own `_git_run` chokepoint. Never called on the calling
+    process's own checkout: `release`'s own cwd-equality guard runs first,
+    since a worktree cannot remove its own cwd."""
+    result = _git_run(["worktree", "remove", str(path)])
+    if result.exit_status != 0:
+        raise ClaimError(process.git_failure_detail(result))
+    result = _git_run(["branch", "-d", branch])
+    if result.exit_status != 0:
+        raise ClaimError(process.git_failure_detail(result))
+
+
+def branch_merged_into_default(branch: str, *, remote: str) -> bool:
+    """Whether `branch`'s tip is already an ancestor of `remote`'s own
+    trunk (issue #322): `release --merged`'s own cleanup precondition,
+    fetching `remote` first so a landing this same process just verified
+    through the forge is visible locally even when nothing else in this
+    checkout has fetched since. A squash or rebase landing's trunk commit is
+    never a literal descendant of the lane branch's own tip, so this reads
+    `False` for one -- a safe, conservative "not merged" that only ever
+    skips cleanup, never removes a branch git cannot itself prove is in."""
+    fetch = _git_run(["fetch", remote])
+    if fetch.exit_status != 0:
+        raise ClaimError(process.git_failure_detail(fetch))
+    trunk = _trunk_ref(remote)
+    result = _git_run(["merge-base", "--is-ancestor", branch, trunk])
+    if result.exit_status == 0:
+        return True
+    if result.exit_status == 1:
+        return False
+    raise ClaimError(process.git_failure_detail(result))

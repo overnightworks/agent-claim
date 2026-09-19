@@ -1,3 +1,4 @@
 # Ledger for scripts/similar_methods.py. One "relpath:qualname — reason" per line, either
 # side of an accepted pair (issue #319). Empty today: no pair in src/ or tests/ has been
 # reviewed and deliberately accepted as a duplicate shape. Written by hand when one is.
+tests/test_checkout.py:_bare_remote_repository_with_one_commit — a bare-remote-plus-one-commit scaffold this shares with test_cli.py's _landing_repository/_check_trunk_repository (issue #322); those own unrelated sibling lanes' trunk/landing fixtures, outside this lane's claimed scope to fold together
