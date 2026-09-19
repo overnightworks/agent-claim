@@ -491,20 +491,24 @@ check reads a `state-ref` item the same way `board`/`next` already do.
 request (#230 slice 6) — naming the offline path instead: land with
 `item close` plus `release --abandoned "landed as <sha>"`.
 
-`aco item new --title TITLE [--kind task|feature|container] [--parent ITEM]`
-creates a fresh item straight in `refs/aco/state` — a task/feature skeleton
-(`--kind container` writes the container skeleton instead) plus a `[record]`
-naming its kind and, with `--parent`, its parent — through the same one CAS
-write `cut`'s own `create_child` performs, and prints exactly one line, the
-minted id (`--json`: `{"item": "aco-xxxxxx", "number": n}`). It refuses under
-`storage = "github"` by name ("items live on the forge; open the issue
-there") — aco is pulled from the forge, never governs it, so it never opens a
-GitHub issue itself. `aco item show ITEM [--json]` prints one header line —
-`aco-xxxxxx · #n · open|closed · parent aco-…|none` — followed by the stored
-body byte-exact; it reads through the ordinary forge port, so it works under
-both storages (a state-ref item's own file, or a GitHub issue's body), shows
-a closed item exactly like an open one (closing never deletes), and refuses
-an unknown id by name.
+`aco item new --title TITLE [--kind task|feature|container] [--parent ITEM]
+[--origin FORGE#N]` creates a fresh item straight in `refs/aco/state` — a
+task/feature skeleton (`--kind container` writes the container skeleton
+instead) plus a `[record]` naming its kind and, with `--parent`, its parent —
+through the same one CAS write `cut`'s own `create_child` performs, and
+prints exactly one line, the minted id (`--json`: `{"item": "aco-xxxxxx",
+"number": n}`). It refuses under `storage = "github"` by name ("items live on
+the forge; open the issue there") — aco is pulled from the forge, never
+governs it, so it never opens a GitHub issue itself. `--origin FORGE#N`
+(issue #316, e.g. `gitlab#514`) binds the fresh item to a foreign forge's
+issue without aco ever governing that forge: it is refused by name, before
+any write, when it does not match that grammar. `aco item show ITEM [--json]`
+prints one header line — `aco-xxxxxx · #n · open|closed · parent
+aco-…|none · origin FORGE#N|none` — followed by the stored body byte-exact;
+it reads through the ordinary forge port, so it works under both storages (a
+state-ref item's own file, or a GitHub issue's body, which never carries an
+origin), shows a closed item exactly like an open one (closing never
+deletes), and refuses an unknown id by name.
 
 `aco item edit ITEM` reads the whole new body from stdin only (`aco item edit
 ITEM < body.md`; no `--file`, no editor) and refuses before any write when it
@@ -756,7 +760,10 @@ An expectation line rides the same items: `aco ask <item> --text "…"`
 proposes one, `aco rule <item> --line N (--yes|--no|--later)` records the
 operator's word, and `aco rulings` lists every item that still carries an
 open one. Nothing above ever reaches a forge — the week runs entirely
-against this repository's own `refs/aco/state`.
+against this repository's own `refs/aco/state`. Lanes bound to foreign
+issues still need no adapter: `aco item new --title "…" --origin gitlab#514`
+stores that reference in `record.origin`, `item show` prints it, and `claim`
+works on the item exactly as on any other.
 
 ## The work-item body contract
 

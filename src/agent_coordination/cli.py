@@ -608,6 +608,12 @@ def _add_item_parser(commands: argparse._SubParsersAction) -> None:
         metavar="ITEM",
         help=f"the fresh item's parent, {ITEM_REF_HELP}",
     )
+    new.add_argument(
+        "--origin",
+        type=items.parse_origin,
+        metavar="FORGE#N",
+        help="bind this lane to a foreign forge issue, e.g. gitlab#514",
+    )
     new.add_argument("--json", action="store_true", help=JSON_HELP)
     show = item_commands.add_parser(
         "show", help="print one item's header and its stored body byte-exact"
@@ -2388,15 +2394,18 @@ ITEM_NEW_GITHUB_REFUSAL = "items live on the forge; open the issue there"
 
 
 def _cmd_item_new(parsed: argparse.Namespace) -> int:
-    """`aco item new` (issue #285): the one write path for a fresh
+    """`aco item new` (issues #285, #316): the one write path for a fresh
     state-ref item -- `StateRefBoard.create_item`, the same CAS write
     `cut`'s own `create_child` performs, generalized to an optional
-    parent -- so this module never grows a second way to create one.
-    Refuses under `storage = "github"`: the forge is pulled, never
-    governed, so aco never opens a GitHub issue on a repository's behalf.
-    Never resolves the generic `_LazyForge` (issue #248) -- it calls
-    `_state_ref_forge` directly, since `create_item` is not part of the
-    generic `ForgeWriter` port every other write command narrows to."""
+    parent and origin -- so this module never grows a second way to
+    create one. `--origin` binds the fresh item to a foreign forge issue
+    (`items.parse_origin`'s own grammar, refused by `argparse` before this
+    ever runs) without aco governing that forge at all. Refuses under
+    `storage = "github"`: the forge is pulled, never governed, so aco
+    never opens a GitHub issue on a repository's behalf. Never resolves
+    the generic `_LazyForge` (issue #248) -- it calls `_state_ref_forge`
+    directly, since `create_item` is not part of the generic `ForgeWriter`
+    port every other write command narrows to."""
     toplevel = _resolve_toplevel()
     config = board.load_config(toplevel / board.CONFIG_PATH)
     if config.storage is not board.Storage.STATE_REF:
@@ -2414,7 +2423,9 @@ def _cmd_item_new(parsed: argparse.Namespace) -> int:
         if kind is board.ItemKind.CONTAINER
         else board.BLOCK_CHILD_SKELETON
     )
-    item_id = client.create_item(title=parsed.title, body=skeleton, kind=kind, parent=parsed.parent)
+    item_id = client.create_item(
+        title=parsed.title, body=skeleton, kind=kind, parent=parsed.parent, origin=parsed.origin
+    )
     _print_item_new_result(item_id, items.item_number(item_id), as_json=parsed.json)
     return 0
 
@@ -2563,13 +2574,16 @@ def _item_parent_id(parent: board.ParentIssue | None) -> str | None:
 def _item_header(
     number: int, reference: forge.ItemReference, parent: board.ParentIssue | None
 ) -> str:
-    """`item show`'s one header line: id, number, state, and parent -- the
-    same shape regardless of which forge answered the reads, since an id
-    (`items.format_item_id`) is a pure encoding of `number`, never a
-    per-adapter fact."""
+    """`item show`'s one header line: id, number, state, parent, and origin
+    -- the same shape regardless of which forge answered the reads, since an
+    id (`items.format_item_id`) is a pure encoding of `number`, never a
+    per-adapter fact. `reference.origin` (issue #316) stays `None` for a
+    GitHub-stored item, so this prints `origin none` there exactly like an
+    unset parent prints `parent none`."""
     return (
         f"{items.format_item_id(number)} · #{number} · "
-        f"{_item_state_text(reference.state)} · parent {_item_parent_id(parent) or 'none'}"
+        f"{_item_state_text(reference.state)} · parent {_item_parent_id(parent) or 'none'} · "
+        f"origin {reference.origin or 'none'}"
     )
 
 
@@ -2596,6 +2610,7 @@ def _cmd_item_show(parsed: argparse.Namespace, session: _ReadSession) -> int:
                     "number": number,
                     "state": _item_state_text(reference.state),
                     "parent": _item_parent_id(parent),
+                    "origin": reference.origin,
                     "body": body,
                 }
             )

@@ -185,8 +185,14 @@ class TestMalformedRecordDefects:
             pytest.param(
                 {"origin": "7"},
                 "record.origin",
-                "record.origin must be a string",
+                f"record.origin must be {items.ORIGIN_GRAMMAR_HINT}",
                 id="origin-not-a-string",
+            ),
+            pytest.param(
+                {"origin": '"not-an-origin"'},
+                "record.origin",
+                f"record.origin must be {items.ORIGIN_GRAMMAR_HINT}",
+                id="origin-malformed-string",
             ),
             pytest.param(
                 {"created_at": '"yesterday"'},
@@ -352,3 +358,38 @@ class TestRecordTable:
         table = items.record_table(minimal)
 
         assert set(table) == {"title", "state", "labels", "blocked_by", "created_at", "updated_at"}
+
+
+class TestParseOrigin:
+    """The one origin grammar (issue #316), tested once against
+    `parse_origin` -- the same `ORIGIN_PATTERN` `board._record_relation_defects`
+    validates a persisted `record.origin` against, so this class is that
+    grammar's one test."""
+
+    @pytest.mark.parametrize(
+        ("value", "valid"),
+        [
+            pytest.param("gitlab#514", True, id="forge-and-number"),
+            pytest.param("github#1", True, id="single-digit"),
+            pytest.param("gitea-self-hosted#42", True, id="hyphenated-forge-name"),
+            pytest.param("github.com/example/agent-claim#42", True, id="host-owner-repo"),
+            pytest.param("github.com/OvernightWorks/x#1", True, id="uppercase-host-owner-repo"),
+            pytest.param("GitLab#514", True, id="uppercase-forge"),
+            pytest.param("gitlab", False, id="no-number"),
+            pytest.param("514", False, id="no-forge"),
+            pytest.param("#5", False, id="no-forge-before-hash"),
+            pytest.param("gitlab#", False, id="no-number-after-hash"),
+            pytest.param("gitlab#x", False, id="non-digit-number"),
+            pytest.param("gitlab 514", False, id="no-hash"),
+            pytest.param("gitlab#0514", False, id="leading-zero"),
+            pytest.param("gitlab #514", False, id="embedded-space"),
+            pytest.param("", False, id="empty"),
+            pytest.param("gitla\u212a#514", False, id="kelvin-sign-non-ascii-letter"),
+        ],
+    )
+    def test_parse_origin_matches_the_one_origin_grammar(self, value: str, valid: bool) -> None:
+        if valid:
+            assert items.parse_origin(value) == value
+            return
+        with pytest.raises(ClaimUnavailableError, match="is not an origin"):
+            items.parse_origin(value)

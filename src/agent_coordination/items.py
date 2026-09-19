@@ -34,6 +34,25 @@ from .protocol import ClaimUnavailableError, MalformedStateTreeError
 # key, so a rename of the file is the only way its id ever changes.
 ITEM_ID_PATTERN = re.compile(r"aco-[0-9a-f]{6}")
 ITEM_FILENAME_SUFFIX = ".md"
+# The one origin grammar (issue #316, parent #230): a forge name or
+# host/owner/repo path -- one or more letter/digit/hyphen segments joined by
+# `.` or `/` -- then `#` and the number that forge itself uses for the
+# issue. Case-insensitive on the host/owner/repo part (issue #316 delta): a
+# hand-written v2 ref may carry the forge's own capitalization, e.g.
+# `github.com/OvernightWorks/x#1`. `--origin`'s argparse `type=`
+# (`parse_origin`) and the persisted `[record].origin` field
+# (`board._record_relation_defects`) both validate against this one pattern,
+# so a stored malformed origin is exactly as rejected as a malformed
+# `--origin` flag. This is also the one owner `aco pull <forge>#<n>` (#230
+# slice 5) will later split `record.origin` back out through.
+ORIGIN_PATTERN = re.compile(
+    r"[a-z][a-z0-9-]*(?:[./][a-z][a-z0-9-]*)*#[1-9]\d*", re.ASCII | re.IGNORECASE
+)
+# The one hint text for a malformed origin, shared by `parse_origin`'s
+# argparse refusal and `board._record_relation_defects`' record defect, so a
+# bad `--origin` flag and a bad stored `record.origin` read the same
+# sentence rather than two independently worded rules for one grammar.
+ORIGIN_GRAMMAR_HINT = "forge#n or host/owner/repo#n, e.g. gitlab#514"
 # Refuse rather than silently widen (issue #283, ruling 16.09.2026): an id
 # never grows a seventh hex character just because the id space (16.7
 # million values per repository) is filling up. Three tries against real
@@ -119,6 +138,17 @@ def item_id_from_filename(filename: str) -> str:
     if not filename.endswith(ITEM_FILENAME_SUFFIX) or ITEM_ID_PATTERN.fullmatch(candidate) is None:
         raise MalformedStateTreeError(f"items/{filename} is not a valid item file name")
     return candidate
+
+
+def parse_origin(value: str) -> str:
+    """`--origin`'s argparse `type=` (issue #316): `value` unchanged when it
+    matches `ORIGIN_PATTERN`, a loud refusal before any write otherwise --
+    the same `protocol.ClaimError` `board.parse_item_reference` already
+    raises from an argparse `type=`, so `main`'s existing `parse_args` guard
+    catches this one too without a second exception class to catch."""
+    if ORIGIN_PATTERN.fullmatch(value) is None:
+        raise ClaimUnavailableError(f"{value!r} is not an origin; use {ORIGIN_GRAMMAR_HINT}")
+    return value
 
 
 def parse_item_record(item_id: str, record: Mapping[str, object]) -> ItemRecord:
