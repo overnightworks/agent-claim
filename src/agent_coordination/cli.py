@@ -277,28 +277,6 @@ ROLE_ON_LIVE_CLAIM_HELP = (
 ITEM_REF_HELP = "an item, as aco-xxxxxx, #n, or the bare number n"
 
 
-def _parse_item_ref(value: str) -> int:
-    """One item reference -- `aco-xxxxxx` (`items.item_number`'s own hex
-    decode), `#n`, or the bare integer `n` -- parsed to the number every
-    forge port keys by (issue #285, decision D4: an id is identity, not
-    just display, so a fresh id `item new` prints is something every other
-    command can claim right back). The one owner for every argparse slot
-    that means an item: `claim`, `cut`, `ask`, `rule`, `check`, `brief`,
-    `body --parent`, `status`, `rescope`, and `release`. Refuses by name for anything
-    else; used as an argparse `type=`, so this refusal must reach `main`'s
-    own `protocol.ClaimError` handling around `parse_args` rather than
-    argparse's own usage-error path, which only catches `ValueError`.
-    """
-    if items.ITEM_ID_PATTERN.fullmatch(value) is not None:
-        return items.item_number(value)
-    digits = value.removeprefix("#")
-    if digits.isdigit():
-        return int(digits)
-    raise protocol.ClaimUnavailableError(
-        f"{value!r} is not an item reference; use aco-xxxxxx, #n, or the bare number n"
-    )
-
-
 def _add_bootstrap_parser(commands: argparse._SubParsersAction) -> None:
     commands.add_parser("bootstrap", help="create refs/aco/state if it does not exist yet")
 
@@ -307,7 +285,7 @@ def _add_status_parser(commands: argparse._SubParsersAction) -> None:
     status = commands.add_parser("status", help="show repository-wide build claims")
     status.add_argument(
         "issue",
-        type=_parse_item_ref,
+        type=board.parse_item_reference,
         nargs="?",
         help="show only this issue's claims and the ones they overlap",
     )
@@ -372,7 +350,7 @@ def _add_claim_parser(commands: argparse._SubParsersAction) -> None:
     )
     claim.add_argument(
         "issue",
-        type=_parse_item_ref,
+        type=board.parse_item_reference,
         nargs="?",
         help=LANE_ISSUE_HELP,
     )
@@ -427,7 +405,7 @@ def _add_release_parser(commands: argparse._SubParsersAction) -> None:
     release = commands.add_parser("release", help="release a landed or abandoned claim")
     release.add_argument(
         "issue",
-        type=_parse_item_ref,
+        type=board.parse_item_reference,
         nargs="?",
         help=LANE_ISSUE_HELP,
     )
@@ -468,7 +446,7 @@ def _add_rescope_parser(commands: argparse._SubParsersAction) -> None:
     )
     rescope.add_argument(
         "issue",
-        type=_parse_item_ref,
+        type=board.parse_item_reference,
         nargs="?",
         help=LANE_ISSUE_HELP,
     )
@@ -494,7 +472,7 @@ def _add_rescope_parser(commands: argparse._SubParsersAction) -> None:
 
 def _add_cut_parser(commands: argparse._SubParsersAction) -> None:
     cut = commands.add_parser("cut", help="create a container's next slice as a fresh child issue")
-    cut.add_argument("issue", type=_parse_item_ref, help="the container to cut")
+    cut.add_argument("issue", type=board.parse_item_reference, help="the container to cut")
     cut.add_argument("--title", required=True, help="the fresh child issue's title")
     cut.add_argument(
         "--row",
@@ -508,7 +486,7 @@ def _add_cut_parser(commands: argparse._SubParsersAction) -> None:
 def _add_ask_parser(commands: argparse._SubParsersAction) -> None:
     ask = commands.add_parser("ask", help="append one proposed expectation line to an item's block")
     ask.add_argument(
-        "item", type=_parse_item_ref, help="the item to append the expectation line to"
+        "item", type=board.parse_item_reference, help="the item to append the expectation line to"
     )
     ask.add_argument("--text", required=True, help="the expectation line's prose")
     ask.add_argument(
@@ -540,7 +518,9 @@ def _add_rule_parser(commands: argparse._SubParsersAction) -> None:
     rule = commands.add_parser(
         "rule", help="rule one proposed expectation line, transcribing the operator's word"
     )
-    rule.add_argument("item", type=_parse_item_ref, help="the item whose expectation line is ruled")
+    rule.add_argument(
+        "item", type=board.parse_item_reference, help="the item whose expectation line is ruled"
+    )
     rule.add_argument(
         "--line",
         type=int,
@@ -566,7 +546,7 @@ def _add_check_parser(commands: argparse._SubParsersAction) -> None:
     )
     check.add_argument(
         "number",
-        type=_parse_item_ref,
+        type=board.parse_item_reference,
         help="the pull request or issue to read; the forge says which one it is",
     )
     check.add_argument("--json", action="store_true", help=JSON_HELP)
@@ -591,7 +571,7 @@ def _add_body_parser(commands: argparse._SubParsersAction) -> None:
     )
     body.add_argument(
         "--parent",
-        type=_parse_item_ref,
+        type=board.parse_item_reference,
         metavar="ITEM",
         help="prepend a Parent: #N line to --template's skeleton",
     )
@@ -603,7 +583,7 @@ def _add_brief_parser(commands: argparse._SubParsersAction) -> None:
         "brief",
         help="print one item's body, live claim, lane tip and touched files for a dispatch",
     )
-    brief.add_argument("item", type=_parse_item_ref, help="the work item to brief")
+    brief.add_argument("item", type=board.parse_item_reference, help="the work item to brief")
     brief.add_argument("--json", action="store_true", help=JSON_HELP)
 
 
@@ -624,7 +604,7 @@ def _add_item_parser(commands: argparse._SubParsersAction) -> None:
     )
     new.add_argument(
         "--parent",
-        type=_parse_item_ref,
+        type=board.parse_item_reference,
         metavar="ITEM",
         help=f"the fresh item's parent, {ITEM_REF_HELP}",
     )
@@ -632,17 +612,23 @@ def _add_item_parser(commands: argparse._SubParsersAction) -> None:
     show = item_commands.add_parser(
         "show", help="print one item's header and its stored body byte-exact"
     )
-    show.add_argument("item", type=_parse_item_ref, help=f"the item to show, {ITEM_REF_HELP}")
+    show.add_argument(
+        "item", type=board.parse_item_reference, help=f"the item to show, {ITEM_REF_HELP}"
+    )
     show.add_argument("--json", action="store_true", help=JSON_HELP)
     edit = item_commands.add_parser(
         "edit", help="replace one item's body from stdin, aco keeping its own record fields"
     )
-    edit.add_argument("item", type=_parse_item_ref, help=f"the item to edit, {ITEM_REF_HELP}")
+    edit.add_argument(
+        "item", type=board.parse_item_reference, help=f"the item to edit, {ITEM_REF_HELP}"
+    )
     edit.add_argument("--json", action="store_true", help=JSON_HELP)
     close = item_commands.add_parser(
         "close", help="close a state-ref item; the file stays, next and board let it go"
     )
-    close.add_argument("item", type=_parse_item_ref, help=f"the item to close, {ITEM_REF_HELP}")
+    close.add_argument(
+        "item", type=board.parse_item_reference, help=f"the item to close, {ITEM_REF_HELP}"
+    )
     close.add_argument("--json", action="store_true", help=JSON_HELP)
 
 
@@ -1143,6 +1129,12 @@ def _merged_pull_request_floor(issues: tuple[board.Issue, ...], now: datetime) -
 # whether the three base board reads below have already finished.
 BOARD_CHILD_FETCH_CONCURRENCY = 4
 
+# A stable invariant of the board's own ruling-freshness read (issue #304),
+# not something an operator tunes: `RULING_OLD_AFTER_LANDINGS` (10) is the
+# most any ruling ever needs counted, so this bounds `git log`'s walk deep
+# enough that no realistic ruling window is ever truncated.
+TRUNK_LANDING_DEPTH = 5000
+
 
 def _fetch_children(
     client: forge.BoardSource, container_numbers: tuple[int, ...]
@@ -1303,7 +1295,12 @@ def _board(
                 config=config,
                 repository=client.repository.path,
                 now=now,
-                trunk_landings=checkout.trunk_landing_times(),
+                trunk_landings=tuple(
+                    landing.committed_at
+                    for landing in checkout.trunk_landings(
+                        config.canonical_remote, TRUNK_LANDING_DEPTH
+                    )
+                ),
                 children=children,
                 dependencies=dependencies,
                 requests=client.requests,
@@ -4272,7 +4269,7 @@ def _read_status_body_or_dispatch(parsed: argparse.Namespace) -> int:
 
 def main(arguments: list[str] | None = None) -> int:
     try:
-        # `_parse_item_ref` is an argparse `type=`; its own refusal is
+        # `board.parse_item_reference` is an argparse `type=`; its own refusal is
         # `protocol.ClaimError`, not the `ValueError` argparse's own
         # conversion-error handling catches, so it needs this same try here
         # rather than reaching the parser unguarded.

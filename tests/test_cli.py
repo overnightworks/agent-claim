@@ -280,7 +280,7 @@ def test_read_only_commands_never_write_through_a_reader_only_forge(
     client.landings[12] = landing_pull_request(body="Work-Item: #72\n\nCloses #72")
     monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
     monkeypatch.setattr(checkout, "_git_output", lambda _arguments: "")
-    monkeypatch.setattr(checkout, "trunk_landing_times", lambda: ())
+    monkeypatch.setattr(checkout, "trunk_landings", lambda *_args, **_kwargs: ())
 
     for argv in (
         ["status"],
@@ -516,7 +516,7 @@ def _single_item_board_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     client.board_issues = (board_issue(10, "Plain item", complete_contract("Ship #10.")),)
     monkeypatch.setattr(github, "GitHubForge", lambda _repository: client)
     monkeypatch.setattr(checkout, "_git_output", lambda _arguments: str(tmp_path))
-    monkeypatch.setattr(checkout, "trunk_landing_times", lambda: ())
+    monkeypatch.setattr(checkout, "trunk_landings", lambda *_args, **_kwargs: ())
     _patch_store_write(monkeypatch)
     return client
 
@@ -611,7 +611,7 @@ def test_board_skips_the_children_list_for_a_container_with_zero_children(
     monkeypatch.setattr(client, "list_children", spy_list_children)
     monkeypatch.setattr(github, "GitHubForge", lambda _repository: client)
     monkeypatch.setattr(checkout, "_git_output", lambda _arguments: str(tmp_path))
-    monkeypatch.setattr(checkout, "trunk_landing_times", lambda: ())
+    monkeypatch.setattr(checkout, "trunk_landings", lambda *_args, **_kwargs: ())
     _patch_store_write(monkeypatch)
 
     assert issue_claim.main(["--repo", "example/agent-claim", "board"]) == 0
@@ -660,7 +660,7 @@ def test_board_skips_the_dependency_list_for_a_zero_blocker_item_in_block_mode(
     monkeypatch.setattr(client, "list_board_dependencies", spy_list_board_dependencies)
     monkeypatch.setattr(github, "GitHubForge", lambda _repository: client)
     monkeypatch.setattr(checkout, "_git_output", lambda _arguments: str(tmp_path))
-    monkeypatch.setattr(checkout, "trunk_landing_times", lambda: ())
+    monkeypatch.setattr(checkout, "trunk_landings", lambda *_args, **_kwargs: ())
     _patch_store_write(monkeypatch)
 
     assert issue_claim.main(["--repo", "example/agent-claim", "board"]) == 0
@@ -703,7 +703,7 @@ def test_board_shows_open_and_total_instead_of_proposed(
     monkeypatch.setattr(client, "list_recent_merged_board_pull_requests", lambda _since: ())
     monkeypatch.setattr(github, "GitHubForge", lambda _repository: client)
     monkeypatch.setattr(checkout, "_git_output", lambda _arguments: str(tmp_path))
-    monkeypatch.setattr(checkout, "trunk_landing_times", lambda: ())
+    monkeypatch.setattr(checkout, "trunk_landings", lambda *_args, **_kwargs: ())
 
     assert issue_claim.main(["--repo", "example/agent-claim", "board"]) == 0
     rendered = capsys.readouterr().out
@@ -951,7 +951,7 @@ def _configured_board_client(
     monkeypatch.setattr(client, "list_recent_merged_board_pull_requests", lambda _since: ())
     monkeypatch.setattr(github, "GitHubForge", lambda _repository: client)
     monkeypatch.setattr(checkout, "_git_output", lambda _arguments: str(tmp_path))
-    monkeypatch.setattr(checkout, "trunk_landing_times", lambda: ())
+    monkeypatch.setattr(checkout, "trunk_landings", lambda *_args, **_kwargs: ())
     _patch_store_write(monkeypatch, *(_store_claim_from_request(claimed) for claimed in standing))
     return client
 
@@ -1159,7 +1159,7 @@ def test_next_reports_expectation_state(
     monkeypatch.setattr(client, "list_recent_merged_board_pull_requests", lambda _since: ())
     monkeypatch.setattr(github, "GitHubForge", lambda _repository: client)
     monkeypatch.setattr(checkout, "_git_output", lambda _arguments: str(tmp_path))
-    monkeypatch.setattr(checkout, "trunk_landing_times", lambda: ())
+    monkeypatch.setattr(checkout, "trunk_landings", lambda *_args, **_kwargs: ())
 
     assert issue_claim.main(["--repo", "example/agent-claim", "next"]) == 0
     assert capsys.readouterr().out == expected_output
@@ -1192,7 +1192,7 @@ def test_next_pulls_an_unruled_item_and_names_only_unworkable_ones_as_skipped(
     monkeypatch.setattr(client, "list_recent_merged_board_pull_requests", lambda _since: ())
     monkeypatch.setattr(github, "GitHubForge", lambda _repository: client)
     monkeypatch.setattr(checkout, "_git_output", lambda _arguments: str(tmp_path))
-    monkeypatch.setattr(checkout, "trunk_landing_times", lambda: ())
+    monkeypatch.setattr(checkout, "trunk_landings", lambda *_args, **_kwargs: ())
     _patch_store_write(monkeypatch, _store_claim_from_request(standing))
 
     assert issue_claim.main(["--repo", "example/agent-claim", "next"]) == 0
@@ -1528,7 +1528,7 @@ def test_claim_refuses_when_the_higher_priority_item_needs_refining(
     monkeypatch.setattr(client, "list_recent_merged_board_pull_requests", lambda _since: ())
     monkeypatch.setattr(github, "GitHubForge", lambda _repository: client)
     monkeypatch.setattr(checkout, "_git_output", lambda _arguments: str(tmp_path))
-    monkeypatch.setattr(checkout, "trunk_landing_times", lambda: ())
+    monkeypatch.setattr(checkout, "trunk_landings", lambda *_args, **_kwargs: ())
     monkeypatch.setattr(issue_claim, "_request", lambda _arguments: claimed_request)
 
     assert (
@@ -1687,7 +1687,7 @@ def test_claim_refuses_out_of_order_without_a_reason_before_mutating(
     monkeypatch.setattr(client, "list_recent_merged_board_pull_requests", lambda _since: ())
     monkeypatch.setattr(github, "GitHubForge", lambda _repository: client)
     monkeypatch.setattr(checkout, "_git_output", lambda _arguments: str(tmp_path))
-    monkeypatch.setattr(checkout, "trunk_landing_times", lambda: ())
+    monkeypatch.setattr(checkout, "trunk_landings", lambda *_args, **_kwargs: ())
     monkeypatch.setattr(issue_claim, "_request", lambda _arguments: claimed_request)
 
     arguments = [
@@ -1730,7 +1730,7 @@ def test_claim_allows_out_of_order_with_a_reason_and_records_it(
     monkeypatch.setattr(client, "list_recent_merged_board_pull_requests", lambda _since: ())
     monkeypatch.setattr(github, "GitHubForge", lambda _repository: client)
     monkeypatch.setattr(checkout, "_git_output", lambda _arguments: str(tmp_path))
-    monkeypatch.setattr(checkout, "trunk_landing_times", lambda: ())
+    monkeypatch.setattr(checkout, "trunk_landings", lambda *_args, **_kwargs: ())
     monkeypatch.setattr(issue_claim, "_request", lambda _arguments: claimed_request)
 
     assert (
@@ -1782,7 +1782,7 @@ def test_claim_refuses_for_a_higher_priority_item_even_at_a_lower_score(
     monkeypatch.setattr(client, "list_recent_merged_board_pull_requests", lambda _since: ())
     monkeypatch.setattr(github, "GitHubForge", lambda _repository: client)
     monkeypatch.setattr(checkout, "_git_output", lambda _arguments: str(tmp_path))
-    monkeypatch.setattr(checkout, "trunk_landing_times", lambda: ())
+    monkeypatch.setattr(checkout, "trunk_landings", lambda *_args, **_kwargs: ())
     monkeypatch.setattr(issue_claim, "_request", lambda _arguments: claimed_request)
 
     assert (
@@ -3288,7 +3288,7 @@ def test_next_skips_a_frozen_item_and_names_it_as_such(
     monkeypatch.setattr(client, "list_recent_merged_board_pull_requests", lambda _since: ())
     monkeypatch.setattr(github, "GitHubForge", lambda _repository: client)
     monkeypatch.setattr(checkout, "_git_output", lambda _arguments: str(tmp_path))
-    monkeypatch.setattr(checkout, "trunk_landing_times", lambda: ())
+    monkeypatch.setattr(checkout, "trunk_landings", lambda *_args, **_kwargs: ())
 
     assert issue_claim.main(["--repo", "example/agent-claim", "next"]) == 0
     assert capsys.readouterr().out == (
@@ -3321,7 +3321,7 @@ def test_claim_does_not_warn_about_a_frozen_higher_scored_item(
     monkeypatch.setattr(client, "list_recent_merged_board_pull_requests", lambda _since: ())
     monkeypatch.setattr(github, "GitHubForge", lambda _repository: client)
     monkeypatch.setattr(checkout, "_git_output", lambda _arguments: str(tmp_path))
-    monkeypatch.setattr(checkout, "trunk_landing_times", lambda: ())
+    monkeypatch.setattr(checkout, "trunk_landings", lambda *_args, **_kwargs: ())
     monkeypatch.setattr(issue_claim, "_request", lambda _arguments: claimed_request)
 
     assert (
@@ -3401,7 +3401,7 @@ def test_board_reads_priority_configuration_from_the_checkout_root(
             return ()
 
     monkeypatch.setattr(checkout, "_git_output", git_output)
-    monkeypatch.setattr(checkout, "trunk_landing_times", lambda: ())
+    monkeypatch.setattr(checkout, "trunk_landings", lambda *_args, **_kwargs: ())
 
     projected = issue_claim._board(BoardClient(), ()).board
 
@@ -3791,7 +3791,7 @@ def test_board_queries_merged_pull_requests_back_to_the_oldest_open_issue(
             return ()
 
     monkeypatch.setattr(checkout, "_git_output", lambda _arguments: str(tmp_path))
-    monkeypatch.setattr(checkout, "trunk_landing_times", lambda: ())
+    monkeypatch.setattr(checkout, "trunk_landings", lambda *_args, **_kwargs: ())
 
     issue_claim._board(BoardClient(), ())
 
@@ -3844,7 +3844,7 @@ def test_board_fetches_children_only_for_container_kinded_issues(
             return (board.ChildItem(92, board.ChildState.OPEN),)
 
     monkeypatch.setattr(checkout, "_git_output", lambda _arguments: str(tmp_path))
-    monkeypatch.setattr(checkout, "trunk_landing_times", lambda: ())
+    monkeypatch.setattr(checkout, "trunk_landings", lambda *_args, **_kwargs: ())
 
     projected = issue_claim._board(BoardClient(), ()).board
 
@@ -5344,11 +5344,11 @@ def _default_open_issue_reference(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # A PR checkout has no origin/main, so the live function would fail loud in CI;
-# tests of trunk_landing_times itself (tests/test_checkout.py) call
-# _LIVE_TRUNK_LANDING_TIMES.
+# tests of trunk_landings itself (tests/test_checkout.py) call
+# _LIVE_TRUNK_LANDINGS.
 @pytest.fixture(autouse=True)
-def _stub_trunk_landing_times(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(checkout, "trunk_landing_times", lambda: ())
+def _stub_trunk_landings(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(checkout, "trunk_landings", lambda *_args, **_kwargs: ())
 
 
 @pytest.fixture(autouse=True)
@@ -6181,7 +6181,7 @@ def test_cli_claim_replay_skips_out_of_order_for_the_matching_lower_priority_ite
     monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
     monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
     monkeypatch.setattr(checkout, "_git_output", lambda _arguments: str(tmp_path))
-    monkeypatch.setattr(checkout, "trunk_landing_times", lambda: ())
+    monkeypatch.setattr(checkout, "trunk_landings", lambda *_args, **_kwargs: ())
 
     assert (
         issue_claim.main(
@@ -6229,7 +6229,7 @@ def test_cli_claim_replay_does_not_bypass_out_of_order_for_another_agent(
     monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
     monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
     monkeypatch.setattr(checkout, "_git_output", lambda _arguments: str(tmp_path))
-    monkeypatch.setattr(checkout, "trunk_landing_times", lambda: ())
+    monkeypatch.setattr(checkout, "trunk_landings", lambda *_args, **_kwargs: ())
 
     assert (
         issue_claim.main(
@@ -7586,7 +7586,7 @@ def test_board_shows_claim_age_from_the_claim_comment(
     client.board_issues = (board_issue(72, "Work", complete_contract("Claim #72.")),)
     _patch_status_cli(monkeypatch, client)
     monkeypatch.setattr(checkout, "_git_output", lambda _arguments: str(tmp_path))
-    monkeypatch.setattr(checkout, "trunk_landing_times", lambda: ())
+    monkeypatch.setattr(checkout, "trunk_landings", lambda *_args, **_kwargs: ())
     _patch_store_write(
         monkeypatch,
         _store_claim_from_request(claimed),
@@ -7611,7 +7611,7 @@ def test_board_marks_a_claim_old_after_sixty_one_minutes(
     client.board_issues = (board_issue(72, "Work", complete_contract("Claim #72.")),)
     _patch_status_cli(monkeypatch, client)
     monkeypatch.setattr(checkout, "_git_output", lambda _arguments: str(tmp_path))
-    monkeypatch.setattr(checkout, "trunk_landing_times", lambda: ())
+    monkeypatch.setattr(checkout, "trunk_landings", lambda *_args, **_kwargs: ())
     _patch_store_write(
         monkeypatch,
         _store_claim_from_request(claimed),
@@ -8455,8 +8455,11 @@ def test_next_names_an_old_ruling_when_the_item_is_pulled(
     monkeypatch.setattr(checkout, "_git_output", lambda _arguments: str(tmp_path))
     monkeypatch.setattr(
         checkout,
-        "trunk_landing_times",
-        lambda: tuple(datetime(2026, 8, 29, hour, tzinfo=UTC) for hour in range(10)),
+        "trunk_landings",
+        lambda *_args, **_kwargs: tuple(
+            checkout.TrunkLanding(f"sha{hour}", datetime(2026, 8, 29, hour, tzinfo=UTC), None)
+            for hour in range(10)
+        ),
     )
     _patch_store_write(monkeypatch)
 
@@ -10575,30 +10578,22 @@ def test_cli_brief_refuses_a_non_github_canonical_remote_by_host(
     ("value", "number"),
     [("aco-3f9a2c", 0x3F9A2C), ("#42", 42), ("42", 42)],
 )
-def test_parse_item_ref_accepts_every_reference_syntax(value: str, number: int) -> None:
-    """Issue #285 proof 5: `aco-xxxxxx` (hex-decoded), `#n`, and the bare
-    number `n` are all one item reference."""
-    assert issue_claim._parse_item_ref(value) == number
-
+def test_rescope_parses_every_item_reference_syntax(value: str, number: int) -> None:
+    """Issue #285 proof 5: `rescope`'s `issue` argument is wired to
+    `board.parse_item_reference` (moved from `cli._parse_item_ref` by issue
+    #304; that function's own grammar proof lives in `tests/test_board.py`)."""
     rescoped = issue_claim._parser().parse_args(["rescope", value, "--add", "src"])
 
     assert rescoped.issue == number
 
 
-@pytest.mark.parametrize("value", ["foo", "aco-xyz", "#"])
-def test_parse_item_ref_refuses_anything_else(value: str) -> None:
-    """Issue #285 proof 5: anything that is none of the three forms refuses
-    by name rather than guessing."""
-    with pytest.raises(ClaimUnavailableError, match="is not an item reference"):
-        issue_claim._parse_item_ref(value)
-
-
 def test_main_refuses_a_malformed_item_reference_before_ever_dispatching(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """`_parse_item_ref` runs as an argparse `type=` inside `parse_args`, so
-    its refusal must reach `main`'s own error rendering rather than an
-    argparse usage error or an unhandled exception (issue #285)."""
+    """`board.parse_item_reference` runs as an argparse `type=` inside
+    `parse_args`, so its refusal must reach `main`'s own error rendering
+    rather than an argparse usage error or an unhandled exception
+    (issue #285)."""
     status = issue_claim.main(["claim", "not-an-item", "--scope", "README"])
 
     assert status == 2

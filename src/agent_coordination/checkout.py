@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 
-from . import process
+from . import board, process
 from .protocol import ClaimError, ClaimRequest, _outbound_text, named_with_overflow_count
 
 ACO_AGENT_ENV = "ACO_AGENT"
@@ -284,13 +284,22 @@ def is_default_branch(branch: str) -> bool:
     return branch in DEFAULT_BRANCH_FALLBACK
 
 
-def _trunk_ref() -> str:
-    ref = _origin_head_ref()
-    if ref is not None:
-        return ref
+def _trunk_ref(remote: str) -> str:
+    """`remote`'s trunk ref: its recorded `HEAD` symbolic ref, or the
+    historical `{main, master}` guess when `remote` never recorded one
+    (issue #304, generalizing `_origin_head_ref`'s `origin`-only read to the
+    caller's own canonical remote -- `default_branch_name`/`is_default_branch`
+    keep reading `origin` specifically, since GitHub-repository discovery is
+    a separate axis from a repository's configured canonical remote)."""
+    try:
+        symbolic = _git_output(["symbolic-ref", "--quiet", f"refs/remotes/{remote}/HEAD"])
+    except ClaimError:
+        symbolic = ""
+    if symbolic:
+        return symbolic
     for candidate in (
-        "refs/remotes/origin/main",
-        "refs/remotes/origin/master",
+        f"refs/remotes/{remote}/main",
+        f"refs/remotes/{remote}/master",
         "main",
         "master",
     ):
@@ -302,25 +311,85 @@ def _trunk_ref() -> str:
     raise ClaimError("cannot determine the main branch for ruling age")
 
 
-def trunk_landing_times() -> tuple[datetime, ...]:
-    """Committer times of first-parent landings on the default branch, oldest first.
+# Field separator between a record's `sha`/`committed_at`/`Work-Item`
+# trailer values/`No-Item` trailer values; `\x1f` between repeated trailer
+# values within one field. Both are non-printing bytes git's own
+# `%(trailers:...,separator=...)` never inserts into a value, unlike the
+# default separator (a newline), which would otherwise merge two trailer
+# values into what looks like two commit records once the raw output is
+# split on newlines below. Git's own `%x00`/`%x1f` *placeholder text* goes
+# into the `--format=` argument (git turns it into the byte, in its own
+# output, at run time); the raw byte itself can never sit in that argument,
+# since an argv string is a C string and a literal NUL there is illegal.
+_TRUNK_LANDING_FIELD_SEPARATOR = "\x00"
+_TRUNK_LANDING_TRAILER_SEPARATOR = "\x1f"
+_TRUNK_LANDING_LOG_FORMAT = (
+    "%H"
+    "%x00%cI"
+    "%x00%(trailers:key=Work-Item,valueonly,separator=%x1f)"
+    "%x00%(trailers:key=No-Item,valueonly,separator=%x1f)"
+)
 
-    A merge counts once. Using the default branch — never the work branch — is the
-    contract: a ruling ages with trunk, not with local commits.
+
+@dataclass(frozen=True)
+class TrunkLanding:
+    """One first-parent commit on the trunk (issue #304): its identity, when
+    it landed, and -- when its own trailer block names one -- what it
+    landed. `classification` is read solely from the trailer block git's own
+    parsing recognizes; a `Work-Item:`/`No-Item:` line anywhere else in the
+    body is prose, not evidence, so most trunk commits (not every landing is
+    a dispatched slice's own merge or squash) carry `None`."""
+
+    sha: str
+    committed_at: datetime
+    classification: board.TrunkClassification | None
+
+
+def _trailer_values(field: str) -> tuple[str, ...]:
+    return tuple(field.split(_TRUNK_LANDING_TRAILER_SEPARATOR)) if field else ()
+
+
+def _parsed_trunk_landing(record: str) -> TrunkLanding:
+    sha, raw_committed_at, work_item_field, no_item_field = record.split(
+        _TRUNK_LANDING_FIELD_SEPARATOR
+    )
+    try:
+        committed_at = datetime.fromisoformat(raw_committed_at)
+    except ValueError as error:
+        raise ClaimError("git returned a malformed trunk landing timestamp") from error
+    if committed_at.tzinfo is None:
+        raise ClaimError("git returned a malformed trunk landing timestamp")
+    classification = board.trunk_commit_classification(
+        _trailer_values(work_item_field), _trailer_values(no_item_field)
+    )
+    return TrunkLanding(sha, committed_at.astimezone(UTC), classification)
+
+
+def trunk_landings(remote: str, depth: int) -> tuple[TrunkLanding, ...]:
+    """The most recent `depth` first-parent landings on `remote`'s trunk,
+    oldest first, each classified from its own trailer block alone
+    (issue #304).
+
+    A merge counts once. Reading `remote`'s trunk — never the work branch —
+    is the contract: a ruling ages with trunk, not with local commits, and
+    `remote` is the caller's own canonical remote, never a hardcoded
+    `origin`, so a repository configured with a different canonical remote
+    ages rulings against the trunk it actually lands on.
     """
-    raw = _git_output(["log", "--first-parent", "--reverse", "--format=%cI", _trunk_ref()])
+    raw = _git_output(
+        [
+            "log",
+            "--first-parent",
+            "--reverse",
+            f"--format={_TRUNK_LANDING_LOG_FORMAT}",
+            "-n",
+            str(depth),
+            _trunk_ref(remote),
+        ]
+    )
     if not raw:
         return ()
-    times: list[datetime] = []
-    for line in raw.splitlines():
-        try:
-            parsed = datetime.fromisoformat(line)
-        except ValueError as error:
-            raise ClaimError("git returned a malformed trunk landing timestamp") from error
-        if parsed.tzinfo is None:
-            raise ClaimError("git returned a malformed trunk landing timestamp")
-        times.append(parsed.astimezone(UTC))
-    return tuple(times)
+    return tuple(_parsed_trunk_landing(record) for record in raw.splitlines())
 
 
 def _resolved_agent(explicit: str | None) -> str:

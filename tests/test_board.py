@@ -2859,3 +2859,60 @@ def test_a_non_ascii_digit_in_a_hash_reference_is_not_an_issue_number() -> None:
 def test_body_defect_text_is_the_shared_renderer() -> None:
     defect = board.ContractDefect("now", "missing")
     assert board.body_defect_text(defect) == "body malformed: now: missing"
+
+
+@pytest.mark.parametrize(
+    ("value", "number"),
+    [("aco-3f9a2c", 0x3F9A2C), ("#42", 42), ("42", 42)],
+)
+def test_parse_item_reference_accepts_every_reference_syntax(value: str, number: int) -> None:
+    """Issue #285 proof 5, moved from `cli._parse_item_ref` by issue #304:
+    `aco-xxxxxx` (hex-decoded), `#n`, and the bare number `n` are all one
+    item reference -- the one grammar every CLI argparse slot that means an
+    item shares with a trunk commit's `Work-Item:` trailer value."""
+    assert board.parse_item_reference(value) == number
+
+
+@pytest.mark.parametrize("value", ["foo", "aco-xyz", "#"])
+def test_parse_item_reference_refuses_anything_else(value: str) -> None:
+    """Issue #285 proof 5: anything that is none of the three forms refuses
+    by name rather than guessing."""
+    with pytest.raises(protocol.ClaimUnavailableError, match="is not an item reference"):
+        board.parse_item_reference(value)
+
+
+def test_trunk_commit_classification_reads_a_single_work_item_trailer() -> None:
+    classification = board.trunk_commit_classification(("#10",), ())
+    assert classification == board.TrunkWorkItemClassification((10,))
+
+
+def test_trunk_commit_classification_lands_every_item_a_repeated_trailer_names() -> None:
+    """Issue #304: a trailer block that repeats `Work-Item:` lands every
+    item it names, unlike a pull request body's single-item rule."""
+    classification = board.trunk_commit_classification(("#10", "#11"), ())
+    assert classification == board.TrunkWorkItemClassification((10, 11))
+    assert str(classification) == "Work-Item: #10\nWork-Item: #11"
+
+
+def test_trunk_commit_classification_reads_a_no_item_trailer() -> None:
+    classification = board.trunk_commit_classification((), ("docs",))
+    assert classification == board.NoItemClassification(board.NoItemKind.DOCS)
+
+
+@pytest.mark.parametrize(
+    ("work_item_values", "no_item_values"),
+    [
+        pytest.param((), (), id="neither-trailer"),
+        pytest.param((), ("docs", "fix"), id="ambiguous-no-item"),
+        pytest.param((), ("not-a-kind",), id="unrecognized-no-item-kind"),
+    ],
+)
+def test_trunk_commit_classification_is_none_without_a_recognized_trailer(
+    work_item_values: tuple[str, ...], no_item_values: tuple[str, ...]
+) -> None:
+    assert board.trunk_commit_classification(work_item_values, no_item_values) is None
+
+
+def test_trunk_commit_classification_fails_loud_on_a_malformed_work_item_value() -> None:
+    with pytest.raises(protocol.ClaimUnavailableError, match="is not an item reference"):
+        board.trunk_commit_classification(("not-an-item",), ())
