@@ -81,7 +81,11 @@ forbidden_modules = [
     "agent_coordination.items",
     "agent_coordination.checkout",
 ]
-allow_indirect_imports = true
+# false checks every chain, not only a direct import: store being "git
+# transport only" is a full isolation boundary, so store reaching a
+# forbidden module through an allowed intermediate (store -> some helper
+# -> github) is exactly the coupling this contract exists to forbid.
+allow_indirect_imports = false
 as_packages = false
 
 [[tool.importlinter.contracts]]
@@ -114,8 +118,17 @@ as_packages = false
 [[tool.importlinter.contracts]]
 name = "Only the process boundary imports subprocess"
 type = "forbidden"
-source_modules = ["agent_coordination", "agent_coordination.*"]
+# "agent_coordination.**" (recursive), not "agent_coordination.*": the
+# single-level wildcard is blind to a subpackage's own submodules, so a
+# future nested module could import subprocess unnoticed.
+source_modules = ["agent_coordination", "agent_coordination.**"]
 forbidden_modules = ["subprocess"]
+# true checks only the direct edge: subprocess has no other module to
+# reach it through, so the only "indirect" chain would be through another
+# agent_coordination module that itself directly imports subprocess --
+# checking indirectly would misattribute that module's violation to every
+# caller along the chain instead of the module that actually wrote the
+# import.
 allow_indirect_imports = true
 as_packages = false
 ignore_imports = ["agent_coordination.process -> subprocess"]
@@ -123,8 +136,12 @@ ignore_imports = ["agent_coordination.process -> subprocess"]
 [[tool.importlinter.contracts]]
 name = "Only the gh, git, and terminal owners run commands"
 type = "forbidden"
-source_modules = ["agent_coordination", "agent_coordination.*"]
+source_modules = ["agent_coordination", "agent_coordination.**"]
 forbidden_modules = ["agent_coordination.process"]
+# true checks only the direct edge: many modules legitimately depend on an
+# allowed process caller (github, checkout, store, terminal) further up
+# their own chain, so checking indirectly would flag every one of those
+# callers too instead of only the module that itself imports process.
 allow_indirect_imports = true
 as_packages = false
 ignore_imports = [
