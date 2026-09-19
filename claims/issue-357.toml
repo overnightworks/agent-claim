@@ -1,8 +1,0 @@
-claim_id = "008dd22174b244d1a66ada21798426d1"
-agent = "Claude head (coordinator)"
-role = "builder"
-base = "924ed72af19bf2a248cf5de8273edaad47d902bf"
-branch = "claude/issue-357-board-estimates"
-scope = ["README.md", "pyproject.toml", "scripts/test_budget_ratchet.txt", "specs/board.spec.md", "specs/body-block.spec.md", "specs/item.spec.md", "specs/ref-store-cas.spec.md", "src/agent_coordination/board.py", "src/agent_coordination/board_html.py", "src/agent_coordination/cli.py", "src/agent_coordination/items.py", "src/agent_coordination/protocol.py", "src/agent_coordination/store.py", "tests/board_fixtures.py", "tests/board_html_golden.html", "tests/test_board.py", "tests/test_board_html.py", "tests/test_cli.py", "tests/test_state_board.py", "tests/test_store.py"]
-opened_commit = "41b80f6f63874f1dc4f04bef0169cd496fa6fb2d"
-whole_reason = "one feature (estimates from measured lanes) across the lifecycle reader, the size field, the board projections and their tests"
