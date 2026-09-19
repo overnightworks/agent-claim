@@ -1,0 +1,7 @@
+claim_id = "318279039d8e4294962dff75451a4050"
+agent = "Claude head (coordinator)"
+role = "builder"
+base = "617800521bc18ca3039016f45a5a4a7c3ca215e6"
+branch = "claude/issue-312-github-decoder"
+scope = ["src/agent_coordination/github.py", "tests/test_github.py"]
+opened_commit = "d94c546587e6141385c58a298942a92125d30462"
