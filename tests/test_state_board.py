@@ -58,6 +58,12 @@ def _git(*arguments: str, cwd: Path) -> None:
     subprocess.run(["git", *arguments], cwd=cwd, check=True, capture_output=True)
 
 
+def _head_sha(cwd: Path) -> str:
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=cwd, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
 @pytest.fixture
 def bare_remote(tmp_path: Path) -> Path:
     """An empty bare repository standing in for the canonical remote (the
@@ -730,8 +736,8 @@ def _projected(
     """`projected_board` fed entirely from `client`'s own read methods --
     the one assembly both parametrized cases below share, mirroring what
     `cli._board` does at the CLI layer without that layer's filesystem and
-    network concerns. `open_pull_requests`/`landings_derivable` come from
-    `client.capability` (issue #248), the same two reads `cli._board` makes,
+    network concerns. `open_pull_requests_supported` comes from
+    `client.capability` (issue #248), the same read `cli._board` makes,
     never from the storage pin `config.storage` also carries."""
     issues = client.list_open_board_issues()
     children = {
@@ -756,10 +762,6 @@ def _projected(
         dependencies=dependencies,
         open_pull_requests_supported=(
             client.capability(forge.ForgeOperation.LIST_OPEN_BOARD_PULL_REQUESTS)
-            is not forge.Capability.UNSUPPORTED
-        ),
-        landings_derivable=(
-            client.capability(forge.ForgeOperation.LIST_RECENT_MERGED_BOARD_PULL_REQUESTS)
             is not forge.Capability.UNSUPPORTED
         ),
     )
@@ -790,19 +792,17 @@ EXPECTED_RULINGS_LINES_BY_STORAGE = {
         _github_fake(), _EXPECTED_BOARD, storage=board.Storage.STATE_REF
     ),
 }
-# `state-ref` renders the identical scenario plus one honest line (issue
-# #248, Sonnet review blocking 3) -- but never `_EXPECTED_BOARD` itself
+# `state-ref` renders the identical scenario, never `_EXPECTED_BOARD` itself
 # `replace`d: `item.actionable_reason` (issue #300 residual 2) is now baked
 # in at build time from `config.storage`, exactly like every other field a
 # real `state-ref` pin changes, so reusing the `Storage.GITHUB`-built board
 # under a different `render` call would silently keep its stale `#n`
 # blocker text. A fresh `_projected` call under `Storage.STATE_REF` bakes
-# that text correctly; `landings_derivable` still needs its own `replace`,
-# since `_github_fake`'s own capability (never `config.storage`) is what
-# `_projected` reads it from, and this fake reports GitHub's own capability
-# regardless of which storage its config carries.
+# that text correctly; the two texts otherwise agree byte-for-byte apart
+# from the id-shaped pins, since this scenario carries no merged pull
+# request at all (issue #371 retired the one line that used to differ).
 EXPECTED_STATE_REF_BOARD_TEXT = board.render(
-    replace(_projected(_github_fake(), storage=board.Storage.STATE_REF), landings_derivable=False),
+    _projected(_github_fake(), storage=board.Storage.STATE_REF),
     storage=board.Storage.STATE_REF,
 )
 EXPECTED_BOARD_TEXT_BY_STORAGE = {
@@ -816,8 +816,7 @@ EXPECTED_BOARD_TEXT_BY_STORAGE = {
 # matching branch, never via the state-ref-only capability fallback.
 # `state-ref`'s own expectation is a fresh build under `Storage.STATE_REF`
 # (same reasoning as `EXPECTED_STATE_REF_BOARD_TEXT` above), so the only
-# sanctioned differences stay the landings-capability line and the id-shaped
-# pins.
+# sanctioned difference stays the id-shaped pins.
 _EXPECTED_BOARD_WITH_LIVE_CLAIM = _projected(
     _github_fake(open_pull_requests=(LIVE_CLAIM_OPEN_PULL_REQUEST,)),
     storage=board.Storage.GITHUB,
@@ -826,13 +825,10 @@ _EXPECTED_BOARD_WITH_LIVE_CLAIM = _projected(
 EXPECTED_BOARD_WITH_LIVE_CLAIM_TEXT_BY_STORAGE = {
     board.Storage.GITHUB: board.render(_EXPECTED_BOARD_WITH_LIVE_CLAIM),
     board.Storage.STATE_REF: board.render(
-        replace(
-            _projected(
-                _github_fake(open_pull_requests=(LIVE_CLAIM_OPEN_PULL_REQUEST,)),
-                storage=board.Storage.STATE_REF,
-                claims=(LIVE_CLAIM,),
-            ),
-            landings_derivable=False,
+        _projected(
+            _github_fake(open_pull_requests=(LIVE_CLAIM_OPEN_PULL_REQUEST,)),
+            storage=board.Storage.STATE_REF,
+            claims=(LIVE_CLAIM,),
         ),
         storage=board.Storage.STATE_REF,
     ),
@@ -2052,6 +2048,62 @@ class TestCliStateRefForge:
         payload = json.loads(capsys.readouterr().out)
         item = next(row for row in payload["items"] if row["number"] == item_number)
         assert item["stage"] == "code-landed"
+
+    def test_board_reads_two_trunk_trailer_landings_as_landing_rows_under_state_ref(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+    ) -> None:
+        """Issue #371, Beweis 1: two trailer-carrying trunk commits each land
+        their own item under `storage = state-ref` -- `board`'s text
+        `LANDUNGEN` rows, `board --json`'s `landings` array, and
+        `board --html`'s Landungen section all read `checkout.trunk_landings`
+        directly, one row per item with its own sha and no `pull_request`,
+        independent of any pull-request listing this storage can never
+        perform."""
+        first_id, second_id = "aco-000005", "aco-000006"
+        first_number = items.item_number(first_id)
+        second_number = items.item_number(second_id)
+        item_files = {
+            f"{item_id}.md": _state_ref_body(
+                _Projection("Ship it.", "Land it.", "It is done."),
+                _record(title=title, state="open", kind="task"),
+            ).encode()
+            for item_id, title in ((first_id, "First"), (second_id, "Second"))
+        }
+        _git("commit", "--allow-empty", "-m", f"Land it.\n\nWork-Item: {first_id}", cwd=worktree)
+        first_sha = _head_sha(worktree)
+        _git(
+            "commit", "--allow-empty", "-m", f"Land it too.\n\nWork-Item: {second_id}", cwd=worktree
+        )
+        second_sha = _head_sha(worktree)
+        self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, item_files)
+        board_command = ["board"]
+
+        assert issue_claim.main([*board_command, "--json"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        landings = {row["item"]: row for row in payload["landings"]}
+        assert landings.keys() == {first_number, second_number}
+        assert landings[first_number]["sha"] == first_sha
+        assert landings[first_number]["pull_request"] is None
+        assert landings[second_number]["sha"] == second_sha
+        assert landings[second_number]["pull_request"] is None
+        first_date = datetime.fromisoformat(landings[first_number]["committed_at"]).date()
+        second_date = datetime.fromisoformat(landings[second_number]["committed_at"]).date()
+
+        assert issue_claim.main(board_command) == 0
+        rendered_text = capsys.readouterr().out
+        assert "LANDUNGEN" in rendered_text
+        assert f"{first_id} {first_date} {first_sha[:7]}" in rendered_text
+        assert f"{second_id} {second_date} {second_sha[:7]}" in rendered_text
+
+        assert issue_claim.main([*board_command, "--html"]) == 0
+        rendered_html = capsys.readouterr().out
+        assert f"<li>{first_id} {first_date} <code>{first_sha[:7]}</code></li>" in rendered_html
+        assert f"<li>{second_id} {second_date} <code>{second_sha[:7]}</code></li>" in rendered_html
 
     def test_board_refuses_without_an_origin_head(
         self,

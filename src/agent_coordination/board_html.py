@@ -19,13 +19,11 @@ per card carrying the loopback token and the note, with the three outcomes
 as its own submit buttons, when served), "Lanes" (active claims with the
 item's own Now/Next/Blocked by/Done when, verbatim from the body), "Themen"
 (containers with their open children, then standalone items), and
-"Landungen" (items `board` already classified `Stage.CODE_LANDED`, paired
-with the merged pull request that plainly closes or declares them when one
-resolves, else the trunk commit whose own `Work-Item:` trailer names them
-directly -- both storages read that trailer straight from local git history,
-independent of the merged-pull-request listing `landings_derivable` gates --
-or the one "nicht ableitbar" line when neither source resolves a single
-row). The three knowlagentic-only conventions (`Plain:`/`For you:`,
+"Landungen" (`board.Board.landings`, issue #371: one row per item the trunk
+walk names as landed under both storages, plus, under `github`, one more
+row per item a merged pull request landed with no trailer of its own --
+`board.landing_rows`'s own projection, read straight, never re-derived
+here). The three knowlagentic-only conventions (`Plain:`/`For you:`,
 `Stage:`, `(lane: slug)`) are gone: a lane shows the item's own title and
 contract text, nothing else.
 """
@@ -36,16 +34,13 @@ import html
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC
 from enum import StrEnum
 from typing import cast
 
 from . import board
 
 RULE_OUTCOMES: tuple[str, ...] = ("yes", "no", "later")
-# git's own default abbreviation length -- a trunk-landed row's sha is
-# evidence to look up, not a full identity, so the short form is enough.
-_SHORT_SHA_LENGTH = 7
 
 
 @dataclass(frozen=True)
@@ -144,32 +139,6 @@ class Topic:
 
 
 @dataclass(frozen=True)
-class TrunkLandedItem:
-    """One item a trunk commit's own `Work-Item:` trailer names as landed
-    (issue #304 review delta): `sha`/`committed_at` identify that commit.
-    Every board source reads this straight from local git history, so it
-    stands even when the source cannot list merged pull requests at all
-    (state-ref's `landings_derivable=False`) -- `build_page` renders it as
-    the Landungen row's evidence in exactly that case."""
-
-    item: int
-    sha: str
-    committed_at: datetime
-
-
-@dataclass(frozen=True)
-class LandedItem:
-    item: int
-    item_title: str
-    pull_request_number: int | None
-    pull_request_title: str | None
-    # Set only when no merged pull request resolved this item (`build_page`
-    # tries the pull request first): the trailer-carrying trunk commit that
-    # landed it instead, when one is known.
-    trunk: TrunkLandedItem | None = None
-
-
-@dataclass(frozen=True)
 class BoardPage:
     """Everything `render` shows, already derived by `build_page` -- `render`
     itself needs nothing beyond this, so a test can hand-build one without a
@@ -180,8 +149,9 @@ class BoardPage:
     cards: tuple[ExpectationCard, ...]
     lanes: tuple[LaneCard, ...]
     topics: tuple[Topic, ...]
-    landed: tuple[LandedItem, ...]
-    landings_derivable: bool
+    # The Landungen view (issue #371), read straight from `board.Board.landings`
+    # -- `build_page` performs no re-derivation of its own.
+    landed: tuple[board.LandingRow, ...]
     # The board's own measured-lane section (issue #357), rendered through
     # `board.measurements_lines` -- the one text `aco board` and this page
     # both read, so the two never drift into separately worded sentences.
@@ -329,78 +299,20 @@ def _topics(projected: board.Board, *, storage: board.Storage) -> tuple[Topic, .
     return tuple(topics)
 
 
-def _closing_pull_request(
-    number: int, pull_requests: tuple[board.PullRequest, ...], *, repository: str
-) -> board.PullRequest | None:
-    """The merged pull request that plainly closes or declares `number` its
-    work item -- `board.closing_references`/`declared_work_items`, the two
-    public conventions this repository's own pull requests use (a `Closes
-    #N` line, or a `Work-Item: #N` trailer). Narrower than `board.py`'s own
-    private `_associated_issues` (drops the "lands"/"implements" keyword and
-    the un-closing epic-slice marker `_touched_without_closing` reads): those
-    stay `board.py`'s own decision, so an epic's landed slices may show here
-    with no resolved pull request rather than reproduce that private
-    matching outside its own module."""
-    for pull_request in pull_requests:
-        closing = {
-            reference.number
-            for reference in board.closing_references(pull_request.body, repository)
-            if reference.repository == repository
-        }
-        if number in closing or number in board.declared_work_items((pull_request,), repository):
-            return pull_request
-    return None
-
-
-def _landed_items(
-    projected: board.Board,
-    recent_merged_pull_requests: tuple[board.PullRequest, ...],
-    trunk_landed_items: tuple[TrunkLandedItem, ...],
-) -> tuple[LandedItem, ...]:
-    """One `LandedItem` per `Stage.CODE_LANDED` item, in board-rank order --
-    `trunk_by_item` keeps the most recent record when a number somehow
-    repeats (`trunk_landings` reads oldest first), a case real history never
-    actually produces since a landed item is retired, not landed twice."""
-    trunk_by_item = {entry.item: entry for entry in trunk_landed_items}
-    entries: list[LandedItem] = []
-    for item in projected.items:
-        if item.stage is not board.Stage.CODE_LANDED:
-            continue
-        pull_request = _closing_pull_request(
-            item.number, recent_merged_pull_requests, repository=projected.repository
-        )
-        trunk_landing = None if pull_request is not None else trunk_by_item.get(item.number)
-        entries.append(
-            LandedItem(
-                item.number,
-                item.title,
-                None if pull_request is None else pull_request.number,
-                None if pull_request is None else pull_request.title,
-                trunk=trunk_landing,
-            )
-        )
-    return tuple(entries)
-
-
 @dataclass(frozen=True)
 class BoardSources:
     """Everything `build_page` needs beyond the projected `board.Board`
     itself -- each already read by `board --html`'s own `board` fetch
     (issue #276): `bodies` (each open issue's body), `claimants` (the live
-    store claims, keyed by the issue they hold), the merged pull requests
-    `board` itself reads to classify `Stage.CODE_LANDED`, the live store's
-    own tip, the repository's storage pin (for `board.expectation_lines`
-    et al.), and every trunk commit whose own trailer names a landed item
-    (issue #304 review delta) -- read from local git history alongside
-    `board`'s own fetch, independent of whether the source can list merged
-    pull requests at all."""
+    store claims, keyed by the issue they hold), the live store's own tip,
+    and the repository's storage pin (for `board.expectation_lines` et al.).
+    The Landungen view needs no source of its own any more (issue #371): it
+    reads straight from `projected.landings`."""
 
     bodies: Mapping[int, str]
     claimants: Mapping[int, LaneClaimant]
-    recent_merged_pull_requests: tuple[board.PullRequest, ...]
     state_tip: str
     storage: board.Storage = board.Storage.GITHUB
-    trunk_landed_items: tuple[TrunkLandedItem, ...] = ()
 
 
 def build_page(projected: board.Board, sources: BoardSources) -> BoardPage:
@@ -424,23 +336,13 @@ def build_page(projected: board.Board, sources: BoardSources) -> BoardPage:
         for item in projected.items
         if item.number in sources.claimants
     )
-    # Unconditional: a trailer-landed row (`sources.trunk_landed_items`) reads
-    # straight from local git history, so it stands even when
-    # `projected.landings_derivable` is false -- the source cannot list
-    # merged pull requests at all (state-ref), not that trunk history is
-    # unreadable too. `_render_landed_section` shows "nicht ableitbar" only
-    # once this list comes back empty *and* that capability is missing.
-    landed = _landed_items(
-        projected, sources.recent_merged_pull_requests, sources.trunk_landed_items
-    )
     return BoardPage(
         repository=projected.repository,
         state_tip=sources.state_tip,
         cards=cards,
         lanes=lanes,
         topics=_topics(projected, storage=sources.storage),
-        landed=landed,
-        landings_derivable=projected.landings_derivable,
+        landed=projected.landings,
         measurements=projected.measurements,
         storage=sources.storage,
     )
@@ -605,30 +507,20 @@ def _render_topic(topic: Topic, *, storage: board.Storage) -> str:
       </li>"""
 
 
-def _render_landed(entry: LandedItem, *, storage: board.Storage) -> str:
-    if entry.pull_request_number is not None:
-        title = html.escape(entry.pull_request_title or "")
-        reference = f"PR #{entry.pull_request_number}: {title}"
-    elif entry.trunk is not None:
-        date = entry.trunk.committed_at.astimezone(UTC).date().isoformat()
-        reference = f"{date} <code>{entry.trunk.sha[:_SHORT_SHA_LENGTH]}</code>"
+def _render_landed(row: board.LandingRow, *, storage: board.Storage) -> str:
+    date = row.committed_at.astimezone(UTC).date().isoformat()
+    if isinstance(row.evidence, board.TrunkLandingEvidence):
+        evidence = f"<code>{row.evidence.sha[: board.SHORT_SHA_LENGTH]}</code>"
     else:
-        reference = "PR nicht zugeordnet"
-    label = board.item_label(entry.item, storage)
-    return f"<li>{label} {html.escape(entry.item_title)} &mdash; {reference}</li>"
+        evidence = f"PR #{row.evidence.number}"
+    label = board.item_label(row.item, storage)
+    return f"<li>{label} {date} {evidence}</li>"
 
 
 def _render_landed_section(page: BoardPage) -> str:
     if not page.landed:
-        # A source that cannot list merged pull requests at all (state-ref's
-        # `landings_derivable=False`) still resolved zero trunk-trailer rows
-        # above -- neither source could name a single landed item, the one
-        # case this line exists for (issue #304 review delta); an empty list
-        # from a source that *can* list pull requests is a proven "none".
-        if not page.landings_derivable:
-            return f'<p class="empty">{LANDINGS_NOT_DERIVABLE_TEXT}</p>'
         return _EMPTY_PARAGRAPH
-    rows = "".join(_render_landed(entry, storage=page.storage) for entry in page.landed)
+    rows = "".join(_render_landed(row, storage=page.storage) for row in page.landed)
     return f'<ul class="landed">{rows}</ul>'
 
 
@@ -692,7 +584,6 @@ def render(page: BoardPage, *, served: ServedRuleForm | None = None) -> str:
     )
 
 
-LANDINGS_NOT_DERIVABLE_TEXT = "nicht ableitbar"
 _EMPTY_PARAGRAPH = '<p class="empty">nichts</p>'
 _EMPTY_TOPICS = '<li class="empty">nichts</li>'
 

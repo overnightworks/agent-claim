@@ -560,11 +560,9 @@ disclosed under "Der volle Satz" whenever a `question` shortened the
 heading), "Lanes" (active claims — agent, role, branch, age — with the
 item's own Now/Next/Blocked by/Done when verbatim from the body), "Themen"
 (containers with their open children and closed/total progress, then
-standalone items), and "Landungen" (items `board` already classified
-`Stage.CODE_LANDED`, paired with the merged pull request that closes or
-declares them when `board.closing_references`/`declared_work_items`
-resolves one — or the one "nicht ableitbar" line when `landings_derivable`
-is false). An empty section still renders its heading and "nichts". The
+standalone items), and "Landungen" (`board`'s own Landungen rows above,
+issue #371 — one `<li>` per row, `<label> <date> <sha7>` or `<label> <date>
+PR #<n>`). An empty section still renders its heading and "nichts". The
 page carries the mockup's design tokens for light and dark and stays
 narrow-width safe; the same board state renders the identical page
 byte-for-byte regardless of which head writes it.
@@ -722,10 +720,12 @@ Every command that takes an item — `claim`, `cut`, `ask`, `rule`, `check`,
 `aco-xxxxxx`, `#n`, or the bare number `n`: an id is identity, not only
 display, so the id `item new` prints is something every other command can
 claim right back, on a `state-ref` repository or a `github` one alike.
-Landings are not yet derived from the state ref either (#230 slice 6), so
-every `state-ref` item's stage is either `IN_FLIGHT` (an active claim on an
-open branch) or `TEXT_ONLY`; `CODE_LANDED` and the board's recovery section
-stay empty until that slice lands.
+`Stage.CODE_LANDED` reads the trunk walk directly (issue #304): a
+trailer-carrying commit lands its item under either storage, independent of
+any pull-request listing. The one real storage gap is `RECOVERY`, which
+stays empty under `state-ref` — it names an open item a merged pull
+request's own body already declared landed, data this storage cannot list
+at all.
 The board table's `FREED` column shows `YYYY-MM-DD (N d)` when every listed
 issue blocker has closed, using the latest such UTC closing date and whole days
 since then; it otherwise shows `-`. Every item in `board --json` carries the
@@ -760,6 +760,18 @@ items first with that step: open issues that a merged pull request already
 declared as its `Work-Item:` — the landing happened, the bookkeeping did not. It
 is keyed on that typed line, never on an issue's update time. `next --json`
 carries the same items under `recovery`.
+
+`board` also prints a `LANDUNGEN` section (issue #371), one line per item the
+trunk walk's own trailer names as landed — `<label> <date> <sha7>` — read
+across `board`'s own trunk-read depth, under both storages, independent of
+whether that item is still open. Under `storage = "github"` it adds one more
+line per item an older merged pull request landed with no trailer of its
+own — `<label> <date> PR #<n>` — deduplicated against the trailer rows (the
+trailer path always wins); `storage = "state-ref"` never adds this
+supplement, since it cannot list pull requests at all. `board --json` carries
+the same rows under `"landings"`, each `{"item", "committed_at", "sha",
+"pull_request"}` with exactly one of `sha`/`pull_request` non-`null`;
+`board --html`'s "Landungen" section (below) reads the identical projection.
 
 `board` ends its text output with a `requests: N` line, counting every read
 the command made through the forge port; `board --json` carries the same

@@ -31,7 +31,7 @@ number, `<label>` an item as `specs/landing-grammar.spec.md` prints it.
 | an item claimed or malformed | BOARD-03 | — | — | — |
 | board empty of ready/stale/recovery rows | BOARD-04 | — | — | — |
 | landed-but-open items exist | BOARD-05 | — | — | — |
-| the board source cannot list merged pull requests | BOARD-06 | BOARD-12 | BOARD-20 | BOARD-20 |
+| the Landungen view's own rows | BOARD-06 | BOARD-12 | BOARD-20 | BOARD-20 |
 | a container, with or without an open child | BOARD-07 | — | — | — |
 | an item with no recognized `kind` | BOARD-08 | BOARD-08 | — | — |
 | an uncut `[[slice]]` row | BOARD-09 | BOARD-14 | — | — |
@@ -56,7 +56,7 @@ does, before either reads a single issue -- cited there, not restated.
 - [ ] [BOARD-03] Every row's `ACTIONABLE` cell reads `yes`, or `no: <reason>` -- `no: claimed`, or any other `actionable_reason` verbatim (see E-BOARD-02).
 - [ ] [BOARD-04] `READY NOW`, `STALE`, and `RECOVERY (close or re-project)` each list comma-joined `<label>`s in board order, or `none` when empty (see E-BOARD-02).
 - [ ] [BOARD-05] `RECOVERY (close or re-project)` names every item a merged pull request's own `Work-Item:` line declares, that item itself still open (`specs/landing-grammar.spec.md`, LAND-43).
-- [ ] [BOARD-06] A board source that cannot list merged pull requests appends `landings are not derivable from this board source: recovery and code-landed stay empty` after `RECOVERY`.
+- [ ] [BOARD-06] `LANDUNGEN` follows `RECOVERY`: one line per row, `<label> <date> <sha7>` or `<label> <date> PR #<n>` (github's own supplement, LAND-44/45), or `none` when empty.
 - [ ] [BOARD-07] `CONTAINERS` lists one line per container item, open child or not: `<label> <closed>/<total> closed; open: <children or none>`, or `none` when there is none (see E-BOARD-02).
 - [ ] [BOARD-08] An item the forge reports no `kind` for, or a non-`container` `kind`, is left out of `CONTAINERS` even with child counts of its own (#309): never guessed at (see E-BOARD-03).
 - [ ] [BOARD-09] `UNCUT` lists one line per item with an undispatched `[[slice]]` row, `<label>: rows <indices> uncut`, or `none` when every slice table is either empty or fully cut.
@@ -74,8 +74,8 @@ does, before either reads a single issue -- cited there, not restated.
 
 ## `--json`
 
-- [ ] [BOARD-11] The top-level object carries exactly `items`, `ready_now`, `stale`, `recovery`, `uncut`, `requests`, `landings_derivable`, `measurements` -- never a `repository` key (see E-BOARD-04).
-- [ ] [BOARD-12] `landings_derivable` is `false` for a board source that cannot list merged pull requests, `true` otherwise -- the one field `render`'s BOARD-06 line reports in text.
+- [ ] [BOARD-11] The top-level object carries exactly `items`, `ready_now`, `stale`, `recovery`, `landings`, `uncut`, `requests`, `measurements` -- never a `repository` key (see E-BOARD-04).
+- [ ] [BOARD-12] Each `landings` row carries `{"item", "committed_at", "sha", "pull_request"}`, exactly one of `sha`/`pull_request` non-`null` (LAND-54).
 - [ ] [BOARD-13] Each item's `open_blockers` is split into a same-repository `int` list plus a sibling `foreign_blockers` list of `"<repository>#<n>"` strings, never one mixed list.
 - [ ] [BOARD-14] An `uncut` row's own `scope` key is present, canonical and non-empty only when that row carries a `scope` of its own; a scopeless row's object carries no `scope` key at all, never `"scope": null`.
 - [ ] [BOARD-26] Each item object carries `size` (`"S"`/`"M"`/`"L"`/`null`) and `estimate` (`null`, or the fields below) alongside its other fields.
@@ -94,7 +94,7 @@ does, before either reads a single issue -- cited there, not restated.
 - [ ] [BOARD-17] Lanes lists one card per live claim, `<label> <title>` heading, Agent/Branch/Alter always, and Now/Next/Blocked by/Done when only when the contract carries them (see E-BOARD-05).
 - [ ] [BOARD-18] The page carries exactly five `<h2>` sections in order: `Wartet auf dich <N>`, `Lanes <N>`, `Themen` (uncounted), `Landungen <N>`, `Messungen` (uncounted, issue #357) (see E-BOARD-05).
 - [ ] [BOARD-19] An empty `Wartet auf dich`/`Lanes` list renders `<p class="empty">nichts</p>`; an empty `Themen` list renders `<li class="empty">nichts</li>`.
-- [ ] [BOARD-20] `Landungen` shows `<p class="empty">nicht ableitbar</p>` only once its list is empty and `landings_derivable` is `false` (LAND-46); a proven-empty list still shows plain `nichts`.
+- [ ] [BOARD-20] `Landungen` renders each row `<label> <date> <sha7>` or `<label> <date> PR #<n>` (LAND-45/46); empty renders plain `nichts`, never a capability-gated line.
 - [ ] [BOARD-21] The static page (no `--serve`) shows each open card's three outcomes as copyable `aco rule <n> --line <k> --<outcome>` lines, never a live form.
 - [ ] [BOARD-28] `Messungen` renders BOARD-25's own first line as a `<p>`, every further line as one `<li>`; empty, it renders `<p class="empty">…</p>` instead, never an empty `<ul>`.
 
@@ -148,6 +148,9 @@ none
 RECOVERY (close or re-project)
 none
 
+LANDUNGEN
+none
+
 CONTAINERS
 #11 2/3 closed; open: #12
 
@@ -181,7 +184,7 @@ Setup: bare-remote, fake `gh`, one open issue `#10`
 
 ```console
 $ aco board --json
-{"items": [...], "ready_now": [...], "stale": [], "recovery": [], "uncut": [], "requests": 3, "landings_derivable": true, "measurements": {"classes": [], "unfinished": 0, "unparsed": 0, "since": null, "as_of": "<date>"}}
+{"items": [...], "ready_now": [...], "stale": [], "recovery": [], "landings": [], "uncut": [], "requests": 3, "measurements": {"classes": [], "unfinished": 0, "unparsed": 0, "since": null, "as_of": "<date>"}}
 exit 0
 ```
 
