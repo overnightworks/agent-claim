@@ -45,6 +45,7 @@ from cli_fixtures import (
     _real_git,
     _set_agent_identity_env,
     arrange_scope_width,
+    stub_board_config_tracked,
 )
 from github_fixtures import LANDING_BRANCH, WORK_ITEM_ISSUE
 
@@ -5350,7 +5351,7 @@ def _stub_board_config_tracked(monkeypatch: pytest.MonkeyPatch) -> None:
     the untracked/ignored refusal is its own axis from `versioned_paths()`'s
     scope-width listing above, so a scope-width fixture fixing one never has
     to carry the other. A test proving the refusal itself overrides this."""
-    monkeypatch.setattr(checkout, "path_is_tracked", lambda _path: True)
+    stub_board_config_tracked(monkeypatch)
 
 
 @pytest.fixture(autouse=True)

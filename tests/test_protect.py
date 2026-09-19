@@ -24,6 +24,7 @@ from cli_fixtures import (
     _forbid_protect_git_github_and_identity,
     _patch_command,
     _set_agent_identity_env,
+    stub_board_config_tracked,
 )
 
 from agent_coordination import board, checkout, protocol, store
@@ -37,7 +38,7 @@ def _stub_board_config_tracked(monkeypatch: pytest.MonkeyPatch) -> None:
     #315): `_isolate_protect_home`'s `work` directory is never a real git
     checkout, so a real `git ls-files` check would otherwise always read
     "not tracked" here. A test proving the refusal itself overrides this."""
-    monkeypatch.setattr(checkout, "path_is_tracked", lambda _path: True)
+    stub_board_config_tracked(monkeypatch)
 
 
 def _isolate_protect_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[Path, Path]:

@@ -25,7 +25,6 @@ from agent_coordination.protocol import ClaimError, ClaimRequest
 _LIVE_VERSIONED_PATHS = checkout.versioned_paths
 _LIVE_TRUNK_LANDINGS = checkout.trunk_landings
 _LIVE_REMOTE_URL = checkout.remote_url
-_BOARD_CONFIG_PATH = board.CONFIG_PATH.as_posix()
 
 
 def test_origin_remote_url_reads_the_git_config(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -468,7 +467,9 @@ def test_versioned_paths_reads_nul_terminated_ls_files_without_stripping(
     [
         pytest.param(_LIVE_VERSIONED_PATHS, id="versioned-paths"),
         pytest.param(checkout.origin_remote_url, id="origin-remote-url"),
-        pytest.param(lambda: checkout.path_is_tracked(_BOARD_CONFIG_PATH), id="path-is-tracked"),
+        pytest.param(
+            lambda: checkout.path_is_tracked(board.CONFIG_PATH.as_posix()), id="path-is-tracked"
+        ),
     ],
 )
 @pytest.mark.parametrize(
@@ -508,9 +509,24 @@ def test_checkout_git_calls_fail_loud_when_git_is_missing_or_times_out(
         git_call()
 
 
-def test_versioned_paths_fails_loud_on_a_nonzero_git_exit(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    "git_call",
+    [
+        pytest.param(_LIVE_VERSIONED_PATHS, id="versioned-paths"),
+        pytest.param(
+            lambda: checkout.path_is_tracked(board.CONFIG_PATH.as_posix()), id="path-is-tracked"
+        ),
+    ],
+)
+def test_checkout_git_calls_fail_loud_on_a_nonzero_git_exit(
+    monkeypatch: pytest.MonkeyPatch, git_call: Callable[[], object]
 ) -> None:
+    """`versioned_paths` and `path_is_tracked` both translate a real git
+    failure exit -- 128 here, outside a git repository -- to the same
+    `ClaimError` detail (issue #315 review): `path_is_tracked`'s own exit-1
+    "not tracked" reading is proven separately by
+    `test_path_is_tracked_reads_the_git_ls_files_exit_status`."""
+
     def failed(arguments, **_kwargs):
         return subprocess.CompletedProcess(
             arguments, 128, stdout=b"", stderr=b"fatal: not a git repository\n"
@@ -518,7 +534,7 @@ def test_versioned_paths_fails_loud_on_a_nonzero_git_exit(
 
     monkeypatch.setattr(subprocess, "run", failed)
     with pytest.raises(ClaimError, match="fatal: not a git repository"):
-        _LIVE_VERSIONED_PATHS()
+        git_call()
 
 
 @pytest.mark.parametrize(
@@ -534,6 +550,7 @@ def test_path_is_tracked_reads_the_git_ls_files_exit_status(
     """`git ls-files --error-unmatch` exits 0 for a path git tracks and 1
     for any path it does not -- absent, merely untracked, and ignored alike
     (issue #315): the caller never has to tell those apart."""
+    board_config_path = board.CONFIG_PATH.as_posix()
     observed: list[list[str]] = []
 
     def run(arguments, **_kwargs):
@@ -542,31 +559,12 @@ def test_path_is_tracked_reads_the_git_ls_files_exit_status(
 
     monkeypatch.setattr(subprocess, "run", run)
 
-    assert checkout.path_is_tracked(_BOARD_CONFIG_PATH) is expected
-    assert observed == [["git", "ls-files", "--error-unmatch", "--", _BOARD_CONFIG_PATH]]
-
-
-def test_path_is_tracked_fails_loud_on_a_git_failure_exit(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Only exit 1 means "not tracked" for `git ls-files --error-unmatch`
-    (issue #315 review): any other nonzero exit -- e.g. 128 outside a git
-    repository -- is a real git failure, matching `versioned_paths`'s
-    handling in this module, and must raise rather than silently read back
-    as an untrusted pin."""
-
-    def failed(arguments, **_kwargs):
-        return subprocess.CompletedProcess(
-            arguments, 128, stdout=b"", stderr=b"fatal: not a git repository\n"
-        )
-
-    monkeypatch.setattr(subprocess, "run", failed)
-    with pytest.raises(ClaimError, match="fatal: not a git repository"):
-        checkout.path_is_tracked(_BOARD_CONFIG_PATH)
+    assert checkout.path_is_tracked(board_config_path) is expected
+    assert observed == [["git", "ls-files", "--error-unmatch", "--", board_config_path]]
 
 
 def _untracked_board_config(repository: Path) -> None:
-    config = repository / _BOARD_CONFIG_PATH
+    config = repository / board.CONFIG_PATH.as_posix()
     config.parent.mkdir(parents=True, exist_ok=True)
     config.write_text("version = 1\n")
 
@@ -584,14 +582,14 @@ def _ignored_board_config(repository: Path) -> None:
 
 def _tracked_board_config(repository: Path) -> None:
     _untracked_board_config(repository)
-    _real_git(repository, "add", _BOARD_CONFIG_PATH)
+    _real_git(repository, "add", board.CONFIG_PATH.as_posix())
     _real_git(repository, "commit", "-q", "-m", "add board config")
 
 
 def _tracked_but_ignored_board_config(repository: Path) -> None:
     _write_gitignore_for_dot_directories(repository)
     _untracked_board_config(repository)
-    _real_git(repository, "add", "-f", _BOARD_CONFIG_PATH)
+    _real_git(repository, "add", "-f", board.CONFIG_PATH.as_posix())
     _real_git(repository, "commit", "-q", "-m", "add board config despite ignore")
 
 
@@ -623,7 +621,7 @@ def test_path_is_tracked_reads_real_git_index_and_ignore_state(
     setup(repository)
     monkeypatch.chdir(repository)
 
-    assert checkout.path_is_tracked(_BOARD_CONFIG_PATH) is expected
+    assert checkout.path_is_tracked(board.CONFIG_PATH.as_posix()) is expected
 
 
 def _fake_trunk_log_record(*fields: str) -> str:

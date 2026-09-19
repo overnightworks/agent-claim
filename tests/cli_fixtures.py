@@ -1,9 +1,10 @@
 """CLI-boundary test scaffolding shared by `tests/test_cli.py` and the
 owner test files split from it (`tests/test_checkout.py`,
-`tests/test_protect.py`): real and faked `git` process helpers, agent-identity
-env setup, and the "this boundary must not be reached" forbid-helpers. All
-three import this module directly; pytest's rootless collection puts
-`tests/` on `sys.path`, so a plain `import cli_fixtures` resolves here."""
+`tests/test_protect.py`, `tests/test_store.py`): real and faked `git`
+process helpers, agent-identity env setup, and the "this boundary must not
+be reached" forbid-helpers. All four import this module directly; pytest's
+rootless collection puts `tests/` on `sys.path`, so a plain
+`import cli_fixtures` resolves here."""
 
 from __future__ import annotations
 
@@ -23,6 +24,23 @@ def _real_git(repository: Path, *arguments: str) -> subprocess.CompletedProcess[
     return subprocess.run(
         ["git", *arguments], cwd=repository, check=True, capture_output=True, text=True
     )
+
+
+def stub_board_config_tracked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every store-command test reads a tracked `board.toml` by default
+    (issue #315), whichever of `test_cli.py`'s faked worktree, `test_protect.py`'s
+    non-git `_isolate_protect_home` directory, or `test_store.py`'s real
+    scratch checkout it runs against -- none of them actually `git add`s the
+    file, so a real `git ls-files` check would otherwise always read "not
+    tracked" here. The untracked/ignored refusal is its own axis, proven by
+    `checkout.path_is_tracked`'s own tests in `test_checkout.py` and by
+    `test_cli.py`'s `test_untracked_board_config_refuses_every_store_command_by_name`,
+    which overrides this stub back to `False`. Each caller wraps this in its
+    own `@pytest.fixture(autouse=True)` (never placed here itself, matching
+    `conftest.py`'s "everything but git-toplevel isolation stays local to its
+    test module") so every test file states in its own body that it reads a
+    tracked board.toml by default."""
+    monkeypatch.setattr(checkout, "path_is_tracked", lambda _path: True)
 
 
 def _git_checkout(
