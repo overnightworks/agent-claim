@@ -582,9 +582,11 @@ item or a real blocker.
 `board` also shows an `UNCUT` section naming, per item, the `[[slice]]`
 entries still waiting to be dispatched, by index, as `#<item>: rows N, N, …
 uncut`. In `board --json` the top-level `uncut` list carries `item` and `rows`,
-a list of `{"index", "title"}` objects. This is a finding, never a status
-column: `cut` removes an entry the moment it dispatches it, so a dispatched
-slice simply leaves the list.
+a list of `{"index", "title"}` objects, plus `"scope"` (issue #331) — the
+row's own canonical, sorted array — when the row carries one; a row with none
+omits the key entirely, never `"scope": null`. This is a finding, never a
+status column: `cut` removes an entry the moment it dispatches it, so a
+dispatched slice simply leaves the list.
 
 `board` prints a `RECOVERY (close or re-project)` section after `STALE`,
 followed by the `CONTAINERS` and `UNCUT` sections above; `next` names recovery

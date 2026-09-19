@@ -1797,9 +1797,61 @@ def test_board_json_and_render_report_an_uncut_slice_entry() -> None:
     assert projected.uncut == (board.UncutSlices(160, (board.SliceRow(1, "Undispatched slice"),)),)
     payload = json.loads(board.board_json(projected))
     assert payload["uncut"] == [
-        {"item": 160, "rows": [{"index": 1, "title": "Undispatched slice", "scope": None}]}
+        {"item": 160, "rows": [{"index": 1, "title": "Undispatched slice"}]}
     ]
     assert "UNCUT\n#160: rows 1 uncut" in board.render(projected)
+
+
+def test_board_json_carries_a_scoped_uncut_slice_row_canonically() -> None:
+    """R2 (issue #331 review): the only prior `board --json` uncut-row
+    coverage passed `scope: null` throughout, so a `[[slice]]` row that
+    carries its own `scope = [...]` had never been driven through parse ->
+    board projection -> JSON. Here it survives as that row's canonical
+    (sorted, deduplicated) array; a row without one still omits the key
+    entirely -- the public shape before this lane, proven by the sibling
+    test above."""
+    container = board.Issue(
+        160,
+        "Container",
+        (),
+        complete_contract(
+            "Cut it.",
+            slice=[
+                {
+                    "index": 1,
+                    "title": "Undispatched slice",
+                    "scope": ["src/widget.py", "docs/plan.md"],
+                }
+            ],
+        ),
+        "2026-08-20T00:00:00Z",
+        "2026-08-20T00:00:00Z",
+        kind=board.ItemKind.CONTAINER,
+        children_closed=0,
+        children_total=0,
+    )
+    projected = projected_board(
+        (container,), (), (), (), board.BoardConfig(), now=datetime(2026, 8, 21, tzinfo=UTC)
+    )
+
+    assert projected.uncut == (
+        board.UncutSlices(
+            160, (board.SliceRow(1, "Undispatched slice", ("docs/plan.md", "src/widget.py")),)
+        ),
+    )
+    payload = json.loads(board.board_json(projected))
+    assert payload["uncut"] == [
+        {
+            "item": 160,
+            "rows": [
+                {
+                    "index": 1,
+                    "title": "Undispatched slice",
+                    "scope": ["docs/plan.md", "src/widget.py"],
+                }
+            ],
+        }
+    ]
 
 
 def test_render_names_an_uncut_slice_by_the_state_ref_id_under_the_pin() -> None:
@@ -1869,9 +1921,9 @@ def test_board_json_and_render_name_several_uncut_rows_by_index() -> None:
         {
             "item": 122,
             "rows": [
-                {"index": 5, "title": "Fifth slice", "scope": None},
-                {"index": 6, "title": "Sixth slice", "scope": None},
-                {"index": 7, "title": "Seventh slice", "scope": None},
+                {"index": 5, "title": "Fifth slice"},
+                {"index": 6, "title": "Sixth slice"},
+                {"index": 7, "title": "Seventh slice"},
             ],
         }
     ]

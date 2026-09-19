@@ -777,11 +777,13 @@ class ParsedBody:
     expectation_progress: ExpectationProgress
     ruling_date: date | None
     frozen_trigger: str | None
-    # The block's own top-level `scope = [...]` (issue #331), canonicalized
-    # like `claim`'s scope -- sorted, deduplicated, every entry validated by
-    # `protocol._valid_scope`. `None` when the block carries no `scope` key
-    # at all, never for an empty one (`_block_scope_defects` refuses that
-    # before this projection is ever built).
+    # The block's own top-level `scope = [...]` (issue #331), exactly the
+    # canonical (sorted, deduplicated) tuple `protocol._valid_scope` returns
+    # -- the same function a live claim's own scope passes through, so the
+    # two stay comparable regardless of typed order. `None` when the block
+    # carries no `scope` key at all, never for an empty one
+    # (`_block_scope_defects` refuses that before this projection is ever
+    # built).
     scope: tuple[str, ...] | None
     slices: tuple[SliceRow, ...]
     read_state: BodyReadState
@@ -937,13 +939,13 @@ def _block_scope_defects(data: dict[str, object]) -> list[ContractDefect]:
 
 
 def _canonical_scope(value: object) -> tuple[str, ...]:
-    """`value`'s validated scope entries, sorted -- the canonical order this
-    module renders and projects a `scope` list in, matching how `claim`
-    itself keeps a deduplicated scope (`protocol._valid_scope` already
-    refuses a duplicate, so sorting is the only reordering left to do).
-    Callable only once a schema check (`_block_scope_defects`,
+    """`value`'s validated scope entries, in `protocol._valid_scope`'s own
+    canonical (sorted, deduplicated) order -- the one scope normaliser a
+    live claim's own scope is built through too, so a body's projected
+    `scope` and a claim's recorded `scope` stay comparable as tuples
+    (issue #331). Callable only once a schema check (`_block_scope_defects`,
     `_block_slice_entry_defects`) has already proven `value` valid."""
-    return tuple(sorted(protocol._valid_scope(value)))
+    return protocol._valid_scope(value)
 
 
 def _record_timestamp_defect(value: object, key_name: str) -> ContractDefect | None:
@@ -2635,6 +2637,18 @@ def _project_blocker_references(entry: dict[str, object], key: str, repository: 
     ]
 
 
+def _project_uncut_row_scope(finding: dict[str, object]) -> None:
+    """Drop a `None` `scope` from one uncut row's JSON dict rather than
+    printing it (issue #331): the public shape before this lane was
+    `{"index", "title"}` with no third key, and `board --json` still owes
+    that to a row that names no scope of its own -- only a row that
+    actually carries one gains the extra `"scope"` key, canonical and
+    non-empty."""
+    for row in cast(_JsonRows, finding["rows"]):
+        if row["scope"] is None:
+            del row["scope"]
+
+
 def board_json(board: Board) -> str:
     payload = asdict(board)
     repository = payload.pop("repository")
@@ -2650,6 +2664,8 @@ def board_json(board: Board) -> str:
             if container is not None:
                 for child in container["open_children"]:
                     _project_blocker_references(child, "blocked_by", repository)
+    for finding in cast(_JsonRows, payload["uncut"]):
+        _project_uncut_row_scope(finding)
     return json.dumps(payload, default=lambda value: value.value)
 
 

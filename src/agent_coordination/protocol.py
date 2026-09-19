@@ -238,6 +238,14 @@ def _scope_list_entries(scope: object) -> list[str]:
 
 
 def _valid_scope(scope: object) -> tuple[str, ...]:
+    """The one canonical scope form (issue #331): sorted, deduplicated,
+    every entry a validated repository-relative path. Every claim's scope
+    passes through here at creation (`cli._request`) and at rescope
+    (`_combined_scope`), so a live claim's scope is always already this
+    exact form; `board._canonical_scope` calls this same function to
+    project a body's own `scope = [...]`, rather than sorting a second
+    time, so the two stay comparable as tuples regardless of the order
+    either was typed in."""
     result: list[str] = []
     for path in _scope_list_entries(scope):
         if len(path) > MAX_SCOPE_PATH_LENGTH or "\\" in path or _has_control_character(path):
@@ -259,7 +267,7 @@ def _valid_scope(scope: object) -> tuple[str, ...]:
         result.append(path)
     if len(set(result)) != len(result):
         raise InvalidClaimMarkerError("claim scope contains duplicate paths")
-    return tuple(result)
+    return tuple(sorted(result))
 
 
 class WideScopeReason(StrEnum):
