@@ -1,7 +1,0 @@
-claim_id = "5e904cbdf82d47c28df56a82364bb18e"
-agent = "Claude head (coordinator)"
-role = "builder"
-base = "6da259b6fa45c32f0a9d26306d8195989bf9f06e"
-branch = "claude/issue-358-spec-workspace"
-scope = ["scripts/spec_coverage_ratchet.txt", "specs/workspace.spec.md"]
-opened_commit = "26964f9e2f78adda36e9242589d9942eb7e1934b"
