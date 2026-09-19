@@ -654,12 +654,24 @@ def _percent_encode_branch(branch: str) -> str:
 
 
 def _percent_decode_branch(encoded: str) -> str:
+    """Invert `_percent_encode_branch`, refusing what it would never have
+    produced (issue #237 finding 23): a canonically encoded key never
+    carries a literal byte outside `_LANE_KEY_UNRESERVED`, so decode enforces
+    that same invariant instead of accepting any unescaped character -- one
+    validator owns "which bytes may appear literally", shared by both
+    directions of the codec.
+    """
     raw = bytearray()
     index = 0
     while index < len(encoded):
         character = encoded[index]
         if character != "%":
-            raw.extend(character.encode("utf-8"))
+            character_bytes = character.encode("utf-8")
+            if len(character_bytes) != 1 or character_bytes[0] not in _LANE_KEY_UNRESERVED:
+                raise MalformedStateTreeError(
+                    f"claim key has an unescaped reserved character: {encoded!r}"
+                )
+            raw.extend(character_bytes)
             index += 1
             continue
         hex_digits = encoded[index + 1 : index + 3]

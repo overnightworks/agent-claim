@@ -106,8 +106,8 @@ _LS_REMOTE_EXIT_NO_MATCH = 2
 _MAX_PUSH_ATTEMPTS = 8
 
 # Retry exhaustion for a live claim/rescope/release transition (criterion 5):
-# 32 attempts, then `ClaimUnavailableError("... moved 32 times; retry the
-# command")` -- never "held by X" for a different-key loser.
+# 32 attempts, then `_retry_exhaustion_error` -- never "held by X" for a
+# different-key loser.
 _MAX_TRANSITION_ATTEMPTS = 32
 
 # The fallback detail every git-transport failure message falls back to when
@@ -116,6 +116,19 @@ _UNKNOWN_GIT_FAILURE = "unknown git failure"
 
 _LINEAGE_STAMP_DIRECTORY = "aco"
 _LINEAGE_STAMP_FILENAME = "last-oid"
+
+# Anchors a freshly fetched tip so it survives `git gc --prune=now` (issue
+# #237 finding 25): `_fetch_to_fetch_head` deliberately lands the fetched
+# commits nowhere but `FETCH_HEAD`, which is not a ref and roots nothing,
+# so a prune run against this checkout right after a fetch collects them --
+# reproduced in the audit, and again by
+# `test_claim_ages_survives_a_gc_prune_of_the_just_fetched_history`.
+# `refs/worktree/*` is git's own per-worktree ref namespace (never shared
+# across linked worktrees), the same worktree-private guarantee
+# `_lineage_stamp_path` already relies on, so anchoring here never touches
+# the shared local namespace `_fetch_to_fetch_head`'s own docstring
+# reserves for `STATE_REF` alone.
+_FETCH_ANCHOR_REF = "refs/worktree/aco/state"
 
 
 class PushTransport(Protocol):
@@ -328,6 +341,17 @@ def _read_fetch_head(worktree: Path) -> ObjectId:
     first_line = fetch_head.read_text().splitlines()[0]
     oid, _, _rest = first_line.partition("\t")
     return ObjectId(oid)
+
+
+def _anchor_fetched_tip(worktree: Path, tip: ObjectId) -> None:
+    """Root `tip` in this worktree's own per-worktree ref namespace right
+    after fetching it, so a `git gc --prune=now` run against this checkout
+    cannot collect the objects `FETCH_HEAD` alone leaves unreachable (issue
+    #237 finding 25)."""
+    result = _run_git(worktree, ["update-ref", _FETCH_ANCHOR_REF, str(tip)])
+    if result.exit_status != 0:
+        detail = result.stderr.decode().strip() or _UNKNOWN_GIT_FAILURE
+        raise ClaimError(f"cannot anchor fetched tip {tip}: {detail}")
 
 
 def _tree_oid(worktree: Path, tip: ObjectId) -> ObjectId:
@@ -603,9 +627,11 @@ def fetch_state(*, worktree: Path, remote: str = DEFAULT_CANONICAL_REMOTE) -> Cl
     """Read `refs/aco/state` from `remote` without ever checking it out.
 
     `EmptyState` only for a proven-absent ref (`ls-remote` exit 2). A present
-    ref is fetched to this worktree's own `FETCH_HEAD` (never a local ref),
-    parsed via plumbing, lineage-checked against this worktree's own last
-    observation, and re-stamped.
+    ref is fetched to this worktree's own `FETCH_HEAD` (never the shared
+    `STATE_REF` name locally), anchored in this worktree's own per-worktree
+    ref namespace so it survives a `git gc --prune=now` (issue #237 finding
+    25), parsed via plumbing, lineage-checked against this worktree's own
+    last observation, and re-stamped.
     """
     probed = _ls_remote_state(worktree, remote)
     if probed is None:
@@ -618,6 +644,7 @@ def fetch_state(*, worktree: Path, remote: str = DEFAULT_CANONICAL_REMOTE) -> Cl
         return EMPTY_STATE
     _fetch_to_fetch_head(worktree, remote)
     tip = _read_fetch_head(worktree)
+    _anchor_fetched_tip(worktree, tip)
     state = _parse_state_tree(worktree, tip)
     _check_lineage(worktree, tip)
     _write_lineage_stamp(worktree, tip)
@@ -677,6 +704,66 @@ class PendingCommit:
     operation_id: str
 
 
+def _pluralize_times(count: int) -> str:
+    return "time" if count == 1 else "times"
+
+
+def _advance_tip_retry(
+    *,
+    previous_tip: ObjectId | None,
+    refreshed_tip: ObjectId | None,
+    moves: int,
+    stationary_since_last_move: int,
+) -> tuple[int, int]:
+    """One rejected attempt's move/stationary tally, the bookkeeping shared
+    by `push_tree` and `commit_transition`: a genuine tip move (a concurrent
+    writer landing first) resets the stationary count, while finding the ref
+    exactly where the previous attempt left it (the push itself never
+    landed) extends it -- the split `_retry_exhaustion_error` needs to name
+    the real cause.
+    """
+    if refreshed_tip != previous_tip:
+        return moves + 1, 0
+    return moves, stationary_since_last_move + 1
+
+
+def _retry_exhaustion_error(
+    *, remote: str, attempts: int, moves: int, stationary_since_last_move: int
+) -> ClaimUnavailableError:
+    """The real cause behind exhausting every retry attempt (issue #237
+    finding 22, corrected for the mixed case): each rejected attempt either
+    observed the ref land on a genuinely new tip (a concurrent writer landing
+    first) or found it exactly where the previous attempt left it (the push
+    itself never landed) -- a real run can do some of each, so `moves`
+    counts only the former and `stationary_since_last_move` counts the
+    latter, since the last such move. Reporting "moved N times" whenever
+    more than one tip was ever observed, no matter how many attempts since
+    the last move sat stuck, blamed a race for exhaustion a stuck lock
+    actually caused. Naming the wrong cause sends an operator chasing
+    concurrent writers that were never there; the one owner of this
+    diagnosis is here, for both `push_tree` and `commit_transition`.
+    """
+    if moves == 0:
+        return ClaimUnavailableError(
+            f"{STATE_REF} rejected {attempts} pushes to {remote} without the ref ever "
+            "moving: a stale lock or missing push rights, not a race -- check "
+            f"{remote}'s {STATE_REF}.lock (delete it if stale) and push permissions; if "
+            f"the ref itself is stuck, `git update-ref -d {STATE_REF}` on {remote} clears it"
+        )
+    moved_report = f"{STATE_REF} moved {moves} {_pluralize_times(moves)} while retrying"
+    if stationary_since_last_move == 0:
+        return ClaimUnavailableError(
+            f"{moved_report}: another writer on {remote} keeps landing first; retry the command"
+        )
+    return ClaimUnavailableError(
+        f"{moved_report}, then rejected {stationary_since_last_move} pushes to {remote} "
+        "without the ref moving after it last moved: another writer landed first, then a "
+        "stale lock or missing push rights took over -- check "
+        f"{remote}'s {STATE_REF}.lock (delete it if stale) and push permissions; retrying "
+        "the command only helps once that clears"
+    )
+
+
 def push_tree(
     *,
     worktree: Path,
@@ -693,6 +780,8 @@ def push_tree(
     (criterion 3) -- never re-applying it a second time.
     """
     parent = observed.tip
+    moves = 0
+    stationary_since_last_move = 0
     for _attempt in range(_MAX_PUSH_ATTEMPTS):
         new_commit = _commit_tree(
             worktree, tree_oid=pending.tree_oid, parent=parent, message=pending.message
@@ -707,11 +796,22 @@ def push_tree(
                 )
                 if found is not None:
                     return OperationAlreadyApplied(tip=refreshed.tip)
+            moves, stationary_since_last_move = _advance_tip_retry(
+                previous_tip=parent,
+                refreshed_tip=refreshed.tip,
+                moves=moves,
+                stationary_since_last_move=stationary_since_last_move,
+            )
             parent = refreshed.tip
             continue
         _write_lineage_stamp(worktree, new_commit)
         return new_commit
-    raise ClaimUnavailableError(f"{STATE_REF} moved {_MAX_PUSH_ATTEMPTS} times; retry the command")
+    raise _retry_exhaustion_error(
+        remote=remote,
+        attempts=_MAX_PUSH_ATTEMPTS,
+        moves=moves,
+        stationary_since_last_move=stationary_since_last_move,
+    )
 
 
 def hash_blob(worktree: Path, content: bytes) -> ObjectId:
@@ -983,6 +1083,8 @@ def commit_transition(
     observed = fetch_state(worktree=worktree, remote=remote)
     if observed.tip is None:
         raise ClaimError(MISSING_STATE_REF)
+    moves = 0
+    stationary_since_last_move = 0
     for _attempt in range(_MAX_TRANSITION_ATTEMPTS):
         new_state = apply(observed, intent)
         new_tree = _write_incremental_state_tree(worktree, observed=observed, new_state=new_state)
@@ -1005,6 +1107,12 @@ def commit_transition(
                 )
                 if found is not None:
                     return refreshed
+            moves, stationary_since_last_move = _advance_tip_retry(
+                previous_tip=observed.tip,
+                refreshed_tip=refreshed.tip,
+                moves=moves,
+                stationary_since_last_move=stationary_since_last_move,
+            )
             observed = refreshed
             continue
         _write_lineage_stamp(worktree, new_commit)
@@ -1015,8 +1123,11 @@ def commit_transition(
             resources=new_state.resources,
             items=new_state.items,
         )
-    raise ClaimUnavailableError(
-        f"{STATE_REF} moved {_MAX_TRANSITION_ATTEMPTS} times; retry the command"
+    raise _retry_exhaustion_error(
+        remote=remote,
+        attempts=_MAX_TRANSITION_ATTEMPTS,
+        moves=moves,
+        stationary_since_last_move=stationary_since_last_move,
     )
 
 
