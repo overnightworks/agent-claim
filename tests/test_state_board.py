@@ -1870,7 +1870,7 @@ class TestCliStateRefForge:
                 store.commit_transition(
                     worktree=worktree,
                     remote=remote_url,
-                    subject="competing container write",
+                    subject=store.TransitionSubject("competing container write"),
                     intent=competing_intent,
                 )
             return result
@@ -2140,6 +2140,50 @@ class TestCliStateRefForge:
         assert state.tip is not None
         stored = store.read_item_files(worktree, state.tip)[f"{printed}.md"].decode()
         assert board.locate_agent_claim_block(stored).data["scope"] == ["src/a.py", "src/b.py"]
+
+    def test_item_new_size_writes_the_top_level_field(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+    ) -> None:
+        """Issue #357 proof 2: `item new --size M` writes the block's own
+        top-level `size = "M"` -- a plain block field, never nested under
+        `[record]` (a `state-ref`-only table BODY-15 refuses under
+        `github`), so the same write reaches a `github`-stored item too."""
+        self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, _item_files())
+
+        status = issue_claim.main(["item", "new", "--title", "Sized Item", "--size", "M"])
+
+        assert status == 0
+        printed = capsys.readouterr().out.strip()
+        remote_url = f"file://{bare_remote}"
+        state = store.fetch_state(worktree=worktree, remote=remote_url)
+        assert state.tip is not None
+        stored = store.read_item_files(worktree, state.tip)[f"{printed}.md"].decode()
+        assert board.locate_agent_claim_block(stored).data["size"] == "M"
+
+    def test_item_new_size_refuses_an_invalid_value_before_any_write(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+    ) -> None:
+        self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, _item_files())
+
+        with pytest.raises(SystemExit) as exited:
+            issue_claim.main(["item", "new", "--title", "Bad Size", "--size", "XL"])
+
+        assert exited.value.code == 2
+        assert "invalid choice" in capsys.readouterr().err
+        remote_url = f"file://{bare_remote}"
+        state = store.fetch_state(worktree=worktree, remote=remote_url)
+        assert state.tip is not None
+        assert set(store.read_item_files(worktree, state.tip)) == set(_item_files())
 
     def test_item_new_kind_container_writes_the_container_skeleton(
         self,
@@ -2470,6 +2514,35 @@ class TestCliStateRefForge:
         assert after_record.state == before_record.state
         assert after_record.updated_at != before_record.updated_at
         assert after_record.updated_at.startswith(datetime.now(UTC).date().isoformat())
+
+    def test_item_edit_size_writes_only_the_top_level_field(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+    ) -> None:
+        """Issue #357 proof 2: `item edit --size L` writes only the block's
+        own top-level `size = "L"`, no stdin read, every other byte
+        (including `[record]`) untouched -- unlike the whole-body `item
+        edit` above."""
+        self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, _item_files())
+        shown = issue_claim.main(["item", "show", str(CHILD_A_NUMBER), "--json"])
+        assert shown == 0
+        before_body = json.loads(capsys.readouterr().out)["body"]
+
+        edited = issue_claim.main(["item", "edit", str(CHILD_A_NUMBER), "--size", "L"])
+
+        assert edited == 0
+        assert capsys.readouterr().out.strip() == f"EDITED #{CHILD_A_NUMBER} size=L"
+        fresh = issue_claim.main(["item", "show", str(CHILD_A_NUMBER), "--json"])
+        assert fresh == 0
+        after_body = json.loads(capsys.readouterr().out)["body"]
+        assert board.locate_agent_claim_block(after_body).data["size"] == "L"
+        before_record = _decoded_record(before_body, CHILD_A_ID)
+        after_record = _decoded_record(after_body, CHILD_A_ID)
+        assert replace(after_record, updated_at=before_record.updated_at) == before_record
 
     def test_item_edit_json_prints_the_item_number_and_fresh_oid(
         self,

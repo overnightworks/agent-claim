@@ -80,6 +80,22 @@ class LaneIdentity:
 ClaimIdentity = IssueIdentity | LaneIdentity
 
 
+def transition_item_identifier(identity: ClaimIdentity, branch: str) -> str:
+    """The bare work item a claim/rescope/release transition names -- an
+    issue number as text, or a lane's own branch (issue #357 R1): computed
+    once from the identity/branch every caller already has, and stored
+    verbatim in the commit's own `item:` trailer (`store._transition_message`)
+    for `claim_lifecycle` to read back unparsed, matching
+    `metrics.LaneEvent.item`'s own bare shape -- never a second grammar a
+    reader has to reconstruct from the commit's human-prose subject line.
+    `cli._transition_subject` also reads this for the identifier half of its
+    own `"claim issue 42"`/`"rescope lane docs/x"` prose.
+    """
+    if isinstance(identity, LaneIdentity):
+        return branch
+    return str(identity.issue)
+
+
 @dataclass(frozen=True)
 class ResourceHold:
     """One named scarce value held by a live claim until land or release."""

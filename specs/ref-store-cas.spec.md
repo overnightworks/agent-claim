@@ -42,7 +42,23 @@ exit `2`, exactly as `specs/claim-record.spec.md` already documents.
 - [ ] [CAS-03] A claim, rescope, release, or item write before `aco bootstrap` has created the ref refuses `the claim state ref does not exist yet; run bootstrap before claim, rescope, release, or item write`.
 - [ ] [CAS-04] An `ls-remote` exit code that is neither `0` nor `2` (auth/transport failure) refuses `cannot reach <remote> refs/aco/state: auth or transport failure (ls-remote exited <code>): <detail>`.
 - [ ] [CAS-05] A present ref whose own `fetch` fails refuses `cannot fetch <remote> refs/aco/state: <detail>`.
-- [ ] [CAS-06] Any transition's landed commit carries `operation_id: <uuid>`, either `claim_id: <id>` or `item_id: <id>`, and `intent: claim|rescope|release|item_write`, readable via `git log --format=%B`.
+- [ ] [CAS-06] Any transition's landed commit carries `operation_id: <uuid>`, `intent: claim|rescope|release|item_write|landing`, and `claim_id`+`item`, `item_id`, or a landing's `item_id`+`claim_id`+`item` (below).
+
+  ```
+  operation_id: <uuid>
+  claim_id: <id>
+  item: <bare identifier>
+  intent: claim
+  ```
+  an item write carries `item_id: <id>` and no `item:` line instead. A
+  landing (issue #359) carries both ids and `item:` together:
+  ```
+  operation_id: <uuid>
+  item_id: <id>
+  claim_id: <id>
+  item: <bare identifier>
+  intent: landing
+  ```
 
 ## Fetch anchor and lineage stamp, one per worktree
 

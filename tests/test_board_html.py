@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
@@ -20,7 +20,7 @@ from board_fixtures import (
     proposed_expectation,
 )
 
-from agent_coordination import board, board_html, items
+from agent_coordination import board, board_html, items, metrics
 
 GOLDEN_PATH = Path(__file__).parent / "board_html_golden.html"
 
@@ -37,7 +37,54 @@ def _fixture_page(
     (#104) whose merged pull request (#556) only board.py's own private
     "lands" convention resolves -- `_closing_pull_request`'s honest
     residual. `lane_blocked` defaults to `False` so the GitHub golden page
-    stays untouched; only the state-ref proof below turns it on."""
+    stays untouched; only the state-ref proof below turns it on. The
+    container (#100) also carries a top-level `size = "M"` (issue #357),
+    measured into a real (non-weak) estimate by its own one completed lane
+    plus two more completed `M` lanes on items this fixture never lists at
+    all (#997, #998) -- their size read back through `closed_item_sizes`
+    (R2's closed-item join) rather than from `container_issue`'s own body,
+    proving a class is never blind to an item that has since closed; a
+    fourth, still-open lane on another unlisted item (#999) shows in the
+    Messungen section as "1 Lanes ohne Ende" without ever touching a size
+    class."""
+    lane_events = (
+        metrics.LaneEvent(
+            item="100",
+            size=None,
+            container=None,
+            claimed_at=datetime(2026, 8, 14, tzinfo=UTC),
+            released_at=datetime(2026, 8, 14, 5, tzinfo=UTC),
+            landed_at=None,
+            rescopes=1,
+        ),
+        metrics.LaneEvent(
+            item="997",
+            size=None,
+            container=None,
+            claimed_at=datetime(2026, 8, 10, tzinfo=UTC),
+            released_at=datetime(2026, 8, 10, 4, tzinfo=UTC),
+            landed_at=None,
+            rescopes=0,
+        ),
+        metrics.LaneEvent(
+            item="998",
+            size=None,
+            container=None,
+            claimed_at=datetime(2026, 8, 12, tzinfo=UTC),
+            released_at=datetime(2026, 8, 12, 6, tzinfo=UTC),
+            landed_at=None,
+            rescopes=0,
+        ),
+        metrics.LaneEvent(
+            item="999",
+            size=None,
+            container=None,
+            claimed_at=datetime(2026, 8, 20, tzinfo=UTC),
+            released_at=None,
+            landed_at=None,
+            rescopes=0,
+        ),
+    )
     child_dependency = block_dependency(50)
     open_child = board_issue(
         101,
@@ -51,7 +98,7 @@ def _fixture_page(
         blocked_by_count=1,
     )
     container_issue = replace(
-        board_issue(100, "Sammelitem", complete_contract("Kinder abarbeiten.")),
+        board_issue(100, "Sammelitem", complete_contract("Kinder abarbeiten.", size="M")),
         kind=board.ItemKind.CONTAINER,
         children_closed=1,
         children_total=2,
@@ -99,6 +146,8 @@ def _fixture_page(
         children={100: (board.ChildItem(101, board.ChildState.OPEN),)},
         dependencies=dependencies,
         now=datetime(2026, 8, 21, tzinfo=UTC),
+        lane_events=lane_events,
+        closed_item_sizes={997: metrics.Size.MEDIUM, 998: metrics.Size.MEDIUM},
     )
     bodies = {
         issue.number: issue.body
@@ -120,6 +169,12 @@ def _fixture_page(
     return board_html.build_page(projected, sources)
 
 
+def _empty_measurements() -> board.Measurements:
+    return board.Measurements(
+        classes=(), unfinished=0, unparsed=0, since=None, as_of=date(2026, 8, 21)
+    )
+
+
 def _empty_page(*, landings_derivable: bool = True) -> board_html.BoardPage:
     return board_html.BoardPage(
         repository="acme/board",
@@ -129,6 +184,7 @@ def _empty_page(*, landings_derivable: bool = True) -> board_html.BoardPage:
         topics=(),
         landed=(),
         landings_derivable=landings_derivable,
+        measurements=_empty_measurements(),
     )
 
 
@@ -248,12 +304,8 @@ def test_css_never_sets_a_min_width_above_400px() -> None:
 
 
 def test_a_landed_item_with_no_resolved_pull_request_still_shows() -> None:
-    page = board_html.BoardPage(
-        repository="acme/board",
-        state_tip="",
-        cards=(),
-        lanes=(),
-        topics=(),
+    page = replace(
+        _empty_page(),
         landed=(
             board_html.LandedItem(
                 item=9,
@@ -262,7 +314,6 @@ def test_a_landed_item_with_no_resolved_pull_request_still_shows() -> None:
                 pull_request_title=None,
             ),
         ),
-        landings_derivable=True,
     )
     rendered = board_html.render(page)
     assert "#9 Unklar gemerged" in rendered
