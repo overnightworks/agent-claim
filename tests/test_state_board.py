@@ -1993,6 +1993,96 @@ class TestCliStateRefForge:
         after = store.fetch_state(worktree=worktree, remote=remote_url)
         assert after.tip == before.tip
 
+    def test_item_new_with_origin_writes_the_record_and_a_fresh_show_prints_it(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+    ) -> None:
+        """Issue #316 proof 1/2: `--origin gitlab#514` writes `record.origin`
+        straight into `items/<id>.md` over a real `file://` remote through
+        `main`, and a fresh `item show` (its own fetch, standing in for a
+        second process) prints it in the header; `claim` then runs on that
+        same item exactly as on any other (proof: `aco-xxxxxx` form, a live
+        claim record)."""
+        self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, _item_files())
+
+        status = issue_claim.main(
+            ["item", "new", "--title", "Bound to GitLab", "--origin", "gitlab#514"]
+        )
+
+        assert status == 0
+        printed = capsys.readouterr().out.strip()
+        assert items.ITEM_ID_PATTERN.fullmatch(printed)
+
+        remote_url = f"file://{bare_remote}"
+        state = store.fetch_state(worktree=worktree, remote=remote_url)
+        assert state.tip is not None
+        stored = store.read_item_files(worktree, state.tip)[f"{printed}.md"].decode()
+        assert _decoded_record(stored, printed).origin == "gitlab#514"
+
+        shown = issue_claim.main(["item", "show", printed])
+        assert shown == 0
+        header_line = capsys.readouterr().out.splitlines()[0]
+        assert header_line.endswith("· origin gitlab#514")
+
+        filled_body = _github_body(_Projection("Build it.", "Ship it.", "It ships."))
+        monkeypatch.setattr(sys, "stdin", io.StringIO(filled_body))
+        edited = issue_claim.main(["item", "edit", printed])
+        assert edited == 0
+        capsys.readouterr()
+
+        monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
+        monkeypatch.setattr(checkout, "_scope_directories", lambda paths: ())
+        monkeypatch.setattr(checkout, "versioned_paths", lambda: ("README",))
+        claimed = issue_claim.main(
+            [
+                "claim",
+                printed,
+                "--agent",
+                "Codex Sol",
+                "--role",
+                "builder",
+                "--base",
+                "a" * 40,
+                "--branch",
+                f"codex/issue-{items.item_number(printed)}-bound-to-gitlab",
+                "--scope",
+                "README",
+                "--claim-id",
+                "origin-claim",
+                "--out-of-order",
+                "proving claim works on an item carrying an origin",
+            ]
+        )
+        assert claimed == 0
+
+    def test_item_new_refuses_a_malformed_origin_before_any_write(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+    ) -> None:
+        """Issue #316 proof 2: an `--origin` that does not match `FORGE#N`
+        refuses with a sentence before `argparse` even reaches `item new`'s
+        own body, so nothing is fetched or pushed to the remote."""
+        self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, _item_files())
+        remote_url = f"file://{bare_remote}"
+        before = store.fetch_state(worktree=worktree, remote=remote_url)
+
+        status = issue_claim.main(
+            ["item", "new", "--title", "Bound to nothing", "--origin", "not-an-origin"]
+        )
+
+        assert status == 2
+        assert "is not an origin" in capsys.readouterr().err
+        after = store.fetch_state(worktree=worktree, remote=remote_url)
+        assert after.tip == before.tip
+
     def test_item_show_prints_the_header_and_body_byte_exact_for_a_closed_child(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -2021,7 +2111,9 @@ class TestCliStateRefForge:
 
         assert status == 0
         out = capsys.readouterr().out
-        header_line = f"{closed_id} · #{closed_number} · closed · parent {CONTAINER_ID}"
+        header_line = (
+            f"{closed_id} · #{closed_number} · closed · parent {CONTAINER_ID} · origin none"
+        )
         assert out == f"{header_line}\n{closed_body}"
 
     def test_item_show_refuses_an_unknown_id(

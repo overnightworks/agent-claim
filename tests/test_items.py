@@ -352,3 +352,31 @@ class TestRecordTable:
         table = items.record_table(minimal)
 
         assert set(table) == {"title", "state", "labels", "blocked_by", "created_at", "updated_at"}
+
+
+class TestParseOrigin:
+    @pytest.mark.parametrize(
+        "value",
+        [
+            pytest.param("gitlab#514", id="gitlab"),
+            pytest.param("github#1", id="single-digit"),
+            pytest.param("gitea-self-hosted#42", id="hyphenated-forge-name"),
+        ],
+    )
+    def test_parse_origin_accepts_forge_hash_number(self, value: str) -> None:
+        assert items.parse_origin(value) == value
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            pytest.param("gitlab", id="no-number"),
+            pytest.param("514", id="no-forge"),
+            pytest.param("GitLab#514", id="uppercase-forge"),
+            pytest.param("gitlab#0514", id="leading-zero"),
+            pytest.param("gitlab #514", id="embedded-space"),
+            pytest.param("", id="empty"),
+        ],
+    )
+    def test_parse_origin_refuses_a_malformed_value(self, value: str) -> None:
+        with pytest.raises(ClaimUnavailableError, match="is not an origin"):
+            items.parse_origin(value)

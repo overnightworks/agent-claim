@@ -100,13 +100,17 @@ class ItemReference:
     plain issue, so a caller that must tell the two apart (`check`)
     distributes on this single read instead of probing with `landing`, which
     fails unclassified for an issue number. A number that does not exist is
-    `MISSING` and no landing.
+    `MISSING` and no landing. `origin` is the foreign issue this item binds
+    to (`FORGE#N`, issue #316, parent #230): populated from `record.origin`
+    under `state-ref`, always `None` under `github` -- a GitHub issue is
+    never itself bound to another forge's issue.
     """
 
     state: ItemState
     title: str | None = None
     body: str | None = None
     is_landing: bool = False
+    origin: str | None = None
 
 
 @dataclass(frozen=True)

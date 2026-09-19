@@ -226,7 +226,9 @@ class StateRefBoard:
             if decoded.record.state is items.RecordState.OPEN
             else forge.ItemState.CLOSED
         )
-        return forge.ItemReference(state, decoded.record.title, decoded.body, False)
+        return forge.ItemReference(
+            state, decoded.record.title, decoded.body, False, decoded.record.origin
+        )
 
     def landing(self, number: int) -> forge.Landing:
         raise forge.ForgeUnsupportedError(NO_LANDINGS_YET)
@@ -316,13 +318,20 @@ class StateRefBoard:
         del parent, child
 
     def _write_new_item(
-        self, *, parent_id: str | None, title: str, body: str, kind: board.ItemKind
+        self,
+        *,
+        parent_id: str | None,
+        title: str,
+        body: str,
+        kind: board.ItemKind,
+        origin: str | None = None,
     ) -> str:
         """The one write every fresh state-ref item goes through (issues
-        #283, #285): mint an id, compose its `[record]`, one CAS write, then
-        fold the result into this instance's own view -- shared by
-        `create_item` (`aco item new`, an optional parent) and `create_child`
-        (`cut`, always one)."""
+        #283, #285, #316): mint an id, compose its `[record]`, one CAS
+        write, then fold the result into this instance's own view -- shared
+        by `create_item` (`aco item new`, an optional parent and origin) and
+        `create_child` (`cut`, always one, never an origin -- a cut child is
+        always this repository's own item)."""
         new_id = items.mint_item_id(self._items.keys())
         now = items.format_record_timestamp(datetime.now(UTC))
         record = items.ItemRecord(
@@ -333,7 +342,7 @@ class StateRefBoard:
             labels=(),
             blocked_by=(),
             parent=parent_id,
-            origin=None,
+            origin=origin,
             created_at=now,
             updated_at=now,
             closed_at=None,
@@ -345,16 +354,28 @@ class StateRefBoard:
         return new_id
 
     def create_item(
-        self, *, title: str, body: str, kind: board.ItemKind, parent: int | None
+        self,
+        *,
+        title: str,
+        body: str,
+        kind: board.ItemKind,
+        parent: int | None,
+        origin: str | None = None,
     ) -> str:
-        """`aco item new`'s own write path (issue #285): the same one write
-        `create_child` performs, generalized to an optional parent -- so
-        `cli.py` never grows a second way to create a state-ref item.
+        """`aco item new`'s own write path (issues #285, #316): the same one
+        write `create_child` performs, generalized to an optional parent and
+        origin -- so `cli.py` never grows a second way to create a state-ref
+        item. `origin` binds this item to a foreign forge issue
+        (`--origin FORGE#N`, already grammar-checked by `items.parse_origin`
+        before this is ever called) without aco governing that forge at all
+        -- #230's own concept, "the forge is pulled, never governed."
         Returns the freshly minted item id rather than `create_child`'s
         `.number`: called only from `cli.py`'s own state-ref-only `item new`
         path, which prints the id itself."""
         parent_id = None if parent is None else self._by_number[parent]
-        return self._write_new_item(parent_id=parent_id, title=title, body=body, kind=kind)
+        return self._write_new_item(
+            parent_id=parent_id, title=title, body=body, kind=kind, origin=origin
+        )
 
     def create_child(self, *, parent: int, title: str, body: str, kind: board.ItemKind) -> int:
         item_id = self.create_item(title=title, body=body, kind=kind, parent=parent)

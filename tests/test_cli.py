@@ -10703,7 +10703,10 @@ def test_item_show_reads_the_fake_forge_body_under_github_storage(
 
     assert status == 0
     expected_id = items.format_item_id(42)
-    assert capsys.readouterr().out == f"{expected_id} · #42 · open · parent none\nBody text.\n"
+    assert (
+        capsys.readouterr().out
+        == f"{expected_id} · #42 · open · parent none · origin none\nBody text.\n"
+    )
 
 
 def test_item_show_as_json_reads_the_fake_forge_body_under_github_storage(
@@ -10724,6 +10727,7 @@ def test_item_show_as_json_reads_the_fake_forge_body_under_github_storage(
         "number": 42,
         "state": "open",
         "parent": None,
+        "origin": None,
         "body": "Body text.\n",
     }
 
