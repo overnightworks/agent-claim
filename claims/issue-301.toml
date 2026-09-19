@@ -1,8 +1,0 @@
-claim_id = "320e391b8b6144ec920a9eeaa33b91dc"
-agent = "Claude head (coordinator)"
-role = "builder"
-base = "1c188b131ad74fce925be436046d945d5fcbcf1b"
-branch = "claude/issue-301-tooling-contracts"
-scope = ["pyproject.toml", ".github/workflows/ci.yml", "scripts/vulture_whitelist.py", "AGENTS.md", "tests/test_layers.py"]
-opened_commit = "1206a821a2eb6a6d13b7c7c2ad987c33c74db162"
-whole_reason = "five tooling-contract findings across pyproject, CI, the vulture whitelist and AGENTS.md; each a few lines, together one hygiene lane"
