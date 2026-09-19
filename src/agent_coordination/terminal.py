@@ -28,7 +28,7 @@ _VIEWER_ENVIRONMENT_NAMES = (
 # The one UUID version this repository mints and validates (issue #378):
 # `workspace.py` -- above this module in the Layers contract -- imports it
 # rather than keeping a second `4` for its own login-attempt identifier.
-_PENDING_TOKEN_VERSION = 4
+PENDING_TOKEN_VERSION = 4
 _ASCII_CONTROL_LIMIT = 32
 _ASCII_DELETE = 127
 
@@ -281,7 +281,7 @@ def _viewer_attempt(value: str) -> ViewerAttempt | None:
         parsed = uuid.UUID(token)
     except ValueError as error:
         raise TerminalError("tmux target has unowned viewer pending metadata") from error
-    if parsed.version != _PENDING_TOKEN_VERSION or str(parsed) != token:
+    if parsed.version != PENDING_TOKEN_VERSION or str(parsed) != token:
         raise TerminalError("tmux target has unowned viewer pending metadata")
     return ViewerAttempt(state, token)
 

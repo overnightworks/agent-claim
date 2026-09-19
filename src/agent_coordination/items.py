@@ -199,7 +199,7 @@ def mint_item_id(
 
 def format_record_timestamp(moment: datetime) -> str:
     """`moment`, in the RFC 3339 UTC second-precision shape every `[record]`
-    timestamp field uses (`board.RECORD_TIMESTAMP_PATTERN`, `protocol`'s
+    timestamp field uses (`protocol.RFC3339_TIMESTAMP_PATTERN`'s
     write-side format)."""
     return moment.astimezone(UTC).strftime(RFC3339_TIMESTAMP_FORMAT)
 

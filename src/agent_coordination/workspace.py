@@ -351,7 +351,7 @@ def _login_attempt_identifier(value: object) -> None:
         identifier = uuid.UUID(value)
     except ValueError as error:
         raise WorkspaceError(_LOGIN_MALFORMED_RECORD) from error
-    if str(identifier) != value or identifier.version != terminal._PENDING_TOKEN_VERSION:
+    if str(identifier) != value or identifier.version != terminal.PENDING_TOKEN_VERSION:
         raise WorkspaceError(_LOGIN_MALFORMED_RECORD)
 
 

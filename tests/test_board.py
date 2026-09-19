@@ -494,7 +494,7 @@ def test_render_block_round_trips_question_example_and_a_multiline_picture() -> 
     must not be mistaken for the closing delimiter, and a value ending in a
     trailing `"` right before the writer's own closing `\"\"\"` -- only a
     TOML multi-line basic string (`_toml_multiline_string`), not the
-    single-line `_toml_string` every other field uses, can carry this
+    single-line `toml_string` every other field uses, can carry this
     byte-exact."""
     picture = (
         '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">\n'

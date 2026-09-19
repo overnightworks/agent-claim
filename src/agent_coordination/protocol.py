@@ -1228,11 +1228,15 @@ def apply(state: ClaimState, intent: ClaimTransitionIntent) -> ClaimState:
 
 # --- `claims/<key>.toml` and `resources/<name>.toml` codecs -----------------
 #
-# Hand-written, not a TOML-writing library: `_toml_string` is this
+# Hand-written, not a TOML-writing library: `toml_string` is this
 # repository's one TOML basic-string writer (issue #378), living here
 # because this module sits below `board` in the Layers contract --
 # `board.py`'s renderers import it rather than keeping a second escape
 # table and drifting from what `tomllib.loads` (the reader) accepts back.
+# It escapes every control character TOML's basic-string grammar forbids
+# unescaped, not only backslash and quote: a value carrying a tab or a
+# newline would otherwise round-trip into TOML that `tomllib.loads` (the
+# reader) refuses to parse back.
 
 _TOML_STRING_ESCAPES = {
     "\\": "\\\\",
@@ -1245,7 +1249,7 @@ _TOML_STRING_ESCAPES = {
 }
 
 
-def _toml_string(value: object) -> str:
+def toml_string(value: object) -> str:
     """A TOML basic string for `value` -- the writer's one escaping path,
     matching what `tomllib.loads` (the reader) accepts back unchanged."""
     escaped = "".join(_TOML_STRING_ESCAPES.get(char, char) for char in cast(str, value))
@@ -1253,7 +1257,7 @@ def _toml_string(value: object) -> str:
 
 
 def _toml_string_array(values: tuple[str, ...]) -> str:
-    return "[" + ", ".join(_toml_string(value) for value in values) + "]"
+    return "[" + ", ".join(toml_string(value) for value in values) + "]"
 
 
 def _toml_int_array(values: tuple[int, ...]) -> str:
@@ -1263,18 +1267,18 @@ def _toml_int_array(values: tuple[int, ...]) -> str:
 def serialize_claim_toml(claim: ActiveClaim) -> str:
     """The `claims/<key>.toml` content for one live claim (§1)."""
     lines = [
-        f"claim_id = {_toml_string(claim.claim_id)}",
-        f"agent = {_toml_string(claim.agent)}",
-        f"role = {_toml_string(claim.role)}",
-        f"base = {_toml_string(claim.base)}",
-        f"branch = {_toml_string(claim.branch)}",
+        f"claim_id = {toml_string(claim.claim_id)}",
+        f"agent = {toml_string(claim.agent)}",
+        f"role = {toml_string(claim.role)}",
+        f"base = {toml_string(claim.base)}",
+        f"branch = {toml_string(claim.branch)}",
         f"scope = {_toml_string_array(claim.scope)}",
-        f"opened_commit = {_toml_string(claim.opened_commit)}",
+        f"opened_commit = {toml_string(claim.opened_commit)}",
     ]
     if claim.whole_reason is not None:
-        lines.append(f"whole_reason = {_toml_string(claim.whole_reason)}")
+        lines.append(f"whole_reason = {toml_string(claim.whole_reason)}")
     if claim.resource is not None:
-        lines.append(f"resource_name = {_toml_string(claim.resource.name)}")
+        lines.append(f"resource_name = {toml_string(claim.resource.name)}")
         lines.append(f"resource_value = {claim.resource.value}")
     return "\n".join(lines) + "\n"
 

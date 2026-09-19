@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from agent_coordination import board, items
+from agent_coordination import board, items, protocol
 from agent_coordination.protocol import ClaimUnavailableError, MalformedStateTreeError
 
 ITEM_ID = "aco-8f3a2c"
@@ -315,7 +315,7 @@ class TestFormatRecordTimestamp:
         formatted = items.format_record_timestamp(datetime(2026, 9, 16, 12, 30, 45, tzinfo=UTC))
 
         assert formatted == "2026-09-16T12:30:45Z"
-        assert board.RECORD_TIMESTAMP_PATTERN.fullmatch(formatted)
+        assert protocol.RFC3339_TIMESTAMP_PATTERN.fullmatch(formatted)
 
 
 class TestRecordTable:
