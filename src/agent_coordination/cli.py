@@ -3781,6 +3781,64 @@ def _scope_versioning(scope: tuple[str, ...], whole_reason: str | None) -> Scope
     return ScopeVersioning(n, total, share)
 
 
+@dataclass(frozen=True)
+class _ClaimTargetContext:
+    """The board-environment scalars `_claim_target_checks` needs beyond
+    the claim request itself, bundled once instead of PLR0913's
+    five-scalar ceiling (issue #337): `storage` and `worktree` `_cmd_claim`
+    already resolved before this point, and `open_by_number` -- the open
+    board, when deriving the scope already fetched it, `None` otherwise --
+    so a fresh issue claim that did not derive its scope still fetches the
+    board exactly once, inside `_claim_target_checks` itself."""
+
+    storage: board.Storage
+    worktree: Path
+    open_by_number: dict[int, board.Issue] | None
+
+
+def _claim_target_checks(
+    session: _WriteSession,
+    requested: protocol.ClaimRequest,
+    observed: protocol.ClaimState,
+    context: _ClaimTargetContext,
+) -> tuple[tuple[SliceCheck, ...], int | None, protocol.ActiveClaim | None]:
+    """`_cmd_claim`'s slice-rule checks against its own target issue,
+    `()`/`None`/`None` for a lane claim -- there is no target issue to
+    check against. A replayed claim (`_matching_store_claim`) skips the
+    forge and the checks entirely, since an interrupted retry was already
+    accepted once. A fresh issue claim reuses `context.open_by_number` when
+    deriving the scope already fetched it (issue #337), so this never
+    re-fetches the open board a second time, then runs the mismatch and
+    slice-rule gates against it. `session.forge()` -- built and
+    Erwartung-6-checked on this first call (issue #245) -- runs only on
+    this fresh-claim path, never for a lane claim or a replay."""
+    if not isinstance(requested.identity, protocol.IssueIdentity):
+        return (), None, None
+    target_issue = requested.identity.issue
+    replayed = _matching_store_claim(observed, requested)
+    if replayed is not None:
+        return (), target_issue, replayed
+    client = session.forge()
+    open_by_number = context.open_by_number
+    if open_by_number is None:
+        open_by_number = {issue.number: issue for issue in client.list_open_board_issues()}
+    _reject_scope_mismatch(open_by_number, target_issue, requested.scope, context.storage)
+    projected = _board(
+        client,
+        tuple(observed.claims.values()),
+        issues=tuple(open_by_number.values()),
+        claim_ages=_claim_ages(context.worktree, observed),
+    ).board
+    checks = _slice_rule_checks(
+        BoardReferenceLookup(client, client.repository.path, open_by_number),
+        target_issue,
+        projected,
+        requested.out_of_order_reason,
+        context.storage,
+    )
+    return checks, target_issue, replayed
+
+
 def _cmd_claim(parsed: argparse.Namespace, session: _WriteSession) -> int:
     requested = _request(parsed)
     if isinstance(requested.identity, protocol.LaneIdentity) and not requested.scope:
@@ -3805,34 +3863,9 @@ def _cmd_claim(parsed: argparse.Namespace, session: _WriteSession) -> int:
         storage = _board_config(_resolve_toplevel()).storage
         requested, open_by_number = _resolved_claim_request(requested, observed, session, storage)
         versioning = _scope_versioning(requested.scope, requested.whole_reason)
-    checks: tuple[SliceCheck, ...] = ()
-    target_issue: int | None = None
-    replayed = None
-    if isinstance(requested.identity, protocol.IssueIdentity):
-        target_issue = requested.identity.issue
-        replayed = _matching_store_claim(observed, requested)
-        if replayed is None:
-            # A lane claim never reaches here (only an `IssueIdentity` not
-            # already replayed does), so `session.forge()` -- built and
-            # Erwartung-6-checked on this first call (issue #245) -- never
-            # runs for a lane claim at all.
-            client = session.forge()
-            if open_by_number is None:
-                open_by_number = {issue.number: issue for issue in client.list_open_board_issues()}
-            _reject_scope_mismatch(open_by_number, target_issue, requested.scope, storage)
-            projected = _board(
-                client,
-                tuple(observed.claims.values()),
-                issues=tuple(open_by_number.values()),
-                claim_ages=_claim_ages(worktree, observed),
-            ).board
-            checks = _slice_rule_checks(
-                BoardReferenceLookup(client, client.repository.path, open_by_number),
-                target_issue,
-                projected,
-                requested.out_of_order_reason,
-                storage,
-            )
+    checks, target_issue, replayed = _claim_target_checks(
+        session, requested, observed, _ClaimTargetContext(storage, worktree, open_by_number)
+    )
     if any(check.level == "error" for check in checks):
         _refuse_claim(parsed.json, target_issue, checks)
         return 2
