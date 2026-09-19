@@ -3152,20 +3152,27 @@ class HookToolEffect(StrEnum):
     """What a `PreToolUse` hook name does to files, for `protect`'s verdict.
 
     `READ` never touches a file's contents, so it clears without a claim
-    check. `MUTATING` can write, so it is gated on a live overlapping claim
+    check. `COMMAND_TEXT` names no path key at all -- its own `command`
+    text is scanned for a recognized write pattern instead (issue #380);
+    a command naming none allows exactly like `READ`, since `protect`
+    cannot judge what its own pattern grammar does not recognize.
+    `MUTATING` can write, so it is gated on a live overlapping claim
     exactly as today. Any name in neither set is unproven -- `protect` must
     fail closed on it rather than default it to either bucket (issue #238).
     """
 
     READ = "read"
+    COMMAND_TEXT = "command_text"
     MUTATING = "mutating"
 
 
 HOOK_TOOL_EFFECTS: Mapping[str, HookToolEffect] = {
     # Read-only: cannot mutate a file, so no claim check is needed.
-    # `Bash`/`shell` are here too -- the hook payload carries no file path
-    # for a shell command, so `protect` cannot gate what it cannot see; this
-    # is a named limit (README, "PreToolUse write gate"), not an oversight.
+    # `shell` and the snake_case terminal names below are here too -- the
+    # hook payload carries no file path for those, so `protect` cannot gate
+    # what it cannot see; this is a named limit (README, "PreToolUse write
+    # gate"), not an oversight. `Bash` left this bucket for its own
+    # command-text one below (issue #380).
     "Read": HookToolEffect.READ,
     "Glob": HookToolEffect.READ,
     "Grep": HookToolEffect.READ,
@@ -3175,16 +3182,20 @@ HOOK_TOOL_EFFECTS: Mapping[str, HookToolEffect] = {
     "TodoWrite": HookToolEffect.READ,
     "Task": HookToolEffect.READ,
     "Agent": HookToolEffect.READ,
-    "Bash": HookToolEffect.READ,
     "shell": HookToolEffect.READ,
     # Other providers' names for the same read-only or path-blind operations
     # (Grok, Codex): a snake_case terminal command is the same blind spot as
-    # `Bash`/`shell` above, and the rest never write a file.
+    # `shell` above, and the rest never write a file.
     "read_file": HookToolEffect.READ,
     "grep": HookToolEffect.READ,
     "list_dir": HookToolEffect.READ,
     "run_terminal_command": HookToolEffect.READ,
     "spawn_subagent": HookToolEffect.READ,
+    # Command-text: no path key at all -- `hook_input.hook_command_paths`
+    # scans the call's own `command` for a recognized write pattern (issue
+    # #380); each recognized path then runs the same judgement chain as a
+    # mutating tool's own path.
+    "Bash": HookToolEffect.COMMAND_TEXT,
     # Mutating: gated on a live claim whose scope overlaps the written path.
     "Edit": HookToolEffect.MUTATING,
     "MultiEdit": HookToolEffect.MUTATING,
@@ -3492,6 +3503,119 @@ def _protect_write(tool_name: str, payload: dict[str, object]) -> int:
     return _hook_allow()
 
 
+def _protect_bash_cwd(payload: dict[str, object]) -> str | None:
+    cwd = _hook_field(payload, "cwd")
+    return cwd if isinstance(cwd, str) and cwd else None
+
+
+def _bash_absolute_path(raw_path: str, *, cwd: str | None) -> str | None:
+    """The absolute filesystem path a Bash-recognized `raw_path` names,
+    resolved against the payload's own `cwd` when `raw_path` itself is
+    relative -- a Bash pattern's own path is relative to the shell's
+    working directory, unlike every other tool's own already-absolute
+    payload path (PROT-09 is that other gate; it does not apply here,
+    PROT-31). `None` when `raw_path` is relative and `cwd` is missing or
+    itself not absolute: a missing `cwd` cannot be guessed, and guessing
+    wrong would deny legitimate work `protect` has no way to tell from a
+    real out-of-scope write, so this allows that one path rather than risk
+    a false deny (`specs/protect.spec.md`'s own `## Never`)."""
+    if Path(raw_path).is_absolute():
+        return raw_path
+    if cwd is None or not Path(cwd).is_absolute():
+        return None
+    return str((Path(cwd) / raw_path).resolve())
+
+
+def _protect_bash_checkout_denial(
+    absolute_path: str,
+) -> tuple[checkout.PathCheckout | None, str | None]:
+    """Bash's own Checkout/Default-Branch gate (issue #380): identical to
+    `_protect_basic_checkout_denial` except a path outside every
+    repository allows -- `(None, None)` -- instead of PROT-10's deny
+    (PROT-32), since a shell command routinely touches `/tmp`, a system
+    path, or another checkout `protect` holds no claim to judge. Bash never
+    denies for a relative path either (PROT-31); `_bash_absolute_path`
+    already resolved or allowed that before this runs."""
+    path_checkout = checkout.resolve_path_checkout(Path(absolute_path).parent)
+    if path_checkout is None:
+        return None, None
+    if not path_checkout.has_commit:
+        return None, checkout.NO_COMMIT_CHECKOUT_REASON
+    not_main_denial = _protect_not_main_denial(path_checkout)
+    if not_main_denial is not None:
+        return None, not_main_denial
+    return path_checkout, None
+
+
+def _protect_bash_path_denial(
+    agent: str, pattern: str, raw_path: str, *, cwd: str | None, state_cache: _ProtectStateCache
+) -> str | None:
+    """The deny reason for one Bash-recognized `(pattern, raw_path)` write,
+    or `None` to allow -- the same Checkout/Default-Branch/Claim-Scope
+    chain `_protect_path_denial` runs for every other mutating tool's own
+    path (issue #380), except: a relative `raw_path` resolves against the
+    payload's own `cwd` instead of PROT-09's outright deny
+    (`_bash_absolute_path`, PROT-31); a path outside every repository
+    allows instead of PROT-10's deny (`_protect_bash_checkout_denial`,
+    PROT-32); and a scope miss -- no live claim on the branch at all, or
+    one that does not cover this path -- denies naming both the recognized
+    pattern and the path (PROT-33), since a bare `claim first` would not
+    tell the agent which of the command's own several paths tripped it."""
+    absolute_path = _bash_absolute_path(raw_path, cwd=cwd)
+    if absolute_path is None:
+        return None
+    path_checkout, denial = _protect_bash_checkout_denial(absolute_path)
+    if path_checkout is None:
+        return denial
+    relative = _relative_scope_entry(absolute_path, toplevel=path_checkout.toplevel)
+    if relative is None:
+        return PATH_REQUIRED
+    state, denial = _protect_cached_claim_state_or_denial(path_checkout, state_cache=state_cache)
+    if state is None:
+        return denial
+    if _protect_overlapping_claim_exists(
+        state, agent=agent, branch=path_checkout.branch, relative=relative
+    ):
+        return None
+    return f"{pattern} {relative} outside claim scope"
+
+
+def _protect_bash(payload: dict[str, object]) -> int:
+    """`Bash`'s own command-text judgment (issue #380): every
+    `(pattern, path)` pair `hook_input.hook_command_paths` recognizes in
+    the call's own `command` runs `_protect_bash_path_denial`'s chain, the
+    first denial winning. A missing or non-string `command`, or one naming
+    no recognized pattern at all, allows outright without ever resolving
+    identity, git, or the store -- `protect` cannot judge what it cannot
+    see (`specs/protect.spec.md`'s own `## Never`), and failing closed here
+    would block the overwhelming majority of harmless shell calls."""
+    tool_input = _hook_field(payload, "toolInput", "tool_input")
+    command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    if not isinstance(command, str):
+        return _hook_allow()
+    pairs = hook_input.hook_command_paths(command)
+    if not pairs:
+        return _hook_allow()
+    agent = checkout._resolved_agent(None)
+    cwd = _protect_bash_cwd(payload)
+    state_cache: _ProtectStateCache = {}
+    for pattern, raw_path in pairs:
+        denial = _protect_bash_path_denial(
+            agent, pattern, raw_path, cwd=cwd, state_cache=state_cache
+        )
+        if denial is not None:
+            return _hook_deny(denial)
+    return _hook_allow()
+
+
+def _protect_dispatch(effect: HookToolEffect, tool_name: str, payload: dict[str, object]) -> int:
+    if effect is HookToolEffect.READ:
+        return _hook_allow()
+    if effect is HookToolEffect.COMMAND_TEXT:
+        return _protect_bash(payload)
+    return _protect_write(tool_name, payload)
+
+
 def _protect() -> int:
     # Grok fail-opens on crash or non-JSON hook output; deny instead of raising.
     try:
@@ -3504,9 +3628,7 @@ def _protect() -> int:
         effect = HOOK_TOOL_EFFECTS.get(tool_name)
         if effect is None:
             return _hook_deny(_unknown_hook_tool_reason(tool_name))
-        if effect is HookToolEffect.READ:
-            return _hook_allow()
-        return _protect_write(tool_name, payload)
+        return _protect_dispatch(effect, tool_name, payload)
     except Exception as error:
         return _hook_deny(str(error))
 
