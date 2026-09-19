@@ -1,17 +1,19 @@
 # `aco reset`
 
 `aco reset` (issue #298, operator-ruled 15.09.2026/16.09.2026) is the one
-recovery path over a broken or rewritten `refs/aco/state`: export, delete
-remote and local, clear every worktree's lineage stamp, bootstrap fresh.
-`specs/ref-store-cas.spec.md` owns the five-step shape itself, the mandatory
-export and its bundle naming, the live-claim refusal, `--no-export`, and the
-bundle's own restore proof (CAS-39..46); this file owns the command's own
-argument shape, forge-freedom, and the exact per-step line for every state
-CAS-39..46 do not already spell out: an absent ref, a failed export, and
-every shape a rejected remote delete can take. A refusal reaching this
-command's own sink prints `ERROR: <sentence>` on stderr, exit `2`, the
-shared sink `specs/ref-store-cas.spec.md`'s own preamble already documents.
-`<sha>`/`<tip>`/`<remote>` are the runner's own values.
+recovery path over a broken or rewritten `refs/aco/state`, its own five-step
+shape owned start to finish by `specs/ref-store-cas.spec.md` (CAS-39..46)
+along with the mandatory export and its bundle naming, the live-claim
+refusal, `--no-export`, and the bundle's own restore proof; this file owns
+the command's own argument shape, forge-freedom, and the exact per-step line
+for every state CAS-39..46 do not already spell out: an absent ref, a
+failed export, and every shape a rejected remote delete can take. A refusal
+reaching this command's own sink prints `ERROR: <sentence>` on stderr, exit
+`2`, the shared sink `specs/ref-store-cas.spec.md`'s own preamble already
+documents. `<repo>`/`<sha>`/`<tip>`/`<remote>` are the runner's own values;
+`<repo>` is the work repository's own directory name (`aco reset`'s own
+`repository` argument to its bundle-name builder, the worktree's own
+`Path.name`).
 
 ## Behavior table
 
@@ -37,12 +39,12 @@ shared sink `specs/ref-store-cas.spec.md`'s own preamble already documents.
 
 - [ ] [RESET-01] `aco reset` against a remote that never carried `refs/aco/state` prints `would: nothing to export: refs/aco/state does not exist on <remote>` (see E-RESET-01).
 - [ ] [RESET-02] That same run's second line is `would: nothing to delete on <remote>: refs/aco/state does not exist`, exit `0` (see E-RESET-01).
-- [ ] [RESET-03] `aco reset --confirm` in that same state prints RESET-01/02's own two sentences without the `would:` prefix, then still clears every worktree's stamp and bootstraps fresh (CAS-44) (see E-RESET-01).
+- [ ] [RESET-03] `aco reset --confirm` in that same state prints RESET-01/02's own two sentences without the `would:` prefix, then CAS-44's own steps still run unmodified (see E-RESET-01).
 
 ## A failed export or delete
 
 - [ ] [RESET-04] A bundle write failure -- an unwritable `--export-dir`, or any other write failure -- refuses `cannot export refs/aco/state at <tip> to <destination>: <detail>`, before any deletion (see E-RESET-02).
-- [ ] [RESET-05] A `--force-with-lease` delete rejected, remote tip unchanged, refuses `cannot delete refs/aco/state on <remote> (lease <tip>): <detail>`, naming `still present`, fix `re-run aco reset --confirm`.
+- [ ] [RESET-05] `--force-with-lease` rejected, tip unchanged, refuses `cannot delete refs/aco/state on <remote> (lease <tip>): <detail>`, naming `still present`, fix `re-run aco reset --confirm` (see E-RESET-05).
 - [ ] [RESET-06] The same rejection, remote tip moved, refuses that same prefix, naming `the remote moved to <current>`, fix `re-run aco reset --confirm`, never a manual lease (see E-RESET-03).
 - [ ] [RESET-07] The same rejection when the remote cannot be reached at all to confirm the outcome refuses that same prefix, naming `outcome unknown`, fix `verify with git ls-remote` (see E-RESET-04).
 - [ ] [RESET-08] A rejected `--force-with-lease` push whose commit actually landed (a lost response) is re-probed as already deleted: `reset` reports no failure for it and continues.
@@ -68,7 +70,7 @@ shared sink `specs/ref-store-cas.spec.md`'s own preamble already documents.
 `Setup: bare-remote` is a fresh work repository whose `origin` is a local
 bare repository with `main` at one commit, a git identity, `origin/HEAD`, a
 tracked `.agent-claim/board.toml` naming no `storage` key, and `ACO_AGENT`
-set to `Ada`; `<remote>` and `<tmp>` are the runner's own paths.
+set to `Ada`; `<remote>`, `<tmp>`, and `<repo>` are the runner's own paths.
 
 ### E-RESET-01 -- nothing yet to export or delete
 
@@ -97,7 +99,7 @@ Setup: bare-remote, bootstrapped, no live claim, `--export-dir` an unwritable di
 
 ```console
 $ aco reset --confirm --export-dir <tmp>
-2> ERROR: cannot export refs/aco/state at <tip> to <tmp>/aco-state-repo-<date>-<sha>.bundle: <detail>
+2> ERROR: cannot export refs/aco/state at <tip> to <tmp>/aco-state-<repo>-<date>-<sha>.bundle: <detail>
 exit 2
 ```
 
@@ -107,7 +109,7 @@ Setup: bare-remote, bootstrapped, no live claim, `refs/aco/state` on `origin` is
 
 ```console
 $ aco reset --confirm --export-dir <tmp>
-exported refs/aco/state at <tip> to <tmp>/aco-state-repo-<date>-<sha>.bundle (restore with: git fetch <tmp>/aco-state-repo-<date>-<sha>.bundle refs/worktree/aco/reset-export:refs/aco/state)
+exported refs/aco/state at <tip> to <tmp>/aco-state-<repo>-<date>-<sha>.bundle (restore with: git fetch <tmp>/aco-state-<repo>-<date>-<sha>.bundle refs/worktree/aco/reset-export:refs/aco/state)
 2> ERROR: cannot delete refs/aco/state on origin (lease <tip>): <detail>; the remote moved to <moved-tip> -- re-run `aco reset --confirm`, which re-observes origin, re-validates against every live claim, and re-exports before deleting again; a manual lease against <moved-tip> would skip both checks
 exit 2
 ```
@@ -118,7 +120,18 @@ Setup: bare-remote, bootstrapped, no live claim, `origin` becomes unreachable af
 
 ```console
 $ aco reset --confirm --export-dir <tmp>
-exported refs/aco/state at <tip> to <tmp>/aco-state-repo-<date>-<sha>.bundle (restore with: git fetch <tmp>/aco-state-repo-<date>-<sha>.bundle refs/worktree/aco/reset-export:refs/aco/state)
+exported refs/aco/state at <tip> to <tmp>/aco-state-<repo>-<date>-<sha>.bundle (restore with: git fetch <tmp>/aco-state-<repo>-<date>-<sha>.bundle refs/worktree/aco/reset-export:refs/aco/state)
 2> ERROR: cannot delete refs/aco/state on origin (lease <tip>): <detail>; outcome unknown -- verify with `git ls-remote origin refs/aco/state` before retrying `aco reset --confirm`
+exit 2
+```
+
+### E-RESET-05 -- an unchanged remote tip names the re-run repair
+
+Setup: bare-remote, bootstrapped, no live claim, the `--force-with-lease` delete is rejected for a reason other than a moved tip -- `refs/aco/state` on `origin` is still at the tip `reset` read
+
+```console
+$ aco reset --confirm --export-dir <tmp>
+exported refs/aco/state at <tip> to <tmp>/aco-state-<repo>-<date>-<sha>.bundle (restore with: git fetch <tmp>/aco-state-<repo>-<date>-<sha>.bundle refs/worktree/aco/reset-export:refs/aco/state)
+2> ERROR: cannot delete refs/aco/state on origin (lease <tip>): <detail>; refs/aco/state is still present at <tip>, unchanged from the lease -- re-run `aco reset --confirm` once the cause is fixed
 exit 2
 ```

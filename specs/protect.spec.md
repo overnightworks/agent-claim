@@ -26,13 +26,14 @@ canonical remote name.
 | tool name in neither table | — | — | — | PROT-06 (unknown) |
 | tool name is read-only | — | — | — | PROT-05 |
 | no resolvable path in the payload | PROT-07 | PROT-07 | PROT-07 | — |
-| identity or board-config failure | PROT-08 | PROT-08 | PROT-08 | — |
+| agent identity cannot be resolved | PROT-08 | PROT-08 | PROT-08 | — |
 | payload path not absolute | PROT-09 | PROT-09 | PROT-09 (each path) | — |
 | path's directory outside every repository | PROT-10 | PROT-10 | PROT-10 | — |
 | checkout has no commit yet | PROT-11 | PROT-11 | PROT-11 | — |
 | shared main checkout, or on the default branch | PROT-12 | PROT-12 | PROT-12 | — |
 | default branch cannot be resolved | PROT-13 | PROT-13 | PROT-13 | — |
 | path resolves to exactly the checkout root | PROT-14 | PROT-14 | PROT-14 | — |
+| board-configuration precondition fails | PROT-29 | PROT-29 | PROT-29 | — |
 | a store fetch failure | PROT-15 | PROT-15 | PROT-15 | — |
 | `refs/aco/state` missing | PROT-16 | PROT-16 | PROT-16 | — |
 | an unexpected crash | PROT-17 | PROT-17 | PROT-17 | — |
@@ -60,7 +61,7 @@ canonical remote name.
 ## The payload path and its own checkout
 
 - [ ] [PROT-07] A mutating tool call with no resolvable path -- a missing key, an empty string, or an `apply_patch` command matching no patch-file grammar -- denies `path required`.
-- [ ] [PROT-08] A failure resolving agent identity or the board-configuration precondition (PIN-01 among its causes), before the store is fetched, denies that failure's own bare sentence, no `ERROR:` prefix.
+- [ ] [PROT-08] A failure resolving this session's own agent identity, before any per-path checkout gate runs, denies that failure's own bare sentence, no `ERROR:` prefix.
 - [ ] [PROT-09] A payload path that is not absolute denies `relative payload path`, never guessed against the hook process's own cwd (see E-PROT-07).
 - [ ] [PROT-10] A payload path whose directory sits outside every git repository denies `not in a repository`.
 - [ ] [PROT-11] A checkout with no commit yet (an unborn branch) denies `no commit on this branch`.
@@ -70,6 +71,7 @@ canonical remote name.
 
 ## The live claim state
 
+- [ ] [PROT-29] A board-configuration precondition failure (PIN-01), reached resolving the store's own canonical remote after checkout/root gates clear, denies that failure's own bare sentence, no `ERROR:` prefix.
 - [ ] [PROT-15] A store fetch failure -- unreachable, malformed tree, or a lineage break -- denies `cannot reach refs/aco/state: <detail>`.
 - [ ] [PROT-16] A fetched state with no `refs/aco/state` at all denies `cannot reach refs/aco/state: <sentence>`, `<sentence>` the one `specs/ref-store-cas.spec.md` CAS-03 already owns.
 - [ ] [PROT-17] Any other uncaught exception denies `{"decision": "deny", "reason": "<message>"}`, that exception's own bare text, no traceback.
@@ -82,14 +84,17 @@ canonical remote name.
 ## `apply_patch`'s own multi-path payload
 
 `apply_patch` (Codex) carries no path key: its `command` is a whole patch
-text, parsed for every `*** Update File:`, `*** Add File:`, `*** Delete
-File:`, and `*** Move to:` line, including one trimmed and indented after an
-`Add File` block.
+text, parsed for every `*** Add File:`, `*** Delete File:`, and `*** Update
+File:` header line. A `*** Move to:` line is recognized only immediately
+after an `*** Update File:` header, before any hunk content; anywhere else
+in the patch, that line is not a header the grammar admits, so the whole
+patch fails to parse and `protect` denies `path required` (PROT-07)
+fail-closed rather than guessing which paths it touches.
 
 - [ ] [PROT-23] Every path an `apply_patch` command touches sitting inside the live claim's own scope allows (see E-PROT-04).
 - [ ] [PROT-24] A command touching several paths denies naming the first one outside scope, in the patch's own order, not a generic `claim first` (see E-PROT-04).
 - [ ] [PROT-25] Two paths in one command sitting in two different linked worktrees of the same repository are judged in their own checkout each; the first denial, `claim first` or otherwise, wins.
-- [ ] [PROT-26] `protect` fetches the store state at most once per repository for one hook call, shared by every path naming that repository.
+- [ ] [PROT-26] Same-repository `apply_patch` paths share one live snapshot: a claim change made mid-call cannot flip the second path's `claim first`/`outside claim scope`/allow verdict (see E-PROT-04).
 
 ## `NotebookEdit`'s own path key
 
