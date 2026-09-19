@@ -66,7 +66,7 @@ def _served_board_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -
         forge.ItemState.OPEN, "Plain item", body
     )
     monkeypatch.setattr(github, "GitHubForge", lambda _repository: client)
-    monkeypatch.setattr(checkout, "_git_output", lambda _arguments: str(tmp_path))
+    monkeypatch.setattr(checkout, "_git_output", lambda _arguments, **_kwargs: str(tmp_path))
     monkeypatch.setattr(checkout, "trunk_landings", lambda *_args, **_kwargs: ())
     _patch_store_write(monkeypatch)
     return client

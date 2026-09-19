@@ -40,7 +40,7 @@ def stub_board_config_tracked(monkeypatch: pytest.MonkeyPatch) -> None:
     `conftest.py`'s "everything but git-toplevel isolation stays local to its
     test module") so every test file states in its own body that it reads a
     tracked board.toml by default."""
-    monkeypatch.setattr(checkout, "path_is_tracked", lambda _path: True)
+    monkeypatch.setattr(checkout, "path_is_tracked", lambda _path, **_kwargs: True)
 
 
 def _git_checkout(
@@ -90,7 +90,7 @@ def _fallback_git_output(
     additionally covers the otherwise-untested case of git exiting 0 with an
     empty ref name."""
 
-    def git(arguments: list[str]) -> str:
+    def git(arguments: list[str], **_kwargs: object) -> str:
         key = tuple(arguments)
         if key == _ORIGIN_HEAD_SYMBOLIC_REF:
             if origin_head_empty:
@@ -184,7 +184,7 @@ def arrange_scope_width(
     monkeypatch.setattr(
         checkout,
         "_scope_directories",
-        lambda paths: tuple(path for path in paths if path in directories),
+        lambda paths, **_kwargs: tuple(path for path in paths if path in directories),
     )
     monkeypatch.setattr(checkout, "versioned_paths", lambda **_kwargs: versioned or ())
     if validate_checkout:

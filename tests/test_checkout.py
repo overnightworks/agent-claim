@@ -57,7 +57,7 @@ def test_remote_url_reads_any_named_remote(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def test_scope_directories_detects_a_git_tree(monkeypatch: pytest.MonkeyPatch) -> None:
-    def git(arguments: list[str]) -> str:
+    def git(arguments: list[str], **_kwargs: object) -> str:
         if arguments == ["cat-file", "-t", "HEAD:docs"]:
             return "tree"
         if arguments == ["cat-file", "-t", "HEAD:README.md"]:
@@ -75,7 +75,7 @@ def test_scope_directories_detects_an_untracked_directory(
     (tmp_path / "scratch").mkdir()
     (tmp_path / "file.py").write_text("x\n")
 
-    def git(arguments: list[str]) -> str:
+    def git(arguments: list[str], **_kwargs: object) -> str:
         if arguments[:2] == ["cat-file", "-t"]:
             raise ClaimError("not in HEAD")
         if arguments == ["rev-parse", "--show-toplevel"]:
@@ -107,7 +107,9 @@ def test_checkout_validation_binds_clean_head_and_branch(
         ("rev-parse", "--git-common-dir"): "/repo/.git",
         ("status", "--porcelain"): "",
     }
-    monkeypatch.setattr(checkout, "_git_output", lambda arguments: values[tuple(arguments)])
+    monkeypatch.setattr(
+        checkout, "_git_output", lambda arguments, **_kwargs: values[tuple(arguments)]
+    )
 
     issue_claim._validate_checkout(request())
 
@@ -170,7 +172,9 @@ def test_checkout_validation_rejects_false_or_late_claims(
     values: dict[tuple[str, ...], str],
     message: str,
 ) -> None:
-    monkeypatch.setattr(checkout, "_git_output", lambda arguments: values[tuple(arguments)])
+    monkeypatch.setattr(
+        checkout, "_git_output", lambda arguments, **_kwargs: values[tuple(arguments)]
+    )
 
     with pytest.raises(ClaimError, match=message):
         issue_claim._validate_checkout(candidate)
@@ -186,7 +190,9 @@ def test_checkout_validation_names_the_base_repair(monkeypatch: pytest.MonkeyPat
         ("rev-parse", "--git-common-dir"): "/repo/.git",
         ("status", "--porcelain"): "",
     }
-    monkeypatch.setattr(checkout, "_git_output", lambda arguments: values[tuple(arguments)])
+    monkeypatch.setattr(
+        checkout, "_git_output", lambda arguments, **_kwargs: values[tuple(arguments)]
+    )
     candidate = request()
 
     with pytest.raises(ClaimError) as error:
@@ -219,7 +225,9 @@ def test_checkout_validation_names_the_isolated_worktree_recipe_for_the_default_
         ("rev-parse", "HEAD"): BASE,
         ("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"): origin_head,
     }
-    monkeypatch.setattr(checkout, "_git_output", lambda arguments: values[tuple(arguments)])
+    monkeypatch.setattr(
+        checkout, "_git_output", lambda arguments, **_kwargs: values[tuple(arguments)]
+    )
     candidate = request(branch=branch)
 
     with pytest.raises(ClaimError) as error:
@@ -244,7 +252,9 @@ def test_checkout_validation_names_the_isolated_worktree_recipe_for_a_shared_che
         ("rev-parse", "--git-common-dir"): "/repo/.git",
         ("status", "--porcelain"): "",
     }
-    monkeypatch.setattr(checkout, "_git_output", lambda arguments: values[tuple(arguments)])
+    monkeypatch.setattr(
+        checkout, "_git_output", lambda arguments, **_kwargs: values[tuple(arguments)]
+    )
     candidate = request()
 
     with pytest.raises(ClaimError) as error:
@@ -273,7 +283,9 @@ def test_checkout_validation_names_the_first_three_dirty_paths_and_the_rest_as_a
         ("rev-parse", "--git-common-dir"): "/repo/.git",
         ("status", "--porcelain"): porcelain,
     }
-    monkeypatch.setattr(checkout, "_git_output", lambda arguments: values[tuple(arguments)])
+    monkeypatch.setattr(
+        checkout, "_git_output", lambda arguments, **_kwargs: values[tuple(arguments)]
+    )
     candidate = request()
 
     with pytest.raises(ClaimError) as error:
@@ -298,7 +310,9 @@ def test_checkout_validation_names_every_dirty_path_when_three_or_fewer(
         ("rev-parse", "--git-common-dir"): "/repo/.git",
         ("status", "--porcelain"): " M src/a.py",
     }
-    monkeypatch.setattr(checkout, "_git_output", lambda arguments: values[tuple(arguments)])
+    monkeypatch.setattr(
+        checkout, "_git_output", lambda arguments, **_kwargs: values[tuple(arguments)]
+    )
     candidate = request()
 
     with pytest.raises(ClaimError) as error:
@@ -504,7 +518,9 @@ def test_refuse_shared_checkout_return_to_claim(
     identity from -- so `RETURN_TO_CLAIM` names it instead of leaving the
     sentence branch-less."""
     values = {("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"): "refs/remotes/origin/main"}
-    monkeypatch.setattr(checkout, "_git_output", lambda arguments: values[tuple(arguments)])
+    monkeypatch.setattr(
+        checkout, "_git_output", lambda arguments, **_kwargs: values[tuple(arguments)]
+    )
     path_checkout = checkout.PathCheckout(
         toplevel=Path("/repo"),
         branch=branch,
@@ -519,6 +535,34 @@ def test_refuse_shared_checkout_return_to_claim(
         )
 
     assert str(error.value) == expected
+
+
+def test_refuse_shared_checkout_denies_when_default_branch_is_unresolved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #314 gate G4: `rescope`'s own worktree-isolation refusal denies
+    outright when the resolved checkout's own `origin/HEAD` cannot be
+    resolved, never falling back to `claim`'s `{main, master}` guess -- a
+    repository whose default branch is `trunk`, read from a checkout with no
+    recorded `origin/HEAD` yet, must never slip through unnoticed as "not
+    the default branch"."""
+
+    def git(arguments: list[str], **_kwargs: object) -> str:
+        raise ClaimError("unknown git failure")
+
+    monkeypatch.setattr(checkout, "_git_output", git)
+    path_checkout = checkout.PathCheckout(
+        toplevel=Path("/repo"),
+        branch="trunk",
+        kind=checkout.CheckoutKind.LINKED_WORKTREE,
+        common_directory=Path("/repo/.git"),
+        has_commit=True,
+    )
+
+    with pytest.raises(ClaimError, match=checkout.DEFAULT_BRANCH_UNKNOWN_REASON):
+        checkout._refuse_shared_checkout(
+            path_checkout, repair=checkout.WorktreeRepair.RETURN_TO_CLAIM
+        )
 
 
 @pytest.mark.parametrize(
