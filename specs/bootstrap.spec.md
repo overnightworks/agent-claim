@@ -1,7 +1,8 @@
 # `aco bootstrap`
 
-`aco bootstrap`: the one command that ever creates `refs/aco/state`
-(`specs/ref-store-cas.spec.md`'s own fact, CAS-01/CAS-02) -- forge-free,
+`aco bootstrap`: the ordinary command path that creates `refs/aco/state`
+(`specs/ref-store-cas.spec.md`'s own fact, CAS-01/CAS-02); `aco reset --confirm`
+reaches the same creation through its own path (CAS-44, CAS-46) -- forge-free,
 argument-free beyond the bare command, and the sole owner of the CLI's own
 argument shape, its forge-freedom, and how a failure reaches its sink. The
 ref's own idempotency, the tree it writes, and every transport and lineage
@@ -25,15 +26,17 @@ those IDs rather than restating them. `<sha>` is the runner's own commit id.
 
 ## The command's own argument shape
 
-- [ ] [BOOT-02] `aco bootstrap` followed by any argument it does not define (`--ledger 5`, `--json`, or any other flag) refuses `aco: error: unrecognized arguments: --ledger 5` on stderr, exit `2`, before any read.
+- [ ] [BOOT-02] `aco bootstrap` followed by any argument it does not define refuses `aco: error: unrecognized arguments: <extra>` on stderr, exit `2`, before any read (see E-BOOT-04).
 
 ## Forge-free, like the other repository-level commands
 
-- [ ] [BOOT-03] `aco bootstrap --repo OWNER/REPO` against any canonical remote host, GitHub or not, prints the ref's own commit id `<sha>`, exit `0`, same as with no `--repo` (see E-BOOT-02).
+- [ ] [BOOT-03] `aco --repo OWNER/REPO bootstrap` against any canonical remote host, GitHub or not, prints the ref's own commit id `<sha>`, exit `0`, same as with no `--repo` (see E-BOOT-02).
 
 ## A store-level failure never invents JSON
 
-- [ ] [BOOT-01] A store-level refusal reaching `aco bootstrap` prints only `ERROR: <sentence>` on stderr, exit `2`; stdout stays empty, this command having no `--json` to invent an error object from (see E-BOOT-03).
+This command defines no `--json`, so its own sink never invents an error object from one.
+
+- [ ] [BOOT-01] A store-level refusal reaching `aco bootstrap` prints only `ERROR: <sentence>` on stderr, exit `2`; stdout stays empty (see E-BOOT-03).
 
 ## Never
 
@@ -47,27 +50,17 @@ those IDs rather than restating them. `<sha>` is the runner's own commit id.
 `Setup: bare-remote` is a fresh work repository whose `origin` is a local
 bare repository with `main` at one commit, a git identity, `origin/HEAD`, a
 tracked `.agent-claim/board.toml` naming no `storage` key, and `ACO_AGENT`
-set to `Ada`; `<sha>` is the runner's own commit id.
-
-### E-BOOT-01 -- bootstrap is idempotent
-
-Setup: bare-remote, no `refs/aco/state` yet
-
-```console
-$ aco bootstrap
-<sha>
-exit 0
-$ aco bootstrap
-<sha>
-exit 0
-```
+set to `Ada`; `<sha>` is the runner's own commit id. Bootstrap's own
+idempotency and empty-tree shape are `specs/ref-store-cas.spec.md`'s own
+proof (CAS-01, CAS-02, E-CAS-01); the sessions below cover only this file's
+own argument shape, forge-freedom, and refusal sink.
 
 ### E-BOOT-02 -- `--repo` and a non-GitHub remote are no error
 
 Setup: bare-remote except `origin` points at `git@gitlab.com:other/repo.git`, no `refs/aco/state` yet
 
 ```console
-$ aco bootstrap --repo example/agent-claim
+$ aco --repo example/agent-claim bootstrap
 <sha>
 exit 0
 ```
@@ -79,5 +72,18 @@ Setup: a fresh repository whose `origin` points at a local path that does not ex
 ```console
 $ aco bootstrap
 2> ERROR: cannot reach origin refs/aco/state: auth or transport failure (ls-remote exited 128): <detail>
+exit 2
+```
+
+### E-BOOT-04 -- an argument this command does not define
+
+Setup: bare-remote, bootstrapped
+
+```console
+$ aco bootstrap --ledger 5
+2> usage: aco [-h] [--version] [--repo REPO]
+2>            {bootstrap,reset,status,board,rulings,next,claim,release,rescope,cut,ask,rule,check,body,brief,item,protect,register,run,login,_run-at-login}
+2>            ...
+2> aco: error: unrecognized arguments: --ledger 5
 exit 2
 ```

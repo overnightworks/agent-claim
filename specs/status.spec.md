@@ -44,10 +44,11 @@ CLAIM-11/CLAIM-12).
 ## Status's own overlap note
 
 The cost-and-overlap line `aco claim` prints at claim time is that
-command's own fact; `aco status` renders overlap separately, one line per
-claim, naming only the peer and its claim id, never the meeting paths.
+command's own fact; `aco status` renders overlap separately as one line per
+claim block, positioned after any resource or `whole:` line, naming only
+the peer and its claim id, never the meeting paths.
 
-- [ ] [STAT-06] A claim whose scope meets a live peer's ends its own block with `overlaps issue #73 (claim-b)`, one per peer, after any resource or `whole:` line; a claim with no peer prints no such line.
+- [ ] [STAT-06] A claim with a live peer ends its own block with `overlaps issue <label> (<claim-id>), issue <label> (<claim-id>)`, comma-joining every peer; a claim with no peer prints no such line (see E-STAT-05).
 - [ ] [STAT-08] `aco status --json`'s `claims[]` object carries an `"overlaps"` array of `{"issue", "lane", "claim_id", "agent"}` objects, one per peer STAT-06's own line names, `[]` when none.
 
 ## `--json`'s claim object, beside the fields `claim-record.spec.md` owns
@@ -58,8 +59,8 @@ claim, naming only the peer and its claim id, never the meeting paths.
 ## `--path`, a narrower read that never touches claim age
 
 - [ ] [STAT-10] `aco status --path P` against no holder prints `UNCLAIMED P`, exit `0` (see E-STAT-03).
-- [ ] [STAT-11] `aco status --path P` against one holder prints `CLAIMED P issue #n: <agent> (<role>) claim=<claim-id>`, with no `base=`, `branch=`, or age field, exit `0` (see E-STAT-03).
-- [ ] [STAT-12] `aco status --path P` against more than one holder appends one line, `overlap: issue #a (id-a), issue #b (id-b)`, after every holder's own line.
+- [ ] [STAT-11] `aco status --path P` against one holder prints `CLAIMED P issue <label>: <agent> (<role>) claim=<claim-id>`, with no `base=`, `branch=`, or age field, exit `0` (see E-STAT-03, E-STAT-05).
+- [ ] [STAT-12] `aco status --path P` against more than one holder appends one line, `overlap: issue <label> (<claim-id>), issue <label> (<claim-id>)`, after every holder's own line (see E-STAT-05).
 - [ ] [STAT-13] `aco status --path P --json` prints `{"path": P, "state": ..., "claims": [...]}`, one object per holder, none carrying an `"overlaps"` key (see E-STAT-03).
 
 ## Storage-aware labels
@@ -69,12 +70,12 @@ claim, naming only the peer and its claim id, never the meeting paths.
 
 ## Forge-free
 
-- [ ] [STAT-16] `aco status` never resolves an item forge or reads a remote's own URL beyond its board-config precondition: `--repo` and a non-GitHub remote are no error, `--json`/`--path` alike (see E-STAT-04).
+- [ ] [STAT-16] `aco status` never resolves an item forge or reads a remote's own URL beyond its board-config check; `--repo` and a non-GitHub remote are no error, in text, `--json`, or `--path` (see E-STAT-04).
 
 ## Never
 
 - `aco status --path` never reads a claim's committer-date age: a lineage break in an unrelated claim's `opened_commit` never stops its answer, unlike the plain (non-`--path`) read, which surfaces that break by CLAIM-50's own sentence.
-- `aco status` never writes: it is a pure read of the fetched state, never a compare-and-swap transition -- only `aco bootstrap` ever creates `refs/aco/state` (`specs/ref-store-cas.spec.md`'s own Never line), and no other command here writes it either.
+- `aco status` never writes: it is a pure read of the fetched state, never a compare-and-swap transition -- only `aco bootstrap`'s ordinary path creates `refs/aco/state` (`specs/ref-store-cas.spec.md`'s own Never line; `aco reset --confirm` reaches the same creation, CAS-44/CAS-46), and no other command here writes it either.
 - `aco status --json`'s `"issue"` field is never the state-ref item id, even under that pin (STAT-15).
 - `aco status --path`'s per-holder object never carries an `"overlaps"` key: the caller reads every holder from the one `"claims"` list instead (STAT-13).
 - `aco status`'s own overlap note never names the meeting paths: that detail stays `aco claim`'s own cost line, never duplicated here (STAT-06).
@@ -139,5 +140,32 @@ Setup: bare-remote except `origin` points at `git@gitlab.com:other/repo.git`, bo
 ```console
 $ aco status
 UNCLAIMED repository
+exit 0
+```
+
+### E-STAT-05 -- overlap and `--path`, under `storage = "state-ref"`
+
+Setup: bare-remote, `storage = "state-ref"` tracked, bootstrapped, two items `<item-a>`
+and `<item-b>` open (`aco item new`), a linked worktree on `ada/issue-a` already
+`aco claim <item-a> --scope README.md --scope docs/PRODUCT.md`, a second linked
+worktree on `ada/issue-b` already `aco claim <item-b> --scope docs/PRODUCT.md`
+
+```console
+$ aco status
+CLAIMED issue <label>: Ada (builder) base=<sha> branch=ada/issue-a claim=<claim-id> 0h 0m
+  README.md
+  docs/PRODUCT.md
+  overlaps issue <label> (<claim-id>)
+CLAIMED issue <label>: Ada (builder) base=<sha> branch=ada/issue-b claim=<claim-id> 0h 0m
+  docs/PRODUCT.md
+  overlaps issue <label> (<claim-id>)
+exit 0
+$ aco status --path README.md
+CLAIMED README.md issue <label>: Ada (builder) claim=<claim-id>
+exit 0
+$ aco status --path docs/PRODUCT.md
+CLAIMED docs/PRODUCT.md issue <label>: Ada (builder) claim=<claim-id>
+CLAIMED docs/PRODUCT.md issue <label>: Ada (builder) claim=<claim-id>
+overlap: issue <label> (<claim-id>), issue <label> (<claim-id>)
 exit 0
 ```
