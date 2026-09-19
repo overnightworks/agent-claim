@@ -1,0 +1,7 @@
+claim_id = "dbeda99abaf8442f885b5e7680bda812"
+agent = "Claude head (coordinator)"
+role = "builder"
+base = "45a45f6b499edf85b05ed27f9f80afa12c68a7bc"
+branch = "claude/issue-333-spec-pin-cas"
+scope = ["specs/storage-pin.spec.md", "specs/ref-store-cas.spec.md", "scripts/spec_coverage_ratchet.txt"]
+opened_commit = "a1d69fcbf077b95cde3c9adbdb30489c83db4eb0"
