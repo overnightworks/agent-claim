@@ -1819,7 +1819,8 @@ def expectation_lines(
 
 def expectation_line_state(line: ExpectationLine) -> str:
     """`open`, or `ruled <ruling> <ruled_on>` -- the one state text
-    `rulings` prints, in both its human and JSON forms."""
+    `rulings`' human form prints; `--json` carries `ruling`/`ruled_on`
+    directly and does not call this (issue #379)."""
     if line.ruling is None:
         return "open"
     ruled_on = cast(date, line.ruled_on)

@@ -1129,15 +1129,16 @@ def test_rulings_renders_text_json_and_empty_success(
         total_lines=2,
     )
     client = _configured_board_client(monkeypatch, tmp_path, open_issues=(open_issue,))
+    rulings_command = ["--repo", "example/agent-claim", "rulings"]
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "rulings"]) == 0
+    assert issue_claim.main(rulings_command) == 0
     assert capsys.readouterr().out == (
         "#10 1/2: Open expectation\n"
         "  1 open: Open decision 0.\n"
         f"  2 ruled yes {RULED_ON.isoformat()}: Settled decision 0.\n"
     )
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "rulings", "--json"]) == 0
+    assert issue_claim.main([*rulings_command, "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == [
         {
             "number": 10,
@@ -1164,14 +1165,14 @@ def test_rulings_renders_text_json_and_empty_success(
     )
     monkeypatch.setattr(client, "list_open_board_issues", lambda: (fully_ruled_issue,))
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "rulings"]) == 0
+    assert issue_claim.main(rulings_command) == 0
     assert capsys.readouterr().out == (
         "#11 0/2: Fully ruled\n"
         f"  1 ruled yes {RULED_ON.isoformat()}: Settled decision 0.\n"
         f"  2 ruled yes {RULED_ON.isoformat()}: Settled decision 1.\n"
     )
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "rulings", "--json"]) == 0
+    assert issue_claim.main([*rulings_command, "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == [
         {
             "number": 11,
@@ -1197,10 +1198,10 @@ def test_rulings_renders_text_json_and_empty_success(
 
     monkeypatch.setattr(client, "list_open_board_issues", lambda: ())
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "rulings"]) == 0
+    assert issue_claim.main(rulings_command) == 0
     assert capsys.readouterr().out == "No expectation lines.\n"
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "rulings", "--json"]) == 0
+    assert issue_claim.main([*rulings_command, "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == []
 
 
