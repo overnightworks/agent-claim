@@ -119,7 +119,7 @@ unknown`, else `0`.
 - [ ] [WS-41] A console awaiting its own launched viewer prints `KEY: viewer pending: waiting for the previously launched console` or `: console launch is pending`.
 - [ ] [WS-42] For a project registered with `--live-pid`, a stable, same-user native process still running its conversation prints `KEY: external live` in place of `started`/`retried`, opening no console.
 - [ ] [WS-43] For a project registered with `--live-pid`, an ambiguous or multiply-matching native process prints `KEY: ownership unknown` in place of `started`/`retried`, retrying nothing.
-- [ ] [WS-44] A fresh or retried console resumes its own session and model; environment carries its own agent, not the caller's (`test_run_starts_the_exact_registered_session_with_its_logical_identity`).
+- [ ] [WS-44] A fresh or retried console resumes the stored provider session and model, replacing the inherited session identity with the registered agent.
 - [ ] [WS-45] A console opened but never observed attached, with no recorded viewer failure, prints `KEY: failed: project console is not attached`.
 - [ ] [WS-46] A console whose viewer attempt was recorded as failed prints `KEY: failed: project console failed to attach`.
 - [ ] [WS-47] A foreign target prints `KEY: failed: tmux target 'aco-KEY' has foreign metadata`.
