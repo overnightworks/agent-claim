@@ -3,6 +3,6 @@ agent = "Claude head (coordinator)"
 role = "builder"
 base = "21d1a07f8f97199ec928a0364625726e8fdcc0f8"
 branch = "claude/issue-378-ownership-bundle-2"
-scope = ["AGENTS.md", "src/agent_coordination/board.py", "src/agent_coordination/github.py", "src/agent_coordination/items.py", "src/agent_coordination/protocol.py", "src/agent_coordination/terminal.py", "src/agent_coordination/workspace.py", "tests/test_board.py", "tests/test_github.py", "tests/test_items.py", "tests/test_protocol.py"]
+scope = ["AGENTS.md", "src/agent_coordination/board.py", "src/agent_coordination/github.py", "src/agent_coordination/items.py", "src/agent_coordination/protocol.py", "src/agent_coordination/terminal.py", "src/agent_coordination/workspace.py", "tests/test_board.py", "tests/test_cli.py", "tests/test_github.py", "tests/test_items.py", "tests/test_protocol.py", "tests/test_state_board.py", "tests/test_workspace.py", "tests/test_workspace_terminal.py"]
 opened_commit = "77be27623841bb7ead80bdb1fae46b9b212f401d"
 whole_reason = "ownership bundle 2: four mechanical de-duplications across six modules"
