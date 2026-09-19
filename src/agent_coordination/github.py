@@ -17,7 +17,9 @@ from . import board, forge, process, protocol
 from .protocol import REPOSITORY_PATTERN, ClaimError
 
 _Page = TypeVar("_Page")
-TIMESTAMP_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
+# The one RFC 3339 timestamp shape (issue #378): `protocol` owns it, since
+# `board` and `items` need to read the same pattern too.
+TIMESTAMP_PATTERN = protocol.RFC3339_TIMESTAMP_PATTERN
 # gh 2.45 colorizes --jq output when it believes stdout is a TTY.
 ANSI_ESCAPE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 MAX_RECENT_MERGED_PULL_REQUESTS = 1000

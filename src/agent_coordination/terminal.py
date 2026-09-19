@@ -25,6 +25,9 @@ _VIEWER_ENVIRONMENT_NAMES = (
     "XDG_RUNTIME_DIR",
     "XAUTHORITY",
 )
+# The one UUID version this repository mints and validates (issue #378):
+# `workspace.py` -- above this module in the Layers contract -- imports it
+# rather than keeping a second `4` for its own login-attempt identifier.
 _PENDING_TOKEN_VERSION = 4
 _ASCII_CONTROL_LIMIT = 32
 _ASCII_DELETE = 127

@@ -31,7 +31,6 @@ _LOGIN_ENTRY_KEYS = frozenset({"Type", "Name", "Exec", "X-Aco-Owner"})
 _DESKTOP_RESERVED_CHARACTERS = frozenset(" \t\n\"'\\><~|&;$*?#()`")
 _ASCII_CONTROL_LIMIT = 32
 _ASCII_DELETE = 127
-_UUID_VERSION = 4
 _LOGIN_EXEC_ARGUMENTS = ("-I", "-m", "agent_coordination.cli", "_run-at-login")
 _LOGIN_WORKSPACE_FAILURE = "workspace failure"
 _LOGIN_MALFORMED_RECORD = "login attempt record is malformed"
@@ -352,7 +351,7 @@ def _login_attempt_identifier(value: object) -> None:
         identifier = uuid.UUID(value)
     except ValueError as error:
         raise WorkspaceError(_LOGIN_MALFORMED_RECORD) from error
-    if str(identifier) != value or identifier.version != _UUID_VERSION:
+    if str(identifier) != value or identifier.version != terminal._PENDING_TOKEN_VERSION:
         raise WorkspaceError(_LOGIN_MALFORMED_RECORD)
 
 

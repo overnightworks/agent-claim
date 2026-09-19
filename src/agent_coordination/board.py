@@ -169,10 +169,10 @@ RECORD_KEYS = frozenset(
 )
 # RFC 3339 UTC, second precision -- the one timestamp shape this repository
 # reads from a forge (github.TIMESTAMP_PATTERN) and now from a state-ref
-# item's own record: duplicated here, not imported, because the Layers
-# contract forbids `board` from depending on `github` (`github` depends on
-# `board`, not the reverse).
-RECORD_TIMESTAMP_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
+# item's own record (issue #378): `protocol` owns the pattern, since the
+# Layers contract forbids `board` from depending on `github` (`github`
+# depends on `board`, not the reverse), and `protocol` sits below both.
+RECORD_TIMESTAMP_PATTERN = protocol.RFC3339_TIMESTAMP_PATTERN
 
 
 class ItemKind(StrEnum):
@@ -1594,27 +1594,14 @@ def locate_agent_claim_block(body: str) -> LocatedBlock:
     return LocatedBlock(tomllib.loads(content), content_start, content_end, newline)
 
 
-_TOML_BASIC_STRING_ESCAPES = {
-    "\\": "\\\\",
-    '"': '\\"',
-    "\b": "\\b",
-    "\t": "\\t",
-    "\n": "\\n",
-    "\f": "\\f",
-    "\r": "\\r",
-}
 # The shape a decoded homogeneous array of tables (`[[expectation]]`,
 # `[[slice]]`) or an `asdict`'d list of dataclasses takes -- one alias so
 # `cast` names a real type instead of repeating the string.
 _JsonRows = list[dict[str, object]]
 
-
-def _toml_string(value: object) -> str:
-    """A TOML basic string for `value` -- the writer's one escaping path,
-    matching what `tomllib.loads` (the reader) accepts back unchanged."""
-    escaped = "".join(_TOML_BASIC_STRING_ESCAPES.get(char, char) for char in cast(str, value))
-    return f'"{escaped}"'
-
+# `protocol._toml_string` is this repository's one TOML basic-string writer
+# (issue #378): it lives below this module in the Layers contract, so it is
+# imported rather than kept as a second escape table here.
 
 _TOML_MULTILINE_STRING_ESCAPES = {"\\": "\\\\", '"': '\\"'}
 
@@ -1638,7 +1625,7 @@ def _render_frozen_until(data: Mapping[str, object]) -> list[str]:
     ruled_on = cast(date, frozen_until["ruled_on"])
     return [
         "",
-        f"frozen_until = {{ trigger = {_toml_string(frozen_until['trigger'])}, "
+        f"frozen_until = {{ trigger = {protocol._toml_string(frozen_until['trigger'])}, "
         f"ruled_on = {ruled_on.isoformat()} }}",
     ]
 
@@ -1651,7 +1638,7 @@ def _render_scope_array(values: object) -> str:
     here. Callable only once a schema check has already proven `values`
     valid, so this never itself refuses a duplicate."""
     entries = protocol._valid_scope(values)
-    return "[" + ", ".join(_toml_string(value) for value in entries) + "]"
+    return "[" + ", ".join(protocol._toml_string(value) for value in entries) + "]"
 
 
 def _render_scope(data: Mapping[str, object]) -> list[str]:
@@ -1663,23 +1650,25 @@ def _render_scope(data: Mapping[str, object]) -> list[str]:
 def _render_size(data: Mapping[str, object]) -> list[str]:
     if "size" not in data:
         return []
-    return ["", f"size = {_toml_string(data['size'])}"]
+    return ["", f"size = {protocol._toml_string(data['size'])}"]
 
 
 def _render_expectations(data: Mapping[str, object]) -> list[str]:
     lines: list[str] = []
     for expectation in cast(_JsonRows, data.get("expectation", [])):
-        lines.extend(("", "[[expectation]]", f"text = {_toml_string(expectation['text'])}"))
+        lines.extend(
+            ("", "[[expectation]]", f"text = {protocol._toml_string(expectation['text'])}")
+        )
         if "default" in expectation:
-            lines.append(f"default = {_toml_string(expectation['default'])}")
+            lines.append(f"default = {protocol._toml_string(expectation['default'])}")
         else:
             ruled_on = cast(date, expectation["ruled_on"])
-            lines.append(f"ruling = {_toml_string(expectation['ruling'])}")
+            lines.append(f"ruling = {protocol._toml_string(expectation['ruling'])}")
             lines.append(f"ruled_on = {ruled_on.isoformat()}")
         if "question" in expectation:
-            lines.append(f"question = {_toml_string(expectation['question'])}")
+            lines.append(f"question = {protocol._toml_string(expectation['question'])}")
         if "example" in expectation:
-            lines.append(f"example = {_toml_string(expectation['example'])}")
+            lines.append(f"example = {protocol._toml_string(expectation['example'])}")
         if "picture" in expectation:
             lines.append(f"picture = {_toml_multiline_string(cast(str, expectation['picture']))}")
     return lines
@@ -1698,7 +1687,7 @@ def _render_slices(data: Mapping[str, object]) -> list[str]:
                 "",
                 "[[slice]]",
                 f"index = {entry['index']}",
-                f"title = {_toml_string(entry['title'])}",
+                f"title = {protocol._toml_string(entry['title'])}",
             )
         )
         if "scope" in entry:
@@ -1707,7 +1696,8 @@ def _render_slices(data: Mapping[str, object]) -> list[str]:
 
 
 def _render_record_array(values: object) -> str:
-    return "[" + ", ".join(_toml_string(value) for value in cast("list[str]", values)) + "]"
+    entries = cast("list[str]", values)
+    return "[" + ", ".join(protocol._toml_string(value) for value in entries) + "]"
 
 
 def _render_record(data: Mapping[str, object]) -> list[str]:
@@ -1722,21 +1712,21 @@ def _render_record(data: Mapping[str, object]) -> list[str]:
     lines = [
         "",
         f"[{RECORD_KEY}]",
-        f"title = {_toml_string(record['title'])}",
-        f"state = {_toml_string(record['state'])}",
+        f"title = {protocol._toml_string(record['title'])}",
+        f"state = {protocol._toml_string(record['state'])}",
     ]
     if record.get("kind") is not None:
-        lines.append(f"kind = {_toml_string(record['kind'])}")
+        lines.append(f"kind = {protocol._toml_string(record['kind'])}")
     lines.append(f"labels = {_render_record_array(record.get('labels', []))}")
     lines.append(f"blocked_by = {_render_record_array(record.get('blocked_by', []))}")
     if record.get("parent") is not None:
-        lines.append(f"parent = {_toml_string(record['parent'])}")
+        lines.append(f"parent = {protocol._toml_string(record['parent'])}")
     if record.get("origin") is not None:
-        lines.append(f"origin = {_toml_string(record['origin'])}")
-    lines.append(f"created_at = {_toml_string(record['created_at'])}")
-    lines.append(f"updated_at = {_toml_string(record['updated_at'])}")
+        lines.append(f"origin = {protocol._toml_string(record['origin'])}")
+    lines.append(f"created_at = {protocol._toml_string(record['created_at'])}")
+    lines.append(f"updated_at = {protocol._toml_string(record['updated_at'])}")
     if record.get("closed_at") is not None:
-        lines.append(f"closed_at = {_toml_string(record['closed_at'])}")
+        lines.append(f"closed_at = {protocol._toml_string(record['closed_at'])}")
     return lines
 
 
@@ -1746,7 +1736,9 @@ def render_block(data: Mapping[str, object], newline: str = "\n") -> str:
     `newline` so a following fence line starts clean. Production caller:
     block-mode `cut`; there is no standalone validator."""
     lines = [f"version = {data['version']}"]
-    lines.extend(f"{key} = {_toml_string(data[key])}" for key in ("now", "next", "done_when"))
+    lines.extend(
+        f"{key} = {protocol._toml_string(data[key])}" for key in ("now", "next", "done_when")
+    )
     lines.extend(_render_frozen_until(data))
     lines.extend(_render_scope(data))
     lines.extend(_render_size(data))

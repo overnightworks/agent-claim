@@ -1,7 +1,7 @@
 This file is reusable AI policy. Keep project facts, provider glue, architecture
 state, tool commands, and plans outside it.
 
-Entry points (pointers only; the facts live there): `README.md` is operator documentation for install, the CLI, and the claim protocol. Follow the installed `aco` CLI for the live rules. Do not copy that protocol here.
+Entry points (pointers only; the facts live there): `README.md` is operator documentation for install, the CLI, and the claim protocol. Follow the installed `aco` CLI for the live rules. `specs/*.spec.md` owns every command's behaviour -- its printed literals, exit codes, and `--json` shapes. Do not copy that protocol here.
 
 Repository facts (owners in parentheses; do not fork them here):
 - Python >= 3.11 (`pyproject.toml`).
