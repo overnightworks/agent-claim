@@ -462,9 +462,14 @@ def _add_release_parser(commands: argparse._SubParsersAction) -> None:
     outcome = release.add_mutually_exclusive_group(required=True)
     outcome.add_argument(
         "--merged",
-        type=int,
-        metavar="PULL_REQUEST",
-        help="the pull request that landed this claim's item on the default branch",
+        nargs="?",
+        const="",
+        metavar="PULL_REQUEST_OR_SHA",
+        help=(
+            "the pull request that landed this claim's item on the default branch "
+            "(storage = github), or the trunk commit that did (storage = state-ref; "
+            "bare --merged picks the newest trunk commit naming this item)"
+        ),
     )
     outcome.add_argument(
         "--abandoned",
@@ -584,18 +589,30 @@ def _add_rule_parser(commands: argparse._SubParsersAction) -> None:
     rule.add_argument("--json", action="store_true", help=JSON_HELP)
 
 
+def _parse_check_subject(value: str) -> int | str:
+    """`check`'s one positional: a pull/issue reference (`board.parse_item_reference`),
+    or -- issue #359, LAND-48 -- a full 40-character commit id, read as a trunk
+    commit instead. The two grammars never collide: an item reference
+    (`aco-xxxxxx`, `#n`, or the bare `n`) is always far shorter than a full
+    git object id."""
+    if protocol.COMMIT_PATTERN.fullmatch(value) is not None:
+        return value
+    return board.parse_item_reference(value)
+
+
 def _add_check_parser(commands: argparse._SubParsersAction) -> None:
     check = commands.add_parser(
         "check",
         help=(
-            "read one number -- a pull request's work-item classification, or an "
-            "issue's body contract; claims, labels and writes nothing"
+            "read one number or trunk commit -- a pull request's work-item "
+            "classification, a trunk commit's (LAND-48), or an issue's body "
+            "contract; claims, labels and writes nothing"
         ),
     )
     check.add_argument(
         "number",
-        type=board.parse_item_reference,
-        help="the pull request or issue to read; the forge says which one it is",
+        type=_parse_check_subject,
+        help="the pull request, issue, or trunk commit to read",
     )
     check.add_argument("--json", action="store_true", help=JSON_HELP)
 
@@ -2034,6 +2051,7 @@ class _LandingCheckContext:
 
     client: forge.ForgeReader
     repository: str
+    storage: board.Storage
 
 
 @dataclass(frozen=True)
@@ -2096,7 +2114,7 @@ def _parent_requirement(
     reference_defect = _parent_reference_defect(parent, context.repository)
     if reference_defect is not None:
         return reference_defect
-    parsed_parent = board.parse_body(parent.body)
+    parsed_parent = board.parse_body(parent.body, storage=context.storage)
     if parsed_parent.read_state is not board.BodyReadState.VALID:
         return board.ClassificationDefect(_parent_body_finding(parent.reference, parsed_parent))
     remaining = tuple(
@@ -2241,9 +2259,10 @@ def _pull_request_check(
     claims: tuple[protocol.ActiveClaim, ...],
     repository: str,
     number: int,
+    storage: board.Storage,
 ) -> CheckOutcome:
     detail = client.landing(number)
-    context = _LandingCheckContext(client, repository)
+    context = _LandingCheckContext(client, repository, storage)
     checked = _checked_classification(context, claims, detail)
     if isinstance(checked, board.ClassificationDefect):
         return CheckOutcome(
@@ -2380,6 +2399,18 @@ def _cmd_body(parsed: argparse.Namespace) -> int:
     return 0
 
 
+def _github_pull_request_number(value: str) -> int:
+    """`--merged`'s value under `storage = "github"` (issue #359): a bare
+    decimal pull request number -- the sha grammar and the empty "newest
+    trunk landing" sentinel both belong to `storage = "state-ref"` alone,
+    since GitHub has no trunk walk to read either from."""
+    if not value or not value.isdigit():
+        raise protocol.ClaimUnavailableError(
+            "--merged requires a pull request number under storage = github"
+        )
+    return int(value)
+
+
 def _release_outcome(merged: int | None, abandoned: str | None) -> protocol.ReleaseOutcome:
     if merged is not None:
         return protocol.MergedRelease(merged)
@@ -2389,12 +2420,16 @@ def _release_outcome(merged: int | None, abandoned: str | None) -> protocol.Rele
 
 
 def _verify_merged_release(
-    client: forge.ForgeReader,
+    client: github.GitHubForge,
     repository: str,
     identity: protocol.ClaimIdentity,
     merged: protocol.MergedRelease,
 ) -> None:
-    """Refuse a `--merged` release the landing itself does not support."""
+    """Refuse a `--merged` release the landing itself does not support; for
+    an issue whose work item is still open, close it through the forge
+    writer instead of refusing (issue #359 Card 1) -- `state_board.py`'s
+    own `LandingIntent` path is `storage = state-ref`'s equivalent, so this
+    only ever runs under `storage = github` (see `_cmd_release`)."""
     detail = client.landing(merged.pull_request)
     if not detail.merged:
         raise protocol.ClaimUnavailableError(f"pull request #{detail.number} is not merged")
@@ -2422,7 +2457,9 @@ def _verify_merged_release(
             f"pull request #{detail.number} names {classification}, not work item #{identity.issue}"
         )
     reference = _fetch_issue_reference(client, identity.issue)
-    if reference.state is not forge.ItemState.CLOSED:
+    if reference.state is forge.ItemState.OPEN:
+        client.close_landed_item(identity.issue, pull_request=detail.number)
+    elif reference.state is not forge.ItemState.CLOSED:
         raise protocol.ClaimUnavailableError(
             f"work item #{identity.issue} is {reference.state.value}, not closed"
         )
@@ -2493,29 +2530,6 @@ def _refuse_repo_under_state_ref(repo: str | None) -> None:
     is no host-based target to override (issue #248)."""
     if repo is not None:
         raise protocol.ClaimUnavailableError("--repo is meaningless under storage = state-ref")
-
-
-# `release --merged`'s own residual under `storage = "state-ref"` (issue
-# #283): `LANDING` stays `forge.Capability.UNSUPPORTED` through #230 slice
-# 6, so a merged release still cannot verify its own pull request there --
-# named by the offline path that works today, rather than leaking
-# `state_board.py`'s own unsupported-capability wording.
-STATE_REF_MERGED_LANDING_NOT_YET = (
-    "state-ref cannot verify a merged pull request yet (#230 slice 6); land "
-    'offline with `item close` and `release --abandoned "landed as <sha>"` until then'
-)
-
-
-def _refuse_state_ref_merged_release(toplevel: Path) -> None:
-    """`release --merged`'s own precondition under `storage = "state-ref"`
-    (issue #283): refused by name before `_verify_merged_release` ever calls
-    `client.landing`, which `state_board.StateRefBoard` has no data for at
-    all -- `claim`'s issue-scoped body check needs no equivalent gate
-    anymore, since it only ever reads and `state_board.StateRefBoard` has
-    read `board`/`next`/`check` since #248.
-    """
-    if _board_config(toplevel).storage is board.Storage.STATE_REF:
-        raise protocol.ClaimUnavailableError(STATE_REF_MERGED_LANDING_NOT_YET)
 
 
 @dataclass(frozen=True)
@@ -3464,10 +3478,14 @@ def _rescope_command(
 
 
 def _cmd_check(parsed: argparse.Namespace, session: _ReadSession) -> int:
-    """One number, one dispatch request into one of three answers: a pull
-    request to classify, an issue whose body contract to read, or a number
-    that is in neither number space. Only the pull-request side needs the
-    live claims, so the issue side never fetches the state ref."""
+    """One number or trunk commit, one dispatch request into one of four
+    answers: a pull request to classify, an issue whose body contract to
+    read, a trunk commit to classify from its own trailer block (issue
+    #359, LAND-48), or a number that is in neither number space. Only the
+    pull-request side needs the live claims, so the issue side never
+    fetches the state ref."""
+    if isinstance(parsed.number, str):
+        return _check_trunk_commit(parsed)
     number = int(parsed.number)
     client = session.forge()
     repository = client.repository.path
@@ -3480,12 +3498,68 @@ def _cmd_check(parsed: argparse.Namespace, session: _ReadSession) -> int:
         outcome = _missing_number(repository, number)
     elif reference.is_landing:
         _worktree, _remote, observed = _store_observation()
-        outcome = _pull_request_check(client, tuple(observed.claims.values()), repository, number)
+        outcome = _pull_request_check(
+            client, tuple(observed.claims.values()), repository, number, config.storage
+        )
     else:
         outcome = _issue_check(
             client, repository, reference.body or "", number, storage=config.storage
         )
     return outcome.report(as_json=parsed.json)
+
+
+def _trunk_classification_text(classification: board.TrunkClassification) -> str:
+    """`classification`'s own display line, the trunk-trailer counterpart of
+    `WorkItemClassification`/`NoItemClassification`'s `__str__` (issue
+    #359): a trunk `Work-Item:` trailer names bare, repository-local
+    numbers (`TrunkWorkItemClassification.numbers`), never a qualified
+    `IssueReference` -- a commit's own trailer is always local -- so this
+    lives here rather than reusing either PR-body type's `__str__`."""
+    if isinstance(classification, board.NoItemClassification):
+        return f"No-Item: {classification.kind.value}"
+    return "Work-Item: " + ", ".join(f"#{number}" for number in classification.numbers)
+
+
+def _trunk_commit_classification_or_finding(
+    landing: checkout.TrunkLanding | None,
+) -> tuple[board.TrunkClassification | None, str | None]:
+    """`landing`'s own classification, or why `check <sha>` refuses instead
+    (issue #359, LAND-48): `None` is not on the walked first-parent trunk at
+    all, carries no trailer, or is a `ClassificationDefect`'s own message."""
+    if landing is None:
+        return None, "is not on the first-parent trunk"
+    classification = landing.classification
+    if classification is None:
+        return None, "carries no `Work-Item:` or `No-Item:` trailer"
+    if isinstance(classification, board.ClassificationDefect):
+        return None, classification.message
+    return classification, None
+
+
+def _check_trunk_commit(parsed: argparse.Namespace) -> int:
+    """`check <sha>` (issue #359, LAND-48): the same three answers `check
+    <pr>` reads from a pull request body's classification (LAND-04/LAND-06),
+    read instead from `sha`'s own trailer block on the first-parent trunk --
+    the same walk `release --merged <sha>` verifies against under `storage
+    = "state-ref"` (LAND-47/LAND-52), reused rather than re-derived here.
+    Needs no forge at all: a trunk commit's trailer is local history."""
+    sha = cast(str, parsed.number)
+    config = _board_config(_resolve_toplevel())
+    landings = checkout.trunk_landings(config.canonical_remote, TRUNK_LANDING_DEPTH)
+    landing = next((entry for entry in landings if entry.sha == sha), None)
+    classification, finding = _trunk_commit_classification_or_finding(landing)
+    if parsed.json:
+        payload: dict[str, object] = {"ok": finding is None, "sha": sha}
+        if finding is not None:
+            payload["refused"] = finding
+        print(json.dumps(payload))
+        return 1 if finding is not None else 0
+    if finding is not None:
+        print(f"REFUSED: {sha} {finding}", file=sys.stderr)
+        return 1
+    assert classification is not None
+    print(f"{sha} declares {_trunk_classification_text(classification)}")
+    return 0
 
 
 def _brief_claim(
@@ -4059,23 +4133,25 @@ def _cmd_claim(parsed: argparse.Namespace, session: _WriteSession) -> int:
     return 0
 
 
-def _cmd_release(parsed: argparse.Namespace, session: _WriteSession) -> None:
-    issue = _optional_issue_number(parsed.issue)
-    identity = _resolved_identity(issue, session.release_branch or "")
-    merged = None if parsed.merged is None else int(parsed.merged)
-    outcome = _release_outcome(merged, parsed.abandoned)
-    client: forge.ForgeReader | None = None
-    if isinstance(outcome, protocol.MergedRelease):
-        # Only a merged release verifies its landing pull request against the
-        # forge (issue #245); an abandoned release -- lane or issue -- never
-        # calls `session.forge()`, so it never resolves a repository or
-        # invokes `gh`.
-        _refuse_state_ref_merged_release(_resolve_toplevel())
-        client = session.forge()
-        _verify_merged_release(client, client.repository.path, identity, outcome)
-    worktree, canonical_remote, observed = _store_observation()
-    _require_state_ref(observed)
-    selected = _selected_store_claim(observed, identity, session.release_branch, parsed.claim_id)
+@dataclass(frozen=True)
+class _ResolvedRelease:
+    """The live claim `release` targets and the role it releases under
+    (issue #359): factored out of `_cmd_release` so `_cmd_release_landed`
+    (the `storage = "state-ref"` `--merged <sha>` path) shares the exact
+    same selection, `--branch`/`--claim-id` agreement, and claimant checks
+    rather than a second copy of them."""
+
+    selected: protocol.ActiveClaim
+    resolved_role: str
+
+
+def _resolve_release_claimant(
+    parsed: argparse.Namespace,
+    observed: protocol.ClaimState,
+    identity: protocol.ClaimIdentity,
+    release_branch: str | None,
+) -> _ResolvedRelease:
+    selected = _selected_store_claim(observed, identity, release_branch, parsed.claim_id)
     if (
         parsed.branch is not None
         and parsed.claim_id is not None
@@ -4096,10 +4172,36 @@ def _cmd_release(parsed: argparse.Namespace, session: _WriteSession) -> None:
                 f"this session={protocol._claimant_text(parsed.agent, role)!r})"
             )
     resolved_role = role if role is not None else selected.role
+    return _ResolvedRelease(selected, resolved_role)
+
+
+def _cmd_release(parsed: argparse.Namespace, session: _WriteSession) -> None:
+    issue = _optional_issue_number(parsed.issue)
+    identity = _resolved_identity(issue, session.release_branch or "")
+    storage = _board_config(_resolve_toplevel()).storage
+    if parsed.merged is not None and storage is board.Storage.STATE_REF:
+        _cmd_release_landed(parsed, session, identity, storage)
+        return
+    merged = None if parsed.merged is None else _github_pull_request_number(parsed.merged)
+    outcome = _release_outcome(merged, parsed.abandoned)
+    client: github.GitHubForge | None = None
+    if isinstance(outcome, protocol.MergedRelease):
+        # Only a merged release verifies its landing pull request against the
+        # forge (issue #245); an abandoned release -- lane or issue -- never
+        # calls `session.forge()`, so it never resolves a repository or
+        # invokes `gh`. `storage` is already proven `github` here (the
+        # `state-ref` branch above returned), so this cast is honest, not a
+        # suppression: `_LazyForge.__call__` builds exactly a
+        # `github.GitHubForge` for every other storage pin.
+        client = cast(github.GitHubForge, session.forge())
+        _verify_merged_release(client, client.repository.path, identity, outcome)
+    worktree, canonical_remote, observed = _store_observation()
+    _require_state_ref(observed)
+    resolved = _resolve_release_claimant(parsed, observed, identity, session.release_branch)
     intent = protocol.ReleaseIntent(
-        claim_id=selected.claim_id,
+        claim_id=resolved.selected.claim_id,
         agent=parsed.agent,
-        role=resolved_role,
+        role=resolved.resolved_role,
         outcome=outcome,
         operation_id=uuid.uuid4().hex,
         coordinator_override=parsed.coordinator_override,
@@ -4107,10 +4209,11 @@ def _cmd_release(parsed: argparse.Namespace, session: _WriteSession) -> None:
     new_state = store.commit_transition(
         worktree=worktree,
         remote=canonical_remote,
-        subject=_transition_subject("release", selected.identity, selected.branch),
+        subject=_transition_subject(
+            "release", resolved.selected.identity, resolved.selected.branch
+        ),
         intent=intent,
     )
-    storage = _board_config(_resolve_toplevel()).storage
     landing, hint = (
         (None, None)
         if client is None
@@ -4118,7 +4221,133 @@ def _cmd_release(parsed: argparse.Namespace, session: _WriteSession) -> None:
     )
     _print_release_result(
         ReleaseReport(
-            selected, parsed.agent, resolved_role, outcome, client, landing, hint, storage
+            resolved.selected,
+            parsed.agent,
+            resolved.resolved_role,
+            outcome,
+            client,
+            landing,
+            hint,
+            storage,
+        ),
+        as_json=parsed.json,
+    )
+
+
+def _newest_landed_commit(landings: tuple[checkout.TrunkLanding, ...], number: int) -> str:
+    """The most recent first-parent trunk commit whose own trailer names
+    `number` (issue #359, LAND-47): the empty-value form of `release
+    --merged`'s own sha argument under `storage = "state-ref"`."""
+    for landing in reversed(landings):
+        classification = landing.classification
+        if (
+            isinstance(classification, board.TrunkWorkItemClassification)
+            and number in classification.numbers
+        ):
+            return landing.sha
+    raise protocol.ClaimUnavailableError(
+        f"no trunk commit carries a Work-Item: trailer naming #{number}"
+    )
+
+
+def _landed_commit_by_sha(
+    landings: tuple[checkout.TrunkLanding, ...], number: int, sha: str
+) -> str:
+    """`sha`, verified as `number`'s own landing commit (issue #359,
+    LAND-52): it must sit on the walked first-parent trunk and carry a
+    `Work-Item:` trailer naming exactly `number`, refused by name before
+    anything is written otherwise."""
+    landing = next((entry for entry in landings if entry.sha == sha), None)
+    if landing is None:
+        raise protocol.ClaimUnavailableError(f"{sha} is not on the first-parent trunk")
+    classification = landing.classification
+    if classification is None:
+        raise protocol.ClaimUnavailableError(f"{sha} carries no `Work-Item:` trailer")
+    if isinstance(classification, board.ClassificationDefect):
+        raise protocol.ClaimUnavailableError(f"{sha} {classification.message}")
+    if (
+        not isinstance(classification, board.TrunkWorkItemClassification)
+        or number not in classification.numbers
+    ):
+        raise protocol.ClaimUnavailableError(f"{sha} does not name work item #{number}")
+    return landing.sha
+
+
+def _landed_commit(landings: tuple[checkout.TrunkLanding, ...], number: int, requested: str) -> str:
+    """The trunk-landing commit `release --merged <sha|empty>` closes
+    `number` from, under `storage = "state-ref"` (issue #359, LAND-47/
+    LAND-52): `requested` empty picks the newest such commit
+    (`_newest_landed_commit`); a given sha is verified instead
+    (`_landed_commit_by_sha`)."""
+    if requested:
+        return _landed_commit_by_sha(landings, number, requested)
+    return _newest_landed_commit(landings, number)
+
+
+def _cmd_release_landed(
+    parsed: argparse.Namespace,
+    session: _WriteSession,
+    identity: protocol.ClaimIdentity,
+    storage: board.Storage,
+) -> None:
+    """`release --merged <sha|empty>` under `storage = "state-ref"` (issue
+    #359, LAND-47/LAND-52): the trunk walk (`checkout.trunk_landings`,
+    issue #304) names, or verifies, the landing commit; one
+    `protocol.LandingIntent` then closes the item and releases the claim in
+    one commit, one CAS -- `_cmd_release`'s own `ReleaseIntent` path never
+    runs for this storage pin's `--merged`.
+    """
+    if not isinstance(identity, protocol.IssueIdentity):
+        raise protocol.ClaimUnavailableError(
+            "--merged under storage = state-ref requires an issue number; "
+            "an issue-less lane has no item to close"
+        )
+    toplevel = _resolve_toplevel()
+    canonical_remote = _board_config(toplevel).canonical_remote
+    landings = checkout.trunk_landings(canonical_remote, TRUNK_LANDING_DEPTH)
+    commit = _landed_commit(landings, identity.issue, cast(str, parsed.merged))
+    client = _state_ref_forge(parsed.repo, canonical_remote)
+    if client.item_reference(identity.issue).state is forge.ItemState.MISSING:
+        raise protocol.ClaimUnavailableError(
+            f"#{identity.issue} does not exist in {client.repository.path}"
+        )
+    write = client.prepare_landing(identity.issue)
+    worktree, _remote, observed = _store_observation()
+    _require_state_ref(observed)
+    resolved = _resolve_release_claimant(parsed, observed, identity, session.release_branch)
+    new_oid = store.hash_blob(worktree, write.content)
+    outcome = protocol.LandedRelease(commit=protocol.ObjectId(commit))
+    intent = protocol.LandingIntent(
+        item_id=write.item_id,
+        item_expected=write.expected,
+        item_new_oid=new_oid,
+        claim_id=resolved.selected.claim_id,
+        agent=parsed.agent,
+        role=resolved.resolved_role,
+        outcome=outcome,
+        operation_id=uuid.uuid4().hex,
+        coordinator_override=parsed.coordinator_override,
+    )
+    new_state = store.commit_transition(
+        worktree=worktree,
+        remote=canonical_remote,
+        subject=_transition_subject(
+            "release", resolved.selected.identity, resolved.selected.branch
+        ),
+        intent=intent,
+    )
+    client.mark_landed(write, new_oid)
+    landing, hint = _landing_report(client, identity, worktree, new_state, storage)
+    _print_release_result(
+        ReleaseReport(
+            resolved.selected,
+            parsed.agent,
+            resolved.resolved_role,
+            outcome,
+            client,
+            landing,
+            hint,
+            storage,
         ),
         as_json=parsed.json,
     )
