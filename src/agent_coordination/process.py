@@ -26,9 +26,8 @@ _MAX_PROC_COMMAND_LINE_BYTES = 16 * 1024
 _MAX_NATIVE_PROCESS_SCAN = 1024
 _STAT_START_TIME_INDEX = 19
 
-# The fallback detail every git-failure sentence in this package falls back
-# to when git's own stderr and stdout both carried nothing readable
-# (issue #372: one owner instead of a `checkout.py`/`store.py` copy each).
+# Fallback when a failed git invocation left nothing readable on either
+# stream (issue #372: one owner instead of a `checkout.py`/`store.py` copy).
 UNKNOWN_GIT_FAILURE = "unknown git failure"
 
 
@@ -333,33 +332,24 @@ def run_captured(
 
 
 def git_command(arguments: list[str], *, directory: Path | None = None) -> list[str]:
-    """Build a `git arguments` command, `-C directory` prefixed when given.
-
-    The one argv shape every git-subprocess caller in this package
-    assembles (issue #372); building it here keeps `checkout` and `store`
-    from re-typing it under two independent module layers that may not
-    import each other.
-    """
+    """Build a `git arguments` command, `-C directory` prefixed when given --
+    the one argv shape `checkout` and `store` each assembled by hand
+    (issue #372), on two layers that may not import each other."""
     return ["git", *(["-C", str(directory)] if directory is not None else []), *arguments]
 
 
 def run_git(arguments: list[str], *, directory: Path | None = None) -> CapturedResult:
     """Launch `git arguments`, in `directory` when given via `-C`, capturing
-    stdout and stderr separately.
-
-    Raises `ExecutableMissingError` or `ProcessTimedOutError`; a nonzero exit
-    status comes back as an ordinary `CapturedResult`. Callers disagree on
-    whether an unlisted `OSError` (permission denied, out of file
-    descriptors, ...) should fail closed too, so that decision stays theirs
-    to make around this call, not this function's to make for them.
-    """
+    stdout and stderr separately. Raises `ExecutableMissingError` or
+    `ProcessTimedOutError`; whether an unlisted `OSError` should also fail
+    closed is each caller's own call to make around this one, since callers
+    disagree (issue #372)."""
     return run_captured(git_command(arguments, directory=directory))
 
 
 def git_failure_detail(result: CapturedResult) -> str:
-    """The best-effort readable text from a finished `git` invocation: its
-    stderr, falling back to stdout, falling back to `UNKNOWN_GIT_FAILURE`
-    when git left nothing readable on either stream."""
+    """A finished `git` invocation's stderr, falling back to stdout, falling
+    back to `UNKNOWN_GIT_FAILURE` when neither stream carried anything."""
     return result.stderr.decode().strip() or result.stdout.decode().strip() or UNKNOWN_GIT_FAILURE
 
 

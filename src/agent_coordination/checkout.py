@@ -24,9 +24,8 @@ CLAUDE_SESSION_ID_ENV = "CLAUDE_SESSION_ID"
 # S1192; issue #314 gate G's follow-up folds `versioned_paths` and
 # `path_is_tracked` into this one owner too, F1). `process.run_git` and
 # `process.git_failure_detail` (issue #372) own the argv shape and the
-# stderr/stdout/fallback reading `store.py` needs the same way; the
-# `ClaimError` translation stays here because `checkout` and `store` sit on
-# one import-linter layer and neither may import the other. `_git_output`,
+# fallback reading `store.py` needs too; the `ClaimError` translation stays
+# here since `checkout`/`store` share one import-linter layer. `_git_output`,
 # `versioned_paths`, and `path_is_tracked` each interpret a successful
 # launch's exit status their own way.
 _GIT_MISSING_EXECUTABLE_ERROR = "git is required for issue claims"
