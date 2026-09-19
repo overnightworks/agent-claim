@@ -84,6 +84,23 @@ class _DecodedItem:
     oid: ObjectId
 
 
+@dataclass(frozen=True)
+class LandingWrite:
+    """One item's own close write, composed but not yet applied (issue
+    #359): `item_id`/`expected`/`content` are exactly the CAS write
+    `close_item` performs immediately today, staged instead so `release
+    --merged <sha|empty>` can hash `content` into a blob itself and fold
+    the result into one atomic `protocol.LandingIntent` alongside the claim
+    it releases. `record` is the item's own already-closed record, carried
+    along so `mark_landed` can fold the committed write back into this
+    instance's in-memory view without re-decoding `content`."""
+
+    item_id: str
+    expected: ObjectId
+    content: bytes
+    record: items.ItemRecord
+
+
 def _decoded_text(item_id: str, content: bytes) -> str:
     try:
         return content.decode("utf-8")
@@ -407,19 +424,17 @@ class StateRefBoard:
         )
         self._items[item_id] = _DecodedItem(record=updated_record, body=new_body, oid=new_oid)
 
-    def close_item(self, number: int) -> str:
-        """Closes `number`'s item record (issue #289): `state` moves to
-        `CLOSED`, `closed_at` and `updated_at` both move to now, and every
-        other field -- the body included -- stays byte-identical, in one CAS
-        write over this instance's own already-read `current.oid` (the same
-        oid discipline `update_item_body` uses, issue #279). The one place
-        `state`/`closed_at` are ever composed -- `cli._cmd_item_close`
-        delegates the whole write here rather than building its own record.
-        Refuses loud, before any write, when the record already carries
-        `state = CLOSED`: a second `close` on the same item is a stale
-        caller, not an idempotent no-op, so it gets its own named date
-        rather than a generic conflict. Returns the fresh `closed_at` for
-        the CLI's own report line."""
+    def _closing_write(self, number: int) -> LandingWrite:
+        """`number`'s own close write, composed but not written (issues
+        #289, #359): `state` moves to `CLOSED`, `closed_at` and `updated_at`
+        both move to now, and every other field -- the body included --
+        stays byte-identical. Refuses loud, before any write, when the
+        record already carries `state = CLOSED`: a second close on the same
+        item is a stale caller, not an idempotent no-op, so it gets its own
+        named date rather than a generic conflict. Shared by `close_item`
+        (which writes this immediately, on its own) and `prepare_landing`
+        (which hands it to `release --merged <sha>`'s own atomic
+        `protocol.LandingIntent` instead, issue #359)."""
         item_id = self._by_number[number]
         current = self._items[item_id]
         if current.record.state is items.RecordState.CLOSED:
@@ -431,11 +446,53 @@ class StateRefBoard:
             current.record, state=items.RecordState.CLOSED, closed_at=now, updated_at=now
         )
         new_body = _with_record(current.body, updated_record)
-        new_oid = self._writer.write_item(
-            item_id, expected=current.oid, content=new_body.encode("utf-8")
+        return LandingWrite(
+            item_id=item_id,
+            expected=current.oid,
+            content=new_body.encode("utf-8"),
+            record=updated_record,
         )
-        self._items[item_id] = _DecodedItem(record=updated_record, body=new_body, oid=new_oid)
-        return now
+
+    def close_item(self, number: int) -> str:
+        """Closes `number`'s item record (issue #289) in one CAS write over
+        this instance's own already-read `current.oid` (the same oid
+        discipline `update_item_body` uses, issue #279) -- the one place
+        `state`/`closed_at` are ever composed for an immediate close;
+        `cli._cmd_item_close` delegates the whole write here rather than
+        building its own record. Returns the fresh `closed_at` for the
+        CLI's own report line."""
+        write = self._closing_write(number)
+        new_oid = self._writer.write_item(
+            write.item_id, expected=write.expected, content=write.content
+        )
+        self._items[write.item_id] = _DecodedItem(
+            record=write.record, body=write.content.decode("utf-8"), oid=new_oid
+        )
+        assert write.record.closed_at is not None  # `_closing_write` just set it
+        return write.record.closed_at
+
+    def prepare_landing(self, number: int) -> LandingWrite:
+        """`number`'s own close write, staged but not applied (issue #359):
+        `release --merged <sha|empty>` under `storage = "state-ref"` hashes
+        `content` into a blob itself (`store.hash_blob` -- this module may
+        not import `store`, the Layers contract) and folds the resulting
+        oid into one atomic `protocol.LandingIntent` alongside the claim it
+        releases, instead of `close_item`'s own immediate, separately
+        committed write. Call `mark_landed` with the result once that
+        transition actually commits, to fold it into this instance's own
+        in-memory view -- this method itself writes nothing."""
+        return self._closing_write(number)
+
+    def mark_landed(self, write: LandingWrite, oid: ObjectId) -> None:
+        """Folds an atomic landing's already-committed close (issue #359)
+        into this instance's own in-memory view, the same update
+        `close_item` performs after its own separate write -- but writes
+        nothing itself: `release --merged <sha>`'s own transition already
+        committed `write.content` at `oid`, atomically with the claim
+        release."""
+        self._items[write.item_id] = _DecodedItem(
+            record=write.record, body=write.content.decode("utf-8"), oid=oid
+        )
 
     def item_oid(self, number: int) -> ObjectId:
         """This item's own current blob oid, straight off this adapter's
