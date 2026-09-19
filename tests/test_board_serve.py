@@ -22,6 +22,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 
 import pytest
 from board_fixtures import board_issue, complete_contract, proposed_expectation
+from cli_fixtures import stub_board_config_tracked
 from test_cli import FakeForge, _patch_store_write, _single_item_board_environment
 
 from agent_coordination import board, board_serve, checkout, forge, github, protocol
@@ -29,6 +30,18 @@ from agent_coordination import cli as issue_claim
 
 OPEN_LINE_TEXT = "Brauchen wir Admin-Rechte?"
 SERVED_ITEM = 10
+
+
+@pytest.fixture(autouse=True)
+def _stub_board_config_tracked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every `board --serve`/`rule` test reads a tracked `board.toml` by
+    default (issue #314): `_board_config`'s `checkout.path_is_tracked` call
+    now runs a real `git -C <directory>` against this module's `tmp_path`
+    fixtures, which are never real git checkouts, so an unstubbed call would
+    always fail closed with "not a git repository" before reaching the
+    behaviour under test -- matching `test_cli.py`'s and `test_protect.py`'s
+    own local autouse wrapper around the same shared helper."""
+    stub_board_config_tracked(monkeypatch)
 
 
 class _ConsistentForge(FakeForge):
