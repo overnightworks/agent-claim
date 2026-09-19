@@ -1,8 +1,0 @@
-claim_id = "3096558d303b44989c45c565201e581e"
-agent = "Claude head (coordinator)"
-role = "builder"
-base = "1c188b131ad74fce925be436046d945d5fcbcf1b"
-branch = "claude/issue-302-store-codec-hook"
-scope = ["src/agent_coordination/store.py", "src/agent_coordination/protocol.py", "src/agent_coordination/hook_input.py", "tests/test_store.py", "tests/test_protocol.py", "tests/test_protect.py"]
-opened_commit = "9e1e58d5480b58e8497c461982370a2b9280c99b"
-whole_reason = "four verified audit findings in the store, the codec and the hook grammar with their three test modules; each is bounded, together one lane"
