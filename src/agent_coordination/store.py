@@ -705,27 +705,39 @@ class PendingCommit:
 
 
 def _retry_exhaustion_error(
-    *, remote: str, attempts: int, ref_moved: bool
+    *, remote: str, attempts: int, moves: int, stationary_since_last_move: int
 ) -> ClaimUnavailableError:
     """The real cause behind exhausting every retry attempt (issue #237
-    finding 22): every attempt's push was refused either because a
-    concurrent writer's commit kept landing first (the ref genuinely moved
-    between attempts) or because the push itself never landed at all (the
-    ref sat still throughout) -- a stale lock or missing push rights on
-    `remote`, not a race. Naming the wrong cause sends an operator chasing
+    finding 22, corrected for the mixed case): each rejected attempt either
+    observed the ref land on a genuinely new tip (a concurrent writer landing
+    first) or found it exactly where the previous attempt left it (the push
+    itself never landed) -- a real run can do some of each, so `moves`
+    counts only the former and `stationary_since_last_move` counts the
+    latter, since the last such move. Reporting "moved N times" whenever
+    more than one tip was ever observed, no matter how many attempts since
+    the last move sat stuck, blamed a race for exhaustion a stuck lock
+    actually caused. Naming the wrong cause sends an operator chasing
     concurrent writers that were never there; the one owner of this
     diagnosis is here, for both `push_tree` and `commit_transition`.
     """
-    if ref_moved:
+    if moves == 0:
         return ClaimUnavailableError(
-            f"{STATE_REF} moved {attempts} times while retrying: another writer on "
-            f"{remote} keeps landing first; retry the command"
+            f"{STATE_REF} rejected {attempts} pushes to {remote} without the ref ever "
+            "moving: a stale lock or missing push rights, not a race -- check "
+            f"{remote}'s {STATE_REF}.lock (delete it if stale) and push permissions; if "
+            f"the ref itself is stuck, `git update-ref -d {STATE_REF}` on {remote} clears it"
+        )
+    moved_report = f"{STATE_REF} moved {moves} times while retrying"
+    if stationary_since_last_move == 0:
+        return ClaimUnavailableError(
+            f"{moved_report}: another writer on {remote} keeps landing first; retry the command"
         )
     return ClaimUnavailableError(
-        f"{STATE_REF} rejected {attempts} pushes to {remote} without the ref ever "
-        "moving: a stale lock or missing push rights, not a race -- check "
-        f"{remote}'s {STATE_REF}.lock (delete it if stale) and push permissions; if "
-        f"the ref itself is stuck, `git update-ref -d {STATE_REF}` on {remote} clears it"
+        f"{moved_report}, then rejected {stationary_since_last_move} pushes to {remote} "
+        "without the ref moving after it last moved: another writer landed first, then a "
+        "stale lock or missing push rights took over -- check "
+        f"{remote}'s {STATE_REF}.lock (delete it if stale) and push permissions; retrying "
+        "the command only helps once that clears"
     )
 
 
@@ -745,7 +757,8 @@ def push_tree(
     (criterion 3) -- never re-applying it a second time.
     """
     parent = observed.tip
-    observed_tips = {parent}
+    moves = 0
+    stationary_since_last_move = 0
     for _attempt in range(_MAX_PUSH_ATTEMPTS):
         new_commit = _commit_tree(
             worktree, tree_oid=pending.tree_oid, parent=parent, message=pending.message
@@ -760,13 +773,20 @@ def push_tree(
                 )
                 if found is not None:
                     return OperationAlreadyApplied(tip=refreshed.tip)
+            if refreshed.tip != parent:
+                moves += 1
+                stationary_since_last_move = 0
+            else:
+                stationary_since_last_move += 1
             parent = refreshed.tip
-            observed_tips.add(parent)
             continue
         _write_lineage_stamp(worktree, new_commit)
         return new_commit
     raise _retry_exhaustion_error(
-        remote=remote, attempts=_MAX_PUSH_ATTEMPTS, ref_moved=len(observed_tips) > 1
+        remote=remote,
+        attempts=_MAX_PUSH_ATTEMPTS,
+        moves=moves,
+        stationary_since_last_move=stationary_since_last_move,
     )
 
 
@@ -1039,7 +1059,8 @@ def commit_transition(
     observed = fetch_state(worktree=worktree, remote=remote)
     if observed.tip is None:
         raise ClaimError(MISSING_STATE_REF)
-    observed_tips: set[ObjectId | None] = {observed.tip}
+    moves = 0
+    stationary_since_last_move = 0
     for _attempt in range(_MAX_TRANSITION_ATTEMPTS):
         new_state = apply(observed, intent)
         new_tree = _write_incremental_state_tree(worktree, observed=observed, new_state=new_state)
@@ -1062,8 +1083,12 @@ def commit_transition(
                 )
                 if found is not None:
                     return refreshed
+            if refreshed.tip != observed.tip:
+                moves += 1
+                stationary_since_last_move = 0
+            else:
+                stationary_since_last_move += 1
             observed = refreshed
-            observed_tips.add(observed.tip)
             continue
         _write_lineage_stamp(worktree, new_commit)
         return ClaimState(
@@ -1074,7 +1099,10 @@ def commit_transition(
             items=new_state.items,
         )
     raise _retry_exhaustion_error(
-        remote=remote, attempts=_MAX_TRANSITION_ATTEMPTS, ref_moved=len(observed_tips) > 1
+        remote=remote,
+        attempts=_MAX_TRANSITION_ATTEMPTS,
+        moves=moves,
+        stationary_since_last_move=stationary_since_last_move,
     )
 
 

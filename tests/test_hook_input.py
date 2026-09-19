@@ -142,16 +142,32 @@ def test_hook_patch_paths_extracts_every_file_line(
     assert hook_input.hook_patch_paths(_patch_command(*lines)) == paths
 
 
-def test_hook_patch_paths_accepts_an_environment_id_line_before_begin_patch() -> None:
-    """Codex's own streaming parser accepts `*** Environment ID: ...` as a
-    valid start line (issue #237 finding 28b); without it, every patch Codex
-    prefixes this way was denied outright for lacking a path (`PATH_REQUIRED`
-    in `cli._protect_write`)."""
+def test_hook_patch_paths_accepts_an_environment_id_line_after_begin_patch() -> None:
+    """Codex's own streaming parser accepts `*** Environment ID: ...` right
+    after `Begin Patch` (issue #237 finding 28b, corrected position:
+    `begin_patch environment_id? hunk+ end_patch`); without it, every patch
+    Codex prefixes this way was denied outright for lacking a path
+    (`PATH_REQUIRED` in `cli._protect_write`)."""
+    text = _patch_command(
+        "*** Environment ID: 11111111-1111-1111-1111-111111111111",
+        "*** Update File: src/widget.py",
+        "@@",
+        "-old",
+        "+new",
+    )
+
+    assert hook_input.hook_patch_paths(text) == ("src/widget.py",)
+
+
+def test_hook_patch_paths_rejects_an_environment_id_line_before_begin_patch() -> None:
+    """The wrong position fails closed rather than being silently accepted:
+    Codex's own grammar never places `Environment ID` before `Begin Patch`,
+    so a patch text in that shape names no path at all."""
     text = "*** Environment ID: 11111111-1111-1111-1111-111111111111\n" + _patch_command(
         "*** Update File: src/widget.py", "@@", "-old", "+new"
     )
 
-    assert hook_input.hook_patch_paths(text) == ("src/widget.py",)
+    assert hook_input.hook_patch_paths(text) == ()
 
 
 @pytest.mark.parametrize(

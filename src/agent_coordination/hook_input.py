@@ -130,6 +130,23 @@ def _update_hunk_line(
     return None
 
 
+def _patch_content_start(lines: list[str]) -> int | None:
+    """The index of the first hunk line, past `Begin Patch` and its optional
+    `Environment ID` line (issue #237 finding 28b), or `None` when `lines`
+    does not open with that grammar at all.
+
+    Codex's own streaming parser admits `begin_patch environment_id? hunk+
+    end_patch`: `Environment ID` comes after `Begin Patch`, never before it
+    -- without accepting it there, every patch Codex prefixes with its own
+    environment id was denied outright for lacking a path.
+    """
+    if not lines or lines[0].strip() != _BEGIN_PATCH_MARKER:
+        return None
+    if len(lines) > 1 and lines[1].startswith(_ENVIRONMENT_ID_PREFIX):
+        return 2
+    return 1
+
+
 def hook_patch_paths(text: str) -> tuple[str, ...]:
     """Every file path an `apply_patch` patch text touches, in the order the
     patch lists them.
@@ -142,10 +159,8 @@ def hook_patch_paths(text: str) -> tuple[str, ...]:
     that merely looks like a header stays diff context. An
     `*** Update File: <path>` line immediately followed by
     `*** Move to: <path>` -- the patch grammar's rename form -- contributes
-    both paths. A leading `*** Environment ID: ...` line (issue #237 finding
-    28b) is accepted before `Begin Patch`, the same start line Codex's own
-    streaming parser admits there -- without it, every patch Codex prefixes
-    with its own environment id was denied outright for lacking a path.
+    both paths. See `_patch_content_start` for the optional `Environment ID`
+    line right after `Begin Patch`.
 
     Returns an empty tuple when `text` does not fully match that grammar --
     missing `Begin`/`End Patch`, content the grammar does not admit in its
@@ -154,15 +169,15 @@ def hook_patch_paths(text: str) -> tuple[str, ...]:
     out of a patch it cannot confidently parse.
     """
     lines = text.split("\n")
-    start_index = 1 if lines and lines[0].startswith(_ENVIRONMENT_ID_PREFIX) else 0
-    if len(lines) <= start_index or lines[start_index].strip() != _BEGIN_PATCH_MARKER:
+    content_start = _patch_content_start(lines)
+    if content_start is None:
         return ()
 
     paths: list[str] = []
     state: _PatchState = _PatchState.STARTED
     move_to_available = False
 
-    for line in lines[start_index + 1 :]:
+    for line in lines[content_start:]:
         if state is _PatchState.ENDED:
             if line.strip():
                 return ()

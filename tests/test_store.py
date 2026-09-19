@@ -292,6 +292,31 @@ class _AlwaysRacingTransport:
         raise protocol.PushRejectedError("simulated concurrent writer")
 
 
+class _MovesOnceThenSticksTransport:
+    """A `PushTransport` where a concurrent writer's commit lands first on
+    exactly the first attempt, then the ref sits fixed while every further
+    push is rejected -- issue #237 finding 22's mixed case, neither
+    `_AlwaysRacingTransport`'s pure race nor `_AlwaysRejectingTransport`'s
+    pure stuck ref."""
+
+    def __init__(self) -> None:
+        self._real = store.GitPushTransport()
+        self._calls = 0
+
+    def push(self, *, worktree: Path, remote: str, ref: str, new_oid: protocol.ObjectId) -> None:
+        self._calls += 1
+        if self._calls == 1:
+            current = store._ls_remote_state(worktree, remote)
+            rival_commit = store._commit_tree(
+                worktree,
+                tree_oid=store._write_bootstrap_tree(worktree),
+                parent=current,
+                message="rival write\n\noperation_id: rival-1\n",
+            )
+            self._real.push(worktree=worktree, remote=remote, ref=ref, new_oid=rival_commit)
+        raise protocol.PushRejectedError("simulated mixed retry")
+
+
 def test_bootstrap_creates_the_empty_state_tree_on_a_proven_empty_remote(
     bare_remote: Path, worktree: Path
 ) -> None:
@@ -785,7 +810,40 @@ def test_push_retry_exhausts_and_names_a_race_when_the_ref_keeps_moving(
             pending=pending,
             transport=transport,
         )
-    assert "stuck" not in str(raised.value) and "lock" not in str(raised.value)
+    assert "stuck" not in str(raised.value)
+    assert "lock" not in str(raised.value)
+
+
+def test_push_retry_exhausts_and_names_the_true_mix_when_the_ref_moves_once_then_sticks(
+    bare_remote: Path, worktree: Path
+) -> None:
+    """Issue #237 finding 22's mixed case: a concurrent writer's commit
+    lands first on exactly the first attempt (`_MovesOnceThenSticksTransport`),
+    then the ref sits fixed while every later push is rejected. Reporting
+    "moved 8 times" here -- the wrong count the shared builder used to
+    print whenever more than one tip was ever observed -- would blame a race
+    that stopped after one move; the true count is one move, then seven
+    pushes rejected without the ref moving again.
+    """
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    observed = store.fetch_state(worktree=worktree, remote=str(bare_remote))
+    pending = store.PendingCommit(
+        tree_oid=store._write_bootstrap_tree(worktree),
+        message="bootstrap empty claim state\n\noperation_id: never-applied\n",
+        operation_id="never-applied",
+    )
+    transport = _MovesOnceThenSticksTransport()
+
+    with pytest.raises(protocol.ClaimUnavailableError, match="moved 1 times") as raised:
+        store.push_tree(
+            worktree=worktree,
+            remote=str(bare_remote),
+            observed=observed,
+            pending=pending,
+            transport=transport,
+        )
+    assert "rejected 7 pushes" in str(raised.value)
+    assert "without the ref moving after it last moved" in str(raised.value)
 
 
 def test_git_push_transport_raises_on_a_non_fast_forward_push(
@@ -1447,7 +1505,31 @@ def test_commit_transition_a_different_key_loser_that_exhausts_retries_names_a_r
             intent=intent,
             transport=transport,
         )
-    assert "stuck" not in str(raised.value) and "lock" not in str(raised.value)
+    assert "stuck" not in str(raised.value)
+    assert "lock" not in str(raised.value)
+
+
+def test_commit_transition_exhaustion_names_the_true_mix_when_the_ref_moves_once_then_sticks(
+    bare_remote: Path, worktree: Path
+) -> None:
+    """Issue #237 finding 22's mixed case for `commit_transition`: a
+    concurrent writer's commit lands first on exactly the first attempt,
+    then the ref sits fixed while the remaining 31 pushes are all rejected
+    -- the true count is one move, not "moved 32 times"."""
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    transport = _MovesOnceThenSticksTransport()
+
+    intent = _issue_claim_intent(42)
+    with pytest.raises(protocol.ClaimUnavailableError, match="moved 1 times") as raised:
+        store.commit_transition(
+            worktree=worktree,
+            remote=str(bare_remote),
+            subject="claim issue 42",
+            intent=intent,
+            transport=transport,
+        )
+    assert "rejected 31 pushes" in str(raised.value)
+    assert "without the ref moving after it last moved" in str(raised.value)
 
 
 def test_commit_transition_lost_response_does_not_apply_twice(
