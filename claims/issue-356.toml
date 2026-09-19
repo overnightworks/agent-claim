@@ -1,8 +1,0 @@
-claim_id = "6f94f075b200444d919740880b3bb0ec"
-agent = "Claude head (coordinator)"
-role = "builder"
-base = "924ed72af19bf2a248cf5de8273edaad47d902bf"
-branch = "claude/issue-356-spec-board-next-rulings"
-scope = ["scripts/spec_coverage_ratchet.txt", "specs/board.spec.md", "specs/next.spec.md", "specs/rulings.spec.md", "tests/test_cli.py"]
-opened_commit = "26380aaa9d324604bdd0e0c6973919cd7c5cf29d"
-whole_reason = "three command specs of one wave, the shared ratchet, and one test comment the gate flagged"
