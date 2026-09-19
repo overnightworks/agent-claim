@@ -3691,39 +3691,60 @@ CLAIM_SCOPE_MISMATCH = "claim scope differs from the item's scope; correct the i
 
 
 def _item_scope(
-    client: forge.ForgeReader, number: int, *, storage: board.Storage
+    client: forge.ForgeReader,
+    open_by_number: Mapping[int, board.Issue],
+    number: int,
+    *,
+    storage: board.Storage,
 ) -> tuple[str, ...] | None:
-    """The item's own top-level `scope = [...]` (issue #337), read through
-    the one body reader `ask`/`rule` already share (`_item_body_or_refuse`)
-    and projected by `board.parse_body` -- so a state-ref and a GitHub item
-    are read exactly alike, and a malformed body simply carries no scope
-    rather than failing `claim` with an unrelated defect message."""
-    body = _item_body_or_refuse(client, number, command="claim")
+    """The item's own top-level `scope = [...]` (issue #337): read from
+    `open_by_number` -- the open-board listing `claim` needs anyway for its
+    slice-rule checks -- when the target is open, so a derived scope costs
+    no separate body read; a closed, missing, or pull-request target never
+    appears there, and falls back to the one single-item lookup
+    `_issue_reference_state` uses for the same reason (issue #245). Both
+    project through `board.parse_body`, so a state-ref and a GitHub item are
+    read exactly alike, and a malformed body simply carries no scope rather
+    than failing `claim` with an unrelated defect message."""
+    issue = open_by_number.get(number)
+    body = (
+        issue.body if issue is not None else _item_body_or_refuse(client, number, command="claim")
+    )
     return board.parse_body(body, storage=storage).scope
 
 
-def _derived_issue_scope(
-    identity: protocol.IssueIdentity, branch: str, session: _WriteSession
-) -> tuple[str, ...]:
-    """`claim`'s own scope when `--scope` was omitted in issue mode (issue
-    #337): a live claim already on this identity is a replayed, interrupted
-    request, so its own stored scope is taken outright -- no body re-read,
-    so a replay never refuses over a body that changed, or lost its scope,
-    since the original claim was opened. Otherwise the item's own body
-    `scope = [...]` is the source of truth, refused by name when the body
-    names none. Observes the store itself, once -- reached only by the
-    handful of `claim` invocations that actually omit `--scope`, so every
-    other claim still costs `_cmd_claim`'s own single, later observation."""
-    _worktree, _canonical_remote, observed = _store_observation()
-    _require_state_ref(observed)
-    existing_live = observed.claims.get(protocol.claim_key(identity, branch))
-    if existing_live is not None:
-        return existing_live.scope
-    storage = _board_config(_resolve_toplevel()).storage
-    item_scope = _item_scope(session.forge(), identity.issue, storage=storage)
+def _resolved_claim_request(
+    requested: protocol.ClaimRequest,
+    observed: protocol.ClaimState,
+    session: _WriteSession,
+    storage: board.Storage,
+) -> tuple[protocol.ClaimRequest, dict[int, board.Issue] | None]:
+    """`requested` with its scope filled in for an issue-mode claim that
+    omitted `--scope` (issue #337), paired with the open-board listing that
+    filling it cost -- `None` when it cost nothing, so `_cmd_claim` never
+    fetches that board a second time for its own slice-rule checks.
+
+    A live claim already on this identity and branch is a replayed,
+    interrupted request even when the retry drops `--scope`: its own stored
+    scope is taken outright, with no forge call and no body read at all, so
+    a retry never refuses merely because the body changed, or lost its
+    scope, since the original claim was opened -- and `_matching_store_claim`
+    is guaranteed `None` for an identity with no live claim at all, so this
+    is the only place that needs to look. Otherwise the item's own body
+    `scope = [...]` is the source of truth, fetched from the same open board
+    `_cmd_claim` needs anyway for its slice-rule checks, so the caller reuses
+    it rather than asking again."""
+    identity = requested.identity
+    assert isinstance(identity, protocol.IssueIdentity)
+    live = observed.claims.get(protocol.claim_key(identity, requested.branch))
+    if live is not None:
+        return replace(requested, scope=live.scope), None
+    client = session.forge()
+    open_by_number = {issue.number: issue for issue in client.list_open_board_issues()}
+    item_scope = _item_scope(client, open_by_number, identity.issue, storage=storage)
     if item_scope is None:
         raise protocol.ClaimUnavailableError(CLAIM_SCOPE_MISSING)
-    return item_scope
+    return replace(requested, scope=item_scope), open_by_number
 
 
 def _reject_scope_mismatch(
@@ -3733,11 +3754,14 @@ def _reject_scope_mismatch(
     storage: board.Storage,
 ) -> None:
     """Refuses an explicit `--scope` whose canonical set differs from the
-    target item's own body scope (issue #337) -- reusing the board issues
-    `_cmd_claim` already fetched for its slice-rule checks, so this costs no
-    second forge read. A target item outside the fetched open list, or one
-    with no `scope` field of its own, has nothing to differ from and is
-    silently accepted, exactly as before this field existed."""
+    target item's own body scope (issue #337) -- reusing the open board
+    `_cmd_claim` fetches once, whether for a derived scope or for its
+    slice-rule checks, so this costs no second forge read. A target item
+    outside the fetched open list, or one with no `scope` field of its own,
+    has nothing to differ from and is silently accepted, exactly as before
+    this field existed. A derived scope always came from this same body, so
+    the comparison here is trivially satisfied -- never an extra read, just
+    an inexpensive no-op check."""
     issue = open_by_number.get(target_issue)
     if issue is None:
         return
@@ -3746,25 +3770,44 @@ def _reject_scope_mismatch(
         raise protocol.ClaimUnavailableError(CLAIM_SCOPE_MISMATCH)
 
 
+def _scope_versioning(scope: tuple[str, ...], whole_reason: str | None) -> ScopeVersioning:
+    """`claim`'s local, forge-free scope checks (issue #207's comma guard,
+    the wide-scope width gate) against the real checkout, run once the
+    requested scope is final -- whether it came from `--scope` or was
+    derived from the item's own body."""
+    versioned = checkout.versioned_paths()
+    _reject_ungrounded_comma_scope(scope, versioned, flag="--scope")
+    n, total, share = _reject_wide_scope(scope, versioned, whole_reason)
+    return ScopeVersioning(n, total, share)
+
+
 def _cmd_claim(parsed: argparse.Namespace, session: _WriteSession) -> int:
     requested = _request(parsed)
-    if isinstance(requested.identity, protocol.LaneIdentity):
-        if not requested.scope:
-            raise protocol.ClaimUnavailableError(LANE_CLAIM_SCOPE_REQUIRED)
-    elif not requested.scope:
-        requested = replace(
-            requested,
-            scope=_derived_issue_scope(requested.identity, requested.branch, session),
-        )
-    versioned = checkout.versioned_paths()
-    _reject_ungrounded_comma_scope(requested.scope, versioned, flag="--scope")
-    n, total, share = _reject_wide_scope(requested.scope, versioned, requested.whole_reason)
-    worktree, canonical_remote, observed = _store_observation()
-    _require_state_ref(observed)
+    if isinstance(requested.identity, protocol.LaneIdentity) and not requested.scope:
+        raise protocol.ClaimUnavailableError(LANE_CLAIM_SCOPE_REQUIRED)
+    open_by_number: dict[int, board.Issue] | None = None
+    if requested.scope or not isinstance(requested.identity, protocol.IssueIdentity):
+        # Scope already final (given, or a lane's own required value): the
+        # local shape checks run first, exactly as before this field
+        # existed, so a comma or width refusal never touches the store or
+        # resolves the repository toplevel.
+        versioning = _scope_versioning(requested.scope, requested.whole_reason)
+        worktree, canonical_remote, observed = _store_observation()
+        _require_state_ref(observed)
+        storage = _board_config(_resolve_toplevel()).storage
+    else:
+        # `--scope` was omitted in issue mode: the item's own scope has to
+        # come from the store, and usually the forge, before it can even be
+        # shape-checked -- both observed exactly once, here, so an omitted-
+        # scope claim never fetches either a second time (issue #337).
+        worktree, canonical_remote, observed = _store_observation()
+        _require_state_ref(observed)
+        storage = _board_config(_resolve_toplevel()).storage
+        requested, open_by_number = _resolved_claim_request(requested, observed, session, storage)
+        versioning = _scope_versioning(requested.scope, requested.whole_reason)
     checks: tuple[SliceCheck, ...] = ()
     target_issue: int | None = None
     replayed = None
-    storage = _board_config(_resolve_toplevel()).storage
     if isinstance(requested.identity, protocol.IssueIdentity):
         target_issue = requested.identity.issue
         replayed = _matching_store_claim(observed, requested)
@@ -3774,13 +3817,13 @@ def _cmd_claim(parsed: argparse.Namespace, session: _WriteSession) -> int:
             # Erwartung-6-checked on this first call (issue #245) -- never
             # runs for a lane claim at all.
             client = session.forge()
-            open_issues = client.list_open_board_issues()
-            open_by_number = {issue.number: issue for issue in open_issues}
+            if open_by_number is None:
+                open_by_number = {issue.number: issue for issue in client.list_open_board_issues()}
             _reject_scope_mismatch(open_by_number, target_issue, requested.scope, storage)
             projected = _board(
                 client,
                 tuple(observed.claims.values()),
-                issues=open_issues,
+                issues=tuple(open_by_number.values()),
                 claim_ages=_claim_ages(worktree, observed),
             ).board
             checks = _slice_rule_checks(
@@ -3810,14 +3853,13 @@ def _cmd_claim(parsed: argparse.Namespace, session: _WriteSession) -> int:
         live = tuple(observed.claims.values())
     touches = protocol.conflicting_claims(live, claimed)
     if parsed.json:
-        return _claim_json(
-            claimed,
-            versioning=ScopeVersioning(n, total, share),
-            touches=touches,
-            checks=checks,
-        )
+        return _claim_json(claimed, versioning=versioning, touches=touches, checks=checks)
     print(f"CLAIMED {_claim_subject(claimed, storage)}: {claimed.claim_id}")
-    print(_claim_cost_line(n, total, requested.scope, touches))
+    print(
+        _claim_cost_line(
+            versioning.versioned_files, versioning.versioned_files_total, requested.scope, touches
+        )
+    )
     return 0
 
 

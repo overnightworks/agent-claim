@@ -211,8 +211,12 @@ habit, which would otherwise store a path that guards nothing; a real
 comma-bearing filename, and any comma-free path not created yet, still claim
 cleanly. Issue mode's `--scope` is optional (issue #337): omitted, `claim`
 takes the item's own top-level `scope = [...]` from its body, refusing by
-name (`item names no scope; pass --scope`) when the body carries none; given,
-it must name the same set the body does — same paths in a different order
+name (`item names no scope; pass --scope`) when the body carries none. That
+read costs one open-board fetch through the forge -- one GitHub request under
+`github` storage, one ref read under `state-ref` -- the same fetch `claim`
+already needs for its slice-rule checks, so an omitted-scope claim never
+reads the board, or the item's body, twice. Given `--scope` explicitly, it
+must name the same set the body does — same paths in a different order
 are accepted, a differing set refuses (`claim scope differs from the item's
 scope; correct the item first`), and a body with no scope of its own puts
 nothing to differ from, so the given value is simply taken. A live claim
