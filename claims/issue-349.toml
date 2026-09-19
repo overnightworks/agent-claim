@@ -1,8 +1,0 @@
-claim_id = "2bff2fc9f2f348aa9d48515de1e102bb"
-agent = "Claude head (coordinator)"
-role = "builder"
-base = "61c3937bfcba447152e129265a35c366928e4f5b"
-branch = "claude/issue-349-spec-claim-rescope"
-scope = ["scripts/spec_coverage_ratchet.txt", "specs/claim-record.spec.md", "specs/claim.spec.md", "specs/rescope.spec.md"]
-opened_commit = "3b9b4e532fba9338cee8fa51c5102556435d0a51"
-whole_reason = "two command specs, the claim-record spec they cite and the shared ratchet"
