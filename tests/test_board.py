@@ -32,7 +32,7 @@ from board_fixtures import (
     slice_entries,
 )
 
-from agent_coordination import board, protocol
+from agent_coordination import board, metrics, protocol
 from agent_coordination.protocol import ClaimError, ClaimRequest
 
 # A real expectation sentence from this repository's own issue #230 (#240's
@@ -2495,6 +2495,49 @@ def test_parse_body_refuses_an_invalid_slice_scope(
     assert expected_message_part in defect.message
 
 
+@pytest.mark.parametrize("size", ["S", "M", "L"])
+def test_parse_body_reads_a_valid_size(size: str) -> None:
+    """Issue #357: `size` is a plain top-level block field -- valid under
+    every storage, never nested under `[record]` (a `state-ref`-only table,
+    BODY-15), since a GitHub-stored item has no such table at all."""
+    parsed = board.parse_body(agent_claim_body(f'{MINIMAL_BLOCK_TOML}size = "{size}"\n'))
+
+    assert parsed.read_state is board.BodyReadState.VALID
+    assert parsed.size is metrics.Size(size)
+
+
+def test_parse_body_reads_no_size_as_none() -> None:
+    parsed = board.parse_body(agent_claim_body(MINIMAL_BLOCK_TOML))
+
+    assert parsed.read_state is board.BodyReadState.VALID
+    assert parsed.size is None
+
+
+def test_parse_body_refuses_an_invalid_size() -> None:
+    parsed = board.parse_body(agent_claim_body(f'{MINIMAL_BLOCK_TOML}size = "XL"\n'))
+
+    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert parsed.contract.defects[0] == board.ContractDefect("size", "size must be S, M, or L")
+
+
+def test_render_block_places_size_before_expectation_and_slice_tables() -> None:
+    data = {
+        "version": 1,
+        "now": "N",
+        "next": "X",
+        "done_when": "D",
+        "expectation": [{"text": "E", "default": "later"}],
+        "slice": [{"index": 1, "title": "Row"}],
+        "size": "M",
+    }
+
+    rendered = board.render_block(data)
+
+    assert rendered.index("size =") < rendered.index("[[expectation]]")
+    assert rendered.index("size =") < rendered.index("[[slice]]")
+    assert 'size = "M"' in rendered
+
+
 def test_parse_body_refuses_scope_as_an_unknown_expectation_key() -> None:
     """`scope` is a field of the block's top level and of `[[slice]]` rows
     only -- an `[[expectation]]` entry never grew it, so writing one there
@@ -3214,3 +3257,262 @@ def test_trunk_commit_classification_refuses_a_contradictory_trailer_block(
     by ordering."""
     defect = board.trunk_commit_classification(work_item_values, no_item_values)
     assert isinstance(defect, board.ClassificationDefect)
+
+
+# --- Board estimates and measurements (issue #357) --------------------------
+
+
+def _lane_event(
+    item: str,
+    *,
+    claimed_at: datetime,
+    released_at: datetime | None,
+    rescopes: int = 0,
+) -> metrics.LaneEvent:
+    """A raw `store.claim_lifecycle`-shaped event: `size`/`landed_at` start
+    `None`, exactly as that reader leaves them -- `build_board`'s own join
+    (`_joined_lane_event`) fills `size` from the matching open item's own
+    current size, never from this fixture."""
+    return metrics.LaneEvent(
+        item=item,
+        size=None,
+        container=None,
+        claimed_at=claimed_at,
+        released_at=released_at,
+        landed_at=None,
+        rescopes=rescopes,
+    )
+
+
+def _sized_item(number: int, size: str | None) -> board.Issue:
+    entries = {} if size is None else {"size": size}
+    return board_issue(number, f"Item {number}", complete_contract("Do it.", **entries))
+
+
+def test_build_board_reports_no_size_as_the_keine_groesse_cell() -> None:
+    projected = projected_board(
+        (_sized_item(200, None),),
+        (),
+        (),
+        (),
+        board.BoardConfig(),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+    )
+
+    item = projected.items[0]
+    assert item.size is None
+    assert item.estimate is None
+    assert board.estimate_cell(item) == board.NO_SIZE_CELL
+
+
+@pytest.mark.parametrize("measured_lanes", [0, 2], ids=["zero-lanes", "two-lanes"])
+def test_build_board_reports_a_weak_estimate_below_three_measured_lanes(
+    measured_lanes: int,
+) -> None:
+    lane_events = tuple(
+        _lane_event(
+            "201",
+            claimed_at=datetime(2026, 8, 10 + index, tzinfo=UTC),
+            released_at=datetime(2026, 8, 10 + index, 4, tzinfo=UTC),
+        )
+        for index in range(measured_lanes)
+    )
+    projected = projected_board(
+        (_sized_item(201, "M"),),
+        (),
+        (),
+        (),
+        board.BoardConfig(),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+        lane_events=lane_events,
+    )
+
+    item = projected.items[0]
+    assert item.size is metrics.Size.MEDIUM
+    if measured_lanes:
+        assert item.estimate is not None
+        assert item.estimate.weak is True
+    else:
+        assert item.estimate is None
+    assert board.estimate_cell(item) == board.WEAK_ESTIMATE_CELL
+
+
+def test_build_board_reports_a_measured_estimate_with_median_and_count() -> None:
+    lane_events = tuple(
+        _lane_event(
+            "202",
+            claimed_at=datetime(2026, 8, 10 + index, tzinfo=UTC),
+            released_at=datetime(2026, 8, 10 + index, hours, tzinfo=UTC),
+        )
+        for index, hours in enumerate((4, 5, 6))
+    )
+    projected = projected_board(
+        (_sized_item(202, "M"),),
+        (),
+        (),
+        (),
+        board.BoardConfig(),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+        lane_events=lane_events,
+    )
+
+    item = projected.items[0]
+    assert item.estimate == metrics.Estimate(
+        item="202", size=metrics.Size.MEDIUM, median_hours=5, n=3, weak=False
+    )
+    assert board.estimate_cell(item) == "~5h (M, n=3)"
+
+
+def test_build_board_measurements_section_reports_classes_dates_and_unfinished() -> None:
+    completed = tuple(
+        _lane_event(
+            "203",
+            claimed_at=datetime(2026, 8, 10 + index, tzinfo=UTC),
+            released_at=datetime(2026, 8, 10 + index, hours, tzinfo=UTC),
+        )
+        for index, hours in enumerate((4, 5, 6))
+    )
+    unfinished = (
+        _lane_event("204", claimed_at=datetime(2026, 8, 20, tzinfo=UTC), released_at=None),
+    )
+    projected = projected_board(
+        (_sized_item(203, "M"),),
+        (),
+        (),
+        (),
+        board.BoardConfig(),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+        lane_events=completed + unfinished,
+    )
+
+    measurements = projected.measurements
+    assert measurements.unfinished == 1
+    assert measurements.since == datetime(2026, 8, 10, tzinfo=UTC)
+    assert measurements.as_of == date(2026, 8, 21)
+    assert len(measurements.classes) == 1
+    entry = measurements.classes[0]
+    assert entry.stats.size is metrics.Size.MEDIUM
+    assert entry.stats.n == 3
+    assert entry.first_event_at == datetime(2026, 8, 10, tzinfo=UTC)
+    assert entry.last_event_at == datetime(2026, 8, 12, 6, tzinfo=UTC)
+
+
+def test_render_shows_no_measurements_line_when_nothing_is_measured() -> None:
+    projected = projected_board(
+        (_sized_item(205, "M"),),
+        (),
+        (),
+        (),
+        board.BoardConfig(),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+    )
+
+    rendered = board.render(projected)
+
+    assert "keine Messungen seit 2026-08-21" in rendered
+    assert "Messungen (Stand" not in rendered
+
+
+def test_board_json_carries_estimate_and_measurements() -> None:
+    lane_events = tuple(
+        _lane_event(
+            "206",
+            claimed_at=datetime(2026, 8, 10 + index, tzinfo=UTC),
+            released_at=datetime(2026, 8, 10 + index, hours, tzinfo=UTC),
+        )
+        for index, hours in enumerate((4, 5, 6))
+    )
+    projected = projected_board(
+        (_sized_item(206, "M"),),
+        (),
+        (),
+        (),
+        board.BoardConfig(),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+        lane_events=lane_events,
+    )
+
+    payload = json.loads(board.board_json(projected))
+    item = next(entry for entry in payload["items"] if entry["number"] == 206)
+    assert item["size"] == "M"
+    assert item["estimate"] == {
+        "item": "206",
+        "size": "M",
+        "median_hours": 5,
+        "n": 3,
+        "weak": False,
+    }
+    measurements = payload["measurements"]
+    assert measurements["unfinished"] == 0
+    assert measurements["since"] == "2026-08-10T00:00:00+00:00"
+    assert measurements["as_of"] == "2026-08-21"
+    assert measurements["classes"] == [
+        {
+            "stats": {"size": "M", "n": 3, "median_hours": 5, "p80_hours": 6, "weak": False},
+            "first_event_at": "2026-08-10T00:00:00+00:00",
+            "last_event_at": "2026-08-12T06:00:00+00:00",
+        }
+    ]
+
+
+def test_estimate_changes_only_when_its_own_size_classs_measured_lanes_change() -> None:
+    """Proof 4 (issue #357), parametrized without git: two open items, `M`
+    and `L`. Adding measured `L` lanes never moves the `M` item's estimate;
+    only adding measured `M` lanes does."""
+    items = (_sized_item(207, "M"), _sized_item(208, "L"))
+    baseline_m_lanes = tuple(
+        _lane_event(
+            "207",
+            claimed_at=datetime(2026, 8, 10 + index, tzinfo=UTC),
+            released_at=datetime(2026, 8, 10 + index, hours, tzinfo=UTC),
+        )
+        for index, hours in enumerate((4, 5, 6))
+    )
+    l_lanes = tuple(
+        _lane_event(
+            "208",
+            claimed_at=datetime(2026, 8, 1 + index, tzinfo=UTC),
+            released_at=datetime(2026, 8, 1 + index, hours, tzinfo=UTC),
+        )
+        for index, hours in enumerate((14, 16, 18))
+    )
+
+    without_l = projected_board(
+        items,
+        (),
+        (),
+        (),
+        board.BoardConfig(),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+        lane_events=baseline_m_lanes,
+    )
+    with_l = projected_board(
+        items,
+        (),
+        (),
+        (),
+        board.BoardConfig(),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+        lane_events=baseline_m_lanes + l_lanes,
+    )
+    m_estimate = next(item for item in without_l.items if item.number == 207).estimate
+    assert m_estimate == next(item for item in with_l.items if item.number == 207).estimate
+
+    more_m_lanes = (
+        *baseline_m_lanes,
+        _lane_event(
+            "207",
+            claimed_at=datetime(2026, 8, 15, tzinfo=UTC),
+            released_at=datetime(2026, 8, 15, 20, tzinfo=UTC),
+        ),
+    )
+    with_more_m = projected_board(
+        items,
+        (),
+        (),
+        (),
+        board.BoardConfig(),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+        lane_events=more_m_lanes,
+    )
+    assert next(item for item in with_more_m.items if item.number == 207).estimate != m_estimate

@@ -1433,6 +1433,131 @@ def test_claim_ages_fails_loud_on_a_malformed_date(
         store.claim_ages(worktree=worktree, tip=state.tip, claims=(claim,))
 
 
+# --- `claim_lifecycle` (issue #357) -----------------------------------------
+
+
+def _rescope_intent(claim_id: str, operation_id: str) -> protocol.RescopeIntent:
+    return protocol.RescopeIntent(
+        claim_id=protocol.ClaimId(claim_id),
+        agent="Ada",
+        role="builder",
+        scope=("README.md",),
+        operation_id=operation_id,
+    )
+
+
+def _release_intent(claim_id: str, operation_id: str) -> protocol.ReleaseIntent:
+    return protocol.ReleaseIntent(
+        claim_id=protocol.ClaimId(claim_id),
+        agent="Ada",
+        role="builder",
+        outcome=protocol.AbandonedRelease("done"),
+        operation_id=operation_id,
+    )
+
+
+def test_claim_lifecycle_reads_intervals_from_real_ref_history(
+    bare_remote: Path, worktree: Path, git_call_spy: Counter[str]
+) -> None:
+    """Three claims land, rescope, and release; a fourth stays open (issue
+    #357, proof 1): `claim_lifecycle` reads every one from `refs/aco/state`'s
+    own first-parent history in one `git log` walk, with no item content and
+    no trunk-landing knowledge of its own -- `size`/`landed_at` stay `None`,
+    the caller's own join (`board.py`) fills them."""
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    _committed_claim(bare_remote, worktree, issue=10)
+    store.commit_transition(
+        worktree=worktree,
+        remote=str(bare_remote),
+        subject="release issue 10",
+        intent=_release_intent("c10", "op-10-release"),
+    )
+    _committed_claim(bare_remote, worktree, issue=11)
+    store.commit_transition(
+        worktree=worktree,
+        remote=str(bare_remote),
+        subject="rescope issue 11",
+        intent=_rescope_intent("c11", "op-11-rescope-1"),
+    )
+    store.commit_transition(
+        worktree=worktree,
+        remote=str(bare_remote),
+        subject="rescope issue 11",
+        intent=_rescope_intent("c11", "op-11-rescope-2"),
+    )
+    store.commit_transition(
+        worktree=worktree,
+        remote=str(bare_remote),
+        subject="release issue 11",
+        intent=_release_intent("c11", "op-11-release"),
+    )
+    _committed_claim(bare_remote, worktree, issue=12)
+    store.commit_transition(
+        worktree=worktree,
+        remote=str(bare_remote),
+        subject="release issue 12",
+        intent=_release_intent("c12", "op-12-release"),
+    )
+    _committed_claim(bare_remote, worktree, issue=13)
+    state = store.fetch_state(worktree=worktree, remote=str(bare_remote))
+    assert state.tip is not None
+    git_call_spy.clear()
+
+    events = store.claim_lifecycle(worktree=worktree, tip=state.tip)
+
+    by_item = {event.item: event for event in events}
+    assert set(by_item) == {"10", "11", "12", "13"}
+    assert all(event.claimed_at.tzinfo is not None for event in events)
+    assert by_item["10"].released_at is not None
+    assert by_item["10"].rescopes == 0
+    assert by_item["11"].released_at is not None
+    assert by_item["11"].rescopes == 2
+    assert by_item["12"].released_at is not None
+    assert by_item["12"].rescopes == 0
+    # The still-open fourth claim: counted, never measured (proof 1's own
+    # "unfinished" reading) -- `released_at` stays `None`, its own class
+    # (`metrics.measure`'s `incomplete`) is the caller's own accounting.
+    assert by_item["13"].released_at is None
+    # No item content and no trunk landing read at all (Layers contract:
+    # `store` is git transport only).
+    assert all(event.size is None for event in events)
+    assert all(event.landed_at is None for event in events)
+    assert git_call_spy["log"] == 1
+
+
+def test_claim_lifecycle_excludes_history_before_a_reset(bare_remote: Path, worktree: Path) -> None:
+    """A reset (issue #298) deletes `STATE_REF` and rebuilds it from an empty
+    tree with no parent commit -- simulated here through the store's own
+    reset primitives (a raw ref delete, `clear_lineage_stamps`, a fresh
+    `bootstrap`) rather than the full CLI `reset` command, since this test's
+    only concern is `claim_lifecycle`'s own first-parent walk. That walk can
+    never reach a claim from before the deleted ref, with no explicit date
+    comparison needed to exclude it."""
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    _committed_claim(bare_remote, worktree, issue=1)
+    store.commit_transition(
+        worktree=worktree,
+        remote=str(bare_remote),
+        subject="release issue 1",
+        intent=_release_intent("c1", "op-1-release"),
+    )
+    subprocess.run(
+        ["git", "update-ref", "-d", store.STATE_REF],
+        cwd=bare_remote,
+        check=True,
+        capture_output=True,
+    )
+    store.clear_lineage_stamps(worktree=worktree)
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    _committed_claim(bare_remote, worktree, issue=2)
+    state = store.fetch_state(worktree=worktree, remote=str(bare_remote))
+    assert state.tip is not None
+
+    events = store.claim_lifecycle(worktree=worktree, tip=state.tip)
+
+    assert {event.item for event in events} == {"2"}
+
+
 def test_commit_transition_and_fetch_state_round_trip_a_claim_with_a_resource(
     bare_remote: Path, worktree: Path
 ) -> None:

@@ -59,6 +59,7 @@ from agent_coordination import (
     forge,
     github,
     items,
+    metrics,
     protocol,
     state_board,
     store,
@@ -486,6 +487,7 @@ def test_board_projects_fixture_json_without_github_writes(
         "uncut",
         "requests",
         "landings_derivable",
+        "measurements",
     }
     first = payload["items"][0]
     ten = next(item for item in payload["items"] if item["number"] == 10)
@@ -6349,6 +6351,7 @@ class _FakeStore:
         consumed_ids: frozenset[protocol.ClaimId] | None = None,
         resources: Mapping[str, protocol.ResourceRecord] | None = None,
         items: Mapping[str, protocol.ObjectId] | None = None,
+        lane_events: tuple[metrics.LaneEvent, ...] = (),
     ) -> None:
         live = dict(claims or {})
         derived_ids = frozenset(claim.claim_id for claim in live.values())
@@ -6371,6 +6374,7 @@ class _FakeStore:
         )
         self.transitions: list[protocol.ClaimTransitionIntent] = []
         self._ages = dict(ages or {})
+        self._lane_events = lane_events
 
     def fetch_state(self, *, worktree: Path, remote: str) -> protocol.ClaimState:
         return self.state
@@ -6399,6 +6403,11 @@ class _FakeStore:
     ) -> dict[str, datetime]:
         return {claim.claim_id: self._ages.get(claim.claim_id, _STATUS_NOW) for claim in claims}
 
+    def claim_lifecycle(
+        self, *, worktree: Path, tip: protocol.ObjectId
+    ) -> tuple[metrics.LaneEvent, ...]:
+        return self._lane_events
+
 
 def _patch_store_write(
     monkeypatch: pytest.MonkeyPatch,
@@ -6408,6 +6417,7 @@ def _patch_store_write(
     consumed_ids: frozenset[protocol.ClaimId] | None = None,
     resources: Mapping[str, protocol.ResourceRecord] | None = None,
     items: Mapping[str, protocol.ObjectId] | None = None,
+    lane_events: tuple[metrics.LaneEvent, ...] = (),
 ) -> _FakeStore:
     fake = _FakeStore(
         {protocol.claim_key(claim.identity, claim.branch): claim for claim in claims},
@@ -6416,10 +6426,12 @@ def _patch_store_write(
         consumed_ids=consumed_ids,
         resources=resources,
         items=items,
+        lane_events=lane_events,
     )
     monkeypatch.setattr(store, "fetch_state", fake.fetch_state)
     monkeypatch.setattr(store, "commit_transition", fake.commit_transition)
     monkeypatch.setattr(store, "claim_ages", fake.claim_ages)
+    monkeypatch.setattr(store, "claim_lifecycle", fake.claim_lifecycle)
     monkeypatch.setattr(checkout, "remote_url", lambda remote: f"git@github.com:{REPOSITORY}.git")
     return fake
 
@@ -12346,6 +12358,58 @@ def test_item_edit_refuses_under_github_storage(capsys: pytest.CaptureFixture[st
     )
 
 
+def test_item_edit_size_writes_the_top_level_field_under_github_storage(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Issue #357 proof 2: `item edit --size M` writes through the generic
+    `ForgeWriter.update_item_body` both storages already implement, so it
+    reaches a `github`-stored item too -- unlike the whole-body `item edit`
+    above, which refuses under `storage = "github"` by name."""
+    client = _client_with_item(
+        monkeypatch, tmp_path, RULE_ITEM, agent_claim_body(MINIMAL_BLOCK_TOML)
+    )
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "item", "edit", str(RULE_ITEM), "--size", "M"]
+    )
+
+    assert exit_code == 0
+    assert capsys.readouterr().out == f"EDITED #{RULE_ITEM} size=M\n"
+    assert board.locate_agent_claim_block(client.item_bodies[RULE_ITEM]).data["size"] == "M"
+
+
+def test_item_edit_size_json_reports_the_item_and_size(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    _client_with_item(monkeypatch, tmp_path, RULE_ITEM, agent_claim_body(MINIMAL_BLOCK_TOML))
+
+    exit_code = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "item",
+            "edit",
+            str(RULE_ITEM),
+            "--size",
+            "S",
+            "--json",
+        ]
+    )
+
+    assert exit_code == 0
+    assert json.loads(capsys.readouterr().out) == {"item": RULE_ITEM, "size": "S"}
+
+
+def test_item_edit_size_refuses_an_invalid_value_before_any_write(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as exited:
+        issue_claim.main(["item", "edit", "42", "--size", "XL"])
+
+    assert exited.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err
+
+
 def test_item_close_refuses_under_github_storage(capsys: pytest.CaptureFixture[str]) -> None:
     """Issue #289 proof 6: under `storage = "github"` (the default), `item
     close` refuses by name -- the forge closes its own issues, aco never
@@ -12452,6 +12516,7 @@ def test_item_show_refuses_an_unknown_id(
 _REAL_STORE_FETCH_STATE = store.fetch_state
 _REAL_STORE_COMMIT_TRANSITION = store.commit_transition
 _REAL_STORE_CLAIM_AGES = store.claim_ages
+_REAL_STORE_CLAIM_LIFECYCLE = store.claim_lifecycle
 
 
 def _use_real_store(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -12461,6 +12526,7 @@ def _use_real_store(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(store, "fetch_state", _REAL_STORE_FETCH_STATE)
     monkeypatch.setattr(store, "commit_transition", _REAL_STORE_COMMIT_TRANSITION)
     monkeypatch.setattr(store, "claim_ages", _REAL_STORE_CLAIM_AGES)
+    monkeypatch.setattr(store, "claim_lifecycle", _REAL_STORE_CLAIM_LIFECYCLE)
 
 
 def _reset_repository(tmp_path: Path) -> tuple[Path, Path]:

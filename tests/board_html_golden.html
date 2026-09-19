@@ -136,6 +136,7 @@ summary:focus-visible {
 .topics summary::-webkit-details-marker { display: none; }
 .topics summary:hover .t-name strong { color: var(--accent); }
 .t-name strong::after { content: " +"; color: var(--muted); font-weight: 400; }
+.t-estimate { color: var(--muted); font: 0.82rem var(--mono); margin-left: 0.4em; }
 .topics details[open] .t-name strong::after { content: " \2212"; }
 .t-progress {
   display: grid; grid-template-columns: minmax(0, 1fr) 3.4em; gap: 12px; align-items: center;
@@ -184,6 +185,12 @@ summary:focus-visible {
 .landed li { padding: 8px 0; border-top: 1px solid var(--rule); font-size: 0.92rem; }
 .landed li:last-child { border-bottom: 1px solid var(--rule); }
 
+.measurements { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.measurements li {
+  padding: 8px 0; border-top: 1px solid var(--rule); font: 0.86rem var(--mono);
+}
+.measurements li:last-child { border-bottom: 1px solid var(--rule); }
+
 @media (max-width: 560px) {
   .facts div { grid-template-columns: minmax(0, 1fr); gap: 0; }
   .parts li { grid-template-columns: 10px minmax(0, 1fr); }
@@ -223,7 +230,10 @@ summary:focus-visible {
       <li>
         <details>
           <summary>
-            <span class="t-name"><strong>#103 Kleine Verbesserung</strong></span>
+            <span class="t-name">
+              <strong>#103 Kleine Verbesserung</strong>
+              <span class="t-estimate">keine Größe</span>
+            </span>
             <span class="t-progress">
               <span class="bar" role="img" aria-label="0 of 1 done">
                 <i style="width:0%"></i>
@@ -237,7 +247,10 @@ summary:focus-visible {
       <li>
         <details>
           <summary>
-            <span class="t-name"><strong>#104 Randfall</strong></span>
+            <span class="t-name">
+              <strong>#104 Randfall</strong>
+              <span class="t-estimate">keine Größe</span>
+            </span>
             <span class="t-progress">
               <span class="bar" role="img" aria-label="0 of 1 done">
                 <i style="width:0%"></i>
@@ -251,7 +264,10 @@ summary:focus-visible {
       <li>
         <details>
           <summary>
-            <span class="t-name"><strong>#100 Sammelitem</strong></span>
+            <span class="t-name">
+              <strong>#100 Sammelitem</strong>
+              <span class="t-estimate">~5h (M, n=3)</span>
+            </span>
             <span class="t-progress">
               <span class="bar" role="img" aria-label="1 of 2 done">
                 <i style="width:50%"></i>
@@ -265,7 +281,10 @@ summary:focus-visible {
       <li>
         <details>
           <summary>
-            <span class="t-name"><strong>#102 Laufende Lane</strong></span>
+            <span class="t-name">
+              <strong>#102 Laufende Lane</strong>
+              <span class="t-estimate">keine Größe</span>
+            </span>
             <span class="t-progress">
               <span class="bar" role="img" aria-label="0 of 1 done">
                 <i style="width:0%"></i>
@@ -281,6 +300,11 @@ summary:focus-visible {
   <section aria-labelledby="landed">
     <h2 id="landed">Landungen <small>2</small></h2>
     <ul class="landed"><li>#103 Kleine Verbesserung &mdash; PR #555: Kleine Verbesserung landen</li><li>#104 Randfall &mdash; PR nicht zugeordnet</li></ul>
+  </section>
+
+  <section aria-labelledby="measurements">
+    <h2 id="measurements">Messungen</h2>
+    <p>Messungen (Stand 2026-08-21, seit 2026-08-10)</p><ul class="measurements"><li>M: n=3, median 5h, p80 6h, 2026-08-10..2026-08-14</li><li>1 Lanes ohne Ende</li></ul>
   </section>
 </main>
 <script>
