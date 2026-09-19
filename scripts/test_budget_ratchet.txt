@@ -3,8 +3,4 @@
 # raise with no matching line here blocks --ci. Never a count baseline: no numbers are
 # recorded, and this file is never rewritten by a script -- only appended to by hand.
 
-# budget: two distinct, non-parametrizable regressions for the REVIEW-gate findings on issue
-# #331's scope canonicalizer -- a real-bare-remote proof that a claim file written before the
-# canonical order existed still replays and releases correctly once read, and a refusal proof
-# that the block-scope renderer no longer silently deduplicates. Neither is one member of an
-# existing parametrized family. [#331]
+# budget: two distinct, non-parametrizable regressions for the scope canonicalizer -- a real-bare-remote proof that a legacy unsorted claim file still replays and releases correctly once read, and a refusal proof that the block-scope renderer no longer silently deduplicates [#331]
