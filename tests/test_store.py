@@ -1724,6 +1724,44 @@ def test_claim_lifecycle_counts_a_second_release_of_the_same_claim_as_unparsed(
     assert event.released_at == first_event.released_at
 
 
+def test_claim_lifecycle_counts_a_rescope_after_release_as_unparsed(
+    bare_remote: Path, worktree: Path
+) -> None:
+    """A `rescope` naming a `claim_id` this walk already released -- `rescope`
+    requires a live claim (`protocol.apply`; `specs/rescope.spec.md`), so a
+    live writer can never produce one after that claim's own release -- used
+    to silently increment `rescoped` on the already-closed accumulator
+    (issue #357 gate B3). It must instead count as `unparsed` and leave the
+    event's own `rescopes` count untouched."""
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    _committed_claim(bare_remote, worktree, issue=1)
+    release_state = store.commit_transition(
+        worktree=worktree,
+        remote=str(bare_remote),
+        subject=store.ClaimTransitionSubject("release issue 1", item="1"),
+        intent=_release_intent("c1", "op-1-release"),
+    )
+    assert release_state.tip is not None
+    _push_message_only_commit(
+        bare_remote,
+        worktree,
+        parent=str(release_state.tip),
+        message=(
+            "rescope issue 1 after release\n\noperation_id: op-1-rescope-late\n"
+            "claim_id: c1\nitem: 1\nintent: rescope\n"
+        ),
+    )
+    final_state = store.fetch_state(worktree=worktree, remote=str(bare_remote))
+    assert final_state.tip is not None
+
+    lifecycle = store.claim_lifecycle(worktree=worktree, tip=final_state.tip)
+
+    assert lifecycle.unparsed == 1
+    (event,) = lifecycle.events
+    assert event.item == "1"
+    assert event.rescopes == 0
+
+
 def test_claim_lifecycle_fails_loud_when_the_log_read_fails(
     monkeypatch: pytest.MonkeyPatch, bare_remote: Path, worktree: Path
 ) -> None:

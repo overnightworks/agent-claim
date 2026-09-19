@@ -541,7 +541,12 @@ def claim_lifecycle(*, worktree: Path, tip: ObjectId) -> ClaimLifecycle:
     live `claim_id` be claimed twice or released twice, so a commit shaped
     that way cannot be a second genuine transition -- and is counted into
     `unparsed` the same way, its first (and only trustworthy) event left
-    untouched rather than overwritten or duplicated (issue #357 gate B2).
+    untouched rather than overwritten or duplicated (issue #357 gate B2). A
+    `rescope` naming an already-released `claim_id` is the same kind of
+    impossible history: `rescope` requires a live claim (`protocol.apply`,
+    `specs/rescope.spec.md`), so a rescope commit after that claim's own
+    release commit is counted into `unparsed` too, its `rescoped` count left
+    untouched (issue #357 gate B3).
     """
     transitions, unparsed = _claim_lifecycle_transitions(worktree, tip)
     accumulators: dict[str, _LifecycleAccumulator] = {}
@@ -561,7 +566,10 @@ def claim_lifecycle(*, worktree: Path, tip: ObjectId) -> ClaimLifecycle:
             unparsed += 1
             continue
         if transition.intent == _RESCOPE_LABEL:
-            accumulator.rescoped += 1
+            if accumulator.released_at is None:
+                accumulator.rescoped += 1
+            else:
+                unparsed += 1
         elif accumulator.released_at is None:
             accumulator.released_at = transition.committed_at
         else:
