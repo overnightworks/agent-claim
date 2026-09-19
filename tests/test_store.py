@@ -9,6 +9,7 @@ semantics in Python.
 
 from __future__ import annotations
 
+import errno
 import subprocess
 import threading
 from collections import Counter
@@ -3279,32 +3280,81 @@ def _break_export_via_a_tip_this_worktree_never_received(
     return _PLACEHOLDER_TIP, tmp_path / "state.bundle", lambda: None
 
 
+def _break_export_via_a_cross_device_link_failure(
+    monkeypatch: pytest.MonkeyPatch, bare_remote: Path, worktree: Path, tmp_path: Path
+) -> tuple[protocol.ObjectId, Path, Callable[[], None]]:
+    """`os.link`'s no-clobber semantics (`FileExistsError`) are not its only
+    failure mode: publishing across a filesystem boundary raises
+    `OSError(errno.EXDEV, ...)` instead, a path CI's 100 % line-coverage
+    gate found unexercised (issue #298, the fifth 19.09.2026 gate REVISE).
+    Patched at `store.os.link`, the module boundary `_write_and_publish_bundle`
+    calls through, rather than reimplementing a real cross-device mount."""
+    tip = store.fetch_state(worktree=worktree, remote=str(bare_remote)).tip
+    assert tip is not None
+
+    def fake_link(source: Path, link_name: Path) -> None:
+        raise OSError(errno.EXDEV, "Invalid cross-device link")
+
+    monkeypatch.setattr(store.os, "link", fake_link)
+    return tip, tmp_path / "state.bundle", lambda: None
+
+
+class _ExportFailureCase(NamedTuple):
+    """One row of `test_export_state_bundle_fails_loud_and_leaves_no_trace`.
+
+    `cause_fragment` is `None` for a row whose break point raises loud
+    without a `from` chain of its own (the write/publish path never chains,
+    only `export_state_bundle`'s own pre-write steps do) -- `None` skips
+    the `__cause__` assertion rather than asserting it is unset, since this
+    family does not otherwise pin that fact for rows it was not asked to."""
+
+    id: str
+    arrange: Callable[
+        [pytest.MonkeyPatch, Path, Path, Path], tuple[protocol.ObjectId, Path, Callable[[], None]]
+    ]
+    cause_fragment: str | None
+
+
 @pytest.mark.parametrize(
-    "break_export",
+    "case",
     [
-        _break_export_via_an_unwritable_destination_directory,
-        _break_export_via_a_failed_bundle_create,
-        _break_export_via_a_tip_this_worktree_never_received,
+        _ExportFailureCase(
+            "unwritable-directory", _break_export_via_an_unwritable_destination_directory, None
+        ),
+        _ExportFailureCase("bundle-create-fails", _break_export_via_a_failed_bundle_create, None),
+        _ExportFailureCase(
+            "unreachable-tip", _break_export_via_a_tip_this_worktree_never_received, None
+        ),
+        _ExportFailureCase(
+            "cross-device-link",
+            _break_export_via_a_cross_device_link_failure,
+            "Invalid cross-device link",
+        ),
     ],
-    ids=["unwritable-directory", "bundle-create-fails", "unreachable-tip"],
+    ids=lambda case: case.id,
 )
 def test_export_state_bundle_fails_loud_and_leaves_no_trace(
     monkeypatch: pytest.MonkeyPatch,
     bare_remote: Path,
     worktree: Path,
     tmp_path: Path,
-    break_export: Callable[
-        [pytest.MonkeyPatch, Path, Path, Path], tuple[protocol.ObjectId, Path, Callable[[], None]]
-    ],
+    case: _ExportFailureCase,
 ) -> None:
     store.bootstrap(worktree=worktree, remote=str(bare_remote))
-    tip, destination, restore = break_export(monkeypatch, bare_remote, worktree, tmp_path)
+    tip, destination, restore = case.arrange(monkeypatch, bare_remote, worktree, tmp_path)
 
     try:
-        with pytest.raises(protocol.ClaimError, match="cannot export"):
+        with pytest.raises(protocol.ClaimError, match="cannot export") as excinfo:
             store.export_state_bundle(worktree=worktree, tip=tip, destination=destination)
     finally:
         restore()
+
+    message = str(excinfo.value)
+    assert str(tip) in message
+    assert str(destination) in message
+    if case.cause_fragment is not None:
+        assert excinfo.value.__cause__ is not None
+        assert case.cause_fragment in str(excinfo.value.__cause__)
 
     assert not destination.exists()
     assert not list(destination.parent.glob(f".{destination.name}.*"))
