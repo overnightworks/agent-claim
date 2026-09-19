@@ -1032,7 +1032,9 @@ _EMPTY_PARALLEL_JSON: dict[str, object] = {
 # path (the "two overlapping each other" pair), Delta names no scope at
 # all, Epsilon names a path under claim-live-1's own directory scope (the
 # "excluded by a live claim, not by another candidate" case; R1 review) --
-# read against two live claims that occupy their own, disjoint paths.
+# read against two live claims, claim-live-2's own path sitting inside
+# claim-live-1's directory scope, so the two are not disjoint from each
+# other either; only the free items are checked for disjointness here.
 # Alpha out-ranks the rest purely by its lower issue number (every item
 # shares the same score), so it is always the first action; Beta then wins
 # the walk over Gamma (board order), and Gamma is dropped silently --
