@@ -1,8 +1,0 @@
-claim_id = "7a003c3e52e742bca5f9e17798ce6e9a"
-agent = "Claude head (coordinator)"
-role = "builder"
-base = "6da259b6fa45c32f0a9d26306d8195989bf9f06e"
-branch = "claude/issue-359-atomic-landing"
-scope = ["README.md", "scripts/spec_coverage_ratchet.txt", "specs/landing-grammar.spec.md", "specs/release.spec.md", "specs/storage-pin.spec.md", "src/agent_coordination/cli.py", "src/agent_coordination/github.py", "src/agent_coordination/protocol.py", "src/agent_coordination/state_board.py", "src/agent_coordination/store.py", "tests/cli_fixtures.py", "tests/test_checkout.py", "tests/test_cli.py", "tests/test_github.py", "tests/test_protocol.py", "tests/test_state_board.py", "tests/test_store.py"]
-opened_commit = "f79028a174f36c2ae2157b10ffb08db6842f9c04"
-whole_reason = "one landing transition across protocol, the two adapters, cli, their tests, README and the two specs it changes"
