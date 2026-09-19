@@ -76,8 +76,8 @@ runner's own values; `<agent>` and `<role>` are the claimant's.
 - [ ] [CLAIM-13] Repeating an interrupted claim with the same claim id, agent, role, branch and scope returns that same live claim and writes no second record, exit `0`.
 - [ ] [CLAIM-14] A claim id already on the ledger with different fields refuses `claim id '<claim-id>' is already on this ledger, active or released; release it, then claim again with a fresh claim id`.
 - [ ] [CLAIM-15] A released claim id stays terminal: claiming with it again refuses with that same `already on this ledger, active or released` sentence, exit `2`.
-- [ ] [CLAIM-16] `aco rescope` against a claim id with no live claim refuses `claim id '<claim-id>' has no active claim to rescope`, exit `2`.
-- [ ] [CLAIM-17] `aco release` against a claim id with no live claim refuses `claim id '<claim-id>' has no active claim to release`, exit `2`.
+- [ ] [CLAIM-16] `aco rescope` against a claim id with no live claim on its identity/branch, including a mismatched `--claim-id`, refuses the wording `rescope.spec.md` owns (RESC-14), exit `2`.
+- [ ] [CLAIM-17] `aco release` against a claim id with no live claim on its identity/branch, including a mismatched `--claim-id`, refuses the wording `release.spec.md` owns (REL-09, REL-10), exit `2`.
 
 ## Scope grammar
 
