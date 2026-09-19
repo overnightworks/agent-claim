@@ -5312,23 +5312,25 @@ def test_landing_intent_refuses_a_stale_item_oid_without_writing_anything(
     )
     item_id = items.format_item_id(10)
     stale_oid = store.hash_blob(worktree, b"some other content\n")
+    closed_oid_attempt = store.hash_blob(worktree, b"closed\n")
     tip_before = _state_ref_tip(worktree, bare_remote)
+    intent = protocol.LandingIntent(
+        item_id=item_id,
+        item_expected=stale_oid,
+        item_new_oid=closed_oid_attempt,
+        claim_id=claim.claim_id,
+        agent="Codex Sol",
+        role="builder",
+        outcome=protocol.LandedRelease(commit=protocol.ObjectId("d" * 40)),
+        operation_id="land-op-10-stale",
+    )
 
     with pytest.raises(protocol.ClaimUnavailableError, match="was written since it was read"):
         store.commit_transition(
             worktree=worktree,
             remote=str(bare_remote),
             subject="release issue 10",
-            intent=protocol.LandingIntent(
-                item_id=item_id,
-                item_expected=stale_oid,
-                item_new_oid=store.hash_blob(worktree, b"closed\n"),
-                claim_id=claim.claim_id,
-                agent="Codex Sol",
-                role="builder",
-                outcome=protocol.LandedRelease(commit=protocol.ObjectId("d" * 40)),
-                operation_id="land-op-10-stale",
-            ),
+            intent=intent,
         )
 
     assert _state_ref_tip(worktree, bare_remote) == tip_before

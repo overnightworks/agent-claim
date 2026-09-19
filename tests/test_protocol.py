@@ -379,9 +379,10 @@ def test_apply_landing_intent_refuses(
     stale item oid, which leaves the claim live rather than releasing it
     anyway."""
     with_item = _claimed_state_with_item()
+    intent = build_intent()
 
     with pytest.raises(protocol.ClaimUnavailableError, match=match):
-        protocol.apply(with_item, build_intent())
+        protocol.apply(with_item, intent)
 
     # A refused landing changes nothing: still claimed, item still at its
     # original oid.
@@ -395,6 +396,7 @@ def test_apply_landing_intent_refuses_against_a_missing_state_ref() -> None:
     bootstrap yet) refuses before either half runs, the same precondition
     every other transition shape enforces."""
     assert protocol.EMPTY_STATE.tip is None
+    intent = _landing_intent()
 
     with pytest.raises(protocol.ClaimError, match="does not exist yet"):
-        protocol.apply(protocol.EMPTY_STATE, _landing_intent())
+        protocol.apply(protocol.EMPTY_STATE, intent)
