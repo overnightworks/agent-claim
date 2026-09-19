@@ -2058,10 +2058,12 @@ class TestCliStateRefForge:
         worktree: Path,
     ) -> None:
         """Issue #371, Beweis 1: two trailer-carrying trunk commits each land
-        their own item under `storage = state-ref` -- `board --json`'s
-        `landings` rows read `checkout.trunk_landings` directly, one row per
-        item with its own sha and no `pull_request`, independent of any
-        pull-request listing this storage can never perform."""
+        their own item under `storage = state-ref` -- `board`'s text
+        `LANDUNGEN` rows, `board --json`'s `landings` array, and
+        `board --html`'s Landungen section all read `checkout.trunk_landings`
+        directly, one row per item with its own sha and no `pull_request`,
+        independent of any pull-request listing this storage can never
+        perform."""
         first_id, second_id = "aco-000005", "aco-000006"
         first_number = items.item_number(first_id)
         second_number = items.item_number(second_id)
@@ -2088,6 +2090,19 @@ class TestCliStateRefForge:
         assert landings[first_number]["pull_request"] is None
         assert landings[second_number]["sha"] == second_sha
         assert landings[second_number]["pull_request"] is None
+        first_date = datetime.fromisoformat(landings[first_number]["committed_at"]).date()
+        second_date = datetime.fromisoformat(landings[second_number]["committed_at"]).date()
+
+        assert issue_claim.main(["board"]) == 0
+        rendered_text = capsys.readouterr().out
+        assert "LANDUNGEN" in rendered_text
+        assert f"{first_id} {first_date} {first_sha[:7]}" in rendered_text
+        assert f"{second_id} {second_date} {second_sha[:7]}" in rendered_text
+
+        assert issue_claim.main(["board", "--html"]) == 0
+        rendered_html = capsys.readouterr().out
+        assert f"<li>{first_id} {first_date} <code>{first_sha[:7]}</code></li>" in rendered_html
+        assert f"<li>{second_id} {second_date} <code>{second_sha[:7]}</code></li>" in rendered_html
 
     def test_board_refuses_without_an_origin_head(
         self,

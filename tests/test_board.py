@@ -2028,10 +2028,65 @@ def test_landing_rows_refuses_a_recently_merged_pull_request_with_no_merge_date(
     listing it does not honor, refused loud rather than silently dropped or
     dated with a guess."""
     epic = board_issue(70, "Epic", complete_contract("Cut the next slice."))
-    slice_pull_request = board.PullRequest(130, "Slice 1", _slice_pull_request_body(70), "branch")
+    closing_pull_request = board.PullRequest(130, "Closes it", "Closes #70.", "branch")
+    config = board.BoardConfig()
 
     with pytest.raises(protocol.ClaimError, match="no merge date"):
-        projected_board((epic,), (), (slice_pull_request,), (), board.BoardConfig())
+        projected_board((epic,), (), (closing_pull_request,), (), config)
+
+
+def test_landing_rows_leaves_a_touched_but_not_closed_epic_unattributed() -> None:
+    """Issue #371 review finding R2: LAND-41/45 credit a Landungen row only
+    to a closing or landing keyword, never to a bare `Refs`/`Part of` touch
+    -- unlike `Stage.CODE_LANDED`, which does credit a corroborated touch
+    (`test_an_epic_inherits_the_landed_stage_of_a_slice_that_did_not_close_it`).
+    A slice pull request that only touches its epic must therefore leave the
+    epic with no landing row at all, "PR nicht zugeordnet", not a
+    `PullRequestLandingEvidence` guess."""
+    epic = board_issue(71, "Epic touched but not closed", complete_contract("Cut the next slice."))
+    slice_pull_request = board.PullRequest(
+        131, "Slice 1", _slice_pull_request_body(71), "branch", merged_at="2026-08-19T00:00:00Z"
+    )
+
+    projected = projected_board((epic,), (), (slice_pull_request,), (), board.BoardConfig())
+
+    assert projected.landings == ()
+
+
+def test_landing_rows_credits_the_earliest_merged_pull_request_regardless_of_listing_order() -> (
+    None
+):
+    """Issue #371 review finding R1: two merged pull requests both plainly
+    close the same item -- the one that actually landed it first (the
+    earlier `merged_at`) must win the row every time, never whichever the
+    adapter happens to list first."""
+    earlier = board.PullRequest(
+        201, "First fix", "Closes #90.", "branch-a", merged_at="2026-08-10T00:00:00Z"
+    )
+    later = board.PullRequest(
+        202, "Follow-up fix", "Closes #90.", "branch-b", merged_at="2026-08-15T00:00:00Z"
+    )
+
+    listed_late_first = board.landing_rows((), (later, earlier), REPOSITORY, board.Storage.GITHUB)
+    listed_early_first = board.landing_rows((), (earlier, later), REPOSITORY, board.Storage.GITHUB)
+
+    assert listed_late_first == listed_early_first
+    (row,) = listed_late_first
+    assert row.evidence == board.PullRequestLandingEvidence(201)
+
+
+def test_landing_rows_orders_equal_timestamp_rows_by_item_number() -> None:
+    """Issue #371 review finding R1: two items landed by the same trunk
+    commit share one `committed_at` -- with no tie-break, their row order
+    would depend on the trunk walk's own dict iteration. The lower item
+    number sorts first among equal timestamps."""
+    landed_at = datetime(2026, 8, 29, tzinfo=UTC)
+    higher = board.TrunkLandingItem(82, "b" * 40, landed_at)
+    lower = board.TrunkLandingItem(81, "a" * 40, landed_at)
+
+    rows = board.landing_rows((higher, lower), (), REPOSITORY, board.Storage.GITHUB)
+
+    assert tuple(row.item for row in rows) == (81, 82)
 
 
 def test_render_shows_a_trunk_landing_row_with_its_short_sha() -> None:

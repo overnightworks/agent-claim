@@ -20,7 +20,7 @@ from board_fixtures import (
     proposed_expectation,
 )
 
-from agent_coordination import board, board_html, items, metrics
+from agent_coordination import board, board_html, cli, items, metrics
 
 GOLDEN_PATH = Path(__file__).parent / "board_html_golden.html"
 
@@ -123,10 +123,9 @@ def _fixture_page(
         merged_at="2026-08-19T00:00:00Z",
     )
     # `board.py`'s own private `LANDING_CLAIM_PATTERN` also credits "lands"
-    # (not just close/fix/resolve), so this merged pull request sets #104's
-    # stage `CODE_LANDED` -- but `_closing_pull_request` only reads the two
-    # public conventions (a named residual), so #104 shows with no resolved
-    # pull request.
+    # (not just close/fix/resolve), so this merged pull request both sets
+    # #104's stage `CODE_LANDED` and resolves its own Landungen row (see
+    # this fixture's own docstring above).
     landing_only_pull_request = board.PullRequest(
         number=556,
         title="Lands #104: Randfall",
@@ -404,8 +403,9 @@ def test_the_default_outcome_is_marked_recommended(default: str, recommended_fla
 
 
 def test_landings_derivable_and_its_not_derivable_line_are_fully_retired() -> None:
-    """Issue #371, Beweis 3: the trunk walk is always present, so the
-    capability flag and its "nicht ableitbar" line are gone from every
+    """Issue #371, Beweis 3 (review finding R3): the trunk walk is always
+    present, so the capability flag, its "nicht ableitbar" line, and every
+    name the old per-caller Landungen assembly needed are gone from every
     module and every JSON/HTML shape that used to carry them -- a structural
     stand-in for a grep, since a stray reintroduction would otherwise slip
     back in silently."""
@@ -413,6 +413,12 @@ def test_landings_derivable_and_its_not_derivable_line_are_fully_retired() -> No
     assert not hasattr(board_html, "LANDINGS_NOT_DERIVABLE_TEXT")
     assert not hasattr(board_html, "TrunkLandedItem")
     assert not hasattr(board_html, "LandedItem")
+    assert not hasattr(board_html, "_closing_pull_request")
+    assert not hasattr(board_html, "_landed_items")
+    assert not hasattr(cli, "_BoardFetch")
     assert "landings_derivable" not in {field.name for field in fields(board.Board)}
     assert "landings_derivable" not in {field.name for field in fields(board.BoardBuildInputs)}
     assert "landings_derivable" not in {field.name for field in fields(board_html.BoardPage)}
+    board_sources_fields = {field.name for field in fields(board_html.BoardSources)}
+    assert "recent_merged_pull_requests" not in board_sources_fields
+    assert "trunk_landed_items" not in board_sources_fields

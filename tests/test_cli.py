@@ -769,9 +769,11 @@ def test_board_dedupes_a_landing_between_the_trunk_trailer_and_a_squash_pull_req
 ) -> None:
     """Issue #371, Beweis 2: under `github`, a trunk-trailer landing (#10)
     and an older-style squash pull request with no trailer of its own (#11)
-    both show as `landings` rows -- one row per item, the trailer path
-    winning for #10 even though pull request #89 also plainly closes it,
-    proving the dedup rather than merely two different items landing."""
+    both show as one row each in `board`'s text `LANDUNGEN` section,
+    `board --json`'s `landings` array, and `board --html`'s Landungen
+    section -- the trailer path winning for #10 even though pull request
+    #89 also plainly closes it, proving the dedup rather than merely two
+    different items landing."""
     client = _single_item_board_environment(monkeypatch, tmp_path)
     client.board_issues = (
         board_issue(10, "Trailer landed", complete_contract("Ship #10.")),
@@ -806,6 +808,17 @@ def test_board_dedupes_a_landing_between_the_trunk_trailer_and_a_squash_pull_req
     assert landings[10]["pull_request"] is None
     assert landings[11]["sha"] is None
     assert landings[11]["pull_request"] == 90
+
+    assert issue_claim.main(["--repo", "example/agent-claim", "board"]) == 0
+    rendered_text = capsys.readouterr().out
+    assert "LANDUNGEN" in rendered_text
+    assert "#10 2026-08-29 aaaaaaa" in rendered_text
+    assert "#11 2026-08-18 PR #90" in rendered_text
+
+    assert issue_claim.main(["--repo", "example/agent-claim", "board", "--html"]) == 0
+    rendered_html = capsys.readouterr().out
+    assert "<li>#10 2026-08-29 <code>aaaaaaa</code></li>" in rendered_html
+    assert "<li>#11 2026-08-18 PR #90</li>" in rendered_html
 
 
 def test_board_html_prints_the_rendered_page_to_stdout(

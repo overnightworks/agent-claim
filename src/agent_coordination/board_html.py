@@ -41,9 +41,6 @@ from typing import cast
 from . import board
 
 RULE_OUTCOMES: tuple[str, ...] = ("yes", "no", "later")
-# git's own default abbreviation length -- a trunk-landed row's sha is
-# evidence to look up, not a full identity, so the short form is enough.
-_SHORT_SHA_LENGTH = 7
 
 
 @dataclass(frozen=True)
@@ -513,7 +510,7 @@ def _render_topic(topic: Topic, *, storage: board.Storage) -> str:
 def _render_landed(row: board.LandingRow, *, storage: board.Storage) -> str:
     date = row.committed_at.astimezone(UTC).date().isoformat()
     if isinstance(row.evidence, board.TrunkLandingEvidence):
-        evidence = f"<code>{row.evidence.sha[:_SHORT_SHA_LENGTH]}</code>"
+        evidence = f"<code>{row.evidence.sha[: board.SHORT_SHA_LENGTH]}</code>"
     else:
         evidence = f"PR #{row.evidence.number}"
     label = board.item_label(row.item, storage)

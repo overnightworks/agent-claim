@@ -434,10 +434,11 @@ class TrunkLandingEvidence:
 @dataclass(frozen=True)
 class PullRequestLandingEvidence:
     """A `LandingRow`'s `github`-only supplementary evidence (issue #371):
-    the merged pull request that plainly closed, declared, or (for an
-    epic's slice) touched its item, used only when no trunk commit's own
-    trailer names that item at all -- an older squash landing whose commit
-    message carries no trailer."""
+    the merged pull request that plainly closed, declared, or landed its
+    item (LAND-41's closing/landing keywords; never a bare `Refs`/`Part of`
+    touch, LAND-45), used only when no trunk commit's own trailer names
+    that item at all -- an older squash landing whose commit message
+    carries no trailer."""
 
     number: int
 
@@ -2277,30 +2278,53 @@ def _pull_request_landing_rows(
     repository: str,
 ) -> tuple[LandingRow, ...]:
     """`github`'s own supplement to the trunk walk (issue #371): one
-    `LandingRow` per item a merged pull request plainly closes, declares,
-    lands, or (for an epic's slice) touches -- LAND-41's own wide
-    definition, reused whole rather than reimplemented narrower -- that no
+    `LandingRow` per item a merged pull request plainly closes, declares, or
+    lands -- LAND-41's own closing/landing keywords, never a `Refs`/`Part of`
+    touch (LAND-45; a touch confers only the board's in-flight/landed
+    *stage*, `_touched_without_closing`, not a Landungen row) -- that no
     trunk commit's trailer already names (`already_landed`, the trunk
     walk's own dedup, trailer path first). The first pull request naming a
-    given item wins when more than one plausibly could,
-    `recent_merged_pull_requests`' own order."""
+    given item wins when more than one plausibly could, sorted by its own
+    merge time (oldest first, so "first" means whichever pull request
+    actually landed the item first) with the pull request number as a
+    stable tie-break for two merged at the same instant -- never
+    `recent_merged_pull_requests`' own possibly-unordered adapter order.
+    `_merged_at` is read only for a pull request that names at least one
+    item this way: one that never does carries no landing evidence and so
+    is never required to carry a merge date either."""
+    claims_by_pull_request = {
+        pull_request: _associated_issues((pull_request,), repository) - already_landed
+        for pull_request in recent_merged_pull_requests
+    }
+    landing_candidates = tuple(
+        pull_request for pull_request, claims in claims_by_pull_request.items() if claims
+    )
     rows: dict[int, LandingRow] = {}
-    for pull_request in recent_merged_pull_requests:
-        claimed = (
-            (
-                _associated_issues((pull_request,), repository)
-                | _touched_without_closing((pull_request,))
-            )
-            - already_landed
-            - rows.keys()
-        )
+    for pull_request in sorted(
+        landing_candidates,
+        key=lambda pull_request: (_merged_at(pull_request), pull_request.number),
+    ):
+        claimed = claims_by_pull_request[pull_request] - rows.keys()
         if not claimed:
             continue
         committed_at = _merged_at(pull_request)
         evidence = PullRequestLandingEvidence(pull_request.number)
-        for item in claimed:
+        for item in sorted(claimed):
             rows[item] = LandingRow(item, committed_at, evidence)
     return tuple(rows.values())
+
+
+def _landing_row_tie_break_key(row: LandingRow) -> tuple[int, int, int]:
+    """The stable order two rows sharing `committed_at` fall back to (issue
+    #371): item number first, then evidence kind (a trunk trailer's row
+    before a pull request's -- the trailer path always wins the same item,
+    so this is unreachable today but keeps the key total rather than
+    coincidentally sufficient), then pull request number. `landing_rows`
+    sorts by this key first and by `committed_at` second, relying on
+    Python's stable sort to keep this order wherever timestamps tie."""
+    if isinstance(row.evidence, TrunkLandingEvidence):
+        return (row.item, 0, 0)
+    return (row.item, 1, row.evidence.number)
 
 
 def landing_rows(
@@ -2316,7 +2340,10 @@ def landing_rows(
     request plainly landed with no trailer of its own (`github`'s squash
     convention before this repository trailer-tagged every landing),
     deduplicated against the trunk rows, trailer path first. Newest first,
-    so a reader sees the most recent landing at the top."""
+    so a reader sees the most recent landing at the top -- two rows landed
+    at the same instant fall back to `_landing_row_tie_break_key`, a
+    Python-stable-sort second pass rather than a second field on the sort
+    key, so equal timestamps still resolve to one deterministic order."""
     trunk_rows = {
         entry.item: LandingRow(entry.item, entry.committed_at, TrunkLandingEvidence(entry.sha))
         for entry in trunk_landing_items
@@ -2326,9 +2353,10 @@ def landing_rows(
         if storage is Storage.GITHUB
         else ()
     )
+    tie_broken = sorted((*trunk_rows.values(), *pull_request_rows), key=_landing_row_tie_break_key)
     return tuple(
         sorted(
-            (*trunk_rows.values(), *pull_request_rows),
+            tie_broken,
             key=lambda row: row.committed_at,
             reverse=True,
         )
@@ -3265,12 +3293,14 @@ def item_label(number: int, storage: Storage) -> str:
 
 # git's own default abbreviation length -- a Landungen row's sha is evidence
 # to look up, not a full identity, so the short form is enough (issue #371).
-_SHORT_SHA_LENGTH = 7
+# The one owner: `board_html` renders the same evidence and imports this
+# rather than keeping its own copy (issue #371 review finding R4).
+SHORT_SHA_LENGTH = 7
 
 
 def _landing_evidence_cell(evidence: LandingEvidence) -> str:
     if isinstance(evidence, TrunkLandingEvidence):
-        return evidence.sha[:_SHORT_SHA_LENGTH]
+        return evidence.sha[:SHORT_SHA_LENGTH]
     return f"PR #{evidence.number}"
 
 
