@@ -64,7 +64,7 @@ layers = [
     "checkout | store",
     "github | state_board",
     "forge",
-    "board",
+    "board | metrics",
     "items",
     "protocol | process | hook_input",
 ]
