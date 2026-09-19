@@ -311,23 +311,43 @@ def _trunk_ref(remote: str) -> str:
     raise ClaimError("cannot determine the main branch for ruling age")
 
 
-# Field separator between a record's `sha`/`committed_at`/`Work-Item`
-# trailer values/`No-Item` trailer values; `\x1f` between repeated trailer
-# values within one field. Both are non-printing bytes git's own
-# `%(trailers:...,separator=...)` never inserts into a value, unlike the
-# default separator (a newline), which would otherwise merge two trailer
-# values into what looks like two commit records once the raw output is
-# split on newlines below. Git's own `%x00`/`%x1f` *placeholder text* goes
-# into the `--format=` argument (git turns it into the byte, in its own
-# output, at run time); the raw byte itself can never sit in that argument,
-# since an argv string is a C string and a literal NUL there is illegal.
+def _git_hex_placeholder(character: str) -> str:
+    """`character`, as the git `--format=`/`%(trailers:...)` `%xHH` escape
+    that makes git itself emit the raw byte at run time -- the one owner for
+    every separator `_TRUNK_LANDING_LOG_FORMAT` embeds, so each byte is
+    spelled once in Python and turned into git's own placeholder text here,
+    never typed a second time as a literal `%x..` string. (The raw byte
+    itself can never sit directly in the `--format=` argument: an argv
+    string is a C string, so a literal NUL there is illegal.)"""
+    return f"%x{ord(character):02x}"
+
+
+# Field separator between a trunk-landing record's `sha`/`committed_at`/
+# `Work-Item` trailer values/`No-Item` trailer values. NUL is also `git log
+# -z`'s own record terminator, so splitting the whole raw stream on it
+# (`trunk_landings`, below) reads every record's four fields *and* the
+# boundary between records through the one byte git forbids inside a commit
+# message -- unlike the historical `\x1f` separator this replaces, which git
+# never escapes inside a trailer *value* (issue #304 review, finding B1: a
+# probed value `#12\x1f#13` survived verbatim and silently split into two
+# fabricated work items).
+#
+# Repeated trailer values within one field join on a real newline instead:
+# git's own `unfold` guarantees one physical line per logical trailer value
+# (a folded/wrapped continuation line is joined back into it) before that
+# separator ever runs, so a value can never itself contain the byte the
+# split relies on.
 _TRUNK_LANDING_FIELD_SEPARATOR = "\x00"
-_TRUNK_LANDING_TRAILER_SEPARATOR = "\x1f"
+_TRUNK_LANDING_TRAILER_VALUE_SEPARATOR = "\n"
 _TRUNK_LANDING_LOG_FORMAT = (
     "%H"
-    "%x00%cI"
-    "%x00%(trailers:key=Work-Item,valueonly,separator=%x1f)"
-    "%x00%(trailers:key=No-Item,valueonly,separator=%x1f)"
+    f"{_git_hex_placeholder(_TRUNK_LANDING_FIELD_SEPARATOR)}%cI"
+    f"{_git_hex_placeholder(_TRUNK_LANDING_FIELD_SEPARATOR)}"
+    "%(trailers:key=Work-Item,valueonly,"
+    f"separator={_git_hex_placeholder(_TRUNK_LANDING_TRAILER_VALUE_SEPARATOR)},unfold)"
+    f"{_git_hex_placeholder(_TRUNK_LANDING_FIELD_SEPARATOR)}"
+    "%(trailers:key=No-Item,valueonly,"
+    f"separator={_git_hex_placeholder(_TRUNK_LANDING_TRAILER_VALUE_SEPARATOR)},unfold)"
 )
 
 
@@ -342,17 +362,15 @@ class TrunkLanding:
 
     sha: str
     committed_at: datetime
-    classification: board.TrunkClassification | None
+    classification: board.TrunkClassification | board.ClassificationDefect | None
 
 
 def _trailer_values(field: str) -> tuple[str, ...]:
-    return tuple(field.split(_TRUNK_LANDING_TRAILER_SEPARATOR)) if field else ()
+    return tuple(field.split(_TRUNK_LANDING_TRAILER_VALUE_SEPARATOR)) if field else ()
 
 
-def _parsed_trunk_landing(record: str) -> TrunkLanding:
-    sha, raw_committed_at, work_item_field, no_item_field = record.split(
-        _TRUNK_LANDING_FIELD_SEPARATOR
-    )
+def _parsed_trunk_landing(fields: tuple[str, str, str, str]) -> TrunkLanding:
+    sha, raw_committed_at, work_item_field, no_item_field = fields
     try:
         committed_at = datetime.fromisoformat(raw_committed_at)
     except ValueError as error:
@@ -379,6 +397,7 @@ def trunk_landings(remote: str, depth: int) -> tuple[TrunkLanding, ...]:
     raw = _git_output(
         [
             "log",
+            "-z",
             "--first-parent",
             "--reverse",
             f"--format={_TRUNK_LANDING_LOG_FORMAT}",
@@ -389,7 +408,20 @@ def trunk_landings(remote: str, depth: int) -> tuple[TrunkLanding, ...]:
     )
     if not raw:
         return ()
-    return tuple(_parsed_trunk_landing(record) for record in raw.splitlines())
+    # `-z` terminates every record -- including the last -- with the same
+    # byte that separates that record's own four fields, so splitting the
+    # whole stream on it leaves exactly one trailing empty token; `sha` and
+    # `committed_at` are never empty, so any other shape is git misbehaving.
+    fields = raw.split(_TRUNK_LANDING_FIELD_SEPARATOR)
+    if fields[-1] != "" or len(fields) % 4 != 1:
+        raise ClaimError("git returned a malformed trunk landing log")
+    fields = fields[:-1]
+    return tuple(
+        _parsed_trunk_landing(
+            (fields[index], fields[index + 1], fields[index + 2], fields[index + 3])
+        )
+        for index in range(0, len(fields), 4)
+    )
 
 
 def _resolved_agent(explicit: str | None) -> str:

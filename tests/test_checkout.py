@@ -8,6 +8,7 @@ CLI-wiring behavior."""
 
 from __future__ import annotations
 
+import re
 import subprocess
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -17,7 +18,7 @@ import pytest
 from board_fixtures import BASE, request
 from cli_fixtures import _fallback_git_output, _git_checkout, _real_git
 
-from agent_coordination import board, checkout, process
+from agent_coordination import board, checkout, process, protocol
 from agent_coordination import cli as issue_claim
 from agent_coordination.protocol import ClaimError, ClaimRequest
 
@@ -517,11 +518,19 @@ def test_versioned_paths_fails_loud_on_a_nonzero_git_exit(
         _LIVE_VERSIONED_PATHS()
 
 
+def _fake_trunk_log_record(*fields: str) -> str:
+    """One fake `git log -z` trunk-landing record: `fields` joined by
+    `checkout._TRUNK_LANDING_FIELD_SEPARATOR`, terminated by that same
+    separator -- real `git log -z` framing, where the record terminator and
+    the field separator are the same NUL byte."""
+    separator = checkout._TRUNK_LANDING_FIELD_SEPARATOR
+    return separator.join(fields) + separator
+
+
 def test_trunk_landings_read_the_named_remotes_trunk_not_the_work_branch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     observed: list[list[str]] = []
-    field = checkout._TRUNK_LANDING_FIELD_SEPARATOR
 
     def git_output(arguments: list[str]) -> str:
         observed.append(arguments)
@@ -529,12 +538,9 @@ def test_trunk_landings_read_the_named_remotes_trunk_not_the_work_branch(
             return "refs/remotes/hub/main"
         if arguments[0] == "log":
             assert arguments[-3:] == ["-n", "20", "refs/remotes/hub/main"]
-            return "\n".join(
-                (
-                    field.join(("sha1", "2026-08-29T00:00:00+00:00", "", "")),
-                    field.join(("sha2", "2026-08-30T00:00:00Z", "#10", "")),
-                )
-            )
+            return _fake_trunk_log_record(
+                "sha1", "2026-08-29T00:00:00+00:00", "", ""
+            ) + _fake_trunk_log_record("sha2", "2026-08-30T00:00:00Z", "#10", "")
         raise AssertionError(arguments)
 
     monkeypatch.setattr(checkout, "_git_output", git_output)
@@ -618,18 +624,88 @@ def test_trunk_landings_fails_loud_on_a_malformed_commit_timestamp(
     """Neither an unparsable `%cI` line nor one git left offset-naive (both
     would only occur if git itself misbehaved) may silently produce a wrong
     ruling age; both fail loud with the same diagnostic."""
-    field = checkout._TRUNK_LANDING_FIELD_SEPARATOR
 
     def git_output(arguments: list[str]) -> str:
         if arguments[:3] == ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"]:
             return "refs/remotes/origin/main"
         if arguments[0] == "log":
-            return field.join(("sha1", raw_commit_time, "", ""))
+            return _fake_trunk_log_record("sha1", raw_commit_time, "", "")
         raise AssertionError(arguments)
 
     monkeypatch.setattr(checkout, "_git_output", git_output)
     with pytest.raises(ClaimError, match="git returned a malformed trunk landing timestamp"):
         _LIVE_TRUNK_LANDINGS("origin", 20)
+
+
+def test_trunk_landings_fails_loud_on_a_log_stream_that_is_not_nul_framed_records(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raw `git log -z` stream always ends in the same NUL that separates
+    each record's own four fields (`_fake_trunk_log_record`); anything else
+    -- here, a caller that fed back plain newline-joined text -- is git (or
+    the fake) misbehaving, not a shape this reads silently."""
+
+    def git_output(arguments: list[str]) -> str:
+        if arguments[:3] == ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"]:
+            return "refs/remotes/origin/main"
+        if arguments[0] == "log":
+            return "sha1\x00not-nul-terminated"
+        raise AssertionError(arguments)
+
+    monkeypatch.setattr(checkout, "_git_output", git_output)
+    with pytest.raises(ClaimError, match="git returned a malformed trunk landing log"):
+        _LIVE_TRUNK_LANDINGS("origin", 20)
+
+
+def _minimal_pushed_repository(tmp_path: Path) -> Path:
+    """A `hub`-remote worktree with one `main`, empty of any commit -- the
+    common setup every real-`git` trunk-landing test that doesn't need the
+    shared five-proof history (`_trunk_history_repository`) builds on."""
+    remote = tmp_path / "remote.git"
+    remote.mkdir()
+    _real_git(remote, "init", "-q", "--bare", "-b", "main")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _real_git(repo, "init", "-q", "-b", "main")
+    _real_git(repo, "config", "user.name", "Test")
+    _real_git(repo, "config", "user.email", "test@example.com")
+    _real_git(repo, "config", "commit.gpgsign", "false")
+    _real_git(repo, "remote", "add", "hub", str(remote))
+    return repo
+
+
+def _push_to_hub(repo: Path) -> None:
+    _real_git(repo, "push", "-q", "hub", "main")
+    _real_git(repo, "remote", "set-head", "hub", "main")
+
+
+@pytest.mark.parametrize(
+    "byte",
+    ["\x1f", "\x1e", "\x01"],
+    ids=["unit-separator", "record-separator", "start-of-heading"],
+)
+def test_trunk_landings_reads_a_control_byte_inside_a_trailer_value_as_one_literal_item(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, byte: str
+) -> None:
+    """Issue #304 review, finding B1: git never escapes `\\x1f`, `\\x1e`, or
+    `\\x01` inside a trailer value -- exactly the bytes the historical
+    `\\x1f`-separated framing used to split repeated trailer values -- so a
+    value that happens to contain one of them must read back as the one
+    literal value git actually recorded, never as two fabricated work items.
+    The NUL/newline framing reads it as data: `parse_item_reference` then
+    refuses that single literal value by name."""
+    repo = _minimal_pushed_repository(tmp_path)
+    (repo / "f.txt").write_text("content\n")
+    _real_git(repo, "add", "f.txt")
+    value = f"#12{byte}#13"
+    _real_git(repo, "commit", "-q", "-m", "change", "-m", f"Work-Item: {value}")
+    _push_to_hub(repo)
+    monkeypatch.chdir(repo)
+
+    with pytest.raises(
+        protocol.ClaimUnavailableError, match=re.escape(f"{value!r} is not an item reference")
+    ):
+        checkout.trunk_landings("hub", 20)
 
 
 def _trunk_history_repository(tmp_path: Path) -> Path:

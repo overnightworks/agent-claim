@@ -1245,11 +1245,11 @@ class TestCliStateRefForge:
         """Issue #292 proofs 1-2: `next`'s own pick, its `Run:` command
         (issue #300 residual 3), `rulings`' row header, and `status`'s
         claimed-issue line print `aco-xxxxxx` under `storage = "state-ref"`
-        -- the same id `_parse_item_ref` already accepts right back -- never
-        `#n`. `board`'s own plain-text table (`board.render`, owned by
-        `board.py`) prints the same id-shaped pin too (issue #300 residual
-        2): `EXPECTED_STATE_REF_BOARD_TEXT` above proves it against this
-        module's own shared scenario, so this test does not repeat that
+        -- the same id `board.parse_item_reference` already accepts right
+        back -- never `#n`. `board`'s own plain-text table (`board.render`,
+        owned by `board.py`) prints the same id-shaped pin too (issue #300
+        residual 2): `EXPECTED_STATE_REF_BOARD_TEXT` above proves it against
+        this module's own shared scenario, so this test does not repeat that
         proof against a second one."""
         self._live_state_ref_checkout(
             monkeypatch, tmp_path, bare_remote, worktree, _rulable_item_files()

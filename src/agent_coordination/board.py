@@ -361,16 +361,13 @@ class TrunkWorkItemClassification:
 
     numbers: tuple[int, ...]
 
-    def __str__(self) -> str:
-        return "\n".join(f"Work-Item: #{number}" for number in self.numbers)
-
 
 TrunkClassification = TrunkWorkItemClassification | NoItemClassification
 
 
 def trunk_commit_classification(
     work_item_values: tuple[str, ...], no_item_values: tuple[str, ...]
-) -> TrunkClassification | None:
+) -> TrunkClassification | ClassificationDefect | None:
     """A trunk commit's classification from its own trailer block alone
     (issue #304): `work_item_values`/`no_item_values` are read through git's
     own trailer parsing (`%(trailers:key=...,valueonly)`), so a `Work-Item:`
@@ -378,7 +375,20 @@ def trunk_commit_classification(
     never reaches here. `None` means the commit's trailer block named
     neither: most trunk commits are not a dispatched slice's landing, and
     that is not a defect worth surfacing the way an in-flight pull request's
-    malformed classification is."""
+    malformed classification is.
+
+    A block naming both `Work-Item:` and `No-Item:`, or repeating
+    `No-Item:`, is contradictory rather than merely absent -- `check <pr>`
+    already refuses the equivalent shape in a pull request body
+    (`_single_classification_match`) -- so it refuses with a typed
+    `ClassificationDefect` instead of letting `Work-Item:` win by ordering
+    (issue #304 review, finding B2)."""
+    if work_item_values and no_item_values:
+        return ClassificationDefect(
+            "carries both `Work-Item:` and `No-Item:` trailers; a landed commit is one or the other"
+        )
+    if len(no_item_values) > 1:
+        return ClassificationDefect("carries more than one `No-Item:` trailer")
     if work_item_values:
         return TrunkWorkItemClassification(
             tuple(parse_item_reference(value) for value in work_item_values)

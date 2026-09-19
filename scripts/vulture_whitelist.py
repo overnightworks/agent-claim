@@ -27,11 +27,19 @@ presentation-only fields (`LaneEvent.rescopes`, `LaneMeasure.landing_wait_hours`
 `store.claim_lifecycle` and the `aco metrics` command that read this module's
 report are Lane 1b of #299, not yet landed. Each is a named future caller,
 not speculative surface; tests already exercise every one of these names.
+
+`TrunkWorkItemClassification.numbers` (issue #304) is a frozen dataclass
+field read only by the class's own generated `__eq__`/`__repr__`, invisible
+to vulture the same way an enum member reached only through dynamic
+construction is: `checkout.trunk_landings` already stores every trunk
+commit's classification on `TrunkLanding.classification`, and the field
+carries the work items a landing names for the still-undispatched consumer
+that reads them back (issue #304 review, finding B2's "lane 2").
 """
 
 from datetime import UTC, date, datetime
 
-from agent_coordination.board import NoItemKind
+from agent_coordination.board import NoItemKind, TrunkWorkItemClassification
 from agent_coordination.board_serve import _BoardRequestHandler
 from agent_coordination.forge import Capability, ForgeUnsupportedError
 from agent_coordination.metrics import (
@@ -79,4 +87,5 @@ _referenced_only_for_vulture = (
     _container_sum_for_vulture.n_estimated,
     _container_sum_for_vulture.n_without_size,
     _parallelism_for_vulture.overlapping_lanes,
+    TrunkWorkItemClassification((0,)).numbers,
 )

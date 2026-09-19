@@ -2891,7 +2891,6 @@ def test_trunk_commit_classification_lands_every_item_a_repeated_trailer_names()
     item it names, unlike a pull request body's single-item rule."""
     classification = board.trunk_commit_classification(("#10", "#11"), ())
     assert classification == board.TrunkWorkItemClassification((10, 11))
-    assert str(classification) == "Work-Item: #10\nWork-Item: #11"
 
 
 def test_trunk_commit_classification_reads_a_no_item_trailer() -> None:
@@ -2903,7 +2902,6 @@ def test_trunk_commit_classification_reads_a_no_item_trailer() -> None:
     ("work_item_values", "no_item_values"),
     [
         pytest.param((), (), id="neither-trailer"),
-        pytest.param((), ("docs", "fix"), id="ambiguous-no-item"),
         pytest.param((), ("not-a-kind",), id="unrecognized-no-item-kind"),
     ],
 )
@@ -2916,3 +2914,22 @@ def test_trunk_commit_classification_is_none_without_a_recognized_trailer(
 def test_trunk_commit_classification_fails_loud_on_a_malformed_work_item_value() -> None:
     with pytest.raises(protocol.ClaimUnavailableError, match="is not an item reference"):
         board.trunk_commit_classification(("not-an-item",), ())
+
+
+@pytest.mark.parametrize(
+    ("work_item_values", "no_item_values"),
+    [
+        pytest.param(("#10",), ("docs",), id="work-item-and-no-item"),
+        pytest.param((), ("docs", "fix"), id="more-than-one-no-item"),
+    ],
+)
+def test_trunk_commit_classification_refuses_a_contradictory_trailer_block(
+    work_item_values: tuple[str, ...], no_item_values: tuple[str, ...]
+) -> None:
+    """Issue #304 review, finding B2: a block naming both `Work-Item:` and
+    `No-Item:`, or repeating `No-Item:`, refuses with a typed
+    `ClassificationDefect` -- the same contradiction `check <pr>` already
+    refuses for a pull request body -- rather than letting `Work-Item:` win
+    by ordering."""
+    defect = board.trunk_commit_classification(work_item_values, no_item_values)
+    assert isinstance(defect, board.ClassificationDefect)
