@@ -1291,33 +1291,116 @@ def _write_bundle_to_descriptor(
         raise
 
 
+def _write_and_publish_bundle(
+    *, worktree: Path, tip: ObjectId, destination: Path, descriptor: int, temporary: Path
+) -> None:
+    """Write `tip`'s bundle into the already-claimed temporary file, then
+    publish it into `destination` (issue #298 reset, the write half of
+    `export_state_bundle`'s step 1 of 5).
+
+    Publishes atomically: the bundle is written in full to `temporary` first
+    (`tempfile.mkstemp`, the same idiom `_write_lineage_stamp` uses), then
+    linked into place with `os.link`, whose no-clobber semantics are this
+    function's `destination`-already-exists check -- a reader can never
+    observe a half-written or empty `destination`, because nothing is ever
+    written at that path directly. Removing `temporary` again, whether this
+    succeeds or raises, is the caller's job (`export_state_bundle`'s
+    unconditional cleanup), not this function's -- so every path out of here
+    leaves `temporary` exactly where it found it.
+    """
+    _write_bundle_to_descriptor(
+        worktree=worktree, tip=tip, destination=destination, descriptor=descriptor
+    )
+    try:
+        os.link(temporary, destination)
+    except FileExistsError:
+        raise ClaimError(f"{destination} already exists; refusing to overwrite an export") from None
+    except OSError as error:
+        raise _export_failure(tip, destination, str(error)) from error
+
+
+def _delete_export_ref(worktree: Path) -> str | None:
+    """Delete the temporary `EXPORT_BUNDLE_REF`, reporting failure as a
+    description rather than raising: `_clear_export_artifacts` below must
+    still attempt the temporary file's own removal even when this fails, so
+    neither cleanup step can skip the other. Deleting an already-absent ref
+    is a documented no-op (`git-update-ref`(1)), so a `tip` that never
+    reached `update-ref` in the first place costs nothing here."""
+    try:
+        result = _run_git(worktree, ["update-ref", "-d", EXPORT_BUNDLE_REF])
+    except ClaimError as error:
+        return str(error)
+    if result.exit_status != 0:
+        return result.stderr.decode().strip() or _UNKNOWN_GIT_FAILURE
+    return None
+
+
+def _clear_export_artifacts(*, worktree: Path, temporary: Path) -> tuple[str, ...]:
+    """Remove the temporary export ref and the temporary file, each
+    attempted independently of whether the other fails (issue #298, the
+    second 19.09.2026 gate REVISE): a broken `git` invocation while clearing
+    `EXPORT_BUNDLE_REF` must never skip the temporary file's removal, and a
+    filesystem failure removing the temporary file must never skip clearing
+    the ref. Returns a description of every artifact that could not be
+    removed, or an empty tuple once both are confirmed gone."""
+    leftovers: list[str] = []
+    ref_failure = _delete_export_ref(worktree)
+    if ref_failure is not None:
+        leftovers.append(f"the temporary export ref {EXPORT_BUNDLE_REF} ({ref_failure})")
+    try:
+        temporary.unlink()
+    except OSError as error:
+        leftovers.append(f"the now-redundant temporary file {temporary} ({error})")
+    return tuple(leftovers)
+
+
+def _export_cleanup_failure(
+    tip: ObjectId,
+    destination: Path,
+    leftovers: tuple[str, ...],
+    primary_error: BaseException | None,
+) -> ClaimError:
+    artifacts = " and ".join(leftovers)
+    if primary_error is None:
+        return ClaimError(
+            f"exported {STATE_REF} at {tip} to {destination} but could not remove {artifacts}"
+        )
+    return ClaimError(
+        f"cannot export {STATE_REF} at {tip} to {destination}: {primary_error}; also could "
+        f"not remove {artifacts}"
+    )
+
+
 def export_state_bundle(*, worktree: Path, tip: ObjectId, destination: Path) -> Path:
     """Bundle `tip` into `destination` (issue #298 reset, step 1 of 5): the
     sole mandatory-unless-`--no-export` write a reset performs before
     anything is deleted.
 
-    Bundles the private `EXPORT_BUNDLE_REF` (its own module comment has the
-    full rationale), never the shared `STATE_REF` (19.09.2026 REVISE
-    findings 1+2): nothing this function does is ever visible to another
-    linked worktree's concurrent reset, and the bundled tip is always
-    exactly the `tip` the caller leased -- never whatever a shared ref
-    happens to hold when the subprocess actually runs. The temporary ref is
-    deleted again before this function returns or raises, in every case;
-    restoring the bundle therefore reads `EXPORT_BUNDLE_REF`'s name on the
-    bundle side of the fetch, not `STATE_REF`'s (`git bundle list-heads`
-    names it, `_reset_restore_command` in `cli.py` builds the command).
+    Bundles the private `EXPORT_BUNDLE_REF` (`_write_bundle_to_descriptor`'s
+    own docstring has the full rationale), never the shared `STATE_REF`:
+    nothing this function does is ever visible to another linked worktree's
+    concurrent reset, and the bundled tip is always exactly the `tip` the
+    caller leased -- never whatever a shared ref happens to hold when the
+    subprocess actually runs. Restoring the bundle therefore reads
+    `EXPORT_BUNDLE_REF`'s name on the bundle side of the fetch, not
+    `STATE_REF`'s (`git bundle list-heads` names it, `_reset_restore_command`
+    in `cli.py` builds the command).
 
-    Publishes atomically (19.09.2026 REVISE finding 4): the bundle is
-    written in full to a unique temporary file next to `destination` first
-    (`tempfile.mkstemp`, the same idiom `_write_lineage_stamp` uses), then
-    linked into place with `os.link`, whose no-clobber semantics are this
-    function's `destination`-already-exists check -- a reader can never
-    observe a half-written or empty `destination`, because nothing is ever
-    written at that path directly. Failing to remove the now-redundant
-    temporary file after a successful link raises loud, naming the path,
-    rather than passing silently -- the previous version suppressed exactly
-    this failure after claiming `destination` itself up front, which could
-    leave an empty file there with no error surfaced for it.
+    Cleanup of the temporary export ref and the temporary file is
+    unconditional and the two are independent of each other (issue #298,
+    the second 19.09.2026 gate REVISE): whatever happened while writing or
+    publishing the bundle -- success, or a failure raised at any point --
+    both cleanups are always attempted, via `_clear_export_artifacts`, and a
+    failure in one never skips the other. The previous version ran the ref
+    cleanup as a plain statement ahead of the temporary file's own cleanup,
+    so an exception from that one git invocation (not just a nonzero exit)
+    skipped the temporary file's removal entirely, and both cleanups
+    suppressed their own `OSError`/nonzero-exit without naming what was left
+    behind. When a cleanup failure happens, the artifact it could not remove
+    is named in the raised error, together with the write/publish failure
+    that preceded it when there was one, carried as that error's cause
+    (`raise ... from`); when cleanup succeeds but the write or publish
+    itself failed, that original error is re-raised unchanged.
     """
     try:
         descriptor, temp_name = tempfile.mkstemp(
@@ -1327,47 +1410,23 @@ def export_state_bundle(*, worktree: Path, tip: ObjectId, destination: Path) -> 
         raise _export_failure(tip, destination, str(error)) from error
     temporary = Path(temp_name)
 
-    write_error: BaseException | None = None
+    primary_error: BaseException | None = None
     try:
-        _write_bundle_to_descriptor(
-            worktree=worktree, tip=tip, destination=destination, descriptor=descriptor
+        _write_and_publish_bundle(
+            worktree=worktree,
+            tip=tip,
+            destination=destination,
+            descriptor=descriptor,
+            temporary=temporary,
         )
-    except BaseException as error:  # re-raised below, once cleanup has run -- never swallowed
-        write_error = error
+    except BaseException as error:  # cleanup below always runs regardless -- never swallowed
+        primary_error = error
 
-    cleanup = _run_git(worktree, ["update-ref", "-d", EXPORT_BUNDLE_REF])
-    if cleanup.exit_status != 0:
-        detail = cleanup.stderr.decode().strip() or _UNKNOWN_GIT_FAILURE
-        cleanup_error = ClaimError(
-            f"cannot clear temporary {EXPORT_BUNDLE_REF} after export: {detail}"
-        )
-        with suppress(OSError):
-            temporary.unlink()
-        raise cleanup_error from write_error
-
-    if write_error is not None:
-        with suppress(OSError):
-            temporary.unlink()
-        raise write_error
-
-    try:
-        os.link(temporary, destination)
-    except FileExistsError:
-        temporary.unlink()
-        raise ClaimError(f"{destination} already exists; refusing to overwrite an export") from None
-    except OSError as error:
-        with suppress(OSError):
-            temporary.unlink()
-        raise _export_failure(tip, destination, str(error)) from error
-
-    try:
-        temporary.unlink()
-    except OSError as error:
-        raise ClaimError(
-            f"exported {STATE_REF} at {tip} to {destination} but could not remove the "
-            f"now-redundant temporary file {temporary}: {error}"
-        ) from error
-
+    leftovers = _clear_export_artifacts(worktree=worktree, temporary=temporary)
+    if leftovers:
+        raise _export_cleanup_failure(tip, destination, leftovers, primary_error) from primary_error
+    if primary_error is not None:
+        raise primary_error
     return destination
 
 

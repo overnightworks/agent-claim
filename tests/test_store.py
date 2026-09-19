@@ -3344,6 +3344,91 @@ def test_export_state_bundle_reports_a_failed_temporary_cleanup_after_a_successf
         stray.unlink()
 
 
+def test_export_state_bundle_names_every_leftover_when_the_ref_cleanup_also_fails(
+    monkeypatch: pytest.MonkeyPatch, bare_remote: Path, worktree: Path, tmp_path: Path
+) -> None:
+    """A failed bundle-create and a failed ref cleanup are independent
+    (issue #298, the second 19.09.2026 gate REVISE): the raised error names
+    the ref cleanup could not remove and still carries the original
+    bundle-create failure as its cause, rather than either one silently
+    winning over the other."""
+    tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    store.fetch_state(worktree=worktree, remote=str(bare_remote))
+    destination = tmp_path / "export" / "state.bundle"
+    destination.parent.mkdir()
+    real_run_captured = process.run_captured
+
+    def fake_run_captured(arguments: list[str]) -> process.CapturedResult:
+        if "bundle" in arguments and "create" in arguments:
+            return process.CapturedResult(
+                exit_status=1, stdout=b"", stderr=b"simulated bundle create failure"
+            )
+        if arguments[-3:] == ["update-ref", "-d", store.EXPORT_BUNDLE_REF]:
+            return process.CapturedResult(
+                exit_status=1, stdout=b"", stderr=b"simulated ref cleanup failure"
+            )
+        return real_run_captured(arguments)
+
+    monkeypatch.setattr(store.process, "run_captured", fake_run_captured)
+
+    with pytest.raises(protocol.ClaimError) as excinfo:
+        store.export_state_bundle(worktree=worktree, tip=tip, destination=destination)
+
+    message = str(excinfo.value)
+    assert "simulated bundle create failure" in message
+    assert store.EXPORT_BUNDLE_REF in message
+    assert "simulated ref cleanup failure" in message
+    assert excinfo.value.__cause__ is not None
+    assert "simulated bundle create failure" in str(excinfo.value.__cause__)
+    assert not destination.exists()
+    assert not list(destination.parent.glob(f".{destination.name}.*"))
+
+    monkeypatch.setattr(store.process, "run_captured", real_run_captured)
+    assert (
+        store._run_git(
+            worktree, ["show-ref", "--verify", "--quiet", store.EXPORT_BUNDLE_REF]
+        ).exit_status
+        == 0
+    )
+    store._run_git(worktree, ["update-ref", "-d", store.EXPORT_BUNDLE_REF])
+
+
+def test_export_state_bundle_names_the_temp_path_when_a_refused_publish_also_fails_to_clean_up(
+    monkeypatch: pytest.MonkeyPatch, bare_remote: Path, worktree: Path, tmp_path: Path
+) -> None:
+    """A refused publish (`destination` already exists) and a failed
+    temporary-file cleanup are independent (issue #298, the second
+    19.09.2026 gate REVISE): the raised error names the temporary file
+    cleanup could not remove and still carries the original refusal as its
+    cause."""
+    tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    destination = tmp_path / "state.bundle"
+    destination.write_bytes(b"an earlier export")
+    real_unlink = Path.unlink
+
+    def fake_unlink(self: Path, missing_ok: bool = False) -> None:
+        if self.name.startswith(f".{destination.name}."):
+            raise OSError("simulated temporary-file cleanup failure")
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", fake_unlink)
+
+    with pytest.raises(protocol.ClaimError, match="already exists") as excinfo:
+        store.export_state_bundle(worktree=worktree, tip=tip, destination=destination)
+
+    message = str(excinfo.value)
+    assert "simulated temporary-file cleanup failure" in message
+    assert excinfo.value.__cause__ is not None
+    assert "already exists" in str(excinfo.value.__cause__)
+    assert destination.read_bytes() == b"an earlier export"
+
+    monkeypatch.setattr(Path, "unlink", real_unlink)
+    leftover = list(destination.parent.glob(f".{destination.name}.*"))
+    assert leftover
+    for stray in leftover:
+        stray.unlink()
+
+
 @pytest.mark.parametrize(
     ("local_ref_present", "pass_expected_remote_tip", "deleted_local_expected"),
     [
