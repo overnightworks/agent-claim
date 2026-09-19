@@ -12,8 +12,9 @@ and its header read (PIN-20), and `item close`'s live-claim and already-
 closed refusals (PIN-25..PIN-28); `specs/body-block.spec.md` owns a stored
 `scope` field's own schema (BODY-53..BODY-56) and `item edit`'s malformed-
 body refusal (BODY-01..BODY-50, cited by PIN-24); `specs/claim-record.spec.md`
-owns the scope canonicalization grammar (CLAIM-18..CLAIM-24) `item new
---scope` reuses; `specs/ref-store-cas.spec.md` owns the stale-oid refusal
+owns the scope canonicalization grammar (CLAIM-19..CLAIM-23) `item new
+--scope` reuses -- never CLAIM-18's comma-versioned-file check, which only
+`aco claim`/`rescope` apply; `specs/ref-store-cas.spec.md` owns the stale-oid refusal
 (CAS-20) a second `item edit`/`item close` from the same snapshot meets;
 `specs/release.spec.md` owns the `--json` refusal object's own shape
 (REL-24). This file cites those IDs rather than restating them. A refusal
@@ -30,6 +31,7 @@ runner's own git object ids.
 | state-ref pin, `--parent` given | ITEM-03 | — | — | — |
 | state-ref pin, `--scope` given | ITEM-04 | — | — | — |
 | state-ref pin, `--scope` invalid | ITEM-05 | — | — | — |
+| state-ref pin, `--origin` given | ITEM-19 | — | — | — |
 | `--origin` malformed | ITEM-06 | — | — | — |
 | an item, open or closed | — | ITEM-07, ITEM-08 | — | — |
 | an unknown id | PIN-18 | ITEM-10 | PIN-23 | PIN-28 |
@@ -40,17 +42,18 @@ runner's own git object ids.
 
 ## `item new`
 
-- [ ] [ITEM-01] `aco item new --title TITLE` with no `--kind` writes `kind = "task"` and the plain child skeleton body before minting; PIN-06/PIN-07 own the printed id and `--json` shape (see E-ITEM-01).
+- [ ] [ITEM-01] `aco item new --title TITLE` with no `--kind` mints the id, then writes the skeleton body once with `kind = "task"` in its `[record]`; PIN-06/PIN-07 own the id and `--json` shape (see E-ITEM-01).
 - [ ] [ITEM-02] `--kind container` writes `Blocked by: nichts` ahead of the block and `kind = "container"` in the stored `[record]` (see E-ITEM-01).
 - [ ] [ITEM-03] `--parent PARENT` sets `record.parent` to `PARENT`'s id; unlike `cut`'s own child body, it never writes a `Parent: #<n>` prose line.
-- [ ] [ITEM-04] Repeated `--scope` values write a sorted, deduplicated top-level `scope = [...]`, the same canonical form CLAIM-18..CLAIM-21's grammar produces for a live claim (see E-ITEM-01).
-- [ ] [ITEM-05] A `--scope` value that grammar refuses — absolute, `..`, `~`, a duplicate — refuses with CLAIM-19's own sentence, before any write.
+- [ ] [ITEM-04] Repeated `--scope` values write a sorted, deduplicated top-level `scope = [...]` ahead of the `[record]` table, CLAIM-19..CLAIM-23's own canonical form (see E-ITEM-01).
+- [ ] [ITEM-05] A `--scope` value that is absolute, `..`, or `~`-prefixed refuses with CLAIM-19's own sentence; a duplicate refuses with CLAIM-21's `claim scope contains duplicate paths`, before any write.
 - [ ] [ITEM-06] `--origin FORGE#N` failing its grammar refuses `'<value>' is not an origin; use forge#n or host/owner/repo#n, e.g. gitlab#514`, exit `2`, before `item new`'s own body ever runs.
+- [ ] [ITEM-19] `--origin`'s grammar is ASCII-only, case-insensitive `forge#n`/`host/owner/repo#n` tokens; an accepted value is stored in `record.origin` with its original case (PIN-20).
 
 ## `item show`
 
 - [ ] [ITEM-07] `aco item show ITEM` prints one header, `<id> · #<n> · <state> · parent <parent-or-none> · origin <origin-or-none>`, then the stored body byte-exact, exit `0` (see E-ITEM-02).
-- [ ] [ITEM-08] A closed item prints ITEM-07's same header and body shape, `state` reading `closed`: closing never edits or hides the body.
+- [ ] [ITEM-08] A closed item prints ITEM-07's same header, `state closed`; closing rewrites the body's `[record]` with `state = "closed"`, `closed_at`, and `updated_at`, the rest byte-identical.
 - [ ] [ITEM-09] `aco item show ITEM --json` prints `{"item", "number", "state", "parent", "origin", "body"}`, `parent`/`origin` `null` when unset (see E-ITEM-02).
 - [ ] [ITEM-10] `aco item show ITEM` against an unknown id refuses `#<n> does not exist in <owner/repo>`, exit `2`.
 - [ ] [ITEM-11] `aco item show ITEM` under `storage = "github"` reads the forge issue's own body through ITEM-07/ITEM-09's same header and `--json` shape.
@@ -64,7 +67,7 @@ runner's own git object ids.
 
 ## `item close`
 
-- [ ] [ITEM-16] `aco item close ITEM --json` prints `{"item", "number", "closed_at"}`, the same three of `item show --json`'s own keys (see E-ITEM-04).
+- [ ] [ITEM-16] `aco item close ITEM --json` prints `{"item", "number", "closed_at"}`; only `item`/`number` overlap ITEM-09's `{"item", "number", "state", "parent", "origin", "body"}` (see E-ITEM-04).
 
 ## `--json` and the refusal object
 
@@ -75,7 +78,7 @@ runner's own git object ids.
 
 - `aco item new --scope` never applies CLAIM-25/CLAIM-26's wide-scope gate: a bare directory or four-plus paths write cleanly into the item's own `scope`; only a later `aco claim` on that item enforces width.
 - `aco item new` under `storage = "github"` never creates a GitHub issue with a type, a twin search, or a sub-issue link: that path is ruled but unbuilt with no owning item (#310 finding 28), so today it only refuses by name (`items live on the forge; open the issue there`, PIN-09).
-- `aco item show` never refuses by storage pin at all, under either `github` or `state-ref` (ITEM-11); only `item new`/`edit`/`close` do.
+- `aco item show` never refuses merely for its storage value itself (ITEM-11 covers both); it does resolve the state-ref forge like `item new`/`edit`/`close`, so `--repo` there refuses same as those (PIN-04, PIN-05).
 - `aco item edit`/`close` never reach ITEM-17's refusal object ahead of PIN-08's own argparse-level check: the item argument is parsed before either command body ever runs.
 
 ## Examples
