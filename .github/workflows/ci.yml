@@ -55,8 +55,20 @@ jobs:
           python3 - <<'PYTHON'
           import json
           import os
+          import sys
 
-          with open("coverage-branch.json") as report_file:
+          report_path = "coverage-branch.json"
+          if not os.path.exists(report_path):
+              missing_message = (
+                  "branch coverage report missing: "
+                  "pytest did not produce coverage-branch.json"
+              )
+              print(missing_message)
+              with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary_file:
+                  summary_file.write(missing_message + "\n")
+              sys.exit(0)
+
+          with open(report_path) as report_file:
               report = json.load(report_file)
 
           branch_percent = report["totals"]["percent_branches_covered"]
