@@ -581,10 +581,30 @@ def _readiness_client(
     statuses: list[dict[str, object]],
     mergeable_state: str = "clean",
 ) -> tuple[GitHubForge, list[list[str]]]:
+    """`statuses` names each combined-status context and its own
+    `conclusion` (`None` for pending, else the state string) the way
+    `landing_readiness`'s own result reads it; this fixture derives the
+    endpoint's own aggregate `state`/`total_count` summary from that same
+    list -- `pending` if any conclusion is still `None`, else `failure` if
+    any is non-`success`, else `success` -- so a caller unions readiness
+    exactly as before while the two real calls (summary, then a paginated
+    names page only when the summary is not passing) stay faithful to
+    `_combined_status_checks`'s own shape."""
     calls: list[list[str]] = []
     pull_request = json.dumps(
         {"state": "open", "headSha": MERGE_COMMIT_SHA, "mergeableState": mergeable_state}
     )
+    conclusions = [row.get("conclusion") for row in statuses]
+    if not statuses:
+        combined_state = "pending"  # GitHub's own default state for zero statuses.
+    elif any(conclusion is None for conclusion in conclusions):
+        combined_state = "pending"
+    elif any(conclusion != "success" for conclusion in conclusions):
+        combined_state = "failure"
+    else:
+        combined_state = "success"
+    summary = json.dumps({"state": combined_state, "total": len(statuses)})
+    name_page = [{"name": row["name"]} for row in statuses]
 
     def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
         calls.append(arguments)
@@ -594,8 +614,11 @@ def _readiness_client(
         if path.startswith(_READINESS_CHECK_RUNS_PATH):
             page = int(path.rsplit("page=", 1)[1])
             return "\n".join(json.dumps(row) for row in check_run_pages.get(page, []))
-        assert path == _READINESS_STATUS_PATH
-        return "\n".join(json.dumps(row) for row in statuses)
+        if path == _READINESS_STATUS_PATH:
+            return summary
+        assert path.startswith(_READINESS_STATUS_PATH)
+        page = int(path.rsplit("page=", 1)[1])
+        return "\n".join(json.dumps(row) for row in name_page) if page == 1 else ""
 
     return GitHubForge(github._repository_id(REPOSITORY), run=fake_run), calls
 
@@ -631,8 +654,7 @@ def test_github_adapter_reads_landing_readiness_from_the_pull_request_and_its_ch
             "api",
             _READINESS_STATUS_PATH,
             "--jq",
-            '.statuses[] | {name:.context,conclusion:(if .state == "pending" '
-            "then null else .state end)}",
+            "{state:.state,total:.total_count}",
         ],
     ]
     assert readiness == forge.LandingReadiness(
@@ -697,20 +719,80 @@ def test_github_adapter_reads_a_failing_status_context() -> None:
     )
 
 
+def test_github_adapter_reads_a_pending_combined_status_aggregate_with_an_empty_names_page() -> (
+    None
+):
+    """Issue #405 review/gate finding: the combined-status endpoint's own
+    aggregate `state` decides the verdict, never a per-context
+    reconstruction of it -- a `pending` aggregate with `total_count > 0`
+    still blocks even when its own `statuses` page comes back empty (a
+    context posted after this read, say), named under
+    `EXTERNAL_STATUS_FALLBACK_NAME` rather than read as "no checks" and
+    passed silently."""
+
+    def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
+        path = arguments[1]
+        if path == _READINESS_PULL_REQUEST_PATH:
+            return json.dumps(
+                {"state": "open", "headSha": MERGE_COMMIT_SHA, "mergeableState": "clean"}
+            )
+        if path.startswith(_READINESS_CHECK_RUNS_PATH):
+            return ""
+        if path == _READINESS_STATUS_PATH:
+            return json.dumps({"state": "pending", "total": 1})
+        assert path.startswith(_READINESS_STATUS_PATH)
+        return ""
+
+    client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
+
+    readiness = client.landing_readiness(57)
+
+    assert readiness.checks == (forge.CheckRun(github.EXTERNAL_STATUS_FALLBACK_NAME, None),)
+
+
+def test_github_adapter_reads_a_failing_combined_status_aggregate() -> None:
+    """Issue #405 review/gate finding: a `failure` (or `error`) aggregate
+    from the combined-status endpoint blocks the same way, named from
+    whatever context its own paginated `statuses` does carry."""
+
+    def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
+        path = arguments[1]
+        if path == _READINESS_PULL_REQUEST_PATH:
+            return json.dumps(
+                {"state": "open", "headSha": MERGE_COMMIT_SHA, "mergeableState": "clean"}
+            )
+        if path.startswith(_READINESS_CHECK_RUNS_PATH):
+            return ""
+        if path == _READINESS_STATUS_PATH:
+            return json.dumps({"state": "failure", "total": 1})
+        assert path.startswith(_READINESS_STATUS_PATH)
+        return json.dumps({"name": "sonarcloud"})
+
+    client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
+
+    readiness = client.landing_readiness(57)
+
+    assert readiness.checks == (forge.CheckRun("sonarcloud", "failure"),)
+
+
 def test_github_adapter_accepts_a_mergeable_state_it_has_never_seen_before() -> None:
     """Issue #405: `mergeable_state` is GitHub's own open vocabulary --
     read verbatim, never a closed set this adapter could refuse a genuine,
     simply-not-yet-enumerated answer against."""
-    client = GitHubForge(
-        github._repository_id(REPOSITORY),
-        run=lambda arguments, input_data=None: (
-            json.dumps(
+
+    def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
+        path = arguments[1]
+        if "pulls" in path:
+            return json.dumps(
                 {"state": "open", "headSha": MERGE_COMMIT_SHA, "mergeableState": "exploding"}
             )
-            if "pulls" in arguments[1]
-            else ""
-        ),
-    )
+        if path.startswith(_READINESS_CHECK_RUNS_PATH):
+            return ""
+        if path == _READINESS_STATUS_PATH:
+            return json.dumps({"state": "success", "total": 0})
+        return ""
+
+    client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
 
     readiness = client.landing_readiness(57)
 

@@ -58,6 +58,13 @@ _ITEM_KIND_TYPE_NAMES: dict[board.ItemKind, str] = {
 # snapshot a concurrent open/close cannot have shifted an issue across.
 ISSUES_PER_PAGE = 100
 MALFORMED_PULL_REQUEST = "GitHub returned a malformed pull request"
+# The combined-status endpoint's own aggregate `state` can be `pending`,
+# `failure`, or `error` with a `statuses` page that, this instant, names no
+# context at all -- a status posted after this read, say (issue #405
+# review/gate finding). A refusal still needs one name to print, so an
+# unnamed non-passing verdict prints this stand-in rather than reading as
+# "no checks" and passing silently.
+EXTERNAL_STATUS_FALLBACK_NAME = "external status checks"
 # `HTTP 5xx` in #4.2's signal table: gh's combined output names the status
 # code but never its class, so any 5xx is matched by digit rather than by an
 # enumerated list of codes that would need to grow with the API.
@@ -602,24 +609,88 @@ class GitHubForge:
         )
         return tuple(self._check_run(value) for value in values)
 
-    def _combined_status_checks(self, sha: str) -> tuple[forge.CheckRun, ...]:
-        """`sha`'s combined commit status contexts (issue #405 review
-        finding): the external checks GitHub's own check-runs listing never
-        carries -- a SonarCloud quality gate, say -- posted through the
-        separate legacy status API. Reuses `_check_run`'s own value contract
-        (`name`/`conclusion`) rather than a second shape: a `pending`
-        context has no conclusion yet, any other state is its own
-        conclusion string, exactly as a completed check run's is."""
+    def _combined_status_summary(self, sha: str) -> tuple[str, int]:
+        """`sha`'s combined-status verdict and true total (issue #405
+        review/gate finding): GitHub computes `state` -- `success`,
+        `pending`, `failure`, or `error` -- as the aggregate over every
+        status context on `sha`, and `total_count` as their true count,
+        both independent of pagination; one cheap call answers both,
+        without ever paging `statuses` for a verdict a per-context
+        reconstruction could get wrong."""
         raw = self._run(
             [
                 "api",
                 f"repos/{self.repository}/commits/{sha}/status",
                 "--jq",
-                '.statuses[] | {name:.context,conclusion:(if .state == "pending" '
-                "then null else .state end)}",
+                "{state:.state,total:.total_count}",
             ]
         )
-        return tuple(self._check_run(value) for value in self._json_lines(raw, "commit status"))
+        values = self._json_lines(raw, "commit status summary")
+        if len(values) != 1 or not isinstance(values[0], dict):
+            raise forge.ForgeMalformedResponseError(
+                "GitHub returned a malformed commit status summary"
+            )
+        value = values[0]
+        state = value.get("state")
+        total = value.get("total")
+        if (
+            not isinstance(state, str)
+            or not state
+            or isinstance(total, bool)
+            or not isinstance(total, int)
+            or total < 0
+        ):
+            raise forge.ForgeMalformedResponseError(
+                "GitHub returned a malformed commit status summary"
+            )
+        return state, total
+
+    def _combined_status_name_page(self, sha: str, page: int) -> tuple[object, ...]:
+        raw = self._run(
+            [
+                "api",
+                f"repos/{self.repository}/commits/{sha}/status"
+                f"?per_page={ISSUES_PER_PAGE}&page={page}",
+                "--jq",
+                ".statuses[] | {name:.context}",
+            ]
+        )
+        return self._json_lines(raw, "commit status")
+
+    def _combined_status_names(self, sha: str) -> tuple[str, ...]:
+        """Every combined-status context's own name, paginated (issue #405
+        gate finding): named only to fill in a refusal sentence once
+        `_combined_status_summary` has already decided the verdict is not
+        passing -- the happy path (`success`, or no statuses at all) never
+        pays for this pagination at all."""
+        values = self._fetch_pages(
+            lambda page: self._combined_status_name_page(sha, page), per_page=ISSUES_PER_PAGE
+        )
+        names: list[str] = []
+        for value in values:
+            name = value.get("name") if isinstance(value, dict) else None
+            if not isinstance(name, str) or not name:
+                raise forge.ForgeMalformedResponseError("GitHub returned a malformed commit status")
+            names.append(name)
+        return tuple(names)
+
+    def _combined_status_checks(self, sha: str) -> tuple[forge.CheckRun, ...]:
+        """`sha`'s combined commit status, read as one verdict (issue #405
+        review/gate finding): the external checks GitHub's own check-runs
+        listing never carries -- a SonarCloud quality gate, say -- posted
+        through the separate legacy status API. The endpoint's own
+        aggregate `state` decides pending/failure/error/success, GitHub's
+        own semantics this tool never recomputes from individual contexts;
+        `total_count` zero passes regardless of that `state` (GitHub's own
+        default state for no statuses at all is `pending`, which would
+        otherwise misread a pull request with no external checks as
+        blocked)."""
+        state, total = self._combined_status_summary(sha)
+        if total == 0 or state == forge.CHECK_CONCLUSION_SUCCESS:
+            return ()
+        names = self._combined_status_names(sha) or (EXTERNAL_STATUS_FALLBACK_NAME,)
+        conclusion = None if state == "pending" else state
+        return tuple(forge.CheckRun(name, conclusion) for name in names)
 
     def landing_readiness(self, number: int) -> forge.LandingReadiness:
         """Whether pull request `number` is safe to merge with its own
