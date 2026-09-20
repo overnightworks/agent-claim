@@ -79,7 +79,7 @@ only in the remote, the attempt count (`8` for bootstrap, `32` for a live
 transition), and which of the three causes applies.
 
 - [ ] [CAS-13] A transition whose push is rejected once, but whose commit actually landed (a lost response), is found by its own `operation_id` on retry, never pushed a second time.
-- [ ] [CAS-47] A retry's search for a lost response's own `operation_id` that fails to read one candidate commit refuses `cannot read commit <sha> while searching for operation_id <id>: <detail>`.
+- [ ] [CAS-47] A retry's search for a lost response's own `operation_id` that fails to read one candidate commit refuses `cannot read commit <sha> while searching for operation_id <id>: <detail>` (see E-CAS-06).
 - [ ] [CAS-14] Two transitions on disjoint identities racing for the same tip both land: the loser re-fetches, re-applies its own `operation_id`'s intent, and lands cleanly -- CLAIM-01 owns the printed line.
 - [ ] [CAS-15] 32 stuck pushes refuse `refs/aco/state rejected 32 pushes to <remote> without the ref ever moving: a stale lock or missing push rights`, fix `check <remote>'s refs/aco/state.lock` (see E-CAS-03).
 - [ ] [CAS-16] A transition rejected 32 times while the ref keeps moving refuses `refs/aco/state moved 32 times while retrying: another writer on <remote> keeps landing first; retry the command`.
@@ -238,4 +238,14 @@ no local refs/aco/state to delete
 cleared lineage stamps and fetch anchors in 1 worktree
 bootstrapped a fresh empty state at <sha>
 exit 0
+```
+
+### E-CAS-06 — a lost-response search that cannot read one of its own candidates
+
+Setup: bare-remote, bootstrapped, a rejected push whose commit actually landed, and one commit in the retry's own search range whose object is missing from the local repository (a corrupted or pruned object store)
+
+```console
+$ aco claim 42 --scope README.md
+2> ERROR: cannot read commit <sha> while searching for operation_id <id>: <detail>
+exit 2
 ```

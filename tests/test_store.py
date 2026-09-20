@@ -1348,24 +1348,6 @@ def _fake_run_captured_failing_candidate_log(
     return fake
 
 
-def test_find_operation_id_fails_loud_when_a_candidates_own_message_read_fails(
-    monkeypatch: pytest.MonkeyPatch, bare_remote: Path, worktree: Path
-) -> None:
-    """Issue #390 finding 9a: `_find_operation_id`'s outer walk already
-    fails loud on a broken `git log`; its per-candidate `git log -1` read
-    must keep the same contract instead of reading a nonzero exit as "this
-    commit does not carry the id"."""
-    tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
-    monkeypatch.setattr(
-        store.process,
-        "run_captured",
-        _fake_run_captured_failing_candidate_log(process.run_captured),
-    )
-
-    with pytest.raises(protocol.ClaimError, match="cannot read commit"):
-        store._find_operation_id(worktree, since=None, until=tip, operation_id="whatever")
-
-
 def test_push_retry_never_pushes_twice_when_a_candidates_own_message_read_fails(
     monkeypatch: pytest.MonkeyPatch, bare_remote: Path, worktree: Path
 ) -> None:
