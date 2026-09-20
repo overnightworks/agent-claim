@@ -1785,6 +1785,25 @@ def test_start_refuses_a_slug_the_derived_rule_would_never_produce(
     assert not (repo.parent / f"{repo.name}-worktrees").exists()
 
 
+def test_start_refuses_an_unsafe_identity_prefix_before_any_git_write(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Issue #322 review/gate: an unsafe `ACO_AGENT` first word must never
+    reach `git worktree add` -- the branch it would build is refused first,
+    by name, and no worktree is ever created."""
+    repo = _start_scenario(monkeypatch, tmp_path, agent="-bad")
+    monkeypatch.chdir(repo)
+
+    status = issue_claim.main(["--repo", REPOSITORY, "start", "314"])
+
+    assert status == 2
+    assert capsys.readouterr().err == (
+        "ERROR: agent identity '-bad' is not usable in a branch name: "
+        "'-bad/issue-314-fresh-slug-title' is not a safe Git ref\n"
+    )
+    assert not (repo.parent / f"{repo.name}-worktrees").exists()
+
+
 def test_start_mints_a_fresh_id_after_an_abandoned_release(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:

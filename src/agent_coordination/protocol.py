@@ -231,10 +231,14 @@ def _identity_summary(identity: ClaimIdentity, branch: str) -> str:
     return f"lane {branch!r}" if isinstance(identity, LaneIdentity) else f"issue #{identity.issue}"
 
 
-def _valid_branch(payload: dict[str, object]) -> str:
-    branch = _required_text(payload, "branch", maximum=255)
+def is_safe_branch_name(branch: str) -> bool:
+    """Whether `branch` is a safe Git ref name: the one rule `_valid_branch`
+    enforces on a stored claim marker, factored out so `start` (issue #322)
+    can hold a freshly built branch name to the identical rule before its
+    first `git worktree add` -- never a second, drifted copy of the same
+    shape."""
     segments = branch.split("/")
-    if (
+    return not (
         BRANCH_PATTERN.fullmatch(branch) is None
         or branch.startswith("-")
         or branch.endswith(("/", "."))
@@ -245,7 +249,12 @@ def _valid_branch(payload: dict[str, object]) -> str:
             not segment or segment.startswith(".") or segment.endswith((".", ".lock"))
             for segment in segments
         )
-    ):
+    )
+
+
+def _valid_branch(payload: dict[str, object]) -> str:
+    branch = _required_text(payload, "branch", maximum=255)
+    if not is_safe_branch_name(branch):
         raise InvalidClaimMarkerError(f"claim marker branch is not a safe Git ref: {branch!r}")
     return branch
 

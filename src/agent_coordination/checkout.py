@@ -10,7 +10,13 @@ from enum import StrEnum
 from pathlib import Path
 
 from . import board, process
-from .protocol import ClaimError, ClaimRequest, _outbound_text, named_with_overflow_count
+from .protocol import (
+    ClaimError,
+    ClaimRequest,
+    _outbound_text,
+    is_safe_branch_name,
+    named_with_overflow_count,
+)
 
 ACO_AGENT_ENV = "ACO_AGENT"
 GROK_SESSION_ID_ENV = "GROK_SESSION_ID"
@@ -718,6 +724,23 @@ def branch_prefix_for_identity() -> str:
     raise ClaimError(
         "branch prefix is required: set ACO_AGENT, GROK_SESSION_ID, or CLAUDE_SESSION_ID"
     )
+
+
+def refuse_unsafe_start_branch(branch: str, *, prefix: str) -> None:
+    """Refuse `start`'s own built branch name before any git write (issue
+    #322 review/gate: an unsafe `ACO_AGENT` first word used to reach `git
+    worktree add` before the claim machinery ever validated the resulting
+    branch, so an invalid name could leave an orphan worktree and branch
+    behind). `slug_from_title`/`validate_slug` already bind the slug's own
+    shape and `number` is always an int, so the one unsanitized ingredient
+    left in `branch` is `prefix` -- the identity word this names as the
+    refusal's cause.
+    """
+    if not is_safe_branch_name(branch):
+        raise ClaimError(
+            f"agent identity {prefix!r} is not usable in a branch name: "
+            f"{branch!r} is not a safe Git ref"
+        )
 
 
 def branch_exists(branch: str) -> bool:

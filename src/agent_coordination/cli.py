@@ -4652,6 +4652,7 @@ def _cmd_start(parsed: argparse.Namespace, session: _WriteSession) -> int:
     )
     prefix = checkout.branch_prefix_for_identity()
     branch = f"{prefix}/issue-{number}-{slug}"
+    checkout.refuse_unsafe_start_branch(branch, prefix=prefix)
     toplevel = _resolve_toplevel()
     worktree_path = _start_worktree_path(toplevel, number=number, slug=slug)
     canonical_remote = _board_config(toplevel).canonical_remote

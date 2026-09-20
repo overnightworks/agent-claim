@@ -1284,6 +1284,17 @@ def test_branch_prefix_for_identity_refuses_with_no_identity_signal(
         checkout.branch_prefix_for_identity()
 
 
+def test_refuse_unsafe_start_branch_names_the_identity_word(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(ClaimError, match="agent identity '-bad' is not usable"):
+        checkout.refuse_unsafe_start_branch("-bad/issue-1-widget", prefix="-bad")
+
+
+def test_refuse_unsafe_start_branch_accepts_a_safe_branch() -> None:
+    checkout.refuse_unsafe_start_branch("codex/issue-1-widget", prefix="codex")
+
+
 def test_branch_exists_reads_real_local_refs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
