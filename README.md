@@ -258,13 +258,11 @@ error the parser itself raises joins the same object, but only for a
 command that declares `--json`: `aco bootstrap --json` stays argparse's own
 text on stderr, stdout empty. A non-zero exit is not always a refusal --
 `next` exits non-zero on an empty board without refusing anything
-(`specs/next.spec.md`). `aco check <sha>` is the one carve-out left: it
-answers in `ok` and `sha` where every other command answers in `ok` and
-`reason`, adds the defect sentence as `refused` only when it refuses, and
-writes nothing on stderr beside the object -- exit `0` when the commit is
-sound, `1` when it is not — issue #435 owns that shape until it moves.
-`specs/output.spec.md` owns the envelope; each command's spec owns its own
-`reason` values.
+(`specs/next.spec.md`). No command carves itself out of this shape any
+more: `aco check <sha>` answers in the same `ok`/`reason` object every
+other command does, naming its commit under `sha` and its defect sentence
+under `message` (issue #435). `specs/output.spec.md` owns the envelope;
+each command's spec owns its own `reason` values.
 
 ## Commands and their specs
 
@@ -279,7 +277,7 @@ by exactly one file below; this table is the map, not a copy.
 | `aco release` | `specs/release.spec.md` | ends a claim as merged or abandoned |
 | `aco status` | `specs/status.spec.md` | reads every live claim, repository-wide or by path |
 | `aco reset` | `specs/reset.spec.md` | rebuilds a broken or rewritten state ref |
-| `aco check` | `specs/check.spec.md` | answers whether a pull request or issue is sound |
+| `aco check` | `specs/check.spec.md` | answers whether a pull request, an issue, or a trunk commit is sound |
 | `aco brief` | `specs/brief.spec.md` | composes one item's body, claim, tip, and touched files |
 | `aco board` | `specs/board.spec.md` | projects the open board (text, `--json`, `--html`, `--serve`) |
 | `aco ask` | `specs/ask.spec.md` | proposes one expectation line on an item |
