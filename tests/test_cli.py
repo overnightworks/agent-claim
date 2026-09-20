@@ -13184,6 +13184,34 @@ def test_land_release_routing_reuses_the_verified_classification_for_a_fresh_mer
     assert issue_claim._land_release_routing(no_item, MERGE_COMMIT_SHA, REPOSITORY) is None
 
 
+def test_land_release_routing_reads_the_merge_commit_trailer_for_a_rerun(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #405 point 4: `classification=None` (a rerun) reads the walked
+    trunk's own trailer instead, routing a `No-Item:` merge commit to no
+    issue -- the same recovery `test_land_rerun_recovers_release_routing_
+    after_the_body_changed` proves end to end for a `Work-Item:` one."""
+    landing = checkout.TrunkLanding(
+        MERGE_COMMIT_SHA, datetime.now(UTC), board.NoItemClassification(board.NoItemKind.FIX)
+    )
+    monkeypatch.setattr(checkout, "trunk_landings", lambda *_args, **_kwargs: (landing,))
+
+    assert issue_claim._land_release_routing(None, MERGE_COMMIT_SHA, REPOSITORY) is None
+
+
+def test_land_release_routing_refuses_a_rerun_with_no_usable_merge_commit_trailer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #405 point 4: a rerun's own merge-commit trailer read refuses
+    by name when the walked trunk carries the sha with neither a
+    `Work-Item:` nor a `No-Item:` trailer -- never a bare re-read of the
+    pull request's own body."""
+    monkeypatch.setattr(checkout, "trunk_landings", lambda *_args, **_kwargs: ())
+
+    with pytest.raises(ClaimError, match="carries no `Work-Item:` or `No-Item:` trailer"):
+        issue_claim._land_release_routing(None, MERGE_COMMIT_SHA, REPOSITORY)
+
+
 def test_land_rerun_recovers_release_routing_after_the_body_changed(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
