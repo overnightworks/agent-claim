@@ -121,7 +121,7 @@ does, before either reads a single issue -- cited there, not restated.
 - [ ] [BOARD-35] A port another process holds refuses `port <port> is already in use by PID <pid>`, else `port <port> is already in use; the owning process could not be identified`, exit `2` (see E-BOARD-11).
 - [ ] [BOARD-39] `--new-token` without `--serve` refuses `--new-token requires --serve`, exit `2`, before any read (see E-BOARD-14).
 - [ ] [BOARD-40] A token file's content that is not one `secrets.token_urlsafe(32)` value refuses `board token at <path> is not a valid token; pass --new-token`, exit `2` (see E-BOARD-13).
-- [ ] [BOARD-41] A symlinked or writable-by-others directory at any level of `<token-path>` refuses `board token directory <path> must be private and owned by this user (found mode <mode>)`, exit `2` (see E-BOARD-12).
+- [ ] [BOARD-41] A symlinked or others-writable level of `<token-path>` refuses `board token directory <path> must be private and owned by this user (found mode <mode>)`, exit `2` (see E-BOARD-12).
 
 ## Never
 
