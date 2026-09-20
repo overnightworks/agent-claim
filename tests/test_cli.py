@@ -12570,16 +12570,22 @@ def test_check_sha_refuses_a_contradictory_trailer(
     `Work-Item:` and `No-Item:`, or repeats `No-Item:`, refuses through
     `check <sha>` by the classification's own defect message -- never
     letting `Work-Item:` win by ordering, and never silently landing
-    nothing the way `aco board`'s own trunk-trailer reading does (LAND-42)."""
+    nothing the way `aco board`'s own trunk-trailer reading does (LAND-42).
+    The `--json` form carries the same refusal through the one envelope,
+    its `message` the line's own finding (issue #435)."""
     repo = _contradictory_trailer_repository(monkeypatch, tmp_path, trailer)
     sha = _real_git(repo, "rev-parse", "main").stdout.strip()
 
     status = issue_claim.main(["check", sha])
+    printed = capsys.readouterr()
+    json_status = issue_claim.main(["check", sha, "--json"])
+    envelope = json.loads(capsys.readouterr().out)
 
-    assert status == 2
-    err = capsys.readouterr().err
-    assert err.startswith(f"REFUSED: {sha} carries")
-    assert "one is required" not in err
+    assert (status, json_status) == (2, 2)
+    assert printed.err.startswith(f"REFUSED: {sha} carries")
+    assert "one is required" not in printed.err
+    finding = printed.err.removeprefix(f"REFUSED: {sha} ").strip()
+    assert envelope == _expected_trunk_envelope(sha, "invalid_classification", finding)
 
 
 @pytest.mark.parametrize("trailer", _CONTRADICTORY_TRAILERS)
