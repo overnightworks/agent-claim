@@ -260,7 +260,7 @@ Setup: bare-remote, no live claim
 
 ```console
 $ echo '{"toolName": "invented_tool"}' | aco protect
-{"decision": "deny", "reason": "'invented_tool' is not in aco's hook tool table (HOOK_TOOL_EFFECTS in cli.py, issue #238); add it there as read-only or mutating before use"}
+{"decision": "deny", "reason": "'invented_tool' is not in aco's hook tool table (HOOK_TOOL_EFFECTS, issue #238); add it there as read-only or mutating before use"}
 exit 2
 ```
 

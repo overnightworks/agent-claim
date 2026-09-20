@@ -133,8 +133,8 @@ HOOK_TOOL_EFFECTS: Mapping[str, HookToolEffect] = {
 
 def _unknown_hook_tool_reason(tool_name: str) -> str:
     return (
-        f"{tool_name!r} is not in aco's hook tool table (HOOK_TOOL_EFFECTS in "
-        "cli.py, issue #238); add it there as read-only or mutating before use"
+        f"{tool_name!r} is not in aco's hook tool table (HOOK_TOOL_EFFECTS, "
+        "issue #238); add it there as read-only or mutating before use"
     )
 
 
