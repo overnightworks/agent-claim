@@ -3,6 +3,6 @@ agent = "Claude head (coordinator)"
 role = "builder"
 base = "d811dce47de21278dd98254e0c7416de4484f9c2"
 branch = "claude/issue-399-whole-field"
-scope = ["specs/body-block.spec.md", "specs/claim.spec.md", "specs/item.spec.md", "specs/next.spec.md", "specs/start.spec.md", "src/agent_coordination/board.py", "src/agent_coordination/cli.py", "src/agent_coordination/protocol.py", "tests/test_board.py", "tests/test_cli.py"]
+scope = ["scripts/test_budget_ratchet.txt", "specs/body-block.spec.md", "specs/claim-record.spec.md", "specs/claim.spec.md", "specs/item.spec.md", "specs/next.spec.md", "specs/start.spec.md", "src/agent_coordination/board.py", "src/agent_coordination/cli.py", "src/agent_coordination/protocol.py", "tests/test_board.py", "tests/test_cli.py"]
 opened_commit = "ebfb2b884d5c0ca15c732678f1145864d31dd772"
 whole_reason = "body whole field and actionable rule: codec, claim/start readers, next rule, specs, tests"
