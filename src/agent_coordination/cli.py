@@ -3466,8 +3466,13 @@ def _protect_checkout_denial(
     checkout's own scope silently stand in for the nested root's own PROT-14
     gate (issue #380 delta, gate finding). A non-directory path (an
     ordinary file, existing or not yet written) never names a checkout root,
-    so it keeps the cheaper parent-first order."""
-    path = Path(absolute_path)
+    so it keeps the cheaper parent-first order. `absolute_path` is
+    normalized lexically first (`os.path.normpath`, no symlink resolution):
+    a lexically equivalent payload like `nested/../nested` or `nested/.`
+    must reach this comparison the same way `nested` does, or a covering
+    outer claim could stand in for the nested checkout root's own PROT-14
+    gate (issue #380 delta, gate finding)."""
+    path = Path(os.path.normpath(absolute_path))
     if path.is_dir():
         self_checkout = checkout.resolve_path_checkout(path)
         if self_checkout is not None and self_checkout.toplevel == path:

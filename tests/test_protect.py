@@ -1550,11 +1550,17 @@ def _protect_real_repo_with_nested_worktree(
 
 
 @pytest.mark.parametrize("payload_for", _TARGET_PATH_PAYLOAD_BUILDERS, ids=["write", "bash-rm"])
+@pytest.mark.parametrize(
+    "root_form",
+    [lambda root: root, lambda root: root / ".." / root.name, lambda root: root / "."],
+    ids=["exact", "dot-dot", "dot"],
+)
 def test_protect_denies_deleting_a_nested_worktrees_own_root(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     payload_for: Callable[[Path], dict[str, object]],
+    root_form: Callable[[Path], Path],
 ) -> None:
     """PROT-36 (issue #380 round 4, gate finding): a linked worktree whose
     own root's *parent* directory sits inside another, outer git checkout
@@ -1564,7 +1570,11 @@ def test_protect_denies_deleting_a_nested_worktrees_own_root(
     than the outer checkout's own scope silently authorizing it. Proven for
     both a payload path (`Write`, the accepted Edit-family behaviour change
     this round) and a Bash-recognized one (`rm`), since both share the same
-    checkout-resolution chain."""
+    checkout-resolution chain, and for a lexically equivalent but
+    unnormalized spelling of the same root (`nested/../nested`, `nested/.`)
+    -- a covering outer claim must not stand in for the nested checkout
+    root's own PROT-14 gate just because the payload path never collapsed
+    its own `..`/`.` segments (issue #380 round 4 delta, gate finding 7)."""
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
@@ -1572,7 +1582,7 @@ def test_protect_denies_deleting_a_nested_worktrees_own_root(
     _use_real_path_is_tracked(monkeypatch)
     outer, nested = _protect_real_repo_with_nested_worktree(tmp_path)
     monkeypatch.chdir(outer)
-    payload = payload_for(nested)
+    payload = payload_for(root_form(nested))
     if payload["toolName"] == "Bash":
         payload["cwd"] = str(outer)
 
