@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -142,31 +143,81 @@ loopback token (issue #388) -- matches the per-start token's prior entropy
 (#280), only now minted once and read back rather than minted per start."""
 
 
-def default_board_token_path(environment: Mapping[str, str], home: Path | None = None) -> Path:
-    """`board --serve`'s persistent token file (issue #388): the same
-    `~/.config/aco/` root `default_config_path` already owns, never a
-    second configuration source, so the printed URL stays stable across
-    restarts and reinstalls without adding a place to look for it."""
-    return _config_root(environment, home) / "board-token"
+_BOARD_DIRECTORY_NAME_COMPONENTS = 2
+_BOARD_DIRECTORY_HASH_CHARACTERS = 16
+_BOARD_IDENTITY_SEPARATOR = "\0"
+"""Between the fields of a board identity: a host name and a repository path
+can both carry any other printable character, and a digest over `host` and
+`path` simply concatenated would read `host-a` + `/acme/repo` as `host-a/`
++ `acme/repo`. A NUL occurs in neither field, so one joined string names
+exactly one identity."""
+
+_UNREADABLE_IN_A_BOARD_DIRECTORY = re.compile(r"[^A-Za-z0-9_-]+")
 
 
-def board_token(path: Path, *, mint_new: bool = False) -> str:
-    """`path`'s persistent token: read back when it already exists and a
+def _board_directory_name(host: str, repository: str) -> str:
+    """One directory name per board identity: the last two components of
+    `repository` -- `owner/repo` on a forge, the checkout's own parent and
+    directory where the canonical remote is a local path -- made readable,
+    plus a digest of the whole identity, `host` included. The digest is
+    what keeps two identities apart (issue #431): the readable part alone
+    collides whenever a name carries a separator character, and two forges
+    carrying the same `owner/repo` are two boards, not one -- a shared
+    directory is exactly the bug this path exists to remove."""
+    tail = repository.strip("/").split("/")[-_BOARD_DIRECTORY_NAME_COMPONENTS:]
+    readable = _UNREADABLE_IN_A_BOARD_DIRECTORY.sub("-", "-".join(tail))
+    identity = _BOARD_IDENTITY_SEPARATOR.join((host, repository))
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    return f"{readable}-{digest[:_BOARD_DIRECTORY_HASH_CHARACTERS]}"
+
+
+@dataclass(frozen=True)
+class BoardTokenLocation:
+    """Where one repository's served board keeps its token, and every
+    directory above it this tool creates itself, outermost first (issue
+    #431). The token now lives one directory per board, so the privacy
+    check that used to cover a single `~/.config/aco` covers each of those
+    levels: a symlink swapped in at any one of them would otherwise hand
+    the token to whoever owns its target."""
+
+    file: Path
+    directories: tuple[Path, ...]
+
+
+def default_board_token_location(
+    host: str, repository: str, environment: Mapping[str, str], home: Path | None = None
+) -> BoardTokenLocation:
+    """`board --serve`'s persistent token file for one repository (issues
+    #388, #431): the same `~/.config/aco/` root `default_config_path`
+    already owns, never a second configuration source, but one directory
+    per board identity under it -- `host` and `repository` together name
+    whose board this is, so a token minted for one repository on one forge
+    never opens another repository's served board, and the printed URL
+    still stays stable across restarts and reinstalls."""
+    root = _config_root(environment, home)
+    boards = root / "boards"
+    board = boards / _board_directory_name(host, repository)
+    return BoardTokenLocation(file=board / "token", directories=(root, boards, board))
+
+
+def board_token(location: BoardTokenLocation, *, mint_new: bool = False) -> str:
+    """`location`'s persistent token: read back when it already exists and a
     fresh one was not requested, minted (`secrets.token_urlsafe`, written
     0600) otherwise -- `mint_new` is `--new-token`'s own request to replace
     it. An existing file whose mode has drifted from 0600, is not a regular
     file this user owns, or is a symlink refuses by name rather than being
     trusted: the token is the one secret this command holds, and it is
-    never logged anywhere but the one printed URL line. `path.parent` is
-    checked the same way every call, not only when this call creates it, so
-    an operator-shared `~/.config/aco` left group- or world-writable is
-    never silently trusted either."""
-    _ensure_board_token_directory(path.parent)
+    never logged anywhere but the one printed URL line. Every directory
+    `location` names is checked the same way on every call, not only when
+    this call creates it, so an operator-shared `~/.config/aco` left group-
+    or world-writable is never silently trusted either."""
+    for directory in location.directories:
+        _ensure_board_token_directory(directory)
     if mint_new:
         token = secrets.token_urlsafe(BOARD_TOKEN_BYTES)
-        _mint_board_token(path, token)
+        _mint_board_token(location.file, token)
         return token
-    return _first_board_token(path)
+    return _first_board_token(location.file)
 
 
 class _BoardTokenNotFoundError(Exception):
@@ -184,7 +235,7 @@ def _write_temporary_token_file(directory: Path, name: str, content: bytes) -> s
     visible at its final name once fully written, never as an empty or
     partial file there. A write, flush, fsync, or chmod failure after
     `mkstemp` removes that temporary file (best effort) before re-raising,
-    so a failed mint never leaves a `.board-token.*` file behind."""
+    so a failed mint never leaves a `.token.*` file behind."""
     descriptor, temporary_name = tempfile.mkstemp(prefix=f".{name}.", dir=directory)
     try:
         with os.fdopen(descriptor, "wb") as handle:

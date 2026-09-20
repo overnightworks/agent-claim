@@ -25,7 +25,7 @@ from types import SimpleNamespace
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 import pytest
-from board_fixtures import board_issue, complete_contract, proposed_expectation
+from board_fixtures import REPOSITORY, board_issue, complete_contract, proposed_expectation
 from cli_fixtures import stub_board_config_tracked
 from test_cli import (
     FakeForge,
@@ -40,6 +40,27 @@ from agent_coordination.body import expectation_lines, rule_expectation
 
 OPEN_LINE_TEXT = "Brauchen wir Admin-Rechte?"
 SERVED_ITEM = 10
+ANOTHER_REPOSITORY = "example/other-board"
+
+
+def _token_location(
+    repository: str = REPOSITORY, host: str = github.GITHUB_HOST
+) -> workspace.BoardTokenLocation:
+    """Where a repository's served board keeps its token (issue #431): one
+    directory per repository under the configuration root this module
+    points at `tmp_path`, named like the `FakeForge` these tests serve."""
+    return workspace.default_board_token_location(host, repository, os.environ)
+
+
+def _existing_token_directory() -> Path:
+    """This board's own token directory, with every level above it already
+    private (`0700`) exactly as a first start leaves them -- a bare
+    `mkdir(parents=True)` would leave those levels at the process umask,
+    which is not the mode these tests are about."""
+    location = _token_location()
+    for directory in location.directories:
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return location.file.parent
 
 
 @pytest.fixture(autouse=True)
@@ -76,10 +97,10 @@ class _ConsistentForge(FakeForge):
 
 
 def _served_board_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> _ConsistentForge:
-    # Issue #388: the token is now persisted to `${XDG_CONFIG_HOME}/aco/
-    # board-token` rather than minted in memory -- every test that starts a
-    # real server must point that root at `tmp_path`, or it would read and
-    # write the real operator's own token file.
+    # Issues #388, #431: the token is persisted under `${XDG_CONFIG_HOME}`
+    # per repository rather than minted in memory -- every test that starts
+    # a real server must point that root at `tmp_path`, or it would read
+    # and write the real operator's own token file.
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     client = _ConsistentForge()
     body = complete_contract(
@@ -176,6 +197,23 @@ def test_get_without_or_with_a_wrong_token_is_forbidden_with_no_card_content(
     assert response.status == 403
     assert b"Plain item" not in response.body
     assert OPEN_LINE_TEXT.encode() not in response.body
+
+
+def test_a_token_minted_for_another_repository_does_not_open_this_board(
+    served_board: ServedBoard,
+) -> None:
+    """Issue #431 proof 1: every repository's board now mints its own
+    token, so the URL another repository's board printed is refused here
+    while this board's own token still serves -- one token file per user
+    used to mean a click on one page ruled on whichever board had been
+    served last."""
+    foreign_token = workspace.board_token(_token_location(ANOTHER_REPOSITORY))
+
+    response = served_board.get(token=foreign_token)
+
+    assert response.status == 403
+    assert b"Plain item" not in response.body
+    assert served_board.get(token=served_board.server.token).status == 200
 
 
 def test_get_with_the_valid_token_serves_one_form_per_card_with_a_note_field(
@@ -452,9 +490,9 @@ def _mint_and_capture_url(
 def test_board_serve_prints_the_same_url_on_a_second_start(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Issue #388 proof 1: the token now lives in
-    `${XDG_CONFIG_HOME}/aco/board-token` (0600), minted once rather than per
-    start, so two starts on the same port print the identical URL."""
+    """Issue #388 proof 1: the token now lives in this board's own
+    `${XDG_CONFIG_HOME}/aco/boards/<board>/token` (0600), minted once rather
+    than per start, so two starts on the same port print the identical URL."""
     _served_board_environment(monkeypatch, tmp_path)
     monkeypatch.setattr(board_serve._BoardHTTPServer, "serve_forever", lambda self: None)
     port = _free_loopback_port()
@@ -463,7 +501,7 @@ def test_board_serve_prints_the_same_url_on_a_second_start(
     second_url = _mint_and_capture_url(capsys, port)
 
     assert first_url == second_url
-    token_path = workspace.default_board_token_path(os.environ)
+    token_path = _token_location().file
     assert stat.S_IMODE(token_path.stat().st_mode) == 0o600
 
 
@@ -491,7 +529,7 @@ def test_a_board_token_file_with_a_permissive_mode_refuses(
     _served_board_environment(monkeypatch, tmp_path)
     monkeypatch.setattr(board_serve._BoardHTTPServer, "serve_forever", lambda self: None)
     _mint_and_capture_url(capsys, _free_loopback_port())
-    token_path = workspace.default_board_token_path(os.environ)
+    token_path = _token_location().file
     token_path.chmod(0o644)
 
     exit_code = issue_claim.main(
@@ -511,7 +549,7 @@ def test_a_board_token_file_with_invalid_content_refuses(
     _served_board_environment(monkeypatch, tmp_path)
     monkeypatch.setattr(board_serve._BoardHTTPServer, "serve_forever", lambda self: None)
     _mint_and_capture_url(capsys, _free_loopback_port())
-    token_path = workspace.default_board_token_path(os.environ)
+    token_path = _token_location().file
     token_path.write_text("not-a-token\n", encoding="utf-8")
     token_path.chmod(0o600)
 
@@ -534,7 +572,7 @@ def test_a_symlinked_board_token_file_refuses(
     _served_board_environment(monkeypatch, tmp_path)
     monkeypatch.setattr(board_serve._BoardHTTPServer, "serve_forever", lambda self: None)
     _mint_and_capture_url(capsys, _free_loopback_port())
-    token_path = workspace.default_board_token_path(os.environ)
+    token_path = _token_location().file
     real_token = tmp_path / "real-token"
     real_token.write_text(token_path.read_text(encoding="utf-8"), encoding="utf-8")
     real_token.chmod(0o600)
@@ -559,8 +597,7 @@ def test_a_group_writable_board_token_directory_refuses(
     naming the path and the actual mode, before the socket is ever bound --
     an existing directory is checked exactly like a freshly created one."""
     _served_board_environment(monkeypatch, tmp_path)
-    token_directory = workspace.default_board_token_path(os.environ).parent
-    token_directory.mkdir(parents=True, exist_ok=True)
+    token_directory = _existing_token_directory()
     token_directory.chmod(0o770)
 
     exit_code = issue_claim.main(
@@ -581,8 +618,7 @@ def test_a_read_only_group_and_world_board_token_directory_is_accepted(
     an ordinary `umask 022` directory merely readable/executable by the
     group and others, is not itself unsafe and a first start succeeds."""
     _served_board_environment(monkeypatch, tmp_path)
-    token_directory = workspace.default_board_token_path(os.environ).parent
-    token_directory.mkdir(parents=True, exist_ok=True)
+    token_directory = _existing_token_directory()
     token_directory.chmod(0o755)
     monkeypatch.setattr(board_serve._BoardHTTPServer, "serve_forever", lambda self: None)
 
@@ -600,8 +636,7 @@ def test_a_group_writable_0775_board_token_directory_refuses(
     """Issue #388 (round 3): `0775` carries the group WRITE bit `0755`
     lacks, so it refuses exactly like the already-covered `0770` case."""
     _served_board_environment(monkeypatch, tmp_path)
-    token_directory = workspace.default_board_token_path(os.environ).parent
-    token_directory.mkdir(parents=True, exist_ok=True)
+    token_directory = _existing_token_directory()
     token_directory.chmod(0o775)
 
     exit_code = issue_claim.main(
@@ -621,10 +656,8 @@ def test_serve_refuses_when_the_token_directory_is_owner_unwritable(
     refuses naming the token path instead of a raw `OSError` or
     `_atomic_write`'s unrelated "login recovery state" wording."""
     _served_board_environment(monkeypatch, tmp_path)
-    token_path = workspace.default_board_token_path(os.environ)
-    token_directory = token_path.parent
-    token_directory.mkdir(parents=True, exist_ok=True)
-    token_directory.chmod(0o500)
+    token_path = _token_location().file
+    _existing_token_directory().chmod(0o500)
 
     exit_code = issue_claim.main(
         ["--repo", "example/agent-claim", "board", "--serve", "--port", str(_free_loopback_port())]
@@ -644,7 +677,7 @@ def test_new_token_refuses_when_the_token_directory_is_owner_unwritable(
     wording."""
     _served_board_environment(monkeypatch, tmp_path)
     monkeypatch.setattr(board_serve._BoardHTTPServer, "serve_forever", lambda self: None)
-    token_path = workspace.default_board_token_path(os.environ)
+    token_path = _token_location().file
     _mint_and_capture_url(capsys, _free_loopback_port())
     token_path.parent.chmod(0o500)
 
@@ -815,12 +848,14 @@ def test_board_token_reads_an_existing_token_without_directory_write_access(
     operator later locks down to owner-read-only (`0500`) still serves the
     same stable URL instead of attempting, and failing, a mint."""
     token_directory = tmp_path / "aco"
-    token_path = token_directory / "board-token"
-    minted = workspace.board_token(token_path)
+    location = workspace.BoardTokenLocation(
+        file=token_directory / "token", directories=(token_directory,)
+    )
+    minted = workspace.board_token(location)
     token_directory.chmod(0o500)
 
     try:
-        assert workspace.board_token(token_path) == minted
+        assert workspace.board_token(location) == minted
     finally:
         token_directory.chmod(0o700)
 
