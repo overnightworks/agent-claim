@@ -4,14 +4,16 @@ Sibling of `checkout`, not below it. `checkout`'s owner is this working tree --
 current branch, isolation, cleanliness, agent identity -- and its git calls are
 local (`rev-parse`, `ls-files`, `status`, `branch`). This module's owner is
 repository-global state: a remote compare-and-swap ref, reached through
-`ls-remote`, `FETCH_HEAD`, plumbing, push, and retry. Folding the two would
-let a worktree-local module own repository-global state -- exactly the
-linked-worktree stamp collision `_lineage_stamp_path` exists to avoid.
+`ls-remote`, its own per-worktree anchor ref, plumbing, push, and retry.
+Folding the two would let a worktree-local module own repository-global
+state -- exactly the linked-worktree stamp collision `_lineage_stamp_path`
+exists to avoid.
 
 `cli` (issue #176, slice C2) is this module's production caller: `bootstrap`
 and `commit_transition`. It never checks the state ref out: every read goes
-through plumbing (`ls-remote`, `fetch` to `FETCH_HEAD`, one recursive
-`ls-tree` and one `archive`, never a `cat-file` per entry), and every write
+through plumbing (`ls-remote`, a `fetch` anchored straight into its own
+per-worktree ref, one recursive `ls-tree` and one `archive`, never a
+`cat-file` per entry), and every write
 builds a tree with `hash-object`/`mktree` -- reusing whatever a
 transition's already-committed parent tree still carries unchanged (issue
 #241) -- and a commit with `commit-tree`.
@@ -166,20 +168,29 @@ _MAX_TRANSITION_ATTEMPTS = 32
 _LINEAGE_STAMP_DIRECTORY = "aco"
 _LINEAGE_STAMP_FILENAME = "last-oid"
 
-# Anchors a freshly fetched tip so it survives `git gc --prune=now` (issue
-# #237 finding 25): `_fetch_to_fetch_head` deliberately lands the fetched
-# commits nowhere but `FETCH_HEAD`, which is not a ref and roots nothing,
-# so a prune run against this checkout right after a fetch collects them --
-# reproduced in the audit, and again by
-# `test_claim_ages_survives_a_gc_prune_of_the_just_fetched_history`.
+# `fetch_state` fetches `STATE_REF` straight into this ref through the
+# fetch's own destination refspec, instead of leaving the tip in
+# `FETCH_HEAD` alone. One mechanism now settles two separate problems:
+# - it roots the fetched commits so they survive a `git gc --prune=now` run
+#   against this checkout right after the fetch (issue #237 finding 25,
+#   reproduced in the audit, and again by
+#   `test_claim_ages_survives_a_gc_prune_of_the_just_fetched_history`);
+# - it makes the read atomic with the fetch itself, so a concurrent `git
+#   fetch` anywhere else in this same worktree -- which overwrites the one
+#   shared `FETCH_HEAD` file regardless of what it fetches -- can never be
+#   read as this fetch's own result (issue #310 finding 48: `aco rescope`
+#   once read a fixer agent's own concurrent `git fetch origin` as the state
+#   tip because both shared this worktree's `FETCH_HEAD`).
 # `refs/worktree/*` is git's own per-worktree ref namespace (never shared
 # across linked worktrees), the same worktree-private guarantee
 # `_lineage_stamp_path` already relies on, so anchoring here never touches
-# the shared local namespace `_fetch_to_fetch_head`'s own docstring
-# reserves for `STATE_REF` alone. `fetch_state`'s own anchoring is the sole
-# production writer and reader of this name -- `export_state_bundle` below
-# has its own, separate ref in the same private namespace
-# (`EXPORT_BUNDLE_REF`), never this one.
+# the shared local namespace `STATE_REF` reserves. `fetch_state`'s own
+# anchoring is the sole production writer and reader of this name --
+# `export_state_bundle` below has its own, separate ref in the same private
+# namespace (`EXPORT_BUNDLE_REF`), never this one, and `peek_state` never
+# writes here at all (issue #298 finding 2): its read comes from
+# `_ls_remote_state`'s own answer, since a dry run, a live-claim refusal, or
+# a failed export must change nothing durable.
 _FETCH_ANCHOR_REF = "refs/worktree/aco/state"
 
 # `export_state_bundle` points this at the leased tip and bundles it
@@ -669,35 +680,37 @@ def _ls_remote_state(worktree: Path, remote: str) -> ObjectId | None:
     )
 
 
-def _fetch_to_fetch_head(worktree: Path, remote: str) -> None:
-    """Fetch `STATE_REF` into this worktree's own `FETCH_HEAD` only.
+def _fetch_into_anchor(worktree: Path, remote: str) -> ObjectId:
+    """Fetch `STATE_REF` straight into this worktree's own per-worktree
+    anchor (`_FETCH_ANCHOR_REF`) and read the tip back from that name --
+    `_FETCH_ANCHOR_REF`'s own docstring owns why this is the one production
+    writer of that ref, and why the destination refspec replaces a separate
+    anchoring step.
+    """
+    result = _run_git(worktree, ["fetch", remote, f"+{STATE_REF}:{_FETCH_ANCHOR_REF}"])
+    if result.exit_status != 0:
+        detail = process.git_failure_detail_from_stderr(result)
+        raise ClaimError(f"cannot fetch {remote} {STATE_REF}: {detail}")
+    read = _run_git(worktree, ["rev-parse", _FETCH_ANCHOR_REF])
+    if read.exit_status != 0:
+        detail = process.git_failure_detail_from_stderr(read)
+        raise ClaimError(f"cannot read the fetched tip at {_FETCH_ANCHOR_REF}: {detail}")
+    return ObjectId(read.stdout.decode().strip())
 
-    No destination refspec is given, so production never creates
-    `refs/aco/state` in the shared local namespace -- the oid comes back
-    from `FETCH_HEAD`, read by `_read_fetch_head`.
+
+def _fetch_ref_objects(worktree: Path, remote: str) -> None:
+    """Fetch `STATE_REF`'s objects into this worktree's local object store
+    without creating any local ref for it -- production never creates the
+    shared `refs/aco/state` locally. `peek_state`, this function's only
+    caller, already knows the tip from `_ls_remote_state`'s own answer, so
+    no destination ref is needed here: the tip lands as an unread
+    `FETCH_HEAD` byproduct that `peek_state` never looks at, exactly the
+    write-nothing contract issue #298 finding 2 requires of it.
     """
     result = _run_git(worktree, ["fetch", remote, STATE_REF])
     if result.exit_status != 0:
         detail = process.git_failure_detail_from_stderr(result)
         raise ClaimError(f"cannot fetch {remote} {STATE_REF}: {detail}")
-
-
-def _read_fetch_head(worktree: Path) -> ObjectId:
-    fetch_head = _git_dir(worktree) / "FETCH_HEAD"
-    first_line = fetch_head.read_text().splitlines()[0]
-    oid, _, _rest = first_line.partition("\t")
-    return ObjectId(oid)
-
-
-def _anchor_fetched_tip(worktree: Path, tip: ObjectId) -> None:
-    """Root `tip` in this worktree's own per-worktree ref namespace right
-    after fetching it, so a `git gc --prune=now` run against this checkout
-    cannot collect the objects `FETCH_HEAD` alone leaves unreachable (issue
-    #237 finding 25)."""
-    result = _run_git(worktree, ["update-ref", _FETCH_ANCHOR_REF, str(tip)])
-    if result.exit_status != 0:
-        detail = process.git_failure_detail_from_stderr(result)
-        raise ClaimError(f"cannot anchor fetched tip {tip}: {detail}")
 
 
 def _tree_oid(worktree: Path, tip: ObjectId) -> ObjectId:
@@ -977,11 +990,11 @@ def fetch_state(*, worktree: Path, remote: str = DEFAULT_CANONICAL_REMOTE) -> Cl
     """Read `refs/aco/state` from `remote` without ever checking it out.
 
     `EmptyState` only for a proven-absent ref (`ls-remote` exit 2). A present
-    ref is fetched to this worktree's own `FETCH_HEAD` (never the shared
-    `STATE_REF` name locally), anchored in this worktree's own per-worktree
-    ref namespace so it survives a `git gc --prune=now` (issue #237 finding
-    25), parsed via plumbing, lineage-checked against this worktree's own
-    last observation, and re-stamped.
+    ref is fetched straight into this worktree's own per-worktree anchor
+    (never the shared `STATE_REF` name locally, never read back from
+    `FETCH_HEAD` -- `_fetch_into_anchor`), parsed via plumbing,
+    lineage-checked against this worktree's own last observation, and
+    re-stamped.
     """
     probed = _ls_remote_state(worktree, remote)
     if probed is None:
@@ -992,9 +1005,7 @@ def fetch_state(*, worktree: Path, remote: str = DEFAULT_CANONICAL_REMOTE) -> Cl
                 "the ref may have been deleted"
             )
         return EMPTY_STATE
-    _fetch_to_fetch_head(worktree, remote)
-    tip = _read_fetch_head(worktree)
-    _anchor_fetched_tip(worktree, tip)
+    tip = _fetch_into_anchor(worktree, remote)
     state = _parse_state_tree(worktree, tip)
     _check_lineage(worktree, tip)
     _write_lineage_stamp(worktree, tip)
@@ -1005,9 +1016,15 @@ def peek_state(*, worktree: Path, remote: str = DEFAULT_CANONICAL_REMOTE) -> Cla
     """Read `STATE_REF` on `remote` for a caller that must not write (issue
     #298, 19.09.2026 gate finding 1; issue #405 review/gate finding, `land`'s
     read-only preflight): the one read in this module that skips
-    `fetch_state`'s own lineage guard, anchor, and stamp -- a fetch into
-    `FETCH_HEAD` alone is a read of remote state, never a write of this
-    worktree's own.
+    `fetch_state`'s own lineage guard, anchor, and stamp.
+
+    The tip is `_ls_remote_state`'s own answer (issue #310 finding 48): the
+    fetch that follows (`_fetch_ref_objects`) only brings the objects into
+    this worktree's local store so `_parse_state_tree` can read them -- it
+    writes no destination ref, so a concurrent `git fetch` anywhere else in
+    this same worktree can overwrite the shared `FETCH_HEAD` file all it
+    wants; this read never looks at it, unlike `fetch_state`'s own read,
+    which is anchored instead.
 
     `reset` uses this to recover from exactly what `_check_lineage` refuses
     -- a rewritten or deleted ref this worktree's own stamp disagrees with --
@@ -1018,7 +1035,7 @@ def peek_state(*, worktree: Path, remote: str = DEFAULT_CANONICAL_REMOTE) -> Cla
     itself never happens. Both callers share the same requirement -- a dry
     run, a live-claim refusal, a failed export, or a refused merge must
     change nothing durable -- so this performs no per-worktree write at all:
-    no `_anchor_fetched_tip`, no `_write_lineage_stamp`. `fetch_state` stays
+    no anchor write, no `_write_lineage_stamp`. `fetch_state` stays
     the write-capable read every live transition (`claim`, `release`, ...)
     still needs, since those callers go on to write and must keep this
     worktree's own lineage current.
@@ -1026,9 +1043,8 @@ def peek_state(*, worktree: Path, remote: str = DEFAULT_CANONICAL_REMOTE) -> Cla
     probed = _ls_remote_state(worktree, remote)
     if probed is None:
         return EMPTY_STATE
-    _fetch_to_fetch_head(worktree, remote)
-    tip = _read_fetch_head(worktree)
-    return _parse_state_tree(worktree, tip)
+    _fetch_ref_objects(worktree, remote)
+    return _parse_state_tree(worktree, probed)
 
 
 def _commit_tree(
@@ -1635,9 +1651,10 @@ _SHOW_REF_EXIT_MISSING = 1
 
 def local_state_ref_exists(worktree: Path) -> bool:
     """Whether *this* worktree happens to hold a local `STATE_REF` (issue
-    #298): production never creates one on an ordinary read
-    (`_fetch_to_fetch_head` lands fetched objects in `FETCH_HEAD` alone),
-    nor does `export_state_bundle` below, which bundles its own private
+    #298): production never creates one on an ordinary read (`fetch_state`
+    lands fetched objects in its own per-worktree anchor, `peek_state` in an
+    unread `FETCH_HEAD` byproduct), nor does `export_state_bundle` below,
+    which bundles its own private
     `EXPORT_BUNDLE_REF` instead of `STATE_REF` (19.09.2026 REVISE findings
     1+2) -- but a foreign tool might still leave a local `STATE_REF`, and
     `delete_state_ref`, the reset step right after export, deletes it only

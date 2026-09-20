@@ -62,14 +62,14 @@ exit `2`, exactly as `specs/claim-record.spec.md` already documents.
 
 ## Fetch anchor and lineage stamp, one per worktree
 
-- [ ] [CAS-07] A fetch of a present ref never creates the shared local `refs/aco/state`; the tip lands only in `FETCH_HEAD`, then `refs/worktree/aco/state`, git's own per-worktree namespace (see E-CAS-02).
-- [ ] [CAS-08] An anchor write that itself fails refuses `cannot anchor fetched tip <sha>: <detail>`.
+- [ ] [CAS-07] A fetch of a present ref never creates the shared local `refs/aco/state`; the tip lands only in `refs/worktree/aco/state`, never read back from `FETCH_HEAD` (see E-CAS-02).
+- CAS-08 (retired 20.09.2026, issue #426): the anchor write it named is no longer a step of its own; the fetch that lands the tip in `refs/worktree/aco/state` (CAS-07) fails as one `cannot fetch` refusal.
 - [ ] [CAS-09] This worktree's own last-observed tip is stamped at `<git-dir>/aco/last-oid` -- private to it, never shared with another linked worktree of the same checkout.
 - [ ] [CAS-10] A worktree with no stamp yet at `<git-dir>/aco/last-oid` accepts any tip its first fetch reads, never refusing `... the ref may have been rewritten` (CAS-11).
 - [ ] [CAS-11] A fetched tip that is not a descendant of this worktree's own stamp refuses `refs/aco/state moved from <old> to <new> without <old> as an ancestor of the new tip; the ref may have been rewritten`.
 - [ ] [CAS-48] A lineage check that cannot run refuses `cannot check whether <old> is an ancestor of <new>: <detail>`, never "the ref may have been rewritten" (see E-CAS-07).
 - [ ] [CAS-12] A worktree that observed the ref, then fetches again after it was deleted, refuses `refs/aco/state was previously observed at <old> but is now absent; the ref may have been deleted`.
-- [ ] [CAS-49] A `land` claim observation, or `reset`, reads the remote's tip via `FETCH_HEAD` alone without touching this worktree's own anchor or lineage stamp; only a fetch that advances local state moves them.
+- [ ] [CAS-49] A `land` claim observation, or `reset`, reads the remote's current tip directly, without touching this worktree's own anchor or lineage stamp; only a fetch that advances local state moves them.
 
 ## The compare-and-swap transition and its retries
 

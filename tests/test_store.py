@@ -419,13 +419,14 @@ def test_state_ref_is_never_checked_out(bare_remote: Path, worktree: Path) -> No
     assert local_refs.stdout == ""
 
 
-def test_fetch_state_reads_via_fetch_head_without_creating_the_shared_state_ref(
+def test_fetch_state_anchors_the_tip_without_creating_the_shared_state_ref(
     bare_remote: Path, worktree: Path, tmp_path: Path
 ) -> None:
     """`fetch_state` never creates `STATE_REF` itself in the local, shared
-    ref namespace (`_fetch_to_fetch_head`'s own contract) -- it anchors the
-    fetched tip under `refs/worktree/...` instead (issue #237 finding 25),
-    git's own per-worktree namespace, never the one `STATE_REF` reserves."""
+    ref namespace -- it fetches straight into its own per-worktree anchor
+    instead (`_fetch_into_anchor`, issue #237 finding 25), git's own
+    per-worktree namespace, never the one `STATE_REF` reserves, and never
+    read back from `FETCH_HEAD`."""
     created = store.bootstrap(worktree=worktree, remote=str(bare_remote))
     reader = tmp_path / "reader"
     reader.mkdir()
@@ -435,8 +436,6 @@ def test_fetch_state_reads_via_fetch_head_without_creating_the_shared_state_ref(
 
     assert state.tip == created
     assert _git("for-each-ref", store.STATE_REF, cwd=reader).stdout == ""
-    fetch_head = (reader / ".git" / "FETCH_HEAD").read_text()
-    assert fetch_head.startswith(created)
     anchor = _git("rev-parse", store._FETCH_ANCHOR_REF, cwd=reader).stdout.strip()
     assert anchor == created
 
@@ -445,11 +444,12 @@ def test_peek_state_reads_the_current_tip_without_touching_the_anchor_or_lineage
     bare_remote: Path, worktree: Path
 ) -> None:
     """`store.peek_state` (issue #405 review/gate finding, `land`'s
-    read-only preflight): a fetch into `FETCH_HEAD` alone reads whatever
-    tip is on the remote right now -- even one another writer landed after
-    this worktree's own last observation -- without ever anchoring it or
-    stamping its own lineage, unlike `fetch_state`, which would advance
-    both to the newly read tip (CAS-49)."""
+    read-only preflight): the tip comes from `_ls_remote_state`'s own
+    answer and reads whatever tip is on the remote right now -- even one
+    another writer landed after this worktree's own last observation --
+    without ever anchoring it or stamping its own lineage, unlike
+    `fetch_state`, which would advance both to the newly read tip
+    (CAS-49)."""
     first_tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
     store.fetch_state(worktree=worktree, remote=str(bare_remote))
     anchor_before = _git("rev-parse", store._FETCH_ANCHOR_REF, cwd=worktree).stdout.strip()
@@ -466,6 +466,48 @@ def test_peek_state_reads_the_current_tip_without_touching_the_anchor_or_lineage
     assert state.tip == second_tip
     assert _git("rev-parse", store._FETCH_ANCHOR_REF, cwd=worktree).stdout.strip() == anchor_before
     assert store._read_lineage_stamp(worktree) == stamp_before
+
+
+def test_peek_state_ignores_a_foreign_fetch_that_wins_the_fetch_head_race(
+    bare_remote: Path, worktree: Path, tmp_path: Path
+) -> None:
+    """Issue #310 finding 48, reproduced: `peek_state` used to read the
+    fetched tip from `FETCH_HEAD`, the one file any `git fetch` in this
+    worktree overwrites regardless of what it fetches -- exactly what a
+    fixer agent's own concurrent `git fetch origin <branch>` did to `aco
+    rescope`, which shares this same fetch-then-read shape. A foreign fetch
+    landing between `peek_state`'s own fetch and its read of the tip left
+    `FETCH_HEAD` pointing at that branch's own tip, an ordinary commit whose
+    tree carries no `schema.toml` at all: read as the state tip, it failed
+    with `MalformedStateTreeError`. `peek_state` now reads the tip from
+    `_ls_remote_state`'s own answer instead, so a foreign fetch racing it
+    this way can no longer change what it observes.
+    """
+    created = store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    reader = tmp_path / "reader"
+    reader.mkdir()
+    _git("init", "-b", "main", cwd=reader)
+    _git("commit", "--allow-empty", "-m", "unrelated branch tip", cwd=reader)
+    foreign_tip = _git("rev-parse", "HEAD", cwd=reader).stdout.strip()
+    _git("push", str(bare_remote), f"{foreign_tip}:refs/heads/foreign", cwd=reader)
+    real_run_captured = process.run_captured
+
+    def race_a_foreign_fetch_right_after_the_stores_own(
+        command: list[str],
+    ) -> process.CapturedResult:
+        result = real_run_captured(command)
+        if command[3:5] == ["fetch", str(bare_remote)]:
+            _git("fetch", str(bare_remote), "refs/heads/foreign", cwd=reader)
+        return result
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(
+            store.process, "run_captured", race_a_foreign_fetch_right_after_the_stores_own
+        )
+
+        state = store.peek_state(worktree=reader, remote=str(bare_remote))
+
+    assert state.tip == created
 
 
 @pytest.mark.parametrize(
@@ -1123,19 +1165,19 @@ def test_git_dir_fails_loud_when_the_worktree_is_not_a_repository(tmp_path: Path
         store._git_dir(not_a_repo)
 
 
-def test_fetch_to_fetch_head_fails_loud_when_the_ref_is_missing(
+def test_fetch_into_anchor_fails_loud_when_the_ref_is_missing(
     bare_remote: Path, worktree: Path
 ) -> None:
     with pytest.raises(protocol.ClaimError, match="cannot fetch"):
-        store._fetch_to_fetch_head(worktree, str(bare_remote))
+        store._fetch_into_anchor(worktree, str(bare_remote))
 
 
-def test_fetch_to_fetch_head_never_quotes_a_stray_stdout_line(
+def test_fetch_into_anchor_never_quotes_a_stray_stdout_line(
     monkeypatch: pytest.MonkeyPatch, worktree: Path
 ) -> None:
     """A failed `git fetch` never writes its result to stdout, so a stray
     line there on a stderr-empty failure must not be mistaken for the
-    failure detail (issue #372 R1): `_fetch_to_fetch_head` reads
+    failure detail (issue #372 R1): `_fetch_into_anchor` reads
     `process.git_failure_detail_from_stderr`, not `git_failure_detail`."""
 
     def fake_run_captured(*_args: object, **_kwargs: object) -> process.CapturedResult:
@@ -1144,12 +1186,36 @@ def test_fetch_to_fetch_head_never_quotes_a_stray_stdout_line(
     monkeypatch.setattr(store.process, "run_captured", fake_run_captured)
 
     with pytest.raises(protocol.ClaimError, match=process.UNKNOWN_GIT_FAILURE):
-        store._fetch_to_fetch_head(worktree, "irrelevant-remote")
+        store._fetch_into_anchor(worktree, "irrelevant-remote")
 
 
-def test_anchor_fetched_tip_fails_loud_on_an_unresolvable_tip(worktree: Path) -> None:
-    with pytest.raises(protocol.ClaimError, match="cannot anchor fetched tip"):
-        store._anchor_fetched_tip(worktree, _PLACEHOLDER_TIP)
+def test_fetch_into_anchor_fails_loud_when_the_anchor_cannot_be_read_back(
+    monkeypatch: pytest.MonkeyPatch, bare_remote: Path, worktree: Path
+) -> None:
+    """The fetch that lands the tip in `_FETCH_ANCHOR_REF` and the
+    `rev-parse` that reads it back are two separate git calls -- a failure
+    of the second (the ref vanishing in between, a vanishingly rare race)
+    must refuse loud with git's own detail, never be read as an empty or
+    absent tip."""
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    real_run_captured = process.run_captured
+
+    def fail_only_the_readback(command: list[str]) -> process.CapturedResult:
+        if command[3:4] == ["rev-parse"]:
+            return process.CapturedResult(exit_status=128, stdout=b"", stderr=b"broken ref")
+        return real_run_captured(command)
+
+    monkeypatch.setattr(store.process, "run_captured", fail_only_the_readback)
+
+    with pytest.raises(protocol.ClaimError, match="cannot read the fetched tip"):
+        store._fetch_into_anchor(worktree, str(bare_remote))
+
+
+def test_fetch_ref_objects_fails_loud_when_the_ref_is_missing(
+    bare_remote: Path, worktree: Path
+) -> None:
+    with pytest.raises(protocol.ClaimError, match="cannot fetch"):
+        store._fetch_ref_objects(worktree, str(bare_remote))
 
 
 def test_tree_oid_fails_loud_on_an_unresolvable_commit(worktree: Path) -> None:
@@ -1571,15 +1637,15 @@ def test_claim_ages_reads_the_committer_date_of_each_claim_from_one_log_walk(
 def test_claim_ages_survives_a_gc_prune_of_the_just_fetched_history(
     bare_remote: Path, worktree: Path
 ) -> None:
-    """Issue #237 finding 25, reproduced: `_fetch_to_fetch_head` lands the
+    """Issue #237 finding 25, reproduced: an unanchored fetch lands the
     fetched commits only in `FETCH_HEAD`, which is not a ref and roots
     nothing once the fetch subprocess exits -- a `git gc --prune=now` run
     against this same checkout right after `fetch_state` returns collected
     every commit `claim_ages`'s own `git log` walk needs next, in the
     audit's reproduced incident (nothing else in this worktree references
     the state ref's history). `fetch_state` now anchors the fetched tip in
-    its own per-worktree ref namespace, so the walk survives the same
-    prune.
+    its own per-worktree ref namespace (`_fetch_into_anchor`), so the walk
+    survives the same prune.
     """
     store.bootstrap(worktree=worktree, remote=str(bare_remote))
     claim = _committed_claim(bare_remote, worktree, issue=1)
@@ -2790,7 +2856,6 @@ def test_fetch_state_git_call_count_is_independent_of_claim_count(
     assert dict(git_call_spy) == {
         "ls-remote": 1,
         "fetch": 1,
-        "update-ref": 1,
         "rev-parse": 4,
         "ls-tree": 1,
         "archive": 1,
@@ -2825,7 +2890,6 @@ def test_fetch_state_populates_items_from_the_one_existing_ls_tree_call(
     assert dict(git_call_spy) == {
         "ls-remote": 1,
         "fetch": 1,
-        "update-ref": 1,
         "rev-parse": 4,
         "ls-tree": 1,
         "archive": 1,
@@ -2860,7 +2924,6 @@ def test_status_git_call_count_is_independent_of_claim_count(
     assert dict(git_call_spy) == {
         "ls-remote": 1,
         "fetch": 1,
-        "update-ref": 1,
         "rev-parse": 4,
         "ls-tree": 1,
         "archive": 1,
