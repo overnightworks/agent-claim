@@ -13765,6 +13765,11 @@ ARGPARSE_USAGE_REFUSALS = [
         "unrecognized arguments: --nope",
         id="claim-carrying-an-unknown-flag",
     ),
+    pytest.param(
+        ["item", "new"],
+        "the following arguments are required: --title",
+        id="item-new-missing-its-own-required-flag",
+    ),
 ]
 UNREADABLE_ITEM_REFERENCE_REFUSAL = pytest.param(
     ["status", "notanumber"],
@@ -13810,6 +13815,64 @@ def test_a_refused_parse_without_json_keeps_the_usage_text(
     assert captured.out == ""
     assert captured.err.startswith("usage: aco")
     assert captured.err.endswith(f"error: {message}\n")
+
+
+def test_a_bad_choice_on_a_json_command_prints_the_invalid_usage_envelope(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A value outside an option's own `choices` is one more refusal the
+    parser raises (issue #432), and `brief` declares `--json`, so it reports
+    through OUT-06 like every other one. The sentence is argparse's own,
+    read back off stderr rather than spelled out here: its choice list is
+    argparse's wording, not this contract's."""
+    status = issue_claim.main(["brief", "42", "--step", "nope", "--json"])
+
+    captured = capsys.readouterr()
+    assert status == 2
+    assert "argument --step: invalid choice:" in captured.err
+    _assert_json_refusal_object(captured.err, captured.out, reason="invalid_usage")
+
+
+def test_an_abbreviated_json_flag_asks_for_the_envelope_too(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`--jso` is `--json` wherever no other option of that command shares
+    the prefix, so argparse accepts it and the refusal answers in the shape
+    that caller asked for (issue #432)."""
+    status = issue_claim.main(["release", "42", "--jso"])
+
+    captured = capsys.readouterr()
+    assert status == 2
+    _assert_json_refusal_object(captured.err, captured.out, reason="invalid_usage")
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        pytest.param(["bootstrap", "--json"], id="bootstrap-declaring-no-json-mode"),
+        pytest.param(
+            ["register", "--provider", "nope", "--json"], id="register-naming-an-unknown-provider"
+        ),
+        pytest.param(["item", "--json"], id="item-naming-no-subcommand"),
+        pytest.param(["nope", "--json"], id="a-command-name-the-parser-does-not-know"),
+        pytest.param(["--json"], id="no-command-at-all"),
+    ],
+)
+def test_a_json_flag_no_command_declares_never_reaches_the_envelope(
+    arguments: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """OUT-06's envelope belongs to the commands that declare `--json`
+    (issue #432): `bootstrap` and `register` never offered the mode, and a
+    missing subcommand, an unknown command name, or no command at all never
+    chose one, so each keeps argparse's own usage block with stdout empty --
+    no object a script could mistake for an answer."""
+    with pytest.raises(SystemExit) as exited:
+        issue_claim.main(arguments)
+
+    captured = capsys.readouterr()
+    assert exited.value.code == 2
+    assert captured.out == ""
+    assert captured.err.startswith("usage: aco")
 
 
 PARENT_ISSUE = 79

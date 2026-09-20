@@ -401,12 +401,25 @@ def test_serve_refuses_together_with_html(monkeypatch: pytest.MonkeyPatch, tmp_p
         issue_claim.main(["--repo", "example/agent-claim", "board", "--serve", "--html"])
 
 
-def test_serve_refuses_together_with_json(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """The parser refuses the pair before `--serve` binds a port; the shape
-    that refusal takes under `--json` is OUT-06's, pinned once elsewhere."""
-    _single_item_board_environment(monkeypatch, tmp_path)
+def _refuse_to_bind(*arguments: object, **keywords: object) -> None:
+    raise AssertionError("board --serve bound a port despite the refused flag pair")
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "board", "--serve", "--json"]) == 2
+
+def test_serve_refuses_together_with_json_before_binding_a_port(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The parser refuses the pair before `--serve` reaches a socket at all,
+    and under `--json` that refusal is OUT-06's envelope (issue #432) next
+    to the same sentence stderr prints."""
+    _single_item_board_environment(monkeypatch, tmp_path)
+    monkeypatch.setattr(board_serve._BoardHTTPServer, "__init__", _refuse_to_bind)
+
+    exit_code = issue_claim.main(["--repo", "example/agent-claim", "board", "--serve", "--json"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert captured.err == "ERROR: argument --json: not allowed with argument --serve\n"
+    _assert_json_refusal_object(captured.err, captured.out, reason="invalid_usage")
 
 
 def test_board_serve_dispatches_through_the_write_session_and_prints_the_url(
