@@ -3,9 +3,10 @@
 Each parametrized case drives `analyze` -- the module's own real entry point for one
 rule -- against a minimal fixture spec built from `GREEN_SPEC` by flipping exactly the
 one detail that rule polices; the fixture stays green everywhere else, so a red case
-proves that rule alone fired. A last, unparametrized test drives the same `analyze`
-over the repository's own `specs/` tree: every one of its 23 files must already be
-clean under this gate.
+proves that rule alone fired, and every rule also carries a green case (`GREEN_SPEC`
+itself) proving it stays silent on clean text. A last, unparametrized test drives the
+same `analyze` over the repository's own `specs/` tree: every one of its 23 files must
+already be clean under this gate.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ import importlib.util
 import sys
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import Any, NamedTuple
 
 import pytest
 
@@ -69,6 +70,19 @@ exit 0
 ```
 """
 
+
+def _line_number(text: str, needle: str) -> int:
+    """The 1-based line number of the first line of *text* containing *needle*."""
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        if needle in line:
+            return lineno
+    raise AssertionError(f"{needle!r} not found in fixture text")
+
+
+_CRITERION_LINE_TEXT = "[SAMPLE-01] `sample` prints `ok`, exit `0` (see E-SAMPLE-01)."
+CRITERION_LINE = _line_number(GREEN_SPEC, _CRITERION_LINE_TEXT)
+EXAMPLE_HEADING_LINE = _line_number(GREEN_SPEC, "### E-SAMPLE-01")
+
 _LONG_CRITERION = "`sample` prints `ok`, exit `0` (see E-SAMPLE-01), " + "x" * 200 + "."
 RED_CRITERION_LENGTH = GREEN_SPEC.replace(
     "`sample` prints `ok`, exit `0` (see E-SAMPLE-01).", _LONG_CRITERION
@@ -86,6 +100,14 @@ RED_IMPLEMENTATION_NAME = GREEN_SPEC.replace(
 )
 RED_MISSING_SETUP = GREEN_SPEC.replace("Setup: bare-remote\n\n", "")
 
+# `see` reference shorthand (issue #385 review): a keyword anywhere in the line, a `/`
+# shorthand sharing a prefix, a `..` range, and a comma list, each proven against the
+# criterion's own valid `SAMPLE-01` alongside one deliberately unresolved id.
+RED_SEE_ANYWHERE_IN_LINE = GREEN_SPEC.replace("(see E-SAMPLE-01)", "(context; see E-SAMPLE-99)")
+RED_SEE_SLASH_SHORTHAND = GREEN_SPEC.replace("(see E-SAMPLE-01)", "(see SAMPLE-01/99)")
+RED_SEE_RANGE_SHORTHAND = GREEN_SPEC.replace("(see E-SAMPLE-01)", "(see SAMPLE-01..03)")
+RED_SEE_COMMA_LIST = GREEN_SPEC.replace("(see E-SAMPLE-01)", "(see E-SAMPLE-01, E-SAMPLE-02)")
+
 
 def _analyze_text(tmp_path: Path, text: str) -> list[Any]:
     fixture = tmp_path / "sample.spec.md"
@@ -93,73 +115,165 @@ def _analyze_text(tmp_path: Path, text: str) -> list[Any]:
     return analyze([load_spec_file(fixture)])
 
 
-def test_green_fixture_has_no_findings(tmp_path: Path) -> None:
-    assert _analyze_text(tmp_path, GREEN_SPEC) == []
-
-
 def test_unresolved_behavior_table_cell_is_caught(tmp_path: Path) -> None:
     """A blank line always separates ``## Behavior table`` from its rows in real specs; the
     row scan must not stop there before ever reaching a cell (regression for issue #385)."""
     red_text = GREEN_SPEC.replace("| default | SAMPLE-01 |", "| default | SAMPLE-99 |")
     assert red_text != GREEN_SPEC
+    expected_line = _line_number(red_text, "| default | SAMPLE-99 |")
 
     findings = _analyze_text(tmp_path, red_text)
 
-    assert {f.rule.value for f in findings} == {"unresolved_reference"}
-    assert any("SAMPLE-99" in f.detail for f in findings)
+    assert [(f.rule.value, f.line) for f in findings] == [("unresolved_reference", expected_line)]
+    assert "SAMPLE-99" in findings[0].detail
+
+
+class _ExpectedFinding(NamedTuple):
+    rule: str
+    line: int
+    detail_substring: str
+
+
+RULE_FAMILY_CASES: tuple[tuple[str, str, tuple[_ExpectedFinding, ...]], ...] = (
+    (
+        "criterion_length:red",
+        RED_CRITERION_LENGTH,
+        (_ExpectedFinding("criterion_length", CRITERION_LINE, "> 200"),),
+    ),
+    ("criterion_length:green", GREEN_SPEC, ()),
+    (
+        "id_sequence:red",
+        RED_ID_SEQUENCE,
+        (_ExpectedFinding("id_sequence", 1, "SAMPLE-02 is missing"),),
+    ),
+    ("id_sequence:green", GREEN_SPEC, ()),
+    (
+        "unresolved_reference:red",
+        RED_UNRESOLVED_REFERENCE,
+        (_ExpectedFinding("unresolved_reference", CRITERION_LINE, "E-SAMPLE-99"),),
+    ),
+    ("unresolved_reference:green", GREEN_SPEC, ()),
+    (
+        "missing_section:red",
+        RED_MISSING_SECTION,
+        (_ExpectedFinding("missing_section", 1, "no `## Never` section"),),
+    ),
+    ("missing_section:green", GREEN_SPEC, ()),
+    (
+        "implementation_name:red",
+        RED_IMPLEMENTATION_NAME,
+        (_ExpectedFinding("implementation_name", CRITERION_LINE, "render_output()"),),
+    ),
+    ("implementation_name:green", GREEN_SPEC, ()),
+    (
+        "missing_setup:red",
+        RED_MISSING_SETUP,
+        (_ExpectedFinding("missing_setup", EXAMPLE_HEADING_LINE, "no `Setup:` line"),),
+    ),
+    ("missing_setup:green", GREEN_SPEC, ()),
+)
 
 
 @pytest.mark.parametrize(
-    ("rule", "red_text", "detail_substring"),
+    ("text", "expected"),
+    [pytest.param(text, expected, id=case_id) for case_id, text, expected in RULE_FAMILY_CASES],
+)
+def test_rule_family_red_and_green_cases(
+    tmp_path: Path, text: str, expected: tuple[_ExpectedFinding, ...]
+) -> None:
+    findings = _analyze_text(tmp_path, text)
+
+    assert [(f.rule.value, f.line) for f in findings] == [(e.rule, e.line) for e in expected]
+    for finding, expectation in zip(findings, expected, strict=True):
+        assert expectation.detail_substring in finding.detail
+        assert finding.file == "sample.spec.md"
+
+
+def _criterion_with_snippet(snippet: str) -> str:
+    return GREEN_SPEC.replace(
+        "`sample` prints `ok`, exit `0` (see E-SAMPLE-01).",
+        f"`sample` prints `ok`, mentions {snippet}, exit `0` (see E-SAMPLE-01).",
+    )
+
+
+# The `implementation_name` detector table from the issue #385 review: seven bare
+# implementation shapes that must be flagged, and five backtick-quoted house-style
+# literals that must not be.
+DETECTOR_TABLE: tuple[tuple[str, str, bool], ...] = (
+    ("leading_underscore_snake_case", "_git_run", True),
+    ("python_file_name", "checkout.py", True),
+    ("call_with_parens", "hook_command_paths()", True),
+    ("dotted_attribute_upper_snake", "HookToolEffect.COMMAND_TEXT", True),
+    ("plain_snake_case", "load_brief_config", True),
+    ("dotted_attribute_lower_snake", "store.claim_lifecycle", True),
+    ("long_snake_case", "test_run_starts_the_session", True),
+    ("backticked_command_and_flag", "`aco claim --scope`", False),
+    ("backticked_contract_file", "`board.toml`", False),
+    ("backticked_ref_name", "`refs/aco/state`", False),
+    ("backticked_json_flag", "`--json`", False),
+    ("backticked_trailer_key", "`Work-Item:`", False),
+)
+
+
+@pytest.mark.parametrize(
+    ("snippet", "expected_flagged"),
+    [pytest.param(snippet, flagged, id=case_id) for case_id, snippet, flagged in DETECTOR_TABLE],
+)
+def test_implementation_name_detector_table(
+    tmp_path: Path, snippet: str, expected_flagged: bool
+) -> None:
+    findings = _analyze_text(tmp_path, _criterion_with_snippet(snippet))
+
+    flagged = any(f.rule.value == "implementation_name" for f in findings)
+
+    assert flagged is expected_flagged
+
+
+REFERENCE_SHORTHAND_CASES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("see_anywhere_in_line_not_only_after_paren", RED_SEE_ANYWHERE_IN_LINE, ("E-SAMPLE-99",)),
+    ("see_slash_shorthand_shares_prefix", RED_SEE_SLASH_SHORTHAND, ("SAMPLE-99",)),
+    ("see_range_shorthand_expands_every_id", RED_SEE_RANGE_SHORTHAND, ("SAMPLE-02", "SAMPLE-03")),
+    ("see_comma_list_checks_each_id", RED_SEE_COMMA_LIST, ("E-SAMPLE-02",)),
+)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected_details"),
     [
-        pytest.param(
-            "criterion_length",
-            RED_CRITERION_LENGTH,
-            "> 200",
-            id="criterion_length",
-        ),
-        pytest.param(
-            "id_sequence",
-            RED_ID_SEQUENCE,
-            "SAMPLE-02 is missing",
-            id="id_sequence",
-        ),
-        pytest.param(
-            "unresolved_reference",
-            RED_UNRESOLVED_REFERENCE,
-            "E-SAMPLE-99",
-            id="unresolved_reference",
-        ),
-        pytest.param(
-            "missing_section",
-            RED_MISSING_SECTION,
-            "no `## Never` section",
-            id="missing_section",
-        ),
-        pytest.param(
-            "implementation_name",
-            RED_IMPLEMENTATION_NAME,
-            "render_output()",
-            id="implementation_name",
-        ),
-        pytest.param(
-            "missing_setup",
-            RED_MISSING_SETUP,
-            "no `Setup:` line",
-            id="missing_setup",
-        ),
+        pytest.param(text, details, id=case_id)
+        for case_id, text, details in REFERENCE_SHORTHAND_CASES
     ],
 )
-def test_red_fixture_is_caught_by_its_own_rule_only(
-    tmp_path: Path, rule: str, red_text: str, detail_substring: str
+def test_see_reference_shorthand_is_resolved(
+    tmp_path: Path, text: str, expected_details: tuple[str, ...]
 ) -> None:
-    assert red_text != GREEN_SPEC, "fixture must actually differ from the green baseline"
+    findings = _analyze_text(tmp_path, text)
 
-    findings = _analyze_text(tmp_path, red_text)
+    assert {f.rule.value for f in findings} == {"unresolved_reference"}
+    assert len(findings) == len(expected_details)
+    assert all(f.line == CRITERION_LINE for f in findings)
+    for expected_detail in expected_details:
+        assert any(expected_detail in f.detail for f in findings)
 
-    assert {f.rule.value for f in findings} == {rule}
-    assert any(detail_substring in f.detail for f in findings)
-    assert all(f.file == "sample.spec.md" for f in findings)
+
+def test_well_formed_exemption_line_parses(tmp_path: Path) -> None:
+    ledger = tmp_path / "exemptions.txt"
+    ledger.write_text("sample.spec.md:1:criterion_length — accepted for now\n", encoding="utf-8")
+
+    exemptions, malformed = spec_lint.load_exemptions(ledger)
+
+    assert exemptions == {"sample.spec.md:1:criterion_length": "accepted for now"}
+    assert malformed == []
+
+
+def test_exemption_line_without_a_reason_is_malformed(tmp_path: Path) -> None:
+    ledger = tmp_path / "exemptions.txt"
+    ledger.write_text("sample.spec.md:1:criterion_length\n", encoding="utf-8")
+
+    exemptions, malformed = spec_lint.load_exemptions(ledger)
+
+    assert exemptions == {}
+    assert [(f.rule.value, f.line) for f in malformed] == [("malformed_exemption", 1)]
 
 
 def test_repository_specs_are_clean_under_the_gate() -> None:
