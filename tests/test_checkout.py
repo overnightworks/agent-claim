@@ -1232,6 +1232,26 @@ def test_slug_from_title_refuses_when_nothing_survives() -> None:
         checkout.slug_from_title("!!! ??? ...")
 
 
+def test_validate_slug_accepts_a_value_matching_the_derived_shape() -> None:
+    assert checkout.validate_slug("fresh-slug-42") == "fresh-slug-42"
+
+
+@pytest.mark.parametrize(
+    "slug",
+    [
+        pytest.param("Fresh-Slug", id="uppercase"),
+        pytest.param("-fresh-slug", id="leading-hyphen"),
+        pytest.param("fresh-slug-", id="trailing-hyphen"),
+        pytest.param("fresh--slug", id="doubled-hyphen"),
+        pytest.param("a" * 41, id="too-long"),
+        pytest.param("", id="empty"),
+    ],
+)
+def test_validate_slug_refuses_a_value_the_derived_rule_would_never_produce(slug: str) -> None:
+    with pytest.raises(ClaimError, match="--slug must be"):
+        checkout.validate_slug(slug)
+
+
 @pytest.mark.parametrize(
     ("environ", "prefix"),
     [
@@ -1351,6 +1371,25 @@ def test_resolve_or_create_worktree_refuses_a_worktree_on_a_different_branch(
 
     with pytest.raises(ClaimError, match="exists on branch 'codex/issue-9-old-slug'"):
         checkout.resolve_or_create_worktree(worktree, "codex/issue-9-widget", remote="origin")
+
+
+def test_resolve_or_create_worktree_refuses_a_worktree_from_a_different_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #322 review finding 2: a clean linked worktree on the exact
+    same branch name, but belonging to an entirely different repository,
+    must never be adopted as this item's own -- only its own repository's
+    common git directory earns reuse."""
+    caller = _scratch_git_repository(tmp_path)
+    foreign_root = tmp_path / "foreign"
+    foreign_root.mkdir()
+    _foreign_main, foreign_worktree = _repo_with_linked_worktree(foreign_root)
+    monkeypatch.chdir(caller)
+
+    with pytest.raises(ClaimError, match="belongs to a different repository"):
+        checkout.resolve_or_create_worktree(
+            foreign_worktree, "codex/issue-1-widget", remote="origin"
+        )
 
 
 def test_worktree_on_branch_finds_the_one_matching_path(tmp_path: Path) -> None:

@@ -263,23 +263,30 @@ def _worktree_repair_instruction(repair: WorktreeRepair, *, branch: str | None) 
 
 
 def _validate_worktree_branch(
-    branch: str, *, repair: WorktreeRepair = WorktreeRepair.CREATE
+    branch: str,
+    *,
+    repair: WorktreeRepair = WorktreeRepair.CREATE,
+    directory: Path | None = None,
 ) -> None:
     """Require an isolated non-main worktree checked out on `branch`, read
-    from the calling process's own cwd -- `claim`'s own precondition, since
-    a fresh claim is created by literally standing in the worktree it
-    claims. `rescope` no longer shares this (issue #314): it judges an
-    already-resolved `PathCheckout` instead, via `_refuse_shared_checkout`
-    below, so a rescope invoked from a foreign cwd is not silently judged by
-    the wrong checkout.
+    from `directory` via `-C` when given (issue #322: `start`'s own resolved
+    worktree, never a process-wide `os.chdir`) or the calling process's own
+    cwd otherwise -- `claim`'s own precondition, since a fresh claim is
+    created by literally standing in the worktree it claims. `rescope` no
+    longer shares this (issue #314): it judges an already-resolved
+    `PathCheckout` instead, via `_refuse_shared_checkout` below, so a
+    rescope invoked from a foreign cwd is not silently judged by the wrong
+    checkout.
     """
-    if is_default_branch(branch):
+    if is_default_branch(branch, directory=directory):
         raise ClaimError(
             f"{ISOLATED_NON_MAIN_BRANCH_REFUSAL}{_worktree_repair_instruction(repair, branch=None)}"
         )
-    current = _git_output(["branch", "--show-current"])
-    git_directory = Path(_git_output(["rev-parse", "--git-dir"])).resolve()
-    common_directory = Path(_git_output(["rev-parse", "--git-common-dir"])).resolve()
+    current = _git_output(["branch", "--show-current"], directory=directory)
+    git_directory = Path(_git_output(["rev-parse", "--git-dir"], directory=directory)).resolve()
+    common_directory = Path(
+        _git_output(["rev-parse", "--git-common-dir"], directory=directory)
+    ).resolve()
     if current != branch:
         raise ClaimError(f"claim branch {branch!r} does not match checkout branch {current!r}")
     if git_directory == common_directory:
@@ -405,15 +412,18 @@ def _dirty_paths(status: str) -> tuple[str, ...]:
     return tuple(line[3:] for line in status.splitlines() if line)
 
 
-def _validate_checkout(request: ClaimRequest) -> None:
-    head = _git_output(["rev-parse", "HEAD"])
+def _validate_checkout(request: ClaimRequest, *, directory: Path | None = None) -> None:
+    """`claim`'s own preconditions against `directory` via `-C` when given
+    (issue #322: `start`'s own resolved worktree, never a process-wide
+    `os.chdir`) or the calling process's own cwd otherwise."""
+    head = _git_output(["rev-parse", "HEAD"], directory=directory)
     if head != request.base:
         raise ClaimError(
             f"claim base {request.base} does not match checkout HEAD {head}; "
             "omit --base to use checkout HEAD"
         )
-    _validate_worktree_branch(request.branch)
-    dirty = _git_output(["status", "--porcelain"])
+    _validate_worktree_branch(request.branch, directory=directory)
+    dirty = _git_output(["status", "--porcelain"], directory=directory)
     if dirty:
         named = named_with_overflow_count(_dirty_paths(dirty))
         raise ClaimError(f"claim must be acquired before the first worktree edit: {named}")
@@ -464,22 +474,23 @@ def default_branch_name(*, directory: Path | None = None) -> str | None:
     return ref.removeprefix("refs/remotes/origin/")
 
 
-def is_default_branch(branch: str) -> bool:
+def is_default_branch(branch: str, *, directory: Path | None = None) -> bool:
     """Whether `branch` is the repository's default branch (issue #238):
     the name `origin/HEAD` resolves to, or the historical `{"main", "master"}`
     guess when a repository has no recorded `origin/HEAD`.
 
     `claim`'s own worktree precondition (`_validate_worktree_branch`) alone:
-    always read from the calling process's own cwd, since a fresh claim is
-    created by literally standing in the worktree it claims -- there is no
-    attacker-reachable payload location to spoof here, so the historical
-    guess stays an accepted risk (issue #238) this function keeps
+    read from `directory` via `-C` when given (issue #322: `start`'s own
+    resolved worktree) or the calling process's own cwd otherwise, since a
+    fresh claim is created by literally standing in the worktree it claims
+    -- there is no attacker-reachable payload location to spoof here, so the
+    historical guess stays an accepted risk (issue #238) this function keeps
     unchanged. `protect` and `rescope` judge a resolved checkout's default
     branch directly through `default_branch_name(directory=...)` instead
     (issue #314 gate G4) and deny outright when it cannot be resolved,
     rather than share this guess.
     """
-    resolved = default_branch_name()
+    resolved = default_branch_name(directory=directory)
     if resolved is not None:
         return branch == resolved
     return branch in DEFAULT_BRANCH_FALLBACK
@@ -665,6 +676,28 @@ def slug_from_title(title: str) -> str:
     return slug
 
 
+# The shape `slug_from_title` always produces (issue #322 review finding 3):
+# an explicit `--slug` value is held to the identical rule rather than used
+# verbatim, since it lands unescaped in a worktree path and a branch name.
+_SLUG_SHAPE_RULE = (
+    "lowercase letters, digits, and single '-' separators only, at most 40 characters, "
+    "never leading or trailing '-'"
+)
+_SLUG_SHAPE_PATTERN = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*")
+
+
+def validate_slug(slug: str) -> str:
+    """`slug`, refused by name when it does not match the shape
+    `slug_from_title` itself always produces (issue #322 review finding 3):
+    `--slug` is never sanitized the way a derived slug is, so a value with
+    uppercase letters, punctuation, or a leading/trailing/doubled `-` is
+    refused outright rather than silently accepted into a worktree path and
+    branch name a derived slug could never produce."""
+    if len(slug) > _SLUG_MAX_LENGTH or _SLUG_SHAPE_PATTERN.fullmatch(slug) is None:
+        raise ClaimError(f"--slug must be {_SLUG_SHAPE_RULE}")
+    return slug
+
+
 def branch_prefix_for_identity() -> str:
     """`start`'s own branch prefix (issue #322) -- my inclination, not a
     settled decision: read from the same identity signals `_resolved_agent`
@@ -723,11 +756,42 @@ def create_linked_worktree(path: Path, *, branch: str, remote: str) -> None:
 _CHOOSE_A_DIFFERENT_WORKTREE_REPAIR = "remove it, or pass --slug to choose a different worktree"
 
 
+def _refuse_foreign_worktree(path: Path, existing: PathCheckout) -> None:
+    """Refuse to resume `existing` -- already resolved at `path` -- unless
+    it is a linked worktree of this same repository (issue #322 review
+    finding 2): the caller's own common git directory, read from its own
+    cwd since `resolve_or_create_worktree` always runs from the repository
+    it is building a sibling worktree for, must equal `existing`'s; a clean
+    linked worktree from a different repository that merely happens to sit
+    on the same branch name must never be adopted as this item's own.
+    """
+    if existing.toplevel != path.resolve():
+        raise ClaimError(
+            f"worktree {path} is not a checkout root by itself (its own toplevel is "
+            f"{existing.toplevel}); {_CHOOSE_A_DIFFERENT_WORKTREE_REPAIR}"
+        )
+    if existing.kind is not CheckoutKind.LINKED_WORKTREE:
+        raise ClaimError(
+            f"worktree {path} is a repository's own main checkout, not a linked worktree; "
+            f"{_CHOOSE_A_DIFFERENT_WORKTREE_REPAIR}"
+        )
+    own_common_directory = Path(
+        _git_output(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+    ).resolve()
+    if existing.common_directory != own_common_directory:
+        raise ClaimError(
+            f"worktree {path} belongs to a different repository; "
+            f"{_CHOOSE_A_DIFFERENT_WORKTREE_REPAIR}"
+        )
+
+
 def resolve_or_create_worktree(path: Path, branch: str, *, remote: str) -> None:
     """Create `path`'s linked worktree and `branch` when nothing sits there
     yet, or validate a prior `start`'s own worktree for resume (issue #322):
     refuses by name when `branch` is already taken by something that is not
-    this worktree, or when a worktree already at `path` is dirty."""
+    this worktree, when `path` resolves to a checkout this repository does
+    not own (`_refuse_foreign_worktree`), or when a worktree already at
+    `path` is dirty."""
     existing = resolve_path_checkout(path)
     if existing is None:
         if branch_exists(branch):
@@ -737,6 +801,7 @@ def resolve_or_create_worktree(path: Path, branch: str, *, remote: str) -> None:
             )
         create_linked_worktree(path, branch=branch, remote=remote)
         return
+    _refuse_foreign_worktree(path, existing)
     if existing.branch != branch:
         raise ClaimError(
             f"worktree {path} exists on branch {existing.branch!r}, not {branch!r}; "

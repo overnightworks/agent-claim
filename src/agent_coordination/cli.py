@@ -9,7 +9,6 @@ import sys
 import uuid
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, date, datetime
 from enum import StrEnum
@@ -58,7 +57,7 @@ START_DESCRIPTION = (
 )
 START_OUT_OF_ORDER_HELP = (
     "refuses a claim without a reason when a higher-priority actionable item is free or "
-    "an open blocker remains; records why"
+    "an open blocker remains; the reason is never stored, only downgrading the check"
 )
 
 
@@ -218,21 +217,25 @@ def _claim_cost_line(
     return f"{n} of {total} versioned files ({percent}%); {_touch_summary(own_scope, touches)}"
 
 
-def _resolved_claim_branch(arguments: argparse.Namespace) -> str:
-    """`claim`'s own branch: `--branch` when given, else the current
-    checkout branch -- the one resolution `_request` and `_cmd_claim` (issue
-    #337, which needs it before `_request` builds a full request) both bind
-    to, so it stays a single owner rather than two copies of the same git
-    call and validation."""
+def _resolved_claim_branch(arguments: argparse.Namespace, *, directory: Path | None = None) -> str:
+    """`claim`'s own branch: `--branch` when given, else `directory`'s
+    checked-out branch, read via `-C` when given (issue #322: `start`'s own
+    resolved worktree, never a process-wide `os.chdir`) or the calling
+    process's own cwd otherwise -- the one resolution `_request` and
+    `_cmd_claim` (issue #337, which needs it before `_request` builds a full
+    request) both bind to, so it stays a single owner rather than two copies
+    of the same git call and validation."""
     branch = (
-        checkout._git_output(["branch", "--show-current"])
+        checkout._git_output(["branch", "--show-current"], directory=directory)
         if arguments.branch is None
         else arguments.branch
     )
     return protocol._valid_branch({"branch": branch})
 
 
-def _request(arguments: argparse.Namespace) -> protocol.ClaimRequest:
+def _request(
+    arguments: argparse.Namespace, *, directory: Path | None = None
+) -> protocol.ClaimRequest:
     """The validated `ClaimRequest` `claim` submits, `arguments.scope`
     bound as-is when given. Omitted -- issue mode only (issue #337); lane
     mode still refuses it, `_cmd_claim`'s own first check -- it binds the
@@ -241,10 +244,14 @@ def _request(arguments: argparse.Namespace) -> protocol.ClaimRequest:
     this request's scope ever reaches a wide-scope check or a write."""
     agent = protocol._outbound_text(checkout._resolved_agent(arguments.agent), "agent", maximum=128)
     role = protocol._outbound_text(arguments.role, "role", maximum=64)
-    base = checkout._git_output(["rev-parse", "HEAD"]) if arguments.base is None else arguments.base
+    base = (
+        checkout._git_output(["rev-parse", "HEAD"], directory=directory)
+        if arguments.base is None
+        else arguments.base
+    )
     if protocol.COMMIT_PATTERN.fullmatch(base) is None:
         raise protocol.ClaimError("base must be a full lowercase commit SHA")
-    branch = _resolved_claim_branch(arguments)
+    branch = _resolved_claim_branch(arguments, directory=directory)
     issue = _optional_issue_number(arguments.issue)
     identity = _resolved_identity(issue, branch)
     claim_id = arguments.claim_id or uuid.uuid4().hex
@@ -265,7 +272,7 @@ def _request(arguments: argparse.Namespace) -> protocol.ClaimRequest:
         whole_reason=whole_reason,
         resource=resource,
     )
-    checkout._validate_checkout(request)
+    checkout._validate_checkout(request, directory=directory)
     return request
 
 
@@ -1147,25 +1154,22 @@ def _claim_json(
     return 0
 
 
-def _release_json(
-    released: protocol.ActiveClaim,
-    agent: str,
-    role: str | None,
-    outcome: protocol.ReleaseOutcome,
-    landing: ReleaseLanding | None,
-) -> None:
+def _release_json(report: ReleaseReport, landing: ReleaseLanding | None) -> None:
+    released = report.selected
     payload: dict[str, object] = {
         **_identity_json(released.identity),
         "branch": released.branch,
         "claim_id": released.claim_id,
-        "agent": agent,
-        "role": role if role is not None else released.role,
-        "reason": outcome.reason,
+        "agent": report.agent,
+        "role": report.role if report.role is not None else released.role,
+        "reason": report.outcome.reason,
     }
     if landing is not None:
         payload["freed"] = list(landing.freed)
         payload["next"] = None if landing.next_item is None else landing.next_item.number
         payload["parent_closable"] = landing.parent_closable
+    if report.worktree is not None:
+        payload["worktree"] = worktree_cleanup_outcome_text(report.worktree)
     print(json.dumps(payload))
 
 
@@ -1381,14 +1385,17 @@ def _validated_dependencies(
     return validated
 
 
-def _resolve_toplevel() -> Path:
+def _resolve_toplevel(*, directory: Path | None = None) -> Path:
     """The checkout's toplevel, for every command that resolves the
     repository's board configuration (#150) -- its priority ladder, its idea
     label, its canonical remote, and the body pin it is still checked
-    against. Without a working tree there is no configuration to read, so
-    the command refuses rather than running on guessed defaults (#178)."""
+    against. Read from `directory` via `-C` when given (issue #322: `start`'s
+    own resolved worktree, never a process-wide `os.chdir`) or the calling
+    process's own cwd otherwise. Without a working tree there is no
+    configuration to read, so the command refuses rather than running on
+    guessed defaults (#178)."""
     try:
-        return Path(checkout._git_output(["rev-parse", "--show-toplevel"]))
+        return Path(checkout._git_output(["rev-parse", "--show-toplevel"], directory=directory))
     except protocol.ClaimError as error:
         raise protocol.ClaimUnavailableError(
             "this command reads the repository's body contract from "
@@ -3085,13 +3092,16 @@ def _claim_history(worktree: Path, state: protocol.ClaimState) -> _ClaimHistory:
     )
 
 
-def _store_observation() -> tuple[Path, str, protocol.ClaimState]:
+def _store_observation(*, directory: Path | None = None) -> tuple[Path, str, protocol.ClaimState]:
     """One fetch of `refs/aco/state` for a store command -- forge-free by
-    itself (issue #245). A command that also needs a forge resolves and
+    itself (issue #245). `directory`, when given (issue #322: `start`'s own
+    resolved worktree, never a process-wide `os.chdir`), is the worktree
+    this observation is anchored to and fetched into; the calling process's
+    own cwd otherwise. A command that also needs a forge resolves and
     Erwartung-6-checks that target separately, the first time its session's
     `forge` is actually asked for."""
-    canonical_remote = _canonical_remote_name(_resolve_toplevel())
-    worktree = Path.cwd()
+    canonical_remote = _canonical_remote_name(_resolve_toplevel(directory=directory))
+    worktree = Path.cwd() if directory is None else directory
     return worktree, canonical_remote, store.fetch_state(worktree=worktree, remote=canonical_remote)
 
 
@@ -4468,14 +4478,18 @@ def _reject_scope_mismatch(
         raise protocol.ClaimUnavailableError(CLAIM_SCOPE_MISMATCH)
 
 
-def _scope_versioning(scope: tuple[str, ...], whole_reason: str | None) -> ScopeVersioning:
+def _scope_versioning(
+    scope: tuple[str, ...], whole_reason: str | None, *, directory: Path | None = None
+) -> ScopeVersioning:
     """`claim`'s local, forge-free scope checks (issue #207's comma guard,
     the wide-scope width gate) against the real checkout, run once the
     requested scope is final -- whether it came from `--scope` or was
-    derived from the item's own body."""
-    versioned = checkout.versioned_paths()
+    derived from the item's own body. Read from `directory` via `-C` when
+    given (issue #322: `start`'s own resolved worktree, never a
+    process-wide `os.chdir`) or the calling process's own cwd otherwise."""
+    versioned = checkout.versioned_paths(directory=directory)
     _reject_ungrounded_comma_scope(scope, versioned, flag="--scope")
-    n, total, share = _reject_wide_scope(scope, versioned, whole_reason)
+    n, total, share = _reject_wide_scope(scope, versioned, whole_reason, directory=directory)
     return ScopeVersioning(n, total, share)
 
 
@@ -4537,8 +4551,10 @@ def _claim_target_checks(
     return checks, target_issue, replayed
 
 
-def _cmd_claim(parsed: argparse.Namespace, session: _WriteSession) -> int:
-    requested = _request(parsed)
+def _cmd_claim(
+    parsed: argparse.Namespace, session: _WriteSession, *, directory: Path | None = None
+) -> int:
+    requested = _request(parsed, directory=directory)
     if isinstance(requested.identity, protocol.LaneIdentity) and not requested.scope:
         raise protocol.ClaimUnavailableError(LANE_CLAIM_SCOPE_REQUIRED)
     open_by_number: dict[int, board.Issue] | None = None
@@ -4547,20 +4563,20 @@ def _cmd_claim(parsed: argparse.Namespace, session: _WriteSession) -> int:
         # local shape checks run first, exactly as before this field
         # existed, so a comma or width refusal never touches the store or
         # resolves the repository toplevel.
-        versioning = _scope_versioning(requested.scope, requested.whole_reason)
-        worktree, canonical_remote, observed = _store_observation()
+        versioning = _scope_versioning(requested.scope, requested.whole_reason, directory=directory)
+        worktree, canonical_remote, observed = _store_observation(directory=directory)
         _require_state_ref(observed)
-        storage = _board_config(_resolve_toplevel()).storage
+        storage = _board_config(_resolve_toplevel(directory=directory)).storage
     else:
         # `--scope` was omitted in issue mode: the item's own scope has to
         # come from the store, and usually the forge, before it can even be
         # shape-checked -- both observed exactly once, here, so an omitted-
         # scope claim never fetches either a second time (issue #337).
-        worktree, canonical_remote, observed = _store_observation()
+        worktree, canonical_remote, observed = _store_observation(directory=directory)
         _require_state_ref(observed)
-        storage = _board_config(_resolve_toplevel()).storage
+        storage = _board_config(_resolve_toplevel(directory=directory)).storage
         requested, open_by_number = _resolved_claim_request(requested, observed, session, storage)
-        versioning = _scope_versioning(requested.scope, requested.whole_reason)
+        versioning = _scope_versioning(requested.scope, requested.whole_reason, directory=directory)
     checks, target_issue, replayed = _claim_target_checks(
         session, requested, observed, _ClaimTargetContext(storage, worktree, open_by_number)
     )
@@ -4594,28 +4610,31 @@ def _cmd_claim(parsed: argparse.Namespace, session: _WriteSession) -> int:
     return 0
 
 
-@contextmanager
-def _process_directory(path: Path):
-    """Run the wrapped block with this process's own cwd temporarily at
-    `path` (issue #322): `start` acquires its claim inside the worktree it
-    just created or resumed exactly as `aco claim` does, and `aco claim`'s
-    own preconditions read the calling process's cwd by design -- a fresh
-    claim is created by literally standing in the worktree it claims
-    (`checkout._validate_worktree_branch`'s own docstring) -- so this is
-    reused here instead of threading a `directory` parameter through every
-    one of `_cmd_claim`'s own helpers. Always restored, even on failure, so
-    `start`'s own caller is never left standing anywhere but where it
-    started."""
-    previous = Path.cwd()
-    os.chdir(path)
-    try:
-        yield
-    finally:
-        os.chdir(previous)
-
-
 def _start_worktree_path(toplevel: Path, *, number: int, slug: str) -> Path:
     return toplevel.parent / f"{toplevel.name}-worktrees" / f"issue-{number}-{slug}"
+
+
+def _print_start_resume(
+    live: protocol.ActiveClaim,
+    observed: protocol.ClaimState,
+    storage: board.Storage,
+    whole_reason: str | None,
+    *,
+    directory: Path,
+) -> None:
+    """`start`'s own resume path (issue #322 review finding 1): prints the
+    same `CLAIMED ...`/cost-line grammar a fresh claim prints, for the live
+    claim `_cmd_start` already found in the store -- the same
+    `observed.claims` lookup `status`/`release` use -- rather than minting a
+    second, fresh id for an item that already has one."""
+    print(f"CLAIMED {_claim_subject(live, storage)}: {live.claim_id}")
+    versioning = _scope_versioning(live.scope, whole_reason, directory=directory)
+    touches = protocol.conflicting_claims(tuple(observed.claims.values()), live)
+    print(
+        _claim_cost_line(
+            versioning.versioned_files, versioning.versioned_files_total, live.scope, touches
+        )
+    )
 
 
 def _cmd_start(parsed: argparse.Namespace, session: _WriteSession) -> int:
@@ -4626,7 +4645,11 @@ def _cmd_start(parsed: argparse.Namespace, session: _WriteSession) -> int:
         raise protocol.ClaimUnavailableError(f"issue #{number} does not exist here")
     if item.state is forge.ItemState.CLOSED:
         raise protocol.ClaimUnavailableError(f"issue #{number} is closed")
-    slug = parsed.slug or checkout.slug_from_title(item.title or "")
+    slug = (
+        checkout.validate_slug(parsed.slug)
+        if parsed.slug is not None
+        else checkout.slug_from_title(item.title or "")
+    )
     prefix = checkout.branch_prefix_for_identity()
     branch = f"{prefix}/issue-{number}-{slug}"
     toplevel = _resolve_toplevel()
@@ -4635,6 +4658,14 @@ def _cmd_start(parsed: argparse.Namespace, session: _WriteSession) -> int:
     checkout.resolve_or_create_worktree(worktree_path, branch, remote=canonical_remote)
     print(f"worktree: {worktree_path}")
     print(f"branch: {branch}")
+    identity = _resolved_identity(number, branch)
+    _worktree, _remote, observed = _store_observation(directory=worktree_path)
+    _require_state_ref(observed)
+    storage = _board_config(_resolve_toplevel(directory=worktree_path)).storage
+    live = observed.claims.get(protocol.claim_key(identity, branch))
+    if live is not None:
+        _print_start_resume(live, observed, storage, parsed.whole, directory=worktree_path)
+        return 0
     claim_parsed = argparse.Namespace(
         issue=number,
         agent=None,
@@ -4642,21 +4673,19 @@ def _cmd_start(parsed: argparse.Namespace, session: _WriteSession) -> int:
         base=None,
         branch=None,
         scope=parsed.scope,
-        # Deterministic, not random (issue #322): a second `start` call for
-        # the same item recomputes the same branch, agent, and scope
-        # (`_resolved_claim_request` reuses the live claim's own stored
-        # scope), so a matching claim id is what turns that resume into an
-        # ordinary CLM-15 replay through `aco claim`'s own unchanged
-        # machinery, rather than a second, conflicting claim attempt.
-        claim_id=f"start-{number}",
+        # A fresh id, exactly as a bare `aco claim` mints one (issue #322
+        # review finding 1): the lookup above already resumed a live claim
+        # by name when one exists, so this path only ever runs for an item
+        # that has none yet, and CLAIM-15's own replay-by-claim-id logic
+        # never needs to recognize a `start`-minted id as special.
+        claim_id=None,
         out_of_order=parsed.out_of_order,
         whole=parsed.whole,
         resource=None,
         json=False,
     )
     claim_session = _WriteSession(forge=session.forge, release_branch=None)
-    with _process_directory(worktree_path):
-        return _cmd_claim(claim_parsed, claim_session)
+    return _cmd_claim(claim_parsed, claim_session, directory=worktree_path)
 
 
 @dataclass(frozen=True)
@@ -4753,6 +4782,11 @@ def _cmd_release(parsed: argparse.Namespace, session: _WriteSession) -> None:
         if client is None
         else _landing_report(client, identity, worktree, new_state, storage)
     )
+    worktree_cleanup = (
+        _cleanup_landed_worktree(parsed, resolved.selected.branch, canonical_remote)
+        if isinstance(outcome, protocol.MergedRelease)
+        else None
+    )
     _print_release_result(
         ReleaseReport(
             resolved.selected,
@@ -4763,47 +4797,96 @@ def _cmd_release(parsed: argparse.Namespace, session: _WriteSession) -> None:
             landing,
             hint,
             storage,
+            worktree_cleanup,
         ),
         as_json=parsed.json,
     )
-    if isinstance(outcome, protocol.MergedRelease):
-        _cleanup_landed_worktree(parsed, resolved.selected.branch, canonical_remote)
 
 
-def _cleanup_landed_worktree(parsed: argparse.Namespace, branch: str, remote: str) -> None:
+WORKTREE_KEPT_FLAG_REASON = "--keep-worktree was given"
+WORKTREE_KEPT_RAN_FROM_INSIDE_REASON = "release ran from inside it"
+WORKTREE_KEPT_NOT_MERGED_REASON = "not merged into the default branch"
+WORKTREE_KEPT_DIRTY_REASON = "dirty"
+WORKTREE_KEPT_ELSEWHERE_REASON = "branch checked out elsewhere"
+WORKTREE_KEPT_NO_WORKTREE_REASON = "no linked worktree found"
+
+
+@dataclass(frozen=True)
+class WorktreeCleanupResult:
+    """What `release --merged`'s own worktree/branch cleanup did with the
+    lane's linked worktree (issue #322 review finding 4): `removed` is the
+    only outcome that changed anything on disk or in refs; every other
+    outcome's own `reason` is the one sentence `release` prints after
+    `worktree: kept -- `, identical in text and in `--json`."""
+
+    removed: bool
+    reason: str | None
+
+
+_WORKTREE_REMOVED = WorktreeCleanupResult(removed=True, reason=None)
+
+
+def _worktree_kept(reason: str) -> WorktreeCleanupResult:
+    return WorktreeCleanupResult(removed=False, reason=reason)
+
+
+def worktree_cleanup_outcome_text(result: WorktreeCleanupResult) -> str:
+    """The tail `release` prints after `worktree: ` in text, and the exact
+    `--json` value of its `worktree` field (issue #322 review finding 4):
+    one owner, so the two shapes can never drift apart."""
+    return "removed" if result.removed else f"kept -- {result.reason}"
+
+
+def _declined_worktree_cleanup_reason(
+    toplevel: Path, matching: Path | None, branch: str, remote: str
+) -> str | None:
+    """Why `_cleanup_landed_worktree` keeps the lane's worktree instead of
+    removing it, checked in order (issue #322 review finding 4): `None`
+    only once every precondition for removal holds, so its caller removes
+    exactly when this returns nothing to report."""
+    if matching is None:
+        return WORKTREE_KEPT_NO_WORKTREE_REASON
+    if matching == toplevel:
+        return WORKTREE_KEPT_RAN_FROM_INSIDE_REASON
+    matching_checkout = checkout.resolve_path_checkout(matching)
+    if matching_checkout is not None and matching_checkout.kind is checkout.CheckoutKind.MAIN:
+        return WORKTREE_KEPT_ELSEWHERE_REASON
+    if not checkout.branch_merged_into_default(branch, remote=remote):
+        return WORKTREE_KEPT_NOT_MERGED_REASON
+    if checkout._git_output(["status", "--porcelain"], directory=matching):
+        return WORKTREE_KEPT_DIRTY_REASON
+    return None
+
+
+def _cleanup_landed_worktree(
+    parsed: argparse.Namespace, branch: str, remote: str
+) -> WorktreeCleanupResult:
     """After a successful `--merged` release, remove the lane's local
-    worktree and local branch when both are safe to remove (issue #322):
-    `--keep-worktree` opts out outright; a worktree cannot remove its own
-    cwd, so a release running from inside it says so in one line (on stderr
-    under `--json`, alongside every other line that is not the JSON object
-    itself) and keeps both instead. Every other reason cleanup does not run
-    -- no linked worktree found at all, a dirty tree, `branch` not provably
-    merged yet, or a git failure along the way -- declines silently: unlike
-    `_landing_report`'s own `hint:` line, which surfaces information a
-    caller would otherwise lose (whether the landing freed other work),
-    nothing here is lost by staying quiet -- the worktree and branch simply
-    remain, exactly as `--keep-worktree` would have left them. The remote
-    branch stays the forge merge's own business either way."""
+    worktree and local branch when both are safe to remove, and report
+    exactly what happened either way (issue #322 review finding 4): loud
+    for every outcome, never a silent decline. `--keep-worktree` opts out
+    outright; a worktree cannot remove its own cwd, so a release running
+    from inside it keeps both; the branch's own shared main checkout is
+    never touched either. Order matters: merged-ness and the
+    checked-out-elsewhere check (`_declined_worktree_cleanup_reason`) both
+    run before anything is removed, the worktree is removed before its
+    branch, and a git failure at any step -- including after the worktree is
+    already gone -- is reported in the same `kept` line rather than
+    swallowed. The remote branch stays the forge merge's own business
+    either way."""
     if parsed.keep_worktree:
-        return
+        return _worktree_kept(WORKTREE_KEPT_FLAG_REASON)
     try:
         toplevel = _resolve_toplevel()
         matching = checkout.worktree_on_branch(store.list_worktrees(toplevel), branch)
-        if matching is None:
-            return
-        if matching == toplevel:
-            print(
-                "worktree: kept, this release ran from inside it",
-                file=sys.stderr if parsed.json else sys.stdout,
-            )
-            return
-        if not checkout.branch_merged_into_default(branch, remote=remote):
-            return
-        if checkout._git_output(["status", "--porcelain"], directory=matching):
-            return
+        reason = _declined_worktree_cleanup_reason(toplevel, matching, branch, remote)
+        if reason is not None:
+            return _worktree_kept(reason)
+        assert matching is not None
         checkout.remove_linked_worktree(matching, branch=branch)
-    except protocol.ClaimError:
-        return
+        return _WORKTREE_REMOVED
+    except protocol.ClaimError as error:
+        return _worktree_kept(f"git failure: {error}")
 
 
 def _newest_landed_commit(landings: tuple[checkout.TrunkLanding, ...], number: int) -> str:
@@ -4910,6 +4993,7 @@ def _cmd_release_landed(
     )
     client.mark_landed(write, new_oid)
     landing, hint = _landing_report(client, identity, worktree, new_state, storage)
+    worktree_cleanup = _cleanup_landed_worktree(parsed, resolved.selected.branch, canonical_remote)
     _print_release_result(
         ReleaseReport(
             resolved.selected,
@@ -4920,10 +5004,10 @@ def _cmd_release_landed(
             landing,
             hint,
             storage,
+            worktree_cleanup,
         ),
         as_json=parsed.json,
     )
-    _cleanup_landed_worktree(parsed, resolved.selected.branch, canonical_remote)
 
 
 def _landing_report(
@@ -4965,7 +5049,9 @@ class ReleaseReport:
     instead of PLR0913's five-scalar ceiling: the just-released claim, the
     caller identity that performed it, the outcome it recorded, and the
     merged-landing board read (`None` for an abandoned or issueless release)
-    alongside its `hint` fallback."""
+    alongside its `hint` fallback. `worktree` is the merged outcome's own
+    cleanup result (issue #322 review finding 4), `None` for `--abandoned`,
+    which never attempts cleanup at all."""
 
     selected: protocol.ActiveClaim
     agent: str
@@ -4975,12 +5061,13 @@ class ReleaseReport:
     landing: ReleaseLanding | None
     hint: str | None
     storage: board.Storage
+    worktree: WorktreeCleanupResult | None
 
 
 def _print_release_result(report: ReleaseReport, *, as_json: bool) -> None:
     selected, landing, hint = report.selected, report.landing, report.hint
     if as_json:
-        _release_json(selected, report.agent, report.role, report.outcome, landing)
+        _release_json(report, landing)
         if hint is not None:
             print(hint, file=sys.stderr)
         return
@@ -4995,6 +5082,8 @@ def _print_release_result(report: ReleaseReport, *, as_json: bool) -> None:
             parent_line = _parent_closable_line(landing.parent_closable, report.storage)
             if parent_line is not None:
                 print(parent_line)
+    if report.worktree is not None:
+        print(f"worktree: {worktree_cleanup_outcome_text(report.worktree)}")
 
 
 def _cut_target(client: forge.ForgeWriter, number: int) -> board.Issue:
