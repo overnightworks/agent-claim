@@ -1207,8 +1207,12 @@ def test_fetch_into_anchor_fails_loud_when_the_anchor_cannot_be_read_back(
 
     monkeypatch.setattr(store.process, "run_captured", fail_only_the_readback)
 
-    with pytest.raises(protocol.ClaimError, match="cannot read the fetched tip"):
+    with pytest.raises(protocol.ClaimError) as raised:
         store._fetch_into_anchor(worktree, str(bare_remote))
+
+    assert str(raised.value) == (
+        f"cannot read the fetched tip at {store._FETCH_ANCHOR_REF}: broken ref"
+    )
 
 
 def test_fetch_ref_objects_fails_loud_when_the_ref_is_missing(

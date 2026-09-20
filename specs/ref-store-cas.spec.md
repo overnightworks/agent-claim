@@ -64,6 +64,7 @@ exit `2`, exactly as `specs/claim-record.spec.md` already documents.
 
 - [ ] [CAS-07] A fetch of a present ref never creates the shared local `refs/aco/state`; the tip lands only in `refs/worktree/aco/state`, never read back from `FETCH_HEAD` (see E-CAS-02).
 - CAS-08 (retired 20.09.2026, issue #426): the anchor write it named is no longer a step of its own; the fetch that lands the tip in `refs/worktree/aco/state` (CAS-07) fails as one `cannot fetch` refusal.
+- [ ] [CAS-50] A fetch that lands the tip but cannot read it back from `refs/worktree/aco/state` refuses `cannot read the fetched tip at refs/worktree/aco/state: <detail>`.
 - [ ] [CAS-09] This worktree's own last-observed tip is stamped at `<git-dir>/aco/last-oid` -- private to it, never shared with another linked worktree of the same checkout.
 - [ ] [CAS-10] A worktree with no stamp yet at `<git-dir>/aco/last-oid` accepts any tip its first fetch reads, never refusing `... the ref may have been rewritten` (CAS-11).
 - [ ] [CAS-11] A fetched tip that is not a descendant of this worktree's own stamp refuses `refs/aco/state moved from <old> to <new> without <old> as an ancestor of the new tip; the ref may have been rewritten`.
@@ -88,7 +89,7 @@ transition), and which of the three causes applies.
 
 ### Work budget
 
-- [ ] [CAS-18] `status`'s two store reads (a fetch, then every claim's age) make exactly one `ls-remote`, `fetch`, `update-ref`, `ls-tree`, `archive`, and `log` call, ten live claims or three hundred alike.
+- [ ] [CAS-18] `status`'s two store reads (a fetch, then every claim's age) make one `ls-remote`, `fetch`, `ls-tree`, `archive`, `log` call and four `rev-parse` calls, ten live claims or three hundred alike.
 
 ## An item write's own compare-and-swap
 
