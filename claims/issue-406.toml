@@ -1,8 +1,0 @@
-claim_id = "030277d39ad44c1bba01c98e186ca78f"
-agent = "Claude head (coordinator)"
-role = "builder"
-base = "db603331584974865151d307880b8613f5d1022f"
-branch = "claude/issue-406-claim-envelope"
-scope = ["scripts/similar_methods_exemptions.txt", "scripts/test_budget_ratchet.txt", "specs/body.spec.md", "specs/brief.spec.md", "specs/check.spec.md", "specs/claim-record.spec.md", "specs/claim.spec.md", "specs/output.spec.md", "specs/release.spec.md", "specs/rescope.spec.md", "specs/status.spec.md", "src/agent_coordination/board.py", "src/agent_coordination/cli.py", "src/agent_coordination/protocol.py", "tests/test_cli.py", "tests/test_state_board.py"]
-opened_commit = "c921354b83df031f98e7ab22db78454240eeb910"
-whole_reason = "exit/JSON slice 3: status, claim, rescope, the claim-field owner, four specs and tests"
