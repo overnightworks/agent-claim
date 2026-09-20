@@ -11,10 +11,16 @@ and its recovery line; it never restates what `release --merged`'s own
 classification, claim, parent, or closing rules require (cited by ID) or
 what a successful release prints (`freed:`/`next:`, LAND-49). `<n>` is the
 pull request number as given, `<sha>` its merge commit, `<state>` GitHub's
-own `mergeable_state`, `<name>`/`<conclusion>` one check run's own name and
-conclusion. A refusal before any write prints `ERROR: <sentence>` on
-stderr, exit `2`, exactly as `specs/ref-store-cas.spec.md`'s own preamble
-documents; `aco land` has no `--json` mode.
+own `mergeable_state`, `<name>`/`<conclusion>` one check's own name and
+conclusion. "Checks" is every check run GitHub reports for the head sha
+(every page of `check-runs`) plus every combined-status context
+(`commits/<sha>/status`; an external context such as SonarCloud counts);
+"no checks" means both are empty. A name list past three entries prints
+only the first three, then `and N more` (`protocol.named_with_overflow_count`),
+so no refusal line exceeds 200 characters. A refusal before any write
+prints `ERROR: <sentence>` on stderr, exit `2`, exactly as
+`specs/ref-store-cas.spec.md`'s own preamble documents; `aco land` has no
+`--json` mode.
 
 ## Behavior table
 
@@ -40,8 +46,8 @@ documents; `aco land` has no `--json` mode.
 - [ ] [LANDCMD-01] Under `storage = "state-ref"`, `aco land <n>` refuses `aco land is a github command; storage = state-ref has no pull requests to land`, exit `2`, before any read.
 - [ ] [LANDCMD-02] A pull request that is not open refuses `pull request #<n> is not open; it cannot be landed`, exit `2`.
 - [ ] [LANDCMD-03] A pull request whose own `mergeable_state` is not `clean` refuses `pull request #<n> is not mergeable (<state>)`, exit `2`.
-- [ ] [LANDCMD-04] A pull request exposing no CI checks against its own head commit refuses `pull request #<n> exposes no CI checks; cannot verify green CI`, exit `2`. "Checks" is every check run GitHub reports for the head sha, across every page of `check-runs`, plus every context of the combined commit status (`commits/<sha>/status`, an external context such as SonarCloud included); "no checks" means both are empty, never one alone.
-- [ ] [LANDCMD-05] A pull request with one or more checks not yet completed refuses `pull request #<n> has checks still running: <name>, <name>; wait for every check to succeed`, exit `2`. A name list past three entries prints only the first three, then `… and N more`, so no refusal line exceeds 200 characters.
+- [ ] [LANDCMD-04] A pull request exposing no CI checks against its own head commit refuses `pull request #<n> exposes no CI checks; cannot verify green CI`, exit `2`.
+- [ ] [LANDCMD-05] A pull request with one or more checks not yet completed refuses `pull request #<n> has checks still running: <name>, <name>; wait for every check to succeed`, exit `2`.
 - [ ] [LANDCMD-06] A pull request whose checks all completed, at least one without success, refuses `pull request #<n> has non-successful checks: <name> (<conclusion>); land only after every check succeeds`, exit `2`.
 - [ ] [LANDCMD-07] Once every check succeeds, `check <pr>`'s own classification/claim/parent/closing rules apply (LAND-04..LAND-28, LAND-32): a defect refuses `pull request #<n> <that same defect sentence>`, exit `2`.
 - [ ] [LANDCMD-08] A classified work item that is not open refuses `work item #<n> is not open; it cannot be landed`, exit `2`; an issue-less pull request skips this check.
@@ -91,6 +97,16 @@ Setup: bare-remote, fake `gh`, pull request `#57` open, `mergeable_state` `clean
 ```console
 $ aco land 57
 2> ERROR: pull request #57 has checks still running: build; wait for every check to succeed
+exit 2
+```
+
+### E-LANDCMD-05a — a name list past three checks is capped
+
+Setup: bare-remote, fake `gh`, pull request `#57` open, `mergeable_state` `clean`, five checks still running: `check-0` through `check-4`
+
+```console
+$ aco land 57
+2> ERROR: pull request #57 has checks still running: check-0, check-1, check-2, and 2 more; wait for every check to succeed
 exit 2
 ```
 

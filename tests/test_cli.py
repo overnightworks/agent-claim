@@ -12826,6 +12826,14 @@ def _land_scenario(
             "land only after every check succeeds",
             id="check-failed",
         ),
+        pytest.param(
+            _land_readiness(
+                checks=tuple(forge.CheckRun(f"check-{index}", None) for index in range(5))
+            ),
+            "pull request #12 has checks still running: check-0, check-1, check-2, and 2 more; "
+            "wait for every check to succeed",
+            id="check-running-name-list-capped",
+        ),
     ],
 )
 def test_land_refuses_every_readiness_defect_before_any_write(

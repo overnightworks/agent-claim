@@ -5060,9 +5060,13 @@ def _land_checks_refusal(number: int, checks: tuple[forge.CheckRun, ...]) -> str
         return f"pull request #{number} exposes no CI checks; cannot verify green CI"
     pending = _land_pending_check_names(checks)
     if pending:
+        # Capped the same way `next`'s own `parallel:` line is (issue #348,
+        # `protocol.named_with_overflow_count`): a pull request with many
+        # still-running checks must never print a refusal past 200
+        # characters (issue #405 review finding).
         return (
-            f"pull request #{number} has checks still running: {', '.join(pending)}; "
-            "wait for every check to succeed"
+            f"pull request #{number} has checks still running: "
+            f"{protocol.named_with_overflow_count(pending)}; wait for every check to succeed"
         )
     failed = _land_failed_check(checks)
     if failed is not None:
