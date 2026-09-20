@@ -4674,14 +4674,21 @@ def _cmd_start(parsed: argparse.Namespace, session: _WriteSession) -> int:
     storage = _board_config(_resolve_toplevel(directory=worktree_path)).storage
     # `claim_key` alone is an issue-only key for an `IssueIdentity` (it never
     # folds `branch` into the key at all): a live record found under it may
-    # belong to a different agent or a different branch entirely, so resume
-    # requires this session's own agent and the expected lane branch too --
-    # the same two facts `release`'s own claimant/branch checks require
-    # (review/gate finding). A mismatch falls through to the fresh-claim path
-    # below, which raises the store's own "is claimed by ..." conflict.
+    # belong to a different agent, a different role, or a different branch
+    # entirely, so resume requires this session's own agent, `start`'s own
+    # claiming role, and the expected lane branch too -- the same facts
+    # `release`'s own claimant/branch checks require, plus the role a reviewer
+    # claim on the same item must never satisfy (review/gate finding). A
+    # mismatch falls through to the fresh-claim path below, which raises the
+    # store's own "is claimed by ..." conflict.
     live = observed.claims.get(protocol.claim_key(identity, branch))
     agent = checkout._resolved_agent(None)
-    if live is not None and live.agent == agent and live.branch == branch:
+    if (
+        live is not None
+        and live.agent == agent
+        and live.role == DEFAULT_CLAIM_ROLE
+        and live.branch == branch
+    ):
         _print_start_resume(live, observed, storage, parsed, directory=worktree_path)
         return 0
     claim_parsed = argparse.Namespace(

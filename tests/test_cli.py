@@ -1832,6 +1832,36 @@ def test_start_refuses_to_resume_a_live_claim_held_by_another_agent(
     assert "is claimed by Grok sess-9" in capsys.readouterr().err
 
 
+def test_start_refuses_to_resume_the_same_agents_claim_under_another_role(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Issue #322 review/gate finding 3: `claim_key` folds in neither `role`
+    nor `agent`, so a live claim on #314 held by this same session's own
+    agent and branch, but as `reviewer` rather than the `builder` role
+    `start` always claims with, must never be silently resumed as this
+    session's build claim -- it falls through to the store's own
+    "is claimed by ..." conflict, exactly as a different agent's claim
+    does."""
+    repo = _start_scenario(monkeypatch, tmp_path)
+    reviewer_claim = _store_claim_from_request(
+        request(
+            "reviewer-claim",
+            "Codex Sol",
+            issue=314,
+            role="reviewer",
+            branch=_START_BRANCH,
+            scope=("src/x.py",),
+        )
+    )
+    _patch_store_write(monkeypatch, reviewer_claim)
+    monkeypatch.chdir(repo)
+
+    status = issue_claim.main(["--repo", REPOSITORY, "start", "314"])
+
+    assert status == 2
+    assert "is claimed by Codex Sol" in capsys.readouterr().err
+
+
 def test_start_resume_refuses_a_scope_that_differs_from_the_live_claim(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
