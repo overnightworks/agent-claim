@@ -2805,7 +2805,7 @@ def _trunk_no_item_landing_defect(
     Befund 41)."""
     landing = next((entry for entry in landings if entry.sha == sha), None)
     if landing is None:
-        return "is not on the first-parent trunk"
+        return SHA_NOT_ON_TRUNK_DEFECT
     classification = landing.classification
     if classification is None:
         return "carries no `Work-Item:` or `No-Item:` trailer"
@@ -3724,7 +3724,7 @@ def _trunk_commit_classification_or_finding(
     (issue #359, LAND-48): `None` is not on the walked first-parent trunk at
     all, carries no trailer, or is a `ClassificationDefect`'s own message."""
     if landing is None:
-        return None, "is not on the first-parent trunk"
+        return None, SHA_NOT_ON_TRUNK_DEFECT
     classification = landing.classification
     if classification is None:
         return None, "carries no `Work-Item:` or `No-Item:` trailer"
@@ -4997,6 +4997,9 @@ def _newest_landed_commit(landings: tuple[checkout.TrunkLanding, ...], number: i
     )
 
 
+SHA_NOT_ON_TRUNK_DEFECT = "is not on the first-parent trunk"
+
+
 def _trunk_landing_defect(
     landings: tuple[checkout.TrunkLanding, ...], number: int, sha: str
 ) -> str | None:
@@ -5010,7 +5013,7 @@ def _trunk_landing_defect(
     verification -- neither trusts a different notion of "landed"."""
     landing = next((entry for entry in landings if entry.sha == sha), None)
     if landing is None:
-        return "is not on the first-parent trunk"
+        return SHA_NOT_ON_TRUNK_DEFECT
     classification = landing.classification
     if classification is None:
         return "carries no `Work-Item:` trailer"
