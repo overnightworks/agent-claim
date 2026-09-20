@@ -1900,7 +1900,9 @@ def test_claim_accepts_an_item_with_no_dependencies(
     issue = board_issue(10, "Work", complete_contract("Claim #10."), labels=("security",))
     _configured_board_client(monkeypatch, tmp_path, open_issues=(issue,))
     monkeypatch.setattr(
-        issue_claim, "_request", lambda _arguments, **_kwargs: request(issue=10, scope=("src/work.py",))
+        issue_claim,
+        "_request",
+        lambda _arguments, **_kwargs: request(issue=10, scope=("src/work.py",)),
     )
 
     assert (
@@ -1952,7 +1954,9 @@ def test_claim_refuses_an_open_dependency_before_mutation(
     issue, blocked_by = blocked_issue(10, "Work", *dependencies, labels=("security",))
     _configured_board_client(monkeypatch, tmp_path, open_issues=(issue,), dependencies=blocked_by)
     monkeypatch.setattr(
-        issue_claim, "_request", lambda _arguments, **_kwargs: request(issue=10, scope=("src/work.py",))
+        issue_claim,
+        "_request",
+        lambda _arguments, **_kwargs: request(issue=10, scope=("src/work.py",)),
     )
 
     assert (
@@ -1989,7 +1993,9 @@ def test_claim_ignores_a_closed_dependency(
     issue, blocked_by = blocked_issue(10, "Work", closed, labels=("security",))
     _configured_board_client(monkeypatch, tmp_path, open_issues=(issue,), dependencies=blocked_by)
     monkeypatch.setattr(
-        issue_claim, "_request", lambda _arguments, **_kwargs: request(issue=10, scope=("src/work.py",))
+        issue_claim,
+        "_request",
+        lambda _arguments, **_kwargs: request(issue=10, scope=("src/work.py",)),
     )
 
     assert (
@@ -2061,7 +2067,9 @@ def test_claim_refuses_a_malformed_block_before_mutation(
     issue = board_issue(10, "Work", agent_claim_body(f'{MINIMAL_BLOCK_TOML}owner = "someone"\n'))
     _configured_board_client(monkeypatch, tmp_path, open_issues=(issue,))
     monkeypatch.setattr(
-        issue_claim, "_request", lambda _arguments, **_kwargs: request(issue=10, scope=("src/work.py",))
+        issue_claim,
+        "_request",
+        lambda _arguments, **_kwargs: request(issue=10, scope=("src/work.py",)),
     )
 
     assert (
@@ -2109,7 +2117,9 @@ def test_claim_ignores_body_size_and_closed_next_references(
         lambda _client, _number: pytest.fail("claim must not inspect Next references"),
     )
     monkeypatch.setattr(
-        issue_claim, "_request", lambda _arguments, **_kwargs: request(issue=10, scope=("src/work.py",))
+        issue_claim,
+        "_request",
+        lambda _arguments, **_kwargs: request(issue=10, scope=("src/work.py",)),
     )
 
     assert (
@@ -2530,7 +2540,9 @@ def test_claim_json_refusal_reports_out_of_order_without_mutating(
         dependencies=dependent_blockers,
     )
     monkeypatch.setattr(
-        issue_claim, "_request", lambda _arguments, **_kwargs: request(issue=10, scope=("src/lower.py",))
+        issue_claim,
+        "_request",
+        lambda _arguments, **_kwargs: request(issue=10, scope=("src/lower.py",)),
     )
 
     exit_code = issue_claim.main(
@@ -2570,7 +2582,9 @@ def test_claim_does_not_require_out_of_order_for_the_top_ranked_item(
     lower = board_issue(11, "Lower work", complete_contract("Claim #11."))
     _configured_board_client(monkeypatch, tmp_path, open_issues=(top, lower))
     monkeypatch.setattr(
-        issue_claim, "_request", lambda _arguments, **_kwargs: request(issue=10, scope=("src/top.py",))
+        issue_claim,
+        "_request",
+        lambda _arguments, **_kwargs: request(issue=10, scope=("src/top.py",)),
     )
 
     assert (
@@ -2611,7 +2625,9 @@ def test_claim_refuses_a_closed_or_missing_target(
     _configured_board_client(monkeypatch, tmp_path)
     _stub_issue_reference(monkeypatch, {72: (state, "Some title", "")})
     monkeypatch.setattr(
-        issue_claim, "_request", lambda _arguments, **_kwargs: request(issue=72, scope=("src/work.py",))
+        issue_claim,
+        "_request",
+        lambda _arguments, **_kwargs: request(issue=72, scope=("src/work.py",)),
     )
 
     exit_code = issue_claim.main(
@@ -2651,7 +2667,9 @@ def test_claim_refuses_a_container(
     )
     _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
     monkeypatch.setattr(
-        issue_claim, "_request", lambda _arguments, **_kwargs: request(issue=72, scope=("src/work.py",))
+        issue_claim,
+        "_request",
+        lambda _arguments, **_kwargs: request(issue=72, scope=("src/work.py",)),
     )
 
     exit_code = issue_claim.main(
@@ -2684,7 +2702,9 @@ def test_claim_refuses_a_freshly_cut_childs_incomplete_skeleton(
     child = board_issue(101, "Scheibe 1", board.BLOCK_CHILD_SKELETON)
     _configured_board_client(monkeypatch, tmp_path, open_issues=(child,))
     monkeypatch.setattr(
-        issue_claim, "_request", lambda _arguments, **_kwargs: request(issue=101, scope=("src/work.py",))
+        issue_claim,
+        "_request",
+        lambda _arguments, **_kwargs: request(issue=101, scope=("src/work.py",)),
     )
 
     exit_code = issue_claim.main(
@@ -2726,7 +2746,9 @@ def test_claim_names_an_incomplete_body_even_when_the_item_is_also_blocked(
         dependencies={51: (block_dependency(50),)},
     )
     monkeypatch.setattr(
-        issue_claim, "_request", lambda _arguments, **_kwargs: request(issue=51, scope=("src/work.py",))
+        issue_claim,
+        "_request",
+        lambda _arguments, **_kwargs: request(issue=51, scope=("src/work.py",)),
     )
 
     exit_code = issue_claim.main(
@@ -3901,7 +3923,9 @@ def test_claim_json_refusal_carries_refused_issue_and_checks(
     _configured_board_client(monkeypatch, tmp_path)
     _stub_issue_reference(monkeypatch, {72: (forge.ItemState.CLOSED, "Title", "")})
     monkeypatch.setattr(
-        issue_claim, "_request", lambda _arguments, **_kwargs: request(issue=72, scope=("src/work.py",))
+        issue_claim,
+        "_request",
+        lambda _arguments, **_kwargs: request(issue=72, scope=("src/work.py",)),
     )
 
     exit_code = issue_claim.main(
@@ -3944,7 +3968,9 @@ def test_claim_does_not_corridor_on_a_slice_list(
     target = board_issue(72, "Epic", body)
     _configured_board_client(monkeypatch, tmp_path, open_issues=(target,))
     monkeypatch.setattr(
-        issue_claim, "_request", lambda _arguments, **_kwargs: request(issue=72, scope=("src/work.py",))
+        issue_claim,
+        "_request",
+        lambda _arguments, **_kwargs: request(issue=72, scope=("src/work.py",)),
     )
 
     exit_code = issue_claim.main(
@@ -3991,7 +4017,9 @@ def test_claim_checks_a_slice_shaped_title_for_its_recorded_parent(
     client = _configured_board_client(monkeypatch, tmp_path, open_issues=(target,))
     client.parents.update(parents)
     monkeypatch.setattr(
-        issue_claim, "_request", lambda _arguments, **_kwargs: request(issue=1017, scope=("src/work.py",))
+        issue_claim,
+        "_request",
+        lambda _arguments, **_kwargs: request(issue=1017, scope=("src/work.py",)),
     )
 
     exit_code = issue_claim.main(
@@ -4832,7 +4860,9 @@ def test_board_shows_freed_from_a_sole_closed_local_dependency_and_claim_reaches
     _write_block_pin(tmp_path)
     client.board_dependencies = {301: closed_dependency}
     monkeypatch.setattr(
-        issue_claim, "_request", lambda _arguments, **_kwargs: request(issue=301, scope=("src/work.py",))
+        issue_claim,
+        "_request",
+        lambda _arguments, **_kwargs: request(issue=301, scope=("src/work.py",)),
     )
 
     exit_code = issue_claim.main(
@@ -5107,7 +5137,9 @@ def test_claim_treats_a_higher_ranked_configured_idea_as_out_of_order(
     )
     _configured_board_client(monkeypatch, tmp_path, open_issues=(lower, idea))
     monkeypatch.setattr(
-        issue_claim, "_request", lambda _arguments, **_kwargs: request(issue=10, scope=("src/lower.py",))
+        issue_claim,
+        "_request",
+        lambda _arguments, **_kwargs: request(issue=10, scope=("src/lower.py",)),
     )
 
     assert (
@@ -7516,7 +7548,9 @@ def _arranged_claim_client(monkeypatch: pytest.MonkeyPatch) -> FakeForge:
     monkeypatch.setattr(checkout, "_validate_checkout", lambda request, directory=None: None)
     monkeypatch.setattr(checkout, "_scope_directories", lambda paths, **_kwargs: ())
     git_values = _git_checkout()
-    monkeypatch.setattr(checkout, "_git_output", lambda arguments, **_kwargs: git_values[tuple(arguments)])
+    monkeypatch.setattr(
+        checkout, "_git_output", lambda arguments, **_kwargs: git_values[tuple(arguments)]
+    )
     _patch_store_write(monkeypatch)
     return client
 
@@ -7755,7 +7789,9 @@ def test_cli_lane_claim_without_scope_refuses_by_name(
     _set_agent_identity_env(monkeypatch, {checkout.ACO_AGENT_ENV: "Ada"})
     monkeypatch.setattr(checkout, "_validate_checkout", lambda request, directory=None: None)
     git_values = {("branch", "--show-current"): "docs/lane-cleanup"}
-    monkeypatch.setattr(checkout, "_git_output", lambda arguments, **_kwargs: git_values[tuple(arguments)])
+    monkeypatch.setattr(
+        checkout, "_git_output", lambda arguments, **_kwargs: git_values[tuple(arguments)]
+    )
     _forbid_forge_resolution(monkeypatch)
 
     status = issue_claim.main(["claim", "--base", BASE, "--branch", "docs/lane-cleanup"])
