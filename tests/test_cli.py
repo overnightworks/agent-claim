@@ -13104,7 +13104,8 @@ def test_land_merges_a_green_pull_request_and_runs_the_release_path(
     assert trunk_after != trunk_before
     assert client.landings[12].merge_commit == trunk_after
     out = capsys.readouterr().out
-    assert "freed:" in out and "next:" in out
+    assert "freed:" in out
+    assert "next:" in out
 
 
 def test_land_merges_an_issueless_lane_pull_request(
