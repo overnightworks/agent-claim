@@ -12,6 +12,7 @@ already be clean under this gate.
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -274,6 +275,29 @@ def test_exemption_line_without_a_reason_is_malformed(tmp_path: Path) -> None:
 
     assert exemptions == {}
     assert [(f.rule.value, f.line) for f in malformed] == [("malformed_exemption", 1)]
+
+
+def test_malformed_exemption_line_cannot_exempt_itself(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A ledger line naming a malformed_exemption finding as accepted must not suppress that
+    finding: trusting the exemption requires trusting the ledger, which a malformed line is
+    exactly failing to do (regression for issue #385 review round 2)."""
+    spec_dir = tmp_path / "specs"
+    spec_dir.mkdir()
+    (spec_dir / "sample.spec.md").write_text(GREEN_SPEC, encoding="utf-8")
+    ledger = tmp_path / "exemptions.txt"
+    ledger.write_text(
+        "exemptions.txt:2:malformed_exemption — suppress it\nmalformed\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(spec_lint, "SPEC_DIR", spec_dir)
+    monkeypatch.setattr(spec_lint, "EXEMPTIONS_FILE", ledger)
+
+    exit_code = spec_lint.main(["--ci", "--json"])
+    report = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 1
+    assert report["failing"] == ["exemptions.txt:2:malformed_exemption"]
 
 
 def test_repository_specs_are_clean_under_the_gate() -> None:

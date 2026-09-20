@@ -519,7 +519,14 @@ def load_exemptions(path: Path = EXEMPTIONS_FILE) -> tuple[dict[str, str], list[
 
 
 def unexempted(findings: list[Finding], exemptions: dict[str, str]) -> list[Finding]:
-    return [f for f in findings if f.exemption_key not in exemptions]
+    # A malformed_exemption finding is never exempt: exempting a ledger line requires trusting
+    # the ledger, and a malformed line is exactly the ledger failing that trust -- there is no
+    # ledger for the ledger.
+    return [
+        f
+        for f in findings
+        if f.rule is Rule.MALFORMED_EXEMPTION or f.exemption_key not in exemptions
+    ]
 
 
 def _print_report(findings: list[Finding]) -> None:
