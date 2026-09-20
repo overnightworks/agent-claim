@@ -948,7 +948,7 @@ class _RecordingSubParsersAction(argparse._SubParsersAction):
         self,
         parser: argparse.ArgumentParser,
         namespace: argparse.Namespace,
-        values: str | Sequence[Any],
+        values: str | Sequence[Any] | None,
         option_string: str | None = None,
     ) -> None:
         name, *_ = cast(Sequence[str], values)
