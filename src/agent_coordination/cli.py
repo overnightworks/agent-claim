@@ -4827,88 +4827,49 @@ def _cmd_release(parsed: argparse.Namespace, session: _WriteSession) -> None:
 
 WORKTREE_KEPT_FLAG_REASON = "--keep-worktree was given"
 WORKTREE_KEPT_RAN_FROM_INSIDE_REASON = "release ran from inside it"
-WORKTREE_KEPT_NOT_MERGED_REASON = "not merged into the default branch"
-WORKTREE_KEPT_DIRTY_REASON = "dirty"
-WORKTREE_KEPT_ELSEWHERE_REASON = "branch checked out elsewhere"
 WORKTREE_KEPT_NO_WORKTREE_REASON = "no linked worktree found"
 
 
-@dataclass(frozen=True)
-class WorktreeCleanupResult:
-    """What `release --merged`'s own worktree/branch cleanup did with the
-    lane's linked worktree (issue #322 review finding 4): `removed` is the
-    only outcome that changed anything on disk or in refs; every other
-    outcome's own `reason` is the one sentence `release` prints after
-    `worktree: kept -- `, identical in text and in `--json`."""
-
-    removed: bool
-    reason: str | None
-
-
-_WORKTREE_REMOVED = WorktreeCleanupResult(removed=True, reason=None)
-
-
-def _worktree_kept(reason: str) -> WorktreeCleanupResult:
-    return WorktreeCleanupResult(removed=False, reason=reason)
-
-
-def worktree_cleanup_outcome_text(result: WorktreeCleanupResult) -> str:
+def worktree_cleanup_outcome_text(outcome: checkout.WorktreeCleanupOutcome) -> str:
     """The tail `release` prints after `worktree: ` in text, and the exact
-    `--json` value of its `worktree` field (issue #322 review finding 4):
-    one owner, so the two shapes can never drift apart."""
-    return "removed" if result.removed else f"kept -- {result.reason}"
-
-
-def _declined_worktree_cleanup_reason(
-    toplevel: Path, matching: Path | None, branch: str, remote: str
-) -> str | None:
-    """Why `_cleanup_landed_worktree` keeps the lane's worktree instead of
-    removing it, checked in order (issue #322 review finding 4): `None`
-    only once every precondition for removal holds, so its caller removes
-    exactly when this returns nothing to report."""
-    if matching is None:
-        return WORKTREE_KEPT_NO_WORKTREE_REASON
-    if matching == toplevel:
-        return WORKTREE_KEPT_RAN_FROM_INSIDE_REASON
-    matching_checkout = checkout.resolve_path_checkout(matching)
-    if matching_checkout is not None and matching_checkout.kind is checkout.CheckoutKind.MAIN:
-        return WORKTREE_KEPT_ELSEWHERE_REASON
-    if not checkout.branch_merged_into_default(branch, remote=remote):
-        return WORKTREE_KEPT_NOT_MERGED_REASON
-    if checkout._git_output(["status", "--porcelain"], directory=matching):
-        return WORKTREE_KEPT_DIRTY_REASON
-    return None
+    `--json` value of its `worktree` field (issue #322 review/gate finding
+    4): one owner, so the two shapes can never drift apart. A branch-deletion
+    failure after the worktree is already gone names both halves -- never a
+    bare `kept`, which would hide that the worktree itself is gone."""
+    if outcome.worktree.removed and outcome.branch.removed:
+        return "removed"
+    if outcome.worktree.removed:
+        return f"removed; branch kept -- {outcome.branch.reason}"
+    return f"kept -- {outcome.worktree.reason}"
 
 
 def _cleanup_landed_worktree(
     parsed: argparse.Namespace, branch: str, remote: str
-) -> WorktreeCleanupResult:
+) -> checkout.WorktreeCleanupOutcome:
     """After a successful `--merged` release, remove the lane's local
     worktree and local branch when both are safe to remove, and report
-    exactly what happened either way (issue #322 review finding 4): loud
-    for every outcome, never a silent decline. `--keep-worktree` opts out
-    outright; a worktree cannot remove its own cwd, so a release running
-    from inside it keeps both; the branch's own shared main checkout is
-    never touched either. Order matters: merged-ness and the
-    checked-out-elsewhere check (`_declined_worktree_cleanup_reason`) both
-    run before anything is removed, the worktree is removed before its
-    branch, and a git failure at any step -- including after the worktree is
-    already gone -- is reported in the same `kept` line rather than
+    exactly what happened either way (issue #322 review/gate finding 4):
+    loud for every outcome, never a silent decline. `--keep-worktree` opts
+    out outright; a worktree cannot remove its own cwd, so a release running
+    from inside it keeps both; neither needs `checkout.py`'s own merged/
+    elsewhere/dirty/removal policy (`checkout.cleanup_landed_worktree`),
+    since both read only this process's own cwd and worktree listing. A git
+    failure at any step -- including one resolving which worktree matches
+    `branch` at all -- is reported in the same `kept` line rather than
     swallowed. The remote branch stays the forge merge's own business
     either way."""
     if parsed.keep_worktree:
-        return _worktree_kept(WORKTREE_KEPT_FLAG_REASON)
+        return checkout.worktree_cleanup_kept(WORKTREE_KEPT_FLAG_REASON)
     try:
         toplevel = _resolve_toplevel()
         matching = checkout.worktree_on_branch(store.list_worktrees(toplevel), branch)
-        reason = _declined_worktree_cleanup_reason(toplevel, matching, branch, remote)
-        if reason is not None:
-            return _worktree_kept(reason)
-        assert matching is not None
-        checkout.remove_linked_worktree(matching, branch=branch)
-        return _WORKTREE_REMOVED
+        if matching is None:
+            return checkout.worktree_cleanup_kept(WORKTREE_KEPT_NO_WORKTREE_REASON)
+        if matching == toplevel:
+            return checkout.worktree_cleanup_kept(WORKTREE_KEPT_RAN_FROM_INSIDE_REASON)
+        return checkout.cleanup_landed_worktree(matching, branch, remote=remote)
     except protocol.ClaimError as error:
-        return _worktree_kept(f"git failure: {error}")
+        return checkout.worktree_cleanup_kept(f"git failure: {error}")
 
 
 def _newest_landed_commit(landings: tuple[checkout.TrunkLanding, ...], number: int) -> str:
@@ -5083,7 +5044,7 @@ class ReleaseReport:
     landing: ReleaseLanding | None
     hint: str | None
     storage: board.Storage
-    worktree: WorktreeCleanupResult | None
+    worktree: checkout.WorktreeCleanupOutcome | None
 
 
 def _print_release_result(report: ReleaseReport, *, as_json: bool) -> None:

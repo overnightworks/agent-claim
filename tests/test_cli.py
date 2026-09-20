@@ -48,6 +48,7 @@ from cli_fixtures import (
     _real_git,
     _real_repository_with_bare_remote,
     _set_agent_identity_env,
+    _stub_one_git_call,
     arrange_scope_width,
     stub_board_config_tracked,
 )
@@ -11396,80 +11397,81 @@ def test_release_merged_removes_a_clean_merged_lane_worktree_and_branch(
     assert "worktree: removed\n" in capsys.readouterr().out
 
 
-def test_release_merged_keep_worktree_leaves_the_lane_alone(
+def test_release_merged_json_carries_the_worktree_cleanup_outcome(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
-    worktree = _release_cleanup_scenario(monkeypatch, tmp_path)
+    _release_cleanup_scenario(monkeypatch, tmp_path)
 
-    status = issue_claim.main(
-        ["--repo", REPOSITORY, "release", "72", "--merged", "12", "--keep-worktree"]
-    )
+    status = issue_claim.main(["--repo", REPOSITORY, "release", "72", "--merged", "12", "--json"])
 
     assert status == 0
-    assert worktree.exists()
-    assert checkout.branch_exists(_CLEANUP_BRANCH) is True
-    assert "worktree: kept -- --keep-worktree was given\n" in capsys.readouterr().out
+    assert json.loads(capsys.readouterr().out)["worktree"] == "removed"
 
 
-def test_release_merged_keeps_a_dirty_lane_worktree(
+def test_release_merged_removes_the_worktree_and_reports_the_branch_kept(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
+    """Issue #322 review/gate finding 4: a branch-deletion failure after the
+    worktree is already gone must never read as a bare `kept`."""
+    worktree = _release_cleanup_scenario(monkeypatch, tmp_path)
+    _stub_one_git_call(
+        monkeypatch,
+        ["branch", "-d", _CLEANUP_BRANCH],
+        exit_status=1,
+        stderr="error: branch not fully merged",
+    )
+
+    status = issue_claim.main(["--repo", REPOSITORY, "release", "72", "--merged", "12"])
+
+    assert status == 0
+    assert not worktree.exists()
+    assert checkout.branch_exists(_CLEANUP_BRANCH) is True
+    out = capsys.readouterr().out
+    assert "worktree: removed; branch kept -- git failure: error: branch not fully merged\n" in out
+
+
+def test_release_merged_json_carries_the_removed_worktree_branch_kept_outcome(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    _release_cleanup_scenario(monkeypatch, tmp_path)
+    _stub_one_git_call(
+        monkeypatch,
+        ["branch", "-d", _CLEANUP_BRANCH],
+        exit_status=1,
+        stderr="error: branch not fully merged",
+    )
+
+    status = issue_claim.main(["--repo", REPOSITORY, "release", "72", "--merged", "12", "--json"])
+
+    assert status == 0
+    assert json.loads(capsys.readouterr().out)["worktree"] == (
+        "removed; branch kept -- git failure: error: branch not fully merged"
+    )
+
+
+def _dirty_worktree_scenario(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     worktree = _release_cleanup_scenario(monkeypatch, tmp_path)
     (worktree / "scratch.txt").write_text("uncommitted\n")
-
-    assert issue_claim.main(["--repo", REPOSITORY, "release", "72", "--merged", "12"]) == 0
-
-    assert worktree.exists()
-    assert checkout.branch_exists(_CLEANUP_BRANCH) is True
-    assert "worktree: kept -- dirty\n" in capsys.readouterr().out
+    return worktree
 
 
-def test_release_merged_from_inside_the_lane_worktree_keeps_it_and_says_so(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
-) -> None:
+def _ran_from_inside_scenario(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     worktree = _release_cleanup_scenario(monkeypatch, tmp_path)
     _redirect_toplevel(monkeypatch, worktree)
     monkeypatch.chdir(worktree)
-
-    assert issue_claim.main(["--repo", REPOSITORY, "release", "72", "--merged", "12"]) == 0
-
-    assert worktree.exists()
-    assert "worktree: kept -- release ran from inside it\n" in capsys.readouterr().out
+    return worktree
 
 
-def test_release_merged_leaves_nothing_to_clean_up_when_no_worktree_ever_linked_the_branch(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
-) -> None:
-    """Issue #322: the released branch is real and already merged, but no
-    linked worktree was ever built for it (the claim came from a plain
-    checkout) -- cleanup finds nothing to remove and the release itself
-    still succeeds."""
+def _no_linked_worktree_scenario(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path | None:
     _release_cleanup_scenario(monkeypatch, tmp_path, link_worktree=False)
-
-    assert issue_claim.main(["--repo", REPOSITORY, "release", "72", "--merged", "12"]) == 0
-
-    assert checkout.branch_exists(_CLEANUP_BRANCH) is True
-    assert "worktree: kept -- no linked worktree found\n" in capsys.readouterr().out
+    return None
 
 
-def test_release_merged_keeps_a_lane_worktree_not_yet_merged_locally(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
-) -> None:
-    """Issue #322: the forge reports the pull request merged, but this
-    checkout has not itself learned that -- `branch_merged_into_default`
-    reads `False`, so cleanup declines rather than guessing."""
-    worktree = _release_cleanup_scenario(monkeypatch, tmp_path, merge_into_main=False)
-
-    assert issue_claim.main(["--repo", REPOSITORY, "release", "72", "--merged", "12"]) == 0
-
-    assert worktree.exists()
-    assert checkout.branch_exists(_CLEANUP_BRANCH) is True
-    assert "worktree: kept -- not merged into the default branch\n" in capsys.readouterr().out
+def _not_merged_locally_scenario(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    return _release_cleanup_scenario(monkeypatch, tmp_path, merge_into_main=False)
 
 
-def test_release_merged_keeps_a_lane_branch_checked_out_on_the_main_checkout(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
-) -> None:
+def _checked_out_elsewhere_scenario(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Issue #322 review finding 4: the lane branch is checked out on the
     repository's own shared main checkout -- reachable when `release` runs
     from a different linked worktree entirely -- rather than in a disposable
@@ -11497,32 +11499,89 @@ def test_release_merged_keeps_a_lane_branch_checked_out_on_the_main_checkout(
     _redirect_toplevel(monkeypatch, bystander)
     monkeypatch.chdir(bystander)
 
-    assert issue_claim.main(["--repo", REPOSITORY, "release", "72", "--merged", "12"]) == 0
 
+def _git_failure_scenario(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Issue #322 review/gate finding: a git failure resolving the lane's
+    own worktrees must surface as `kept -- git failure: ...`, never as `no
+    linked worktree found`."""
+    worktree = _release_cleanup_scenario(monkeypatch, tmp_path)
+    _stub_one_git_call(
+        monkeypatch,
+        [
+            "rev-parse",
+            "--path-format=absolute",
+            "--show-toplevel",
+            "--git-dir",
+            "--git-common-dir",
+        ],
+        exit_status=128,
+        stderr="fatal: cannot change to 'gone': No such file or directory",
+    )
+    return worktree
+
+
+_WORKTREE_CLEANUP_KEPT_SCENARIOS: tuple[
+    tuple[str, Callable[[pytest.MonkeyPatch, Path], Path | None], tuple[str, ...], str], ...
+] = (
+    (
+        "keep-worktree-flag",
+        _release_cleanup_scenario,
+        ("--keep-worktree",),
+        "--keep-worktree was given",
+    ),
+    ("dirty", _dirty_worktree_scenario, (), "dirty"),
+    ("ran-from-inside", _ran_from_inside_scenario, (), "release ran from inside it"),
+    ("no-linked-worktree", _no_linked_worktree_scenario, (), "no linked worktree found"),
+    (
+        "not-merged-locally",
+        _not_merged_locally_scenario,
+        (),
+        "not merged into the default branch",
+    ),
+    ("checked-out-elsewhere", _checked_out_elsewhere_scenario, (), "branch checked out elsewhere"),
+    (
+        "git-failure",
+        _git_failure_scenario,
+        (),
+        "git failure: fatal: cannot change to 'gone': No such file or directory",
+    ),
+)
+
+
+@pytest.mark.parametrize("as_json", [False, True], ids=["text", "json"])
+@pytest.mark.parametrize(
+    ("configure", "extra_args", "reason"),
+    [entry[1:] for entry in _WORKTREE_CLEANUP_KEPT_SCENARIOS],
+    ids=[entry[0] for entry in _WORKTREE_CLEANUP_KEPT_SCENARIOS],
+)
+def test_release_merged_keeps_the_worktree_for_every_reason(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    configure: Callable[[pytest.MonkeyPatch, Path], Path | None],
+    extra_args: tuple[str, ...],
+    reason: str,
+    as_json: bool,
+) -> None:
+    """Issue #322 review/gate finding 4: text and `--json` proof for every
+    reason cleanup keeps the worktree instead of removing it, parametrized
+    over one fixture rather than one near-identical test per reason."""
+    worktree = configure(monkeypatch, tmp_path)
+    arguments = ["--repo", REPOSITORY, "release", "72", "--merged", "12", *extra_args]
+    if as_json:
+        arguments.append("--json")
+
+    status = issue_claim.main(arguments)
+
+    assert status == 0
     assert checkout.branch_exists(_CLEANUP_BRANCH) is True
-    assert "worktree: kept -- branch checked out elsewhere\n" in capsys.readouterr().out
-
-
-def test_release_merged_json_carries_the_worktree_cleanup_outcome(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
-) -> None:
-    _release_cleanup_scenario(monkeypatch, tmp_path)
-
-    status = issue_claim.main(["--repo", REPOSITORY, "release", "72", "--merged", "12", "--json"])
-
-    assert status == 0
-    assert json.loads(capsys.readouterr().out)["worktree"] == "removed"
-
-
-def test_release_merged_json_carries_a_kept_worktree_cleanup_outcome(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
-) -> None:
-    _release_cleanup_scenario(monkeypatch, tmp_path, link_worktree=False)
-
-    status = issue_claim.main(["--repo", REPOSITORY, "release", "72", "--merged", "12", "--json"])
-
-    assert status == 0
-    assert json.loads(capsys.readouterr().out)["worktree"] == "kept -- no linked worktree found"
+    output = capsys.readouterr().out
+    if as_json:
+        assert json.loads(output)["worktree"] == f"kept -- {reason}"
+    else:
+        assert f"worktree: kept -- {reason}\n" in output
+    if worktree is not None:
+        assert worktree.exists()
 
 
 def test_release_abandoned_records_why_the_lane_stopped(

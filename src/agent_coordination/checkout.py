@@ -354,20 +354,34 @@ def resolve_path_checkout(directory: Path) -> PathCheckout | None:
     against `directory` itself, not the caller's own cwd.
     """
     try:
-        combined = _git_output(
-            [
-                "rev-parse",
-                "--path-format=absolute",
-                "--show-toplevel",
-                "--git-dir",
-                "--git-common-dir",
-            ],
-            directory=directory,
-        )
-        toplevel, git_directory, common_directory = combined.splitlines()
-        branch = _git_output(["branch", "--show-current"], directory=directory)
-    except (ClaimError, ValueError):
+        return _resolve_checkout(directory)
+    except ClaimError:
         return None
+
+
+def _resolve_checkout(directory: Path) -> PathCheckout:
+    """`resolve_path_checkout`'s own git reads, without swallowing a failure
+    into `None` (issue #322 review/gate finding: `worktree_on_branch` below
+    resolves paths git's own worktree registry already vouches for as
+    worktrees of this repository, so any failure resolving one of them is
+    real -- a moved or deleted worktree directory, most often -- never a
+    legitimate "nothing here"; `resolve_path_checkout` is the one caller
+    that still wants that bare `None` reading)."""
+    combined = _git_output(
+        [
+            "rev-parse",
+            "--path-format=absolute",
+            "--show-toplevel",
+            "--git-dir",
+            "--git-common-dir",
+        ],
+        directory=directory,
+    )
+    try:
+        toplevel, git_directory, common_directory = combined.splitlines()
+    except ValueError as error:
+        raise ClaimError(f"git returned a malformed checkout description: {combined!r}") from error
+    branch = _git_output(["branch", "--show-current"], directory=directory)
     kind = CheckoutKind.MAIN if git_directory == common_directory else CheckoutKind.LINKED_WORKTREE
     try:
         _git_output(["rev-parse", "--verify", "HEAD"], directory=directory)
@@ -808,15 +822,23 @@ def _refuse_foreign_worktree(path: Path, existing: PathCheckout) -> None:
         )
 
 
+NOT_A_WORKTREE_REFUSAL = "path exists and is not a worktree of this repository"
+
+
 def resolve_or_create_worktree(path: Path, branch: str, *, remote: str) -> None:
     """Create `path`'s linked worktree and `branch` when nothing sits there
     yet, or validate a prior `start`'s own worktree for resume (issue #322):
     refuses by name when `branch` is already taken by something that is not
     this worktree, when `path` resolves to a checkout this repository does
-    not own (`_refuse_foreign_worktree`), or when a worktree already at
-    `path` is dirty."""
+    not own (`_refuse_foreign_worktree`), when a worktree already at `path`
+    is dirty, or when something -- empty or not -- already sits at `path`
+    without being a worktree of this repository at all (issue #322
+    review/gate finding: `git worktree add` must never be left to adopt, and
+    potentially remove, an existing directory nobody offered up for this)."""
     existing = resolve_path_checkout(path)
     if existing is None:
+        if path.exists():
+            raise ClaimError(NOT_A_WORKTREE_REFUSAL)
         if branch_exists(branch):
             raise ClaimError(
                 f"branch {branch!r} already exists and is not this item's worktree; "
@@ -842,27 +864,115 @@ def worktree_on_branch(paths: tuple[Path, ...], branch: str) -> Path | None:
     (issue #322) -- `release --merged`'s own cleanup finds the lane's
     linked worktree by the branch its claim already names, not by `start`'s
     naming scheme, since a claim's worktree may predate `start` or have
-    been resumed under a different `--slug`."""
+    been resumed under a different `--slug`. `paths` are entries git's own
+    worktree registry already vouches for, so a failure resolving one of
+    them (issue #322 review/gate finding: a moved or deleted worktree
+    directory, most often) is a real refusal, via `_resolve_checkout`,
+    never a silently skipped "not on this branch"."""
     for candidate in paths:
-        found = resolve_path_checkout(candidate)
-        if found is not None and found.branch == branch:
+        found = _resolve_checkout(candidate)
+        if found.branch == branch:
             return candidate
     return None
 
 
-def remove_linked_worktree(path: Path, *, branch: str) -> None:
+@dataclass(frozen=True)
+class WorktreeRemoval:
+    """Whether `release --merged`'s own cleanup removed the lane's linked
+    worktree, and why not when it did not (issue #322 review/gate finding
+    4)."""
+
+    removed: bool
+    reason: str | None
+
+
+@dataclass(frozen=True)
+class BranchRemoval:
+    """Whether the same cleanup also removed the lane's own local branch,
+    tracked apart from `WorktreeRemoval` (issue #322 review/gate finding 4):
+    `git worktree remove` and `git branch -d` are two separate git writes,
+    so the first can succeed while the second fails, and that must never
+    read as a bare `kept` that hides the worktree's own removal."""
+
+    removed: bool
+    reason: str | None
+
+
+@dataclass(frozen=True)
+class WorktreeCleanupOutcome:
+    """`release --merged`'s own worktree/branch cleanup result, in two parts
+    (issue #322 review/gate finding 4): this module owns the policy that
+    decides it, `cli` only renders it."""
+
+    worktree: WorktreeRemoval
+    branch: BranchRemoval
+
+
+_WORKTREE_REMOVED = WorktreeRemoval(removed=True, reason=None)
+_BRANCH_REMOVED = BranchRemoval(removed=True, reason=None)
+
+
+def worktree_cleanup_kept(reason: str) -> WorktreeCleanupOutcome:
+    """The outcome for every reason cleanup declines before ever touching
+    disk: a flag, a dirty tree, an unmerged or elsewhere-checked-out branch,
+    no matching worktree, running from inside it, or a git failure resolving
+    any of these -- `branch` is never separately attempted once `worktree`
+    itself is kept."""
+    return WorktreeCleanupOutcome(
+        worktree=WorktreeRemoval(removed=False, reason=reason),
+        branch=BranchRemoval(removed=False, reason=None),
+    )
+
+
+WORKTREE_KEPT_NOT_MERGED_REASON = "not merged into the default branch"
+WORKTREE_KEPT_DIRTY_REASON = "dirty"
+WORKTREE_KEPT_ELSEWHERE_REASON = "branch checked out elsewhere"
+
+
+def cleanup_landed_worktree(matching: Path, branch: str, *, remote: str) -> WorktreeCleanupOutcome:
+    """`release --merged`'s own cleanup policy once a lane's linked worktree
+    is already found (issue #322 review/gate finding 4): merged check, then
+    checked-out-elsewhere check, then a dirty check, then the worktree
+    removal itself, then the branch deletion -- in that order, since
+    removing a dirty or still-needed worktree is unsafe and the two git
+    writes below it are each worth reporting apart. `release`'s own
+    cwd-equality guard and its "no worktree matches this branch" decision
+    run before this and stay the caller's own job (they need the process's
+    own cwd and worktree listing, neither of which this function reads)."""
+    if not branch_merged_into_default(branch, remote=remote):
+        return worktree_cleanup_kept(WORKTREE_KEPT_NOT_MERGED_REASON)
+    matching_checkout = resolve_path_checkout(matching)
+    if matching_checkout is not None and matching_checkout.kind is CheckoutKind.MAIN:
+        return worktree_cleanup_kept(WORKTREE_KEPT_ELSEWHERE_REASON)
+    dirty = _git_output(["status", "--porcelain"], directory=matching)
+    if dirty:
+        return worktree_cleanup_kept(WORKTREE_KEPT_DIRTY_REASON)
+    return remove_linked_worktree(matching, branch=branch)
+
+
+def remove_linked_worktree(path: Path, *, branch: str) -> WorktreeCleanupOutcome:
     """Remove a landed lane's linked worktree and its own local branch
     (issue #322): `git worktree remove` first -- git refuses to delete a
     branch still checked out anywhere -- then `git branch -d`, both through
     this module's own `_git_run` chokepoint. Never called on the calling
     process's own checkout: `release`'s own cwd-equality guard runs first,
-    since a worktree cannot remove its own cwd."""
+    since a worktree cannot remove its own cwd. A worktree-removal failure
+    still raises loud (nothing on disk has changed yet); a branch-deletion
+    failure once the worktree is already gone returns a typed outcome
+    instead (issue #322 review/gate finding 4), so that success is never
+    lost behind a bare `kept`."""
     result = _git_run(["worktree", "remove", str(path)])
     if result.exit_status != 0:
         raise ClaimError(process.git_failure_detail(result))
     result = _git_run(["branch", "-d", branch])
     if result.exit_status != 0:
-        raise ClaimError(process.git_failure_detail(result))
+        return WorktreeCleanupOutcome(
+            worktree=_WORKTREE_REMOVED,
+            branch=BranchRemoval(
+                removed=False, reason=f"git failure: {process.git_failure_detail(result)}"
+            ),
+        )
+    return WorktreeCleanupOutcome(worktree=_WORKTREE_REMOVED, branch=_BRANCH_REMOVED)
 
 
 def branch_merged_into_default(branch: str, *, remote: str) -> bool:

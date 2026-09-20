@@ -23,6 +23,7 @@ from cli_fixtures import (
     _real_git,
     _real_repository_with_bare_remote,
     _set_agent_identity_env,
+    _stub_one_git_call,
 )
 
 from agent_coordination import board, checkout, process, protocol
@@ -1371,6 +1372,22 @@ def test_resolve_or_create_worktree_refuses_a_branch_taken_by_no_worktree_of_thi
         checkout.resolve_or_create_worktree(worktree, branch, remote="origin")
 
 
+def test_resolve_or_create_worktree_refuses_an_existing_non_worktree_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #322 review/gate finding: an ordinary directory already sitting
+    at the target path -- empty or not -- is refused outright rather than
+    left for `git worktree add` to adopt."""
+    repo = _bare_remote_repository_with_one_commit(tmp_path)
+    branch = "codex/issue-9-widget"
+    worktree = tmp_path / "repo-worktrees" / "issue-9-widget"
+    worktree.mkdir(parents=True)
+    monkeypatch.chdir(repo)
+
+    with pytest.raises(ClaimError, match=re.escape(checkout.NOT_A_WORKTREE_REFUSAL)):
+        checkout.resolve_or_create_worktree(worktree, branch, remote="origin")
+
+
 def test_resolve_or_create_worktree_refuses_a_worktree_on_a_different_branch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1441,16 +1458,44 @@ def test_worktree_on_branch_finds_the_one_matching_path(tmp_path: Path) -> None:
     assert checkout.worktree_on_branch((main,), "codex/issue-1-widget") is None
 
 
+def test_worktree_on_branch_surfaces_a_git_failure_resolving_a_registered_worktree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #322 review/gate finding: `paths` names worktrees git's own
+    registry already vouches for, so a failure resolving one of them (a
+    moved or deleted directory, most often) must surface as a refusal --
+    never a silently skipped "not on this branch"."""
+    main, worktree = _repo_with_linked_worktree(tmp_path)
+    monkeypatch.chdir(main)
+    _stub_one_git_call(
+        monkeypatch,
+        [
+            "rev-parse",
+            "--path-format=absolute",
+            "--show-toplevel",
+            "--git-dir",
+            "--git-common-dir",
+        ],
+        exit_status=128,
+        stderr="fatal: cannot change to 'gone': No such file or directory",
+    )
+
+    with pytest.raises(ClaimError, match="cannot change to"):
+        checkout.worktree_on_branch((worktree,), "codex/issue-1-widget")
+
+
 def test_remove_linked_worktree_deletes_the_directory_and_the_branch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     main, worktree = _repo_with_linked_worktree(tmp_path)
     monkeypatch.chdir(main)
 
-    checkout.remove_linked_worktree(worktree, branch="codex/issue-1-widget")
+    outcome = checkout.remove_linked_worktree(worktree, branch="codex/issue-1-widget")
 
     assert not worktree.exists()
     assert checkout.branch_exists("codex/issue-1-widget") is False
+    assert outcome.worktree.removed is True
+    assert outcome.branch.removed is True
 
 
 def test_branch_merged_into_default_is_true_only_after_a_real_merge(
@@ -1470,24 +1515,6 @@ def test_branch_merged_into_default_is_true_only_after_a_real_merge(
     _push_repository_trunk(repo, "origin")
 
     assert checkout.branch_merged_into_default("feature", remote="origin") is True
-
-
-def _stub_one_git_call(
-    monkeypatch: pytest.MonkeyPatch, arguments: list[str], *, exit_status: int, stderr: str
-) -> None:
-    """Force exactly one `_git_run` argv to a chosen failure exit, every
-    other call reaching the real launcher -- the git-level failure branches
-    below (an unreachable remote, a colliding worktree path, an unmerged
-    branch `git branch -d` itself refuses) are cheaper to force this way
-    than to reproduce with real git state."""
-    real_git_run = checkout._git_run
-
-    def fake(call_arguments: list[str], *, directory: Path | None = None) -> process.CapturedResult:
-        if call_arguments == arguments:
-            return process.CapturedResult(exit_status, b"", stderr.encode())
-        return real_git_run(call_arguments, directory=directory)
-
-    monkeypatch.setattr(checkout, "_git_run", fake)
 
 
 def test_branch_exists_fails_loud_on_an_unexpected_git_exit(
@@ -1563,9 +1590,12 @@ def test_remove_linked_worktree_fails_loud_when_worktree_remove_itself_fails(
         checkout.remove_linked_worktree(worktree, branch="codex/issue-1-widget")
 
 
-def test_remove_linked_worktree_fails_loud_when_branch_delete_itself_fails(
+def test_remove_linked_worktree_reports_the_worktree_removed_and_the_branch_kept(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Issue #322 review/gate finding 4: a branch-deletion failure after the
+    worktree is already gone must never read as a bare `kept` -- the typed
+    outcome names both halves apart."""
     main, worktree = _repo_with_linked_worktree(tmp_path)
     monkeypatch.chdir(main)
     _stub_one_git_call(
@@ -1575,8 +1605,12 @@ def test_remove_linked_worktree_fails_loud_when_branch_delete_itself_fails(
         stderr="error: branch not fully merged",
     )
 
-    with pytest.raises(ClaimError, match="not fully merged"):
-        checkout.remove_linked_worktree(worktree, branch="codex/issue-1-widget")
+    outcome = checkout.remove_linked_worktree(worktree, branch="codex/issue-1-widget")
+
+    assert not worktree.exists()
+    assert outcome.worktree.removed is True
+    assert outcome.branch.removed is False
+    assert outcome.branch.reason is not None and "not fully merged" in outcome.branch.reason
 
 
 def test_branch_merged_into_default_fails_loud_when_the_fetch_itself_fails(
