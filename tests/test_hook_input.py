@@ -518,6 +518,16 @@ def test_hook_patch_paths_returns_empty_for_unrecognized_text(text: str) -> None
             id="sed-in-place-skips-its-own-line-length-value",
         ),
         pytest.param(
+            "sed -i --line-length 80 -e p /tmp/file",
+            ((hook_input.PATTERN_SED_IN_PLACE, "/tmp/file"),),
+            id="sed-in-place-skips-its-own-long-line-length-value",
+        ),
+        pytest.param(
+            "sed -i --line-length=80 -e p /tmp/file",
+            ((hook_input.PATTERN_SED_IN_PLACE, "/tmp/file"),),
+            id="sed-in-place-skips-its-own-attached-long-line-length-value",
+        ),
+        pytest.param(
             "cp --target-directory=/tmp README.md",
             ((hook_input.PATTERN_COPY, "/tmp"),),
             id="cp-target-directory-long-form-is-the-destination",
