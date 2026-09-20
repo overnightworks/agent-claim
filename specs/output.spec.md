@@ -30,6 +30,9 @@ shape until its own migration lands.
 - This file never lists a command's own vocabulary: `ask`, `rule`, and `brief` each document their own `reason` members, with examples, in their own spec.
 - `ok`/`reason` never reorder around a command's payload: `reason` is always the second key, never last, never interleaved with structured detail keys.
 - `message` never carries structured data: every structured detail (`item`, `index`, `claim`, `checks`, and the like) is its own sibling key, never packed into the prose.
+- `protect` never joins this envelope, migrated or not: its hook protocol (`{"decision": …}`, exit `0`/`2`) is a permanent exception (`specs/protect.spec.md`), unlike OUT-04's not-yet-migrated commands.
+- `board --serve` never prints this file's own `--json` envelope either: its own request/response wire contract is permanently `specs/board.spec.md`'s own, not this file's.
+- `bootstrap`, `reset`, `start`, `body --template`, `register`, `run`, and `login` never gain a `--json` mode of their own (each command's own product decision, not a pending migration): each names it in its own `## Never` (`specs/bootstrap.spec.md`, `specs/reset.spec.md`, `specs/start.spec.md`, `specs/body.spec.md`, `specs/workspace.spec.md`).
 
 ## Examples
 

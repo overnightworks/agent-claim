@@ -173,7 +173,7 @@ def test_register_uses_the_xdg_workspace_configuration_path(
         ([workspace.RunOutcome("alpha", workspace.RunState.REATTACHED)], 0, "alpha: reattached\n"),
         (
             [workspace.RunOutcome("alpha", workspace.RunState.FAILED, "tmux unavailable")],
-            1,
+            2,
             "alpha: failed: tmux unavailable\n",
         ),
     ],
@@ -271,7 +271,7 @@ def test_login_cli_refuses_a_repository_target(capsys) -> None:
         ),
         (
             (workspace.RunOutcome("alpha", workspace.RunState.FAILED),),
-            1,
+            2,
             "Workspace recovery completed for 0 project(s). 1 project(s) failed recovery.",
         ),
         (
@@ -356,7 +356,7 @@ def test_hidden_login_runner_reports_workspace_failure_without_private_detail(
     notifications: list[str] = []
     monkeypatch.setattr(terminal, "notify_login_recovery", notifications.append)
 
-    assert cli.main(["_run-at-login"]) == 1
+    assert cli.main(["_run-at-login"]) == 2
 
     attempt = workspace.load_login_attempt(workspace.login_attempt_path(os.environ))
     assert attempt.failure == "workspace failure"
@@ -384,7 +384,7 @@ def test_login_status_reports_a_malformed_attempt_without_echoing_its_contents(
         '"state": "completed", "outcomes": []}\n'
     )
 
-    assert cli.main(["login", "status"]) == 1
+    assert cli.main(["login", "status"]) == 2
 
     output = capsys.readouterr().out
     assert "attempt: malformed" in output

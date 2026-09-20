@@ -459,7 +459,7 @@ def run_login_recovery(
                 completed_at=_login_time(now()),
             )
             _write_login_attempt(state_path, completed)
-            return LoginRunResult(completed, 1)
+            return LoginRunResult(completed, 2)
         if not outcomes:
             completed = LoginAttempt(
                 attempt.attempt_id,
@@ -469,7 +469,7 @@ def run_login_recovery(
                 completed_at=_login_time(now()),
             )
             _write_login_attempt(state_path, completed)
-            return LoginRunResult(completed, 1)
+            return LoginRunResult(completed, 2)
         completed = LoginAttempt(
             attempt.attempt_id,
             attempt.started_at,
@@ -480,7 +480,7 @@ def run_login_recovery(
         _write_login_attempt(state_path, completed)
     return LoginRunResult(
         completed,
-        1
+        2
         if any(state in {RunState.FAILED, RunState.UNKNOWN} for _, state in completed.outcomes)
         else 0,
     )

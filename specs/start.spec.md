@@ -77,6 +77,7 @@ brand-new id, never a stale or deterministic per-item one.
 - `start` never derives the claimed scope independently of `aco claim`'s own body-scope resolution: an explicit `--scope` that disagrees with the item's own body still refuses the same way (CLAIM-54).
 - `start` never reads or writes `refs/aco/state` itself: every claim write happens inside the one `aco claim` call it makes from the resolved worktree.
 - `start` never reuses a prior, now-terminal claim id for the same item: a clean resume with no live claim mints a fresh one (START-11), exactly as a first build would.
+- `start` never gains a `--json` mode: its own parser defines no such flag, so every outcome, success or refusal, is `worktree:`/`branch:` text or a stderr sentence (own product decision).
 
 ## Examples
 
