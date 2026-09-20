@@ -510,6 +510,46 @@ def test_peek_state_ignores_a_foreign_fetch_that_wins_the_fetch_head_race(
     assert state.tip == created
 
 
+def test_fetch_state_ignores_a_foreign_fetch_that_wins_the_fetch_head_race(
+    bare_remote: Path, worktree: Path, tmp_path: Path
+) -> None:
+    """The same race as `test_peek_state_ignores_a_foreign_fetch_that_wins_the_fetch_head_race`
+    above, driven against `fetch_state` instead: a foreign `git fetch` landing
+    in this worktree between the store's own fetch and its read must not
+    change what `fetch_state` observes. `fetch_state` reads the tip back from
+    `_FETCH_ANCHOR_REF` by name (`_fetch_into_anchor`), never from the shared
+    `FETCH_HEAD` file the foreign fetch also overwrites, so this passes today;
+    it fails against the previous `FETCH_HEAD`-reading implementation, which
+    shared this exact race with `peek_state`'s old one (issue #310 finding
+    48).
+    """
+    created = store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    reader = tmp_path / "reader"
+    reader.mkdir()
+    _git("init", "-b", "main", cwd=reader)
+    _git("commit", "--allow-empty", "-m", "unrelated branch tip", cwd=reader)
+    foreign_tip = _git("rev-parse", "HEAD", cwd=reader).stdout.strip()
+    _git("push", str(bare_remote), f"{foreign_tip}:refs/heads/foreign", cwd=reader)
+    real_run_captured = process.run_captured
+
+    def race_a_foreign_fetch_right_after_the_stores_own(
+        command: list[str],
+    ) -> process.CapturedResult:
+        result = real_run_captured(command)
+        if command[3] == "fetch" and str(bare_remote) in command:
+            _git("fetch", str(bare_remote), "refs/heads/foreign", cwd=reader)
+        return result
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(
+            store.process, "run_captured", race_a_foreign_fetch_right_after_the_stores_own
+        )
+
+        state = store.fetch_state(worktree=reader, remote=str(bare_remote))
+
+    assert state.tip == created
+
+
 @pytest.mark.parametrize(
     ("files", "expected_error", "match"),
     [
