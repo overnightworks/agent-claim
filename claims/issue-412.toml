@@ -1,8 +1,0 @@
-claim_id = "cd22b03b6b7346318fa011f4ffb8c649"
-agent = "Claude head (coordinator)"
-role = "builder"
-base = "ff9194af6aeb050fc1e191bfc4c044632a6b43e4"
-branch = "claude/issue-412-board-envelope"
-scope = ["specs/board.spec.md", "specs/next.spec.md", "specs/output.spec.md", "specs/rulings.spec.md", "src/agent_coordination/board.py", "src/agent_coordination/cli.py", "tests/test_board.py", "tests/test_board_serve.py", "tests/test_cli.py", "tests/test_state_board.py"]
-opened_commit = "e8d4bca396bd17087f5208fc9ddcf70bcec4d0d9"
-whole_reason = "exit/JSON slice 5: board, rulings, next on the envelope, three specs and tests"
