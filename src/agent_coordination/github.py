@@ -626,7 +626,7 @@ class GitHubForge:
 
     def default_branch(self) -> str:
         branch = self._run(["api", f"repos/{self.repository}", "--jq", ".default_branch"])
-        if protocol.BRANCH_PATTERN.fullmatch(branch) is None:
+        if not protocol.is_safe_branch_name(branch):
             raise forge.ForgeMalformedResponseError("GitHub returned a malformed default branch")
         return branch
 
