@@ -29,6 +29,7 @@ from collections.abc import Callable, Iterable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
 from io import BytesIO
 from pathlib import Path
 from types import MappingProxyType
@@ -90,6 +91,20 @@ _STATE_TOP_LEVEL_NAMES = frozenset(
 )
 
 
+class TransitionIntent(StrEnum):
+    """The commit message's own `intent:` trailer label (§1 "Commit
+    message"; issue #357 R2), the house `StrEnum` protocol-token type used
+    everywhere else in the package -- a loose string here would let a typo
+    in one of the two writers (`_transition_message`) or readers
+    (`_parsed_transition`) drift from the other unnoticed."""
+
+    CLAIM = "claim"
+    RESCOPE = "rescope"
+    RELEASE = "release"
+    ITEM_WRITE = "item_write"
+    LANDING = "landing"
+
+
 @dataclass(frozen=True)
 class _TransitionKind:
     """One transition intent type's own registration (issue #357 R2): the
@@ -102,24 +117,27 @@ class _TransitionKind:
     (issue #359), the one intent that is both claim- and item-write-shaped,
     is one more row here, never a second place to update."""
 
-    label: str
+    label: TransitionIntent
     claim_shaped: bool
 
 
 # §1 "Commit message": `intent: claim` / `rescope` / `release` / `item_write`
 # / `landing` (issue #359, `LandingIntent`'s atomic close-and-release).
 _TRANSITION_KINDS: dict[type[ClaimTransitionIntent], _TransitionKind] = {
-    ClaimIntent: _TransitionKind(label="claim", claim_shaped=True),
-    RescopeIntent: _TransitionKind(label="rescope", claim_shaped=True),
-    ReleaseIntent: _TransitionKind(label="release", claim_shaped=True),
-    ItemWriteIntent: _TransitionKind(label="item_write", claim_shaped=False),
-    LandingIntent: _TransitionKind(label="landing", claim_shaped=True),
+    ClaimIntent: _TransitionKind(label=TransitionIntent.CLAIM, claim_shaped=True),
+    RescopeIntent: _TransitionKind(label=TransitionIntent.RESCOPE, claim_shaped=True),
+    ReleaseIntent: _TransitionKind(label=TransitionIntent.RELEASE, claim_shaped=True),
+    ItemWriteIntent: _TransitionKind(label=TransitionIntent.ITEM_WRITE, claim_shaped=False),
+    LandingIntent: _TransitionKind(label=TransitionIntent.LANDING, claim_shaped=True),
 }
 _CLAIM_LABEL = _TRANSITION_KINDS[ClaimIntent].label
 _RESCOPE_LABEL = _TRANSITION_KINDS[RescopeIntent].label
 # The one set `_parsed_transition` reads back: every label `_TRANSITION_KINDS`
-# marks claim-shaped, derived rather than listed a second time.
-_CLAIM_SHAPED_LABELS = frozenset(
+# marks claim-shaped, derived rather than listed a second time. Typed as a
+# plain `str` set, not `frozenset[TransitionIntent]`: `_parsed_transition`
+# tests membership of an unparsed trailer value (`str | None`, foreign
+# history included), never a `TransitionIntent` itself.
+_CLAIM_SHAPED_LABELS: frozenset[str] = frozenset(
     kind.label for kind in _TRANSITION_KINDS.values() if kind.claim_shaped
 )
 
@@ -127,6 +145,13 @@ _CLAIM_SHAPED_LABELS = frozenset(
 # outcome this store ever reads as `EMPTY_STATE` (criterion 6). 128 is the
 # generic auth/transport failure and must never be read as empty.
 _LS_REMOTE_EXIT_NO_MATCH = 2
+
+# `git merge-base --is-ancestor` (git(1)): exit 1 is the one documented "not
+# an ancestor" outcome `_check_lineage` reads as a rewritten ref. Any other
+# nonzero exit -- 128 when `previous` or `tip` cannot be read, a pruned
+# object among them -- is a git failure, not a lineage fact, and must fail
+# loud with its own detail instead (issue #390 finding 10).
+_MERGE_BASE_EXIT_NOT_ANCESTOR = 1
 
 # Internal bound on the push-retry loop below (criterion 3's seam). Distinct
 # from `_MAX_TRANSITION_ATTEMPTS`: this loop only ever contends over
@@ -198,8 +223,7 @@ class GitPushTransport:
     def push(self, *, worktree: Path, remote: str, ref: str, new_oid: ObjectId) -> None:
         result = _run_git(worktree, ["push", remote, f"{new_oid}:{ref}"])
         if result.exit_status != 0:
-            detail = result.stderr.decode().strip() or result.stdout.decode().strip()
-            raise PushRejectedError(detail or f"git push exited {result.exit_status}")
+            raise PushRejectedError(process.git_failure_detail(result))
 
 
 def _run_git(worktree: Path, arguments: list[str]) -> process.CapturedResult:
@@ -234,7 +258,7 @@ def _git_dir(worktree: Path) -> Path:
     """
     result = _run_git(worktree, ["rev-parse", "--absolute-git-dir"])
     if result.exit_status != 0:
-        raise ClaimError(result.stderr.decode().strip() or "cannot resolve git-dir")
+        raise ClaimError(process.git_failure_detail(result))
     return Path(result.stdout.decode().strip())
 
 
@@ -281,16 +305,30 @@ def _check_lineage(worktree: Path, tip: ObjectId) -> None:
     if previous is None or previous == tip:
         return
     result = _run_git(worktree, ["merge-base", "--is-ancestor", str(previous), str(tip)])
-    if result.exit_status != 0:
+    if result.exit_status == _MERGE_BASE_EXIT_NOT_ANCESTOR:
         raise StateLineageError(
             f"{STATE_REF} moved from {previous} to {tip} without {previous} as an "
             "ancestor of the new tip; the ref may have been rewritten"
         )
+    if result.exit_status != 0:
+        detail = process.git_failure_detail_from_stderr(result)
+        raise ClaimError(f"cannot check whether {previous} is an ancestor of {tip}: {detail}")
 
 
 # Field separator for the batched `git log` read below: %x09 is git's own
 # escape for a literal tab, unambiguous inside a `--format` string.
 _LOG_FORMAT = "%H%x09%cI"
+
+
+def _commit_history_read_failure(tip: ObjectId, result: process.CapturedResult) -> ClaimError:
+    """The one sentence both first-parent history walks below raise on a
+    failing `git log` (issue #390 finding 7): `_first_parent_commit_dates`
+    and `_claim_lifecycle_transitions` used to spell this identically by
+    hand, dropping git's own stderr each time -- one owner, carrying the
+    detail forward instead."""
+    return ClaimError(
+        f"cannot read the commit history of {tip}: {process.git_failure_detail_from_stderr(result)}"
+    )
 
 
 def _first_parent_commit_dates(worktree: Path, tip: ObjectId) -> dict[ObjectId, datetime]:
@@ -304,7 +342,7 @@ def _first_parent_commit_dates(worktree: Path, tip: ObjectId) -> dict[ObjectId, 
     """
     result = _run_git(worktree, ["log", "--first-parent", f"--format={_LOG_FORMAT}", str(tip)])
     if result.exit_status != 0:
-        raise ClaimError(f"cannot read the commit history of {tip}")
+        raise _commit_history_read_failure(tip, result)
     dates: dict[ObjectId, datetime] = {}
     for line in result.stdout.decode().splitlines():
         commit_hex, _, raw_date = line.partition("\t")
@@ -453,7 +491,7 @@ def _claim_lifecycle_transitions(
         ],
     )
     if result.exit_status != 0:
-        raise ClaimError(f"cannot read the commit history of {tip}")
+        raise _commit_history_read_failure(tip, result)
     raw = result.stdout.decode()
     if not raw:
         return (), 0
@@ -665,7 +703,8 @@ def _anchor_fetched_tip(worktree: Path, tip: ObjectId) -> None:
 def _tree_oid(worktree: Path, tip: ObjectId) -> ObjectId:
     result = _run_git(worktree, ["rev-parse", f"{tip}^{{tree}}"])
     if result.exit_status != 0:
-        raise MalformedStateTreeError(f"cannot resolve the tree for {tip}")
+        detail = process.git_failure_detail_from_stderr(result)
+        raise MalformedStateTreeError(f"cannot resolve the tree for {tip}: {detail}")
     return ObjectId(result.stdout.decode().strip())
 
 
@@ -684,7 +723,10 @@ def _list_tree(
     """
     listing = _run_git(worktree, ["ls-tree", "-r", "-t", str(tree_ref)])
     if listing.exit_status != 0:
-        raise MalformedStateTreeError(f"cannot list the {context} tree {tree_ref} at {tip}")
+        detail = process.git_failure_detail_from_stderr(listing)
+        raise MalformedStateTreeError(
+            f"cannot list the {context} tree {tree_ref} at {tip}: {detail}"
+        )
     entries: dict[str, tuple[str, str]] = {}
     for line in listing.stdout.decode().splitlines():
         mode_type, _, path = line.partition("\t")
@@ -988,7 +1030,7 @@ def _commit_tree(
         arguments += ["-p", str(parent)]
     result = _run_git(worktree, arguments)
     if result.exit_status != 0:
-        raise ClaimError(result.stderr.decode().strip() or "commit-tree failed")
+        raise ClaimError(process.git_failure_detail(result))
     return ObjectId(result.stdout.decode().strip())
 
 
@@ -1005,7 +1047,11 @@ def _find_operation_id(
     retry loop calls this (its own just-built commit, and a tip
     `fetch_state` just parsed), so a failing walk is a broken invariant, not
     an absent id: reading it as "not found" would let a lost response whose
-    commit already landed be pushed a second time.
+    commit already landed be pushed a second time. The per-candidate read
+    below holds that same contract (issue #390 finding 9a): a nonzero exit
+    reading one candidate's own message fails loud with git's detail, never
+    silently treated as "this commit does not carry the id" -- that reading
+    is reserved for a candidate whose message was actually read.
     """
     range_argument = f"{since}..{until}" if since is not None else str(until)
     listing = _run_git(worktree, ["log", "--format=%H", range_argument])
@@ -1017,7 +1063,13 @@ def _find_operation_id(
     needle = f"operation_id: {operation_id}"
     for candidate in listing.stdout.decode().split():
         message = _run_git(worktree, ["log", "-1", "--format=%B", candidate])
-        if message.exit_status == 0 and needle in message.stdout.decode():
+        if message.exit_status != 0:
+            detail = process.git_failure_detail_from_stderr(message)
+            raise ClaimError(
+                f"cannot read commit {candidate} while searching for operation_id "
+                f"{operation_id}: {detail}"
+            )
+        if needle in message.stdout.decode():
             return ObjectId(candidate)
     return None
 
@@ -1558,7 +1610,7 @@ def list_worktrees(worktree: Path) -> tuple[Path, ...]:
     runs there."""
     result = _run_git(worktree, ["worktree", "list", "--porcelain"])
     if result.exit_status != 0:
-        raise ClaimError(result.stderr.decode().strip() or "cannot list worktrees")
+        raise ClaimError(process.git_failure_detail(result))
     return tuple(
         Path(line.removeprefix(_WORKTREE_LIST_PATH_PREFIX))
         for line in result.stdout.decode().splitlines()

@@ -67,6 +67,7 @@ exit `2`, exactly as `specs/claim-record.spec.md` already documents.
 - [ ] [CAS-09] This worktree's own last-observed tip is stamped at `<git-dir>/aco/last-oid` -- private to it, never shared with another linked worktree of the same checkout.
 - [ ] [CAS-10] A worktree with no stamp yet at `<git-dir>/aco/last-oid` accepts any tip its first fetch reads, never refusing `... the ref may have been rewritten` (CAS-11).
 - [ ] [CAS-11] A fetched tip that is not a descendant of this worktree's own stamp refuses `refs/aco/state moved from <old> to <new> without <old> as an ancestor of the new tip; the ref may have been rewritten`.
+- [ ] [CAS-48] A lineage check's `merge-base --is-ancestor` exiting anything but `0` or `1` refuses `cannot check whether <old> is an ancestor of <new>: <detail>`, never "the ref may have been rewritten".
 - [ ] [CAS-12] A worktree that observed the ref, then fetches again after it was deleted, refuses `refs/aco/state was previously observed at <old> but is now absent; the ref may have been deleted`.
 
 ## The compare-and-swap transition and its retries
@@ -78,6 +79,7 @@ only in the remote, the attempt count (`8` for bootstrap, `32` for a live
 transition), and which of the three causes applies.
 
 - [ ] [CAS-13] A transition whose push is rejected once, but whose commit actually landed (a lost response), is found by its own `operation_id` on retry, never pushed a second time.
+- [ ] [CAS-47] A retry's search for a lost response's own `operation_id` that fails to read one candidate commit refuses `cannot read commit <sha> while searching for operation_id <id>: <detail>`.
 - [ ] [CAS-14] Two transitions on disjoint identities racing for the same tip both land: the loser re-fetches, re-applies its own `operation_id`'s intent, and lands cleanly -- CLAIM-01 owns the printed line.
 - [ ] [CAS-15] 32 stuck pushes refuse `refs/aco/state rejected 32 pushes to <remote> without the ref ever moving: a stale lock or missing push rights`, fix `check <remote>'s refs/aco/state.lock` (see E-CAS-03).
 - [ ] [CAS-16] A transition rejected 32 times while the ref keeps moving refuses `refs/aco/state moved 32 times while retrying: another writer on <remote> keeps landing first; retry the command`.

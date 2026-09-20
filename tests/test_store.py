@@ -830,6 +830,23 @@ def test_lineage_error_when_the_ref_is_rewritten_without_this_worktrees_stamp_as
         store.fetch_state(worktree=worktree, remote=str(bare_remote))
 
 
+def test_lineage_check_fails_loud_when_merge_base_cannot_be_read_at_all(
+    bare_remote: Path, worktree: Path
+) -> None:
+    """Issue #390 finding 10: `merge-base --is-ancestor`'s exit `1` is the
+    one documented "not an ancestor" outcome (proven above); every other
+    nonzero exit -- here, an unresolvable stamped commit -- is a git
+    failure, not a lineage fact, and must never be reported as "the ref may
+    have been rewritten"."""
+    tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    store._write_lineage_stamp(worktree, _UNRESOLVABLE_OBJECT_ID)
+    assert tip != _UNRESOLVABLE_OBJECT_ID
+
+    with pytest.raises(protocol.ClaimError, match="cannot check whether") as raised:
+        store.fetch_state(worktree=worktree, remote=str(bare_remote))
+    assert not isinstance(raised.value, protocol.StateLineageError)
+
+
 def test_first_fetch_in_a_worktree_accepts_any_tip_without_a_prior_stamp(
     bare_remote: Path, worktree: Path, tmp_path: Path
 ) -> None:
@@ -1311,6 +1328,81 @@ def test_push_retry_stops_instead_of_committing_again_when_the_search_fails(
         text=True,
     )
     assert log.stdout.strip() == "1"
+
+
+def _fake_run_captured_failing_candidate_log(
+    real: Callable[[list[str]], process.CapturedResult],
+) -> Callable[[list[str]], process.CapturedResult]:
+    """Every real git subprocess runs except the per-candidate `git log -1`
+    inside `_find_operation_id`'s search -- distinguished from that
+    function's own outer `git log --format=%H` listing (issue #390 finding
+    9a) by the `-1` argument the inner read alone carries."""
+
+    def fake(arguments: list[str]) -> process.CapturedResult:
+        if "log" in arguments and "-1" in arguments:
+            return process.CapturedResult(
+                exit_status=1, stdout=b"", stderr=b"simulated candidate read failure"
+            )
+        return real(arguments)
+
+    return fake
+
+
+def test_find_operation_id_fails_loud_when_a_candidates_own_message_read_fails(
+    monkeypatch: pytest.MonkeyPatch, bare_remote: Path, worktree: Path
+) -> None:
+    """Issue #390 finding 9a: `_find_operation_id`'s outer walk already
+    fails loud on a broken `git log`; its per-candidate `git log -1` read
+    must keep the same contract instead of reading a nonzero exit as "this
+    commit does not carry the id"."""
+    tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    monkeypatch.setattr(
+        store.process,
+        "run_captured",
+        _fake_run_captured_failing_candidate_log(process.run_captured),
+    )
+
+    with pytest.raises(protocol.ClaimError, match="cannot read commit"):
+        store._find_operation_id(worktree, since=None, until=tip, operation_id="whatever")
+
+
+def test_push_retry_never_pushes_twice_when_a_candidates_own_message_read_fails(
+    monkeypatch: pytest.MonkeyPatch, bare_remote: Path, worktree: Path
+) -> None:
+    """Issue #390 finding 9a: after a lost response, `push_tree`'s retry
+    searches new history for its own `operation_id` before assuming nothing
+    landed. Reading a broken per-candidate read as "not found" would let the
+    retry build and push a second commit on top of the one that already
+    landed -- exactly the double push the search exists to prevent. Run
+    against the pre-fix `_find_operation_id` (which reads a failing
+    candidate read as "not found"), this test is red: the retry does not
+    stop, and `transport.calls` climbs past `1` as it exhausts
+    `_MAX_PUSH_ATTEMPTS` pushing repeatedly instead.
+    """
+    observed = store.fetch_state(worktree=worktree, remote=str(bare_remote))
+    transport = _AcceptThenRaiseTransport()
+    operation_id = "operation-under-test"
+    pending = store.PendingCommit(
+        tree_oid=store._write_bootstrap_tree(worktree),
+        message=f"bootstrap empty claim state\n\noperation_id: {operation_id}\n",
+        operation_id=operation_id,
+    )
+    monkeypatch.setattr(
+        store.process,
+        "run_captured",
+        _fake_run_captured_failing_candidate_log(process.run_captured),
+    )
+
+    with pytest.raises(protocol.ClaimError, match="cannot read commit"):
+        store.push_tree(
+            worktree=worktree,
+            remote=str(bare_remote),
+            observed=observed,
+            pending=pending,
+            transport=transport,
+        )
+
+    assert transport.calls == 1
 
 
 def test_commit_tree_fails_loud_on_an_unresolvable_tree(worktree: Path) -> None:
