@@ -10,7 +10,9 @@ may and may not carry -- and applies to every command whose own spec cites
 `specs/release.spec.md`, `specs/cut.spec.md`, `specs/item.spec.md`), each
 naming its own `reason` vocabulary with examples. Every `--json` command's
 own spec now cites this file (issue #425 finished the migration ask/rule/
-brief started), including the refusals that fire before the
+brief started; issue #435 brought `check <sha>`, the last printer that
+still built an object of its own, in), including the refusals that fire
+before the
 named command starts (OUT-05) and the ones the argument parser itself
 raises on the way into a command that declares `--json` (OUT-06,
 issue #432).

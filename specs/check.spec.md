@@ -18,9 +18,11 @@ the checked repository's own `owner/repo` path. A refusal that never even
 reaches this command's own dispatch (no checkout, an untracked storage pin,
 an unreachable forge) prints `ERROR: <sentence>` on stderr and, with
 `--json`, the envelope with `reason: "unavailable"`; exit `2` either way.
-`aco check <sha>` (a trunk commit, not a bare number) is a distinct mode
-this file does not own: its own exit and `--json` shape are
-`specs/landing-grammar.spec.md`'s own contract (LAND-48, LAND-60).
+`aco check <sha>` (a trunk commit, not a bare number) is a fourth answer
+this file owns like the other three: `specs/landing-grammar.spec.md` owns
+the trailer grammar that mode reads and the sentences it refuses with
+(LAND-03, LAND-48, LAND-57, LAND-58, LAND-60), this file its exits and its
+`--json` envelope.
 
 ## Behavior table
 
@@ -32,6 +34,9 @@ this file does not own: its own exit and `--json` shape are
 | `<n>` is an issue, malformed body | CHECK-06 | CHECK-05 |
 | `<n>` is an issue, incomplete body | CHECK-07 | CHECK-05 |
 | `<n>` is an issue, blocked | CHECK-08, CHECK-09 | CHECK-05 |
+| `<sha>` is a classified trunk commit | CHECK-12 | CHECK-14 |
+| `<sha>` is a trunk commit the trailer grammar refuses | CHECK-13 | CHECK-14 |
+| `<sha>` is off the walked first-parent trunk | CHECK-13 | CHECK-14 |
 | no checkout, or another pre-dispatch failure | CHECK-10 | CHECK-10 |
 | `--repo` given, `storage = "state-ref"` | CHECK-11 | CHECK-11 |
 
@@ -39,6 +44,7 @@ this file does not own: its own exit and `--json` shape are
 
 - [ ] [CHECK-01] `aco check <n> --json` against a pull request prints the envelope, `"kind": "pull_request", "number": <n>`, `reason`/`message` from the table below (see E-CHECK-01).
 - [ ] [CHECK-05] `aco check <n> --json` against an issue prints the envelope, `"kind": "issue", "number": <n>`, `reason`/`message` below, `"blocked_by"` only with `reason: "blocked"` (see E-CHECK-05).
+- [ ] [CHECK-14] `aco check <sha> --json` prints the envelope, `"kind": "trunk_commit", "sha": "<sha>"`, `reason`/`message` below, never a `refused` key (see E-CHECK-08).
 
 `reason`, by which outcome fired:
 
@@ -51,6 +57,9 @@ this file does not own: its own exit and `--json` shape are
 | issue malformed (CHECK-06) | `malformed` | `2` |
 | issue structurally valid but unfilled (CHECK-07) | `incomplete` | `2` |
 | issue with open `blocked_by` dependencies (CHECK-08) | `blocked` | `3` |
+| trunk commit classified (CHECK-12) | `valid` | `0` |
+| trunk trailer refused (CHECK-13) | `invalid_classification` | `2` |
+| `<sha>` off the walked trunk (CHECK-13) | `not_on_trunk` | `2` |
 | no checkout, or another pre-dispatch failure (CHECK-10) | `unavailable` | `2` |
 | `--repo` given, `storage = "state-ref"` (CHECK-11) | `invalid_usage` | `2` |
 
@@ -70,6 +79,15 @@ own text (BODY-01..BODY-50, BODY-12).
 - [ ] [CHECK-08] An issue with open `blocked_by` dependencies prints `ISSUE #<n> blocked by <label>, <label>` on stderr, exit `3`, local blockers first (see E-CHECK-05).
 - [ ] [CHECK-09] Under `storage = "state-ref"`, a local blocker's own label is `specs/landing-grammar.spec.md`'s `<label>` (`aco-xxxxxx`); a foreign one stays `owner/repo#n` regardless of either pin.
 
+## Trunk mode: a commit's own trailer
+
+`<declaration>` and `<trunk defect sentence>` are
+`specs/landing-grammar.spec.md`'s own text (LAND-48; LAND-03, LAND-57,
+LAND-58, LAND-60).
+
+- [ ] [CHECK-12] `<sha>` naming a trunk commit whose own trailer classifies prints `<sha> declares <declaration>` on stdout, exit `0` (see E-CHECK-08).
+- [ ] [CHECK-13] A `<sha>` the trunk grammar refuses prints `REFUSED: <sha> <trunk defect sentence>` on stderr, exit `2`, and reads no forge at all (see E-CHECK-08).
+
 ## No checkout, no read
 
 `<no-checkout sentence>` is `this command reads the repository's body
@@ -86,7 +104,8 @@ is enough): <git detail>`.
 - Under `storage = "state-ref"`, `check <n>` never reaches the pull-request path: no number under that storage is ever reported as a landing, so every `<n>` resolves to ISSUE or MISSING.
 - `check`'s own subject line is always the bare `#<n>`, in every mode, never the storage-aware `<label>` form `specs/landing-grammar.spec.md` defines for `aco next`/`release`'s own narrative lines.
 - `blocked` (CHECK-08) is the only outcome that exits `3`; every other refusal exits `2` (see the `reason`/exit table above), and no outcome exits `1` any more.
-- `check <sha>`'s own exit and `--json` shape are never this file's: `specs/landing-grammar.spec.md` owns LAND-48/LAND-60 unchanged.
+- The trunk mode never reads a forge: a commit's own trailer is local history, so `check <sha>` answers from the walked trunk alone.
+- No mode of `check` ever prints a `refused` key: `specs/output.spec.md`'s envelope names every refusal by `reason` and `message` instead.
 
 ## Examples
 
@@ -192,5 +211,29 @@ Setup: bare-remote, `.agent-claim/board.toml` tracked with `storage = "state-ref
 $ aco --repo acme/items check 258 --json
 2> ERROR: --repo is meaningless under storage = state-ref
 {"ok": false, "reason": "invalid_usage", "message": "--repo is meaningless under storage = state-ref"}
+exit 2
+```
+
+### E-CHECK-08 — a trunk commit, classified and refused
+
+Setup: bare-remote, `.agent-claim/board.toml` tracked, the trunk's newest commit carrying the trailer `No-Item: docs`, `<sha>` its own commit id
+
+```console
+$ aco check <sha>
+<sha> declares No-Item: docs
+exit 0
+$ aco check <sha> --json
+{"ok": true, "reason": "valid", "kind": "trunk_commit", "sha": "<sha>"}
+exit 0
+```
+
+Setup: bare-remote, `.agent-claim/board.toml` tracked, `<sha>` a commit id the first-parent trunk walk does not hold
+
+```console
+$ aco check <sha>
+2> REFUSED: <sha> is not on the first-parent trunk
+exit 2
+$ aco check <sha> --json
+{"ok": false, "reason": "not_on_trunk", "kind": "trunk_commit", "sha": "<sha>", "message": "is not on the first-parent trunk"}
 exit 2
 ```
