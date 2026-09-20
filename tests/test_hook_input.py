@@ -309,8 +309,8 @@ def test_hook_patch_paths_returns_empty_for_unrecognized_text(text: str) -> None
         ),
         pytest.param(
             "cp -r src/a.py src/b.py",
-            ((hook_input.PATTERN_COPY, "src/a.py"), (hook_input.PATTERN_COPY, "src/b.py")),
-            id="cp-skips-its-own-flag",
+            ((hook_input.PATTERN_COPY, "src/b.py"),),
+            id="cp-skips-its-own-flag-and-judges-only-its-destination",
         ),
         pytest.param(
             "rm -rf tests/t.py",
@@ -372,9 +372,171 @@ def test_hook_patch_paths_returns_empty_for_unrecognized_text(text: str) -> None
             id="unbalanced-quoting-cannot-even-be-tokenized",
         ),
         pytest.param("", (), id="an-empty-command"),
+        pytest.param(
+            "echo '>' > f",
+            ((hook_input.PATTERN_REDIRECT_OVERWRITE, "f"),),
+            id="a-quoted-operator-is-data-not-a-redirect",
+        ),
+        pytest.param(
+            'git commit -m "fix > 2"',
+            (),
+            id="a-quoted-operator-inside-a-commit-message-names-no-redirect",
+        ),
+        pytest.param(
+            "printf x > $SCRATCH/file",
+            (),
+            id="an-unquoted-variable-expansion-is-never-judged",
+        ),
+        pytest.param(
+            "cat > /tmp/x.py <<EOF\nrm docs/file\nEOF",
+            ((hook_input.PATTERN_REDIRECT_OVERWRITE, "/tmp/x.py"),),
+            id="a-heredoc-body-is-data-even-when-it-reads-like-a-write-pattern",
+        ),
+        pytest.param(
+            "gh api repos/example/repo/pulls/1 --input - <<'JSON'\nrm docs/file\nJSON",
+            (),
+            id="a-quoted-heredoc-delimiter-still-skips-its-own-body",
+        ),
+        pytest.param(
+            "cp README.md /tmp/x",
+            ((hook_input.PATTERN_COPY, "/tmp/x"),),
+            id="cp-judges-only-its-destination",
+        ),
+        pytest.param(
+            "git restore --source HEAD --staged f",
+            ((hook_input.PATTERN_GIT_RESTORE, "f"),),
+            id="git-restore-skips-an-options-own-value-argument",
+        ),
+        pytest.param(
+            "git restore --staged",
+            (),
+            id="git-restore-with-only-options-names-no-path",
+        ),
+        pytest.param(
+            "tee /tmp/log > /dev/null",
+            ((hook_input.PATTERN_TEE, "/tmp/log"),),
+            id="tees-own-operand-never-swallows-a-trailing-redirect",
+        ),
+        pytest.param(
+            "echo hi > /dev/null",
+            (),
+            id="a-redirect-to-dev-null-is-never-a-real-write",
+        ),
+        pytest.param(
+            "pytest 2>&1",
+            (),
+            id="a-file-descriptor-duplication-is-never-a-real-write",
+        ),
+        pytest.param(
+            "uv run --locked pytest -k test_thing",
+            (),
+            id="uv-run-names-no-pattern",
+        ),
+        pytest.param(
+            "git worktree add ../issue-1 main",
+            (),
+            id="git-worktree-add-names-no-pattern",
+        ),
+        pytest.param(
+            "git rebase origin/main",
+            (),
+            id="git-rebase-names-no-pattern",
+        ),
+        pytest.param(
+            "aco protect",
+            (),
+            id="aco-itself-names-no-pattern",
+        ),
+        pytest.param(
+            "rm f ",
+            ((hook_input.PATTERN_REMOVE, "f"),),
+            id="trailing-whitespace-after-the-last-word-is-not-a-new-token",
+        ),
+        pytest.param(
+            "cat > /tmp/x <<-EOF\n\tcontent\n\tEOF",
+            ((hook_input.PATTERN_REDIRECT_OVERWRITE, "/tmp/x"),),
+            id="a-tab-strip-heredoc-still-skips-its-own-indented-body",
+        ),
+        pytest.param(
+            "cat <<",
+            (),
+            id="a-heredoc-operator-naming-no-delimiter-at-all-registers-no-body",
+        ),
+        pytest.param(
+            "cat << ; echo hi",
+            (),
+            id="a-heredoc-operator-immediately-followed-by-another-operator-names-no-delimiter",
+        ),
+        pytest.param(
+            "cat > /tmp/x <<EOF\nsome content\nmore content",
+            ((hook_input.PATTERN_REDIRECT_OVERWRITE, "/tmp/x"),),
+            id="a-heredoc-whose-terminator-never-appears-skips-to-the-end",
+        ),
+        pytest.param(
+            "rm a\\ b.txt",
+            ((hook_input.PATTERN_REMOVE, "a b.txt"),),
+            id="a-backslash-escaped-space-outside-quotes-stays-in-one-word",
+        ),
+        pytest.param(
+            "rm a\\",
+            (),
+            id="a-trailing-unescaped-backslash-cannot-even-be-tokenized",
+        ),
+        pytest.param(
+            'rm "a\\"b.txt"',
+            ((hook_input.PATTERN_REMOVE, 'a"b.txt'),),
+            id="a-backslash-escaped-quote-inside-double-quotes-stays-literal",
+        ),
     ],
 )
 def test_hook_command_paths_recognizes_every_write_pattern(
     command: str, pairs: tuple[tuple[str, str], ...]
 ) -> None:
     assert hook_input.hook_command_paths(command) == pairs
+
+
+@pytest.mark.parametrize(
+    ("command", "cwd", "pairs"),
+    [
+        pytest.param(
+            "cd /tmp && printf x > log",
+            None,
+            ((hook_input.PATTERN_REDIRECT_OVERWRITE, "/tmp/log"),),
+            id="a-literal-absolute-cd-changes-the-directory-for-what-follows",
+        ),
+        pytest.param(
+            "cd sub && rm f",
+            "/work",
+            ((hook_input.PATTERN_REMOVE, "/work/sub/f"),),
+            id="a-literal-relative-cd-joins-onto-the-payloads-own-cwd",
+        ),
+        pytest.param(
+            "rm f",
+            "/work",
+            ((hook_input.PATTERN_REMOVE, "/work/f"),),
+            id="cwd-alone-resolves-a-relative-path-with-no-cd-at-all",
+        ),
+        pytest.param(
+            "cd $VAR && rm f",
+            "/work",
+            (),
+            id="an-expandable-cd-target-ends-judgement-for-the-rest-of-the-command",
+        ),
+        pytest.param(
+            "cd - && rm f",
+            "/work",
+            (),
+            id="cd-dash-cannot-be-resolved-and-ends-judgement",
+        ),
+        pytest.param(
+            "cd && rm f",
+            "/work",
+            (),
+            id="a-bare-cd-with-no-operand-cannot-be-resolved-and-ends-judgement",
+        ),
+    ],
+)
+def test_hook_command_paths_tracks_cd_across_the_statement_list(
+    command: str, cwd: str | None, pairs: tuple[tuple[str, str], ...]
+) -> None:
+    assert hook_input.hook_command_paths(command, cwd=cwd) == pairs

@@ -780,7 +780,7 @@ _BASH_WRITE_COMMAND_TEMPLATES: tuple[tuple[str, str], ...] = (
     ("tee {path}", hook_input.PATTERN_TEE),
     ("sed -i 's/a/b/' {path}", hook_input.PATTERN_SED_IN_PLACE),
     ("mv {path} src/renamed.py", hook_input.PATTERN_MOVE),
-    ("cp {path} src/copied.py", hook_input.PATTERN_COPY),
+    ("cp src/source.py {path}", hook_input.PATTERN_COPY),
     ("rm {path}", hook_input.PATTERN_REMOVE),
     ("git checkout -- {path}", hook_input.PATTERN_GIT_CHECKOUT),
     ("git restore {path}", hook_input.PATTERN_GIT_RESTORE),
@@ -837,8 +837,10 @@ def test_protect_bash_judges_a_recognized_pattern_path_by_claim_scope(
     an `Edit` path, resolved against the payload's own `cwd` since Bash's
     own paths are relative (PROT-31). A path inside the live claim's scope
     allows exactly like a covered `Edit` path; one outside it denies naming
-    both the pattern and the path (PROT-33) -- for `mv`/`cp` reporting the
-    first (source) path rather than their own in-scope destination."""
+    both the pattern and the path (PROT-33) -- for `mv` reporting its own
+    (untouched) source rather than its in-scope destination, since `mv`
+    judges every operand; `cp` here is tested on its destination alone
+    (issue #380 delta), the only operand it actually writes."""
     _isolate_protect_home(monkeypatch, tmp_path)
     work = tmp_path / "work"
     _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
@@ -894,11 +896,14 @@ def test_protect_bash_allows_a_relative_path_when_the_payload_carries_no_cwd(
     real out-of-scope write -- so it allows rather than risk a false deny
     (`specs/protect.spec.md`'s own `## Never`). No claim is set up at all:
     a resolver that fell back to guessing a cwd would deny `claim first`
-    here instead of allowing."""
+    here instead of allowing. `_forbid_protect_git_github_and_identity`'s
+    own `_resolved_agent` stub is left in place, unlike the sibling tests
+    below: this path must never resolve identity at all (issue #380 delta,
+    review finding: resolving it eagerly, before this allow, used to turn an
+    unresolvable identity into a wrongful PROT-08 deny here)."""
     _isolate_protect_home(monkeypatch, tmp_path)
     _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
     _forbid_protect_git_github_and_identity(monkeypatch)
-    monkeypatch.setattr(checkout, "_resolved_agent", lambda _: "Grok sess-1")
 
     assert (
         _protect_main(
@@ -931,6 +936,41 @@ def test_protect_bash_denies_a_relative_path_resolved_against_the_payloads_own_c
                 "toolName": "Bash",
                 "toolInput": {"command": "rm docs/widget.md"},
                 "cwd": str(work),
+            },
+        )
+        == 2
+    )
+    _assert_protect_decision(
+        capsys, decision="deny", reason="rm docs/widget.md outside claim scope"
+    )
+
+
+def test_protect_bash_cd_changes_the_directory_for_the_rest_of_the_command(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Issue #380 delta, decision 4: a literal `cd <path> &&` changes the
+    directory a later relative path resolves against -- even into a
+    different checkout than the payload's own `cwd`, judged there exactly
+    as an absolute path in that checkout would be. Were `cd` not tracked,
+    `docs/widget.md` would resolve under the payload's own `cwd`
+    (`elsewhere`, no checkout at all) and allow outright instead."""
+    _isolate_protect_home(monkeypatch, tmp_path)
+    work = tmp_path / "work"
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
+    _patch_protect_git(monkeypatch, work)
+    _patch_protect_claim(monkeypatch, scope=("src",))
+
+    assert (
+        _protect_main(
+            monkeypatch,
+            {
+                "toolName": "Bash",
+                "toolInput": {"command": f"cd {work} && rm docs/widget.md"},
+                "cwd": str(elsewhere),
             },
         )
         == 2
