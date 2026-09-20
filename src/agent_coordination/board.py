@@ -3490,14 +3490,6 @@ def _project_measurements(measurements: dict[str, object]) -> None:
             entry[key] = cast(datetime, entry[key]).astimezone(UTC).isoformat()
 
 
-def _kind_cell(item: BoardItem) -> str:
-    if item.kind is None:
-        return "-"
-    if item.container is not None:
-        return f"{item.kind.value} {item.container.closed}/{item.container.total}"
-    return item.kind.value
-
-
 NO_SIZE_CELL = "keine Größe"
 WEAK_ESTIMATE_CELL = "schwach"
 UNPARSED_TRAILER_SENTENCE = "Commits ohne lesbaren Item-Trailer"
@@ -3571,122 +3563,6 @@ def item_label(number: int, storage: Storage) -> str:
 SHORT_SHA_LENGTH = 7
 
 
-def _landing_evidence_cell(evidence: LandingEvidence) -> str:
-    if isinstance(evidence, TrunkLandingEvidence):
-        return evidence.sha[:SHORT_SHA_LENGTH]
-    return f"PR #{evidence.number}"
-
-
-def _landing_row_line(row: LandingRow, storage: Storage) -> str:
-    date = row.committed_at.astimezone(UTC).date().isoformat()
-    return f"{item_label(row.item, storage)} {date} {_landing_evidence_cell(row.evidence)}"
-
-
-def render(board: Board, *, storage: Storage = Storage.GITHUB) -> str:
-    rows = [
-        (
-            "SCORE",
-            "ISSUE",
-            "KIND",
-            "PRIORITY",
-            "STAGE",
-            "CONTRACT",
-            "EXPECT",
-            "NEXT",
-            "AGE",
-            "IDLE",
-            "FREED",
-            "CLAIM",
-            "ACTIONABLE",
-            "BLOCKERS",
-            "UNBLOCKS",
-            "ESTIMATE",
-            "TITLE",
-        ),
-        *(
-            (
-                str(item.score),
-                item_label(item.number, storage),
-                _kind_cell(item),
-                item.priority_bucket,
-                item.stage.value,
-                _contract_summary(item.contract),
-                _expectation_cell(item),
-                _brief(item.next_step),
-                str(item.age_days),
-                str(item.idle_days),
-                _freed_cell(item),
-                _claim_cell(item),
-                "yes" if item.actionable else f"no: {item.actionable_reason}",
-                ",".join(
-                    open_blocker_label(reference, board.repository, storage)
-                    for reference in item.open_blockers
-                )
-                or "-",
-                str(item.unblocks_count),
-                estimate_cell(item),
-                item.title,
-            )
-            for item in board.items
-        ),
-    ]
-    widths = tuple(max(len(row[index]) for row in rows) for index in range(len(rows[0])))
-    table = "\n".join(
-        "  ".join(value.ljust(widths[index]) for index, value in enumerate(row)).rstrip()
-        for row in rows
-    )
-    ready = ", ".join(item_label(item.number, storage) for item in board.ready_now) or "none"
-    stale = ", ".join(item_label(item.number, storage) for item in board.stale) or "none"
-    recovery = ", ".join(item_label(item.number, storage) for item in board.recovery) or "none"
-    landings = "\n".join(_landing_row_line(row, storage) for row in board.landings) or "none"
-    containers = "\n".join(_container_lines(board, storage)) or "none"
-    uncut = "\n".join(_uncut_line(finding, storage) for finding in board.uncut) or "none"
-    measurements = "\n".join(measurements_lines(board.measurements))
-    return (
-        f"{table}\n\nREADY NOW\n{ready}\n\nSTALE\n{stale}\n\nRECOVERY ({RECOVERY_STEP})\n{recovery}"
-        f"\n\nLANDUNGEN\n{landings}"
-        f"\n\nCONTAINERS\n{containers}\n\nUNCUT\n{uncut}\n\nMESSUNGEN\n{measurements}"
-        f"\n\nrequests: {board.requests}"
-    )
-
-
-def _open_child_cell(child: ChildItem, repository: str, storage: Storage) -> str:
-    if not child.blocked_by:
-        return item_label(child.number, storage)
-    blockers = ", ".join(
-        open_blocker_label(reference, repository, storage) for reference in child.blocked_by
-    )
-    return f"{item_label(child.number, storage)} (blocked by {blockers})"
-
-
-def _container_line(
-    number: int, container: ContainerProgress, repository: str, storage: Storage
-) -> str:
-    open_children = ", ".join(
-        _open_child_cell(child, repository, storage) for child in container.open_children
-    )
-    label = item_label(number, storage)
-    return f"{label} {container.closed}/{container.total} closed; open: {open_children or 'none'}"
-
-
-def _container_lines(board: Board, storage: Storage) -> list[str]:
-    return [
-        _container_line(item.number, item.container, board.repository, storage)
-        for item in board.items
-        if item.container is not None
-    ]
-
-
-def _uncut_line(finding: UncutSlices, storage: Storage) -> str:
-    indices = ", ".join(str(row.index) for row in finding.rows)
-    return f"{item_label(finding.item, storage)}: rows {indices} uncut"
-
-
-def _contract_summary(contract: Contract) -> str:
-    present = (name for name, value in _contract_fields(contract) if value is not None)
-    return ", ".join(present) or "-"
-
-
 @dataclass(frozen=True)
 class _ActionabilityFacts:
     """Everything `_actionable_reason` decides on -- one owner for why an
@@ -3738,30 +3614,6 @@ def _actionable_reason(facts: _ActionabilityFacts) -> str | None:
     if facts.kind is ItemKind.CONTAINER:
         return "container; claim a child"
     return _claim_or_completeness_reason(facts)
-
-
-def _expectation_cell(item: BoardItem) -> str:
-    if item.expectation_state is ExpectationState.NONE:
-        return "-"
-    if item.expectation_state is ExpectationState.PROPOSED:
-        return f"{item.expectation_progress.open}/{item.expectation_progress.total}"
-    count = 0 if item.ruling_landings is None else item.ruling_landings
-    suffix = " old" if item.ruling_old else ""
-    return f"ruled {count}{suffix}"
-
-
-def _claim_cell(item: BoardItem) -> str:
-    if item.active_claim is None:
-        return "-"
-    suffix = " old" if item.claim_old else ""
-    return f"{item.active_claim} {item.claim_age}{suffix}"
-
-
-def _freed_cell(item: BoardItem) -> str:
-    if item.freed_on is None or item.freed_days is None:
-        return "-"
-    freed_date = item.freed_on.astimezone(UTC).date().isoformat()
-    return f"{freed_date} ({item.freed_days} d)"
 
 
 def _brief(value: str | None, *, maximum: int = 48) -> str:

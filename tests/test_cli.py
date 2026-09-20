@@ -497,19 +497,13 @@ def _board_fixture_environment(monkeypatch: pytest.MonkeyPatch) -> list[list[str
     return observed
 
 
-def test_board_renders_fixture_as_text_without_github_writes(
+def test_board_json_shards_the_merged_pull_request_query_by_day_without_writes(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     observed = _board_fixture_environment(monkeypatch)
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "board"]) == 0
-    rendered = capsys.readouterr().out
-    assert "CONTRACT" in rendered
-    assert "NEXT" in rendered
-    assert "ACTIONABLE" in rendered
-    assert "#10" in rendered
-    assert "no: claimed" in rendered
-    assert "no: body malformed: agent-claim: no agent-claim block" in rendered
+    assert issue_claim.main(["--repo", "example/agent-claim", "board", "--json"]) == 0
+    capsys.readouterr()
     assert all("--method" not in arguments for arguments in observed)
     assert all("--jq" in arguments for arguments in observed)
     merged_days = {
@@ -625,15 +619,15 @@ def _lane(item: str, day: int, hours: int) -> metrics.LaneEvent:
     )
 
 
-def test_board_shows_measured_estimates_across_text_json_and_html(
+def test_board_shows_measured_estimates_across_json_and_html(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
     """Proof 3 (issue #357), pinned through the CLI rather than only through
     `board.build_board` directly: one `FakeForge` board build shows every
-    `ESTIMATE` state -- a class with `n >= 3` measured lanes (two of them
+    estimate state -- a class with `n >= 3` measured lanes (two of them
     completed by items that have since closed, R2's own closed-item join),
     one with `n < 3` ("schwach"), and an item with no `size` at all ("keine
-    Größe") -- across text, `--json`, and `--html`."""
+    Größe") -- across `--json` and `--html`."""
     client = FakeForge()
     client.board_issues = (
         board_issue(30, "Measured M", complete_contract("Ship #30.", size="M")),
@@ -656,20 +650,13 @@ def test_board_shows_measured_estimates_across_text_json_and_html(
         _lane("31", 15, 2),
     )
     _patch_store_write(monkeypatch, lane_events=lane_events)
-    # The one scenario value this test's three checks (text, `--json`, `--html`)
-    # all read back rather than each re-typing the M class's own median/count.
+    # The one scenario value this test's two checks (`--json`, `--html`) both
+    # read back rather than each re-typing the M class's own median/count.
     measured_size, measured_median_hours, measured_sample_count = "M", 5, 3
     measured_estimate_cell = (
         f"~{measured_median_hours}h ({measured_size}, n={measured_sample_count})"
     )
     board_args = ["--repo", "example/agent-claim", "board"]
-
-    assert issue_claim.main(board_args) == 0
-    text = capsys.readouterr().out
-    assert measured_estimate_cell in text
-    assert "schwach" in text
-    assert "keine Größe" in text
-    assert "Messungen (Stand" in text
 
     assert issue_claim.main([*board_args, "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -697,13 +684,10 @@ def test_board_shows_measured_estimates_across_text_json_and_html(
 def test_board_shows_the_empty_measurements_sentence_with_nothing_measured(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
-    """The fourth `ESTIMATE`/Messungen state (issue #357 proof 3): with no
-    lifecycle data read at all, text, `--json`, and `--html` all show the
-    board's own empty-measurements sentence, never a fabricated estimate."""
+    """The fourth estimate/Messungen state (issue #357 proof 3): with no
+    lifecycle data read at all, `--json` and `--html` both show the board's
+    own empty-measurements sentence, never a fabricated estimate."""
     _single_item_board_environment(monkeypatch, tmp_path)
-
-    assert issue_claim.main(["--repo", "example/agent-claim", "board"]) == 0
-    assert "keine Messungen seit" in capsys.readouterr().out
 
     assert issue_claim.main(["--repo", "example/agent-claim", "board", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -719,17 +703,12 @@ def test_board_html_shows_unparsed_commits_alongside_the_empty_measurements_sent
     """Gate B1 (issue #357): `board_html._render_measurements_section` used
     to return only `lines[0]` ("keine Messungen seit ...") whenever no size
     class had a measured lane, silently dropping a nonzero `unparsed` (or
-    `unfinished`) trailing line the text section already showed. With a
-    history that carries no measured class but two claim-shaped commits this
-    walk could not parse, the HTML page must show both the empty-measurements
-    sentence and the unparsed count, exactly like the text form."""
+    `unfinished`) trailing line `board.measurements_lines` already carries.
+    With a history that carries no measured class but two claim-shaped
+    commits this walk could not parse, the HTML page must show both the
+    empty-measurements sentence and the unparsed count."""
     _single_item_board_environment(monkeypatch, tmp_path)
     _patch_store_write(monkeypatch, unparsed_lifecycle_commits=2)
-
-    assert issue_claim.main(["--repo", "example/agent-claim", "board"]) == 0
-    text = capsys.readouterr().out
-    assert "keine Messungen seit" in text
-    assert f"2 {board.UNPARSED_TRAILER_SENTENCE}" in text
 
     assert issue_claim.main(["--repo", "example/agent-claim", "board", "--html"]) == 0
     html_page = capsys.readouterr().out
@@ -737,18 +716,19 @@ def test_board_html_shows_unparsed_commits_alongside_the_empty_measurements_sent
     assert f"2 {board.UNPARSED_TRAILER_SENTENCE}" in html_page
 
 
-def test_board_renders_with_no_state_ref_bootstrapped_at_all(
+def test_board_projects_with_no_state_ref_bootstrapped_at_all(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
     """A repository that has never bootstrapped `refs/aco/state` still boards
     cleanly (issue #357): `_claim_ages`/`_claim_lifecycle` both read a missing
-    ref as empty rather than crashing, so Messungen shows the
+    ref as empty rather than crashing, so `measurements` shows the
     empty-measurements sentence and no claim ages are read at all."""
     _single_item_board_environment(monkeypatch, tmp_path)
     _patch_store_write(monkeypatch, tip=None)
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "board"]) == 0
-    assert "keine Messungen seit" in capsys.readouterr().out
+    assert issue_claim.main(["--repo", "example/agent-claim", "board", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["measurements"]["classes"] == []
 
 
 def test_board_reports_requests_equal_to_the_adapters_own_invocation_count(
@@ -756,16 +736,9 @@ def test_board_reports_requests_equal_to_the_adapters_own_invocation_count(
 ) -> None:
     """Issue #168: `observed` is the fixture's own independent tally of every
     `gh` call the injected `run` actually received -- never read from the
-    counter under test -- so a matching `requests` line/field is real
-    evidence, not a tautology. The same client (and its cumulative
-    `observed`) serves both invocations below, so the JSON run's count is
-    checked against `observed`'s size at that later point, not the text
-    run's."""
+    counter under test -- so a matching `requests` field is real evidence,
+    not a tautology."""
     observed = _board_fixture_environment(monkeypatch)
-
-    assert issue_claim.main(["--repo", "example/agent-claim", "board"]) == 0
-    rendered = capsys.readouterr().out
-    assert f"requests: {len(observed)}" in rendered
 
     assert issue_claim.main(["--repo", "example/agent-claim", "board", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -815,11 +788,10 @@ def test_board_dedupes_a_landing_between_the_trunk_trailer_and_a_squash_pull_req
 ) -> None:
     """Issue #371, Beweis 2: under `github`, a trunk-trailer landing (#10)
     and an older-style squash pull request with no trailer of its own (#11)
-    both show as one row each in `board`'s text `LANDUNGEN` section,
-    `board --json`'s `landings` array, and `board --html`'s Landungen
-    section -- the trailer path winning for #10 even though pull request
-    #89 also plainly closes it, proving the dedup rather than merely two
-    different items landing."""
+    both show as one row each in `board --json`'s `landings` array and
+    `board --html`'s Landungen section -- the trailer path winning for #10
+    even though pull request #89 also plainly closes it, proving the dedup
+    rather than merely two different items landing."""
     client = _single_item_board_environment(monkeypatch, tmp_path)
     client.board_issues = (
         board_issue(10, "Trailer landed", complete_contract("Ship #10.")),
@@ -856,12 +828,6 @@ def test_board_dedupes_a_landing_between_the_trunk_trailer_and_a_squash_pull_req
     assert landings[11]["sha"] is None
     assert landings[11]["pull_request"] == 90
 
-    assert issue_claim.main(board_command) == 0
-    rendered_text = capsys.readouterr().out
-    assert "LANDUNGEN" in rendered_text
-    assert "#10 2026-08-29 aaaaaaa" in rendered_text
-    assert "#11 2026-08-18 PR #90" in rendered_text
-
     assert issue_claim.main([*board_command, "--html"]) == 0
     rendered_html = capsys.readouterr().out
     assert "<li>#10 2026-08-29 <code>aaaaaaa</code></li>" in rendered_html
@@ -895,24 +861,24 @@ def test_board_html_path_writes_the_page_to_a_file_instead_of_stdout(
     assert "#10 Plain item" in written
 
 
-def test_board_html_costs_no_gh_call_beyond_plain_board(
+def test_board_html_costs_no_gh_call_beyond_board_json(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
-    """Issue #276: `board --html` reshapes the exact reads `board` already
-    performs -- `_board`'s own merged-pull-request fetch, not a second one --
-    so its request count against the same fixture never exceeds plain
-    `board`'s."""
+    """Issue #276: `board --html` reshapes the exact reads `board --json`
+    already performs -- `_board`'s own merged-pull-request fetch, not a
+    second one -- so its request count against the same fixture never
+    exceeds `board --json`'s."""
     client = _single_item_board_environment(monkeypatch, tmp_path)
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "board"]) == 0
+    assert issue_claim.main(["--repo", "example/agent-claim", "board", "--json"]) == 0
     capsys.readouterr()
-    plain_requests = client.requests
+    json_requests = client.requests
 
     client.requests = 0
     assert issue_claim.main(["--repo", "example/agent-claim", "board", "--html"]) == 0
     capsys.readouterr()
 
-    assert client.requests == plain_requests
+    assert client.requests == json_requests
 
 
 def test_board_html_and_json_are_mutually_exclusive(
@@ -922,6 +888,18 @@ def test_board_html_and_json_are_mutually_exclusive(
 
     with pytest.raises(SystemExit):
         issue_claim.main(["--repo", "example/agent-claim", "board", "--html", "--json"])
+
+
+def test_board_naming_no_output_mode_refuses_before_any_read(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """BOARD-44 (issue #420): the retired text table left `board` with no
+    default mode, so a bare `aco board` must name one instead of reading a
+    forge, a pin, or a repository just to guess."""
+    status = issue_claim.main(["board"])
+
+    assert status == 2
+    assert capsys.readouterr().err == "ERROR: aco board requires --json, --html, or --serve\n"
 
 
 def test_board_skips_the_children_list_for_a_container_with_zero_children(
@@ -961,8 +939,8 @@ def test_board_skips_the_children_list_for_a_container_with_zero_children(
     monkeypatch.setattr(checkout, "trunk_landings", lambda *_args, **_kwargs: ())
     _patch_store_write(monkeypatch)
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "board"]) == 0
-    rendered = capsys.readouterr().out
+    assert issue_claim.main(["--repo", "example/agent-claim", "board", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
 
     assert observed_children_calls == [30]
     # Open issues, open PRs, merged PRs, and exactly one `list_children`
@@ -970,15 +948,6 @@ def test_board_skips_the_children_list_for_a_container_with_zero_children(
     # #176), never from a ledger-comments request. No issue here names a
     # blocker, so `list_board_blockers` never runs -- an empty numbers set
     # costs no request, on the fake exactly as on the real adapter.
-    assert client.requests == 4
-    assert f"requests: {client.requests}" in rendered
-
-    client.requests = 0
-    observed_children_calls.clear()
-    assert issue_claim.main(["--repo", "example/agent-claim", "board", "--json"]) == 0
-    payload = json.loads(capsys.readouterr().out)
-
-    assert observed_children_calls == [30]
     assert payload["requests"] == client.requests == 4
 
 
@@ -1010,16 +979,15 @@ def test_board_skips_the_dependency_list_for_a_zero_blocker_item_in_block_mode(
     monkeypatch.setattr(checkout, "trunk_landings", lambda *_args, **_kwargs: ())
     _patch_store_write(monkeypatch)
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "board"]) == 0
-    rendered = capsys.readouterr().out
+    assert issue_claim.main(["--repo", "example/agent-claim", "board", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
 
     assert observed_dependency_calls == [11]
     # Open issues, open PRs, merged PRs, and exactly one dependency lookup
     # (for #11, never #10) -- block mode never calls `list_board_blockers`,
     # and claims come from the store now (issue #176), never a ledger
     # comments request.
-    assert client.requests == 4
-    assert f"requests: {client.requests}" in rendered
+    assert payload["requests"] == client.requests == 4
 
 
 def test_board_shows_open_and_total_instead_of_proposed(
@@ -1051,21 +1019,6 @@ def test_board_shows_open_and_total_instead_of_proposed(
     monkeypatch.setattr(github, "GitHubForge", lambda _repository: client)
     monkeypatch.setattr(checkout, "_git_output", lambda _arguments, **_kwargs: str(tmp_path))
     monkeypatch.setattr(checkout, "trunk_landings", lambda *_args, **_kwargs: ())
-
-    assert issue_claim.main(["--repo", "example/agent-claim", "board"]) == 0
-    rendered = capsys.readouterr().out
-    assert "EXPECT" in rendered
-    no_expectations = next(line for line in rendered.splitlines() if "No expectations" in line)
-    proposed_expectations = next(
-        line for line in rendered.splitlines() if "Proposed expectations" in line
-    )
-    ruled_expectations = next(
-        line for line in rendered.splitlines() if "Ruled expectations" in line
-    )
-    assert "-" in no_expectations
-    assert "1/2" in proposed_expectations
-    assert "proposed" not in proposed_expectations
-    assert "ruled 0" in ruled_expectations
 
     assert issue_claim.main(["--repo", "example/agent-claim", "board", "--json"]) == 0
     items = {item["number"]: item for item in json.loads(capsys.readouterr().out)["items"]}
@@ -6017,7 +5970,7 @@ def test_lazy_forge_builds_a_state_ref_board_under_the_state_ref_pin(
 
     monkeypatch.setattr(github, "GitHubForge", unused)
 
-    assert issue_claim.main(["board"]) == 0
+    assert issue_claim.main(["board", "--json"]) == 0
 
 
 def test_the_state_ref_read_only_stub_no_longer_exists() -> None:
@@ -6037,7 +5990,7 @@ def test_repo_is_refused_under_the_state_ref_pin(
     ever resolves a repository identity or touches the state ref."""
     _write_state_ref_pin(tmp_path)
 
-    status = issue_claim.main(["--repo", "acme/items", "board"])
+    status = issue_claim.main(["--repo", "acme/items", "board", "--json"])
 
     assert status == 2
     assert capsys.readouterr().err == "ERROR: --repo is meaningless under storage = state-ref\n"
@@ -7482,7 +7435,7 @@ def test_cli_dispatch_adapter_error_denies_with_exit_code_two(
         "GitHubForge",
         lambda repository: (_ for _ in ()).throw(ClaimError("adapter failed")),
     )
-    assert issue_claim.main(["--repo", "example/agent-claim", "board"]) == 2
+    assert issue_claim.main(["--repo", "example/agent-claim", "board", "--json"]) == 2
     assert "ERROR: adapter failed" in capsys.readouterr().err
 
 
@@ -10292,8 +10245,6 @@ def test_board_shows_claim_age_from_the_claim_comment(
         ages={"mine": datetime(2026, 8, 20, 23, 30, tzinfo=UTC)},
     )
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "board"]) == 0
-    assert "Ada (builder) 0h 30m" in capsys.readouterr().out
     assert issue_claim.main(["--repo", "example/agent-claim", "board", "--json"]) == 0
     item = next(row for row in json.loads(capsys.readouterr().out)["items"] if row["number"] == 72)
     assert item["claim_age"] == "0h 30m"
@@ -10317,8 +10268,10 @@ def test_board_marks_a_claim_old_after_sixty_one_minutes(
         ages={"mine": datetime(2026, 8, 20, 22, 59, tzinfo=UTC)},
     )
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "board"]) == 0
-    assert "Ada (builder) 1h 1m old" in capsys.readouterr().out
+    assert issue_claim.main(["--repo", "example/agent-claim", "board", "--json"]) == 0
+    item = next(row for row in json.loads(capsys.readouterr().out)["items"] if row["number"] == 72)
+    assert item["claim_age"] == "1h 1m"
+    assert item["claim_old"] is True
 
 
 def test_cli_status_shows_claim_age_from_the_opened_commit(
@@ -13499,49 +13452,6 @@ def body_check_main(*, extra: tuple[str, ...] = ()) -> int:
     return issue_claim.main(["body", "--check", *extra])
 
 
-def _body_template_skeleton(kind: str) -> str:
-    """The one skeleton `body --template --kind KIND` must print, read from
-    its own owner rather than recomputed here (Value Ownership)."""
-    return board.BLOCK_CONTAINER_SKELETON if kind == "container" else board.BLOCK_CHILD_SKELETON
-
-
-@pytest.mark.parametrize("kind", issue_claim.BODY_TEMPLATE_KINDS)
-def test_body_template_prints_the_one_skeleton_owner_for_its_kind(
-    capsys: pytest.CaptureFixture[str], kind: str
-) -> None:
-    assert issue_claim.main(["body", "--template", "--kind", kind]) == 0
-    assert capsys.readouterr().out == _body_template_skeleton(kind)
-
-
-def test_body_template_defaults_to_the_task_skeleton(capsys: pytest.CaptureFixture[str]) -> None:
-    assert issue_claim.main(["body", "--template"]) == 0
-    assert capsys.readouterr().out == board.BLOCK_CHILD_SKELETON
-
-
-@pytest.mark.parametrize("kind", issue_claim.BODY_TEMPLATE_KINDS)
-def test_body_template_prepends_the_parent_line_cut_writes_for_a_fresh_child(
-    capsys: pytest.CaptureFixture[str], kind: str
-) -> None:
-    assert issue_claim.main(["body", "--template", "--kind", kind, "--parent", "79"]) == 0
-    assert capsys.readouterr().out == f"Parent: #79\n\n{_body_template_skeleton(kind)}"
-
-
-@pytest.mark.parametrize("kind", issue_claim.BODY_TEMPLATE_KINDS)
-def test_body_template_round_trips_through_body_check_for_every_kind(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], kind: str
-) -> None:
-    """The printed skeleton is a recognized, valid block for every kind --
-    read back exactly as `check <item>` reads `cut`'s own fresh child
-    (`test_check_names_the_sections_an_incomplete_body_leaves_empty`'s
-    `a-fresh-skeleton` case): incomplete, never malformed."""
-    assert issue_claim.main(["body", "--template", "--kind", kind]) == 0
-    printed = capsys.readouterr().out
-
-    monkeypatch.setattr(sys, "stdin", io.StringIO(printed))
-    assert body_check_main() == 2
-    assert capsys.readouterr().err == "body incomplete: Now, Next, Done when\n"
-
-
 def test_body_check_accepts_a_complete_block_with_no_defects(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -13700,36 +13610,9 @@ def test_body_check_refuses_stdin_that_is_not_valid_utf8(
     assert "stdin is not valid UTF-8" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize(
-    "extra",
-    [
-        pytest.param(("--kind", "task"), id="kind"),
-        pytest.param(("--parent", "1"), id="parent"),
-    ],
-)
-def test_body_refuses_kind_or_parent_together_with_check(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], extra: tuple[str, ...]
-) -> None:
-    monkeypatch.setattr(sys, "stdin", io.StringIO(agent_claim_body(MINIMAL_BLOCK_TOML)))
-    assert body_check_main(extra=extra) == 2
-    assert "--kind and --parent apply only to --template, not --check" in capsys.readouterr().err
-
-
-def test_body_refuses_json_together_with_template(capsys: pytest.CaptureFixture[str]) -> None:
-    assert issue_claim.main(["body", "--template", "--json"]) == 2
-    assert "--json applies only to --check, not --template" in capsys.readouterr().err
-
-
-@pytest.mark.parametrize(
-    "argv",
-    [
-        pytest.param(["body"], id="neither-mode"),
-        pytest.param(["body", "--template", "--check"], id="both-modes"),
-    ],
-)
-def test_body_requires_exactly_one_mode(argv: list[str]) -> None:
+def test_body_requires_check() -> None:
     with pytest.raises(SystemExit) as refused:
-        issue_claim.main(argv)
+        issue_claim.main(["body"])
 
     assert refused.value.code == 2
 
@@ -14074,7 +13957,7 @@ def test_cli_board_refuses_a_non_github_canonical_remote_by_host(
 
     monkeypatch.setattr(github, "discover_repository", unused)
 
-    status = issue_claim.main(["board"])
+    status = issue_claim.main(["board", "--json"])
 
     captured = capsys.readouterr()
     assert status == 2
@@ -14091,7 +13974,7 @@ _UNTRACKED_BOARD_CONFIG_ERROR = (
     "arguments",
     [
         pytest.param(["bootstrap"], id="bootstrap"),
-        pytest.param(["board"], id="board"),
+        pytest.param(["board", "--json"], id="board"),
     ],
 )
 def test_untracked_board_config_refuses_every_store_command_by_name(

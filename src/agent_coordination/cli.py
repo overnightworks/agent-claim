@@ -686,26 +686,13 @@ def _add_check_parser(commands: argparse._SubParsersAction) -> None:
 
 def _add_body_parser(commands: argparse._SubParsersAction) -> None:
     body = commands.add_parser(
-        "body",
-        help="print a body skeleton, or check one for defects before it reaches the forge",
+        "body", help="check a piped body's fenced agent-claim block for defects before the forge"
     )
-    mode = body.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--template", action="store_true", help="print the skeleton body for --kind")
-    mode.add_argument(
+    body.add_argument(
         "--check",
         action="store_true",
+        required=True,
         help="read a body from stdin and report its defects",
-    )
-    body.add_argument(
-        "--kind",
-        choices=BODY_TEMPLATE_KINDS,
-        help=f"the fresh item's kind for --template; default {DEFAULT_BODY_TEMPLATE_KIND}",
-    )
-    body.add_argument(
-        "--parent",
-        type=board.parse_item_reference,
-        metavar="ITEM",
-        help="prepend a Parent: #N line to --template's skeleton",
     )
     body.add_argument("--json", action="store_true", help=JSON_HELP)
 
@@ -2622,16 +2609,6 @@ BODY_TEMPLATE_KINDS = ("task", "feature", "container")
 DEFAULT_BODY_TEMPLATE_KIND = "task"
 
 
-def _body_template(kind: str, parent: int | None) -> str:
-    """The skeleton `body --template` prints for `kind` (issue #262): the
-    same `board.BLOCK_CHILD_SKELETON` `cut` writes for a task or feature
-    child, or `board.BLOCK_CONTAINER_SKELETON` for a container -- with
-    `parent`'s own `Parent:` line ahead of it when given, exactly as `cut`
-    composes one for its own fresh child (`_body_with_parent`)."""
-    skeleton = board.BLOCK_CONTAINER_SKELETON if kind == "container" else board.BLOCK_CHILD_SKELETON
-    return _body_with_parent(skeleton, parent)
-
-
 def _read_body_check_input() -> str:
     """`body --check`'s body text, read from stdin only (issue #262 Sonar
     S8707): an agent pipes the file in (`aco body --check < body.md`)
@@ -2653,7 +2630,6 @@ class BodyCheckReason(StrEnum):
     VALID = board.BodyShapeVerdict.VALID.value
     MALFORMED = board.BodyShapeVerdict.MALFORMED.value
     INCOMPLETE = board.BodyShapeVerdict.INCOMPLETE.value
-    INVALID_USAGE = "invalid_usage"
     UNAVAILABLE = "unavailable"
 
 
@@ -2673,37 +2649,23 @@ def _body_check_report(check: board.BodyShapeCheck, *, as_json: bool) -> int:
 
 
 def _cmd_body(parsed: argparse.Namespace) -> int:
-    """`body` is forge-free (issue #262), the same way `status` and
-    `bootstrap` are (issue #245): a template is composed from this
-    repository's own skeleton owners, and a check reads stdin only --
-    never an issue, a live claim, a filesystem path, or the forge's own
-    `blocked_by` relation, so it never resolves a `_LazyForge` at all
-    (`main` dispatches it outside `_dispatch`, exactly like `status`).
-    `--check` still reads the repository's own storage pin (issue #287):
-    `[record]` is a known key under `storage = "state-ref"` and an unknown
-    one under `storage = "github"`, the same gate `_state_ref_forge`'s own
-    items already read through `_decode_item`."""
-    if parsed.check:
-        as_json = parsed.json
-        if parsed.kind is not None or parsed.parent is not None:
-            return _refuse(
-                BodyCheckReason.INVALID_USAGE,
-                protocol.ClaimUnavailableError(
-                    "--kind and --parent apply only to --template, not --check"
-                ),
-                as_json=as_json,
-            )
-        try:
-            config = _board_config(_resolve_toplevel())
-            body = _read_body_check_input()
-        except protocol.ClaimError as error:
-            return _refuse(BodyCheckReason.UNAVAILABLE, error, as_json=as_json)
-        check = board.body_shape_check(body, storage=config.storage)
-        return _body_check_report(check, as_json=as_json)
-    if parsed.json:
-        raise protocol.ClaimUnavailableError("--json applies only to --check, not --template")
-    print(_body_template(parsed.kind or DEFAULT_BODY_TEMPLATE_KIND, parsed.parent), end="")
-    return 0
+    """`body --check` is forge-free (issue #262), the same way `status` and
+    `bootstrap` are (issue #245): it reads stdin only, never an issue, a
+    live claim, a filesystem path, or the forge's own `blocked_by`
+    relation, so it never resolves a `_LazyForge` at all (`main` dispatches
+    it outside `_dispatch`, exactly like `status`). It still reads the
+    repository's own storage pin (issue #287): `[record]` is a known key
+    under `storage = "state-ref"` and an unknown one under
+    `storage = "github"`, the same gate `_state_ref_forge`'s own items
+    already read through `_decode_item`."""
+    as_json = parsed.json
+    try:
+        config = _board_config(_resolve_toplevel())
+        body = _read_body_check_input()
+    except protocol.ClaimError as error:
+        return _refuse(BodyCheckReason.UNAVAILABLE, error, as_json=as_json)
+    check = board.body_shape_check(body, storage=config.storage)
+    return _body_check_report(check, as_json=as_json)
 
 
 def _github_pull_request_number(value: str) -> int:
@@ -4063,11 +4025,12 @@ class BoardReason(StrEnum):
     """`aco board`'s own `--json` `reason` vocabulary (issue #412,
     `specs/board.spec.md`): `projected` the only success -- `--html` and
     `--serve` never reach it, since neither ever sets `--json`.
-    `invalid_usage` covers `--new-token` without `--serve` (BOARD-39) and
-    `--repo` under `storage = state-ref` (PIN-04); every other refusal --
-    an unsupported forge host (BOARD-02), a state-ref checkout with no
-    resolvable default branch (PIN-05) -- falls to `unavailable`, matching
-    `ask`/`rule`/`brief`'s own catch-all."""
+    `invalid_usage` covers `--new-token` without `--serve` (BOARD-39), no
+    `--json`/`--html`/`--serve` given at all (BOARD-44), and `--repo` under
+    `storage = state-ref` (PIN-04); every other refusal -- an unsupported
+    forge host (BOARD-02), a state-ref checkout with no resolvable default
+    branch (PIN-05) -- falls to `unavailable`, matching `ask`/`rule`/
+    `brief`'s own catch-all."""
 
     PROJECTED = "projected"
     INVALID_USAGE = "invalid_usage"
@@ -4078,6 +4041,16 @@ class _BoardNewTokenUsageError(protocol.ClaimError):
     """`--new-token` without `--serve` (BOARD-39): named so `--json` can
     choose `invalid_usage` over the broad `unavailable` catch-all every
     other `board` refusal falls to."""
+
+
+class _BoardNoModeUsageError(protocol.ClaimError):
+    """Neither `--json` nor `--html` given, and `--serve` already diverted
+    before `_cmd_board` ever runs (BOARD-44): the retired text table (issue
+    #420, #390 Befund 13) leaves `board` with no default mode of its own
+    any more, so a bare `aco board` must name one instead of guessing."""
+
+
+BOARD_NO_MODE_MESSAGE = "aco board requires --json, --html, or --serve"
 
 
 def _cmd_board(parsed: argparse.Namespace, session: _ReadSession) -> int:
@@ -4092,18 +4065,16 @@ def _cmd_board(parsed: argparse.Namespace, session: _ReadSession) -> int:
         if parsed.html is not None:
             _cmd_board_html(parsed, session)
             return 0
+        if not as_json:
+            raise _BoardNoModeUsageError(BOARD_NO_MODE_MESSAGE)
         projected = _observed_board(session).board
-    except _BoardNewTokenUsageError as error:
+    except (_BoardNewTokenUsageError, _BoardNoModeUsageError) as error:
         return _refuse(BoardReason.INVALID_USAGE, error, as_json=as_json)
     except RepoMeaninglessUnderStateRefError as error:
         return _refuse(BoardReason.INVALID_USAGE, error, as_json=as_json)
     except protocol.ClaimError as error:
         return _refuse(BoardReason.UNAVAILABLE, error, as_json=as_json)
-    if as_json:
-        _emit_json(True, BoardReason.PROJECTED, **board.board_payload(projected))
-        return 0
-    storage = _board_config(_resolve_toplevel()).storage
-    print(board.render(projected, storage=storage))
+    _emit_json(True, BoardReason.PROJECTED, **board.board_payload(projected))
     return 0
 
 
@@ -5200,9 +5171,8 @@ def _print_cut_result(
 def _body_with_parent(skeleton: str, parent: int | None) -> str:
     """`skeleton`, preceded by one `Parent: #<parent>` line -- the same
     wording issue bodies already use for this fact -- when `parent` is
-    given; `skeleton` itself otherwise. The one place that composes a
-    parent line onto a body, shared by `cut`'s own child body and `body
-    --template` (issue #262)."""
+    given; `skeleton` itself otherwise. The one place `cut`'s own child
+    body composes a parent line onto a skeleton."""
     return skeleton if parent is None else f"Parent: #{parent}\n\n{skeleton}"
 
 

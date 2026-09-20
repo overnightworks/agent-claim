@@ -1,56 +1,59 @@
 # `aco board`
 
-`aco board` projects the open work board read-only, in four output modes:
-the fixed-width text table (default), `--json`, `--html` (issue #276, a
-static page), and `--serve` (issue #280, a loopback HTTP page an operator
-opens with the printed link). This file owns those four modes' own shapes
--- the text sections, the `--json` keys, the HTML page's section order and
-empty states, and the one line `--serve` prints -- and the one
-forge-resolution precondition `aco next`/`aco rulings` share with it before
-either ever reads an issue (`## The shared forge precondition`, cited
-rather than restated by `specs/next.spec.md`/`specs/rulings.spec.md`). It
-never restates a fact another file already owns: `<label>`'s two forms and
-the Landungen pairing rule are `specs/landing-grammar.spec.md`'s
-(LAND-41..54); the untracked-pin refusal is `specs/storage-pin.spec.md`'s
-(PIN-01); the ruling a click on that page writes is `specs/rule.spec.md`'s
-(RULE-01..09); `specs/output.spec.md` owns the `--json` envelope itself
-(OUT-nn: key order, `ok`, `message`) that wraps BOARD-11's own top-level
-keys. `--serve`'s own request/response wire contract is not this
-lane's to invent and is not specified here. `board`'s own ranking,
-scoring, and per-column cell semantics (`SCORE`, `PRIORITY`, `AGE`, ...)
-are pre-existing, untouched behaviour this lane does not re-derive into
-criteria; the table's own presence and its `ACTIONABLE`/`no: <reason>`
-cell are the one column this file grades, since `next`'s own SKIPPED list
+`aco board` projects the open work board read-only, in three output modes:
+`--json`, `--html` (issue #276, a static page), and `--serve` (issue #280, a
+loopback HTTP page an operator opens with the printed link); a bare
+`aco board` naming none of them refuses instead (BOARD-44, issue #420) --
+the retired fourth mode was a fixed-width text table (#390 Befund 13). This
+file owns those three modes' own shapes -- the `--json` keys, the HTML
+page's section order and empty states, and the one line `--serve` prints --
+and the one forge-resolution precondition `aco next`/`aco rulings` share
+with it before either ever reads an issue (`## The shared forge
+precondition`, cited rather than restated by
+`specs/next.spec.md`/`specs/rulings.spec.md`). It never restates a fact
+another file already owns: `<label>`'s two forms and the Landungen pairing
+rule are `specs/landing-grammar.spec.md`'s (LAND-41..54); the untracked-pin
+refusal is `specs/storage-pin.spec.md`'s (PIN-01); the ruling a click on
+that page writes is `specs/rule.spec.md`'s (RULE-01..09);
+`specs/output.spec.md` owns the `--json` envelope itself (OUT-nn: key
+order, `ok`, `message`) that wraps BOARD-11's own top-level keys.
+`--serve`'s own request/response wire contract is not this lane's to invent
+and is not specified here. `board`'s own ranking, scoring, and per-item
+field semantics (`score`, `priority_bucket`, `age_days`, ...) are
+pre-existing, untouched behaviour this lane does not re-derive into
+criteria; each item's own `actionable`/`actionable_reason` fields are the
+one pair this file grades, since `next`'s own SKIPPED list
 (`specs/next.spec.md`) reuses that exact reason text. `<n>` is an item
 number, `<label>` an item as `specs/landing-grammar.spec.md` prints it.
 
 ## Behavior table
 
-| state \ trigger | text (default) | `--json` | `--html` | `--serve` |
-|---|---|---|---|---|
-| unsupported canonical-remote host | BOARD-02 | BOARD-02, BOARD-43 | BOARD-02 | BOARD-02 |
-| untracked `.agent-claim/board.toml` | PIN-01 (cited) | PIN-01 (cited) | PIN-01 (cited) | PIN-01 (cited) |
-| `--repo` under `storage = "state-ref"` | BOARD-42 | BOARD-42, BOARD-43 | BOARD-42 | — |
-| an item claimed or malformed | BOARD-03 | — | — | — |
-| board empty of ready/stale/recovery rows | BOARD-04 | — | — | — |
-| landed-but-open items exist | BOARD-05 | — | — | — |
-| the Landungen view's own rows | BOARD-06 | BOARD-12 | BOARD-20 | BOARD-20 |
-| a container, with or without an open child | BOARD-07 | — | — | — |
-| an item with no recognized `kind` | BOARD-08 | BOARD-08 | — | — |
-| an uncut `[[slice]]` row | BOARD-09 | BOARD-14 | — | — |
-| a completed run | BOARD-10 | BOARD-11, BOARD-13 | — | — |
-| `--json`'s success/refusal envelope | — | BOARD-11, BOARD-43 (OUT-nn cited) | — | — |
-| `--html`/`--json`/`--serve` combined | BOARD-16 | BOARD-16 | BOARD-16 | BOARD-16 |
-| `--html PATH` given, or omitted | — | — | BOARD-15 | — |
-| open expectation lines, cards | — | — | BOARD-18, BOARD-19, BOARD-21 | — |
-| a live claim on an item | — | — | BOARD-17 | — |
-| an item with a `size`, measured or not | BOARD-24, BOARD-25, BOARD-29, BOARD-30 | BOARD-26, BOARD-27, BOARD-31 | BOARD-18, BOARD-28 | — |
-| a fresh `--serve` start | — | — | — | BOARD-22, BOARD-23 |
-| `--serve`'s persistent loopback token, minted or read | — | — | — | BOARD-32, BOARD-33, BOARD-34 |
-| `--serve` naming a port another process already holds | — | — | — | BOARD-35 |
-| an already-ruled `[[expectation]]` line | — | — | BOARD-36, BOARD-37, BOARD-38 | BOARD-36, BOARD-37, BOARD-38 |
-| `--new-token` given without `--serve` | BOARD-39 | BOARD-39, BOARD-43 | BOARD-39 | — |
-| the token file's own content, or its directory's mode | — | — | — | BOARD-40, BOARD-41 |
+| state \ trigger | `--json` | `--html` | `--serve` |
+|---|---|---|---|
+| no `--json`, `--html`, or `--serve` given | BOARD-44 | BOARD-44 | BOARD-44 |
+| unsupported canonical-remote host | BOARD-02, BOARD-43 | BOARD-02 | BOARD-02 |
+| untracked `.agent-claim/board.toml` | PIN-01 (cited) | PIN-01 (cited) | PIN-01 (cited) |
+| `--repo` under `storage = "state-ref"` | BOARD-42, BOARD-43 | BOARD-42 | — |
+| the Landungen view's own rows | BOARD-12 | BOARD-20 | BOARD-20 |
+| an item with no recognized `kind` | BOARD-08 | — | — |
+| an uncut `[[slice]]` row | BOARD-14 | — | — |
+| a completed run | BOARD-11, BOARD-13 | — | — |
+| `--json`'s success/refusal envelope | BOARD-11, BOARD-43 (OUT-nn cited) | — | — |
+| `--html`/`--json`/`--serve` combined | BOARD-16 | BOARD-16 | BOARD-16 |
+| `--html PATH` given, or omitted | — | BOARD-15 | — |
+| open expectation lines, cards | — | BOARD-18, BOARD-19, BOARD-21 | — |
+| a live claim on an item | — | BOARD-17 | — |
+| an item with a `size`, measured or not | BOARD-26, BOARD-27, BOARD-31 | BOARD-18, BOARD-28 | — |
+| a fresh `--serve` start | — | — | BOARD-22, BOARD-23 |
+| `--serve`'s persistent loopback token, minted or read | — | — | BOARD-32, BOARD-33, BOARD-34 |
+| `--serve` naming a port another process already holds | — | — | BOARD-35 |
+| an already-ruled `[[expectation]]` line | — | BOARD-36, BOARD-37, BOARD-38 | BOARD-36, BOARD-37, BOARD-38 |
+| `--new-token` given without `--serve` | BOARD-39, BOARD-43 | BOARD-39 | — |
+| the token file's own content, or its directory's mode | — | — | BOARD-40, BOARD-41 |
+
+## No output mode
+
+- [ ] [BOARD-44] `aco board` naming none of `--json`, `--html`, or `--serve` refuses `aco board requires --json, --html, or --serve`, exit `2`, before any forge, pin, or repository read (see E-BOARD-16).
 
 ## The shared forge precondition
 
@@ -61,31 +64,13 @@ does, before either reads a single issue -- cited there, not restated.
 - [ ] [BOARD-01] `board` reaches the same untracked-`.agent-claim/board.toml` refusal `specs/storage-pin.spec.md` owns (PIN-01), exit `2`, before the host check above ever runs.
 - [ ] [BOARD-42] Under `storage = "state-ref"`, `board`/`next`/`rulings` resolve the state-ref forge like `item show`/`edit`/`close`; `--repo` there refuses the same as those (PIN-04, PIN-05).
 
-## Text output
-
-- [ ] [BOARD-03] Every row's `ACTIONABLE` cell reads `yes`, or `no: <reason>` -- `no: claimed`, or any other `actionable_reason` verbatim (see E-BOARD-02).
-- [ ] [BOARD-04] `READY NOW`, `STALE`, and `RECOVERY (close or re-project)` each list comma-joined `<label>`s in board order, or `none` when empty (see E-BOARD-02).
-- [ ] [BOARD-05] `RECOVERY (close or re-project)` names every item a merged pull request's own `Work-Item:` line declares, that item itself still open (`specs/landing-grammar.spec.md`, LAND-43).
-- [ ] [BOARD-06] `LANDUNGEN` follows `RECOVERY`: one line per row, `<label> <date> <sha7>` or `<label> <date> PR #<n>` (github's own supplement, LAND-44/45), or `none` when empty.
-- [ ] [BOARD-07] `CONTAINERS` lists one line per container item, open child or not: `<label> <closed>/<total> closed; open: <children or none>`, or `none` when there is none (see E-BOARD-02).
-- [ ] [BOARD-08] An item the forge reports no `kind` for, or a non-`container` `kind`, is left out of `CONTAINERS` even with child counts of its own (#309): never guessed at (see E-BOARD-03).
-- [ ] [BOARD-09] `UNCUT` lists one line per item with an undispatched `[[slice]]` row, `<label>: rows <indices> uncut`, or `none` when every slice table is either empty or fully cut.
-- [ ] [BOARD-10] The table and every section are followed by one closing line, `requests: <n>`, `<n>` the exact count of forge calls this run made (see E-BOARD-02).
-- [ ] [BOARD-24] `ESTIMATE` reads `~<n>h (<S|M|L>, n=<k>)` when measured, else `schwach` or `keine Größe` (see E-BOARD-02).
-
-  ```
-  ~5h (M, n=4)   # class has 3+ measured lanes
-  schwach        # fewer than 3, including 0
-  keine Größe    # the item names no size
-  ```
-- [ ] [BOARD-25] `MESSUNGEN` follows `UNCUT`: measured, `Messungen (Stand <date>, seit <date>)` then one line per class; else only `keine Messungen seit <date>` (see E-BOARD-02).
-- [ ] [BOARD-29] Each `MESSUNGEN` class line reads `<S|M|L>: n=<k>, median <h>h, p80 <h>h`, `(schwach)` appended under three, then `<first>..<last>` dates.
-- [ ] [BOARD-30] `MESSUNGEN` appends `<n> Lanes ohne Ende` when any claim is still open, and `<n> Commits ohne lesbaren Item-Trailer` when any transition commit could not be read.
+- BOARD-03, BOARD-04, BOARD-05, BOARD-06, BOARD-07, BOARD-09, BOARD-10, BOARD-24, BOARD-25, BOARD-29, BOARD-30 (retired 20.09.2026, issue #420, #390 Befund 13): the fixed-width text table (`board.render`) they described no longer exists; `--json`'s own item fields, `landings` array, `uncut` array, and `measurements` object (BOARD-11..14, BOARD-26, BOARD-27, BOARD-31) and `--html`'s own sections (BOARD-15..21, BOARD-28) carry the equivalent facts.
 
 ## `--json`
 
 - [ ] [BOARD-11] `board --json` wraps OUT-nn (`reason: "projected"`) around `items`, `ready_now`, `stale`, `recovery`, `landings`, `uncut`, `requests`, `measurements` only, never `repository` (E-BOARD-04).
 - [ ] [BOARD-43] `--json` on a dispatched refusal (BOARD-02, BOARD-39, BOARD-42) prints that envelope with the sentence as `message` and `reason` below, exit `2` (see E-BOARD-15).
+- [ ] [BOARD-08] An item the forge reports no `kind` for, or a non-`container` `kind`, carries `"container": null` even with child counts of its own (#309): never guessed at (see E-BOARD-03).
 
 `reason`, by which refusal fired:
 
@@ -133,8 +118,8 @@ does, before either reads a single issue -- cited there, not restated.
 
 ## Never
 
-- `board --html` never performs a `gh` call beyond what plain `board` already made for the same fixture: the Landungen section reuses `board`'s own merged-pull-request read rather than asking a second time.
-- A container whose own child-count summary disagrees with its open-children list (a stale summary, a lost paginated row) is never silently reconciled into a `CONTAINERS`/`--json` row: the board build refuses by name instead of rendering a guess.
+- `board --html` never performs a `gh` call beyond what `board --json` already made for the same fixture: the Landungen section reuses `board`'s own merged-pull-request read rather than asking a second time.
+- A container whose own child-count summary disagrees with its open-children list (a stale summary, a lost paginated row) is never silently reconciled into its own `container`/`--json` field: the board build refuses by name instead of rendering a guess.
 - `board`'s `--json` never carries a `read_state` key on any item, and never a bare `null` in place of an absent `foreign_blockers`/`uncut` `scope` entry.
 - `--serve` never accepts a `--restart` flag: a stable token (BOARD-32) makes an ordinary `kill` and a fresh start enough, and BOARD-35's own refusal, naming the PID, is the tool an operator needs to do that by hand.
 - BOARD-35's refusal never names a PID it could not verify against `/proc`: unable to identify the occupant, it says so instead of guessing one.
@@ -157,58 +142,20 @@ uses).
 Setup: bare-remote, `origin` repointed at `file:///srv/git/agent-claim.git`
 
 ```console
-$ aco board
+$ aco board --json
 2> ERROR: no forge adapter for host file
+{"ok": false, "reason": "unavailable", "message": "no forge adapter for host file"}
 exit 2
 ```
 
-### E-BOARD-02 — the text board's own sections
-
-Setup: bare-remote, fake `gh`, issue `#10` open and claimed, issue `#11` a
-container `2/3` closed with one open child `#12`
-
-```console
-$ aco board
-SCORE  ISSUE  KIND             ...  ACTIONABLE     ...  ESTIMATE      TITLE
-...    #10    -                ...  no: claimed    ...  keine Größe   Ship #10.
-...    #11    container 2/3    ...  no: container; claim a child  ...  keine Größe  Container epic
-
-READY NOW
-none
-
-STALE
-none
-
-RECOVERY (close or re-project)
-none
-
-LANDUNGEN
-none
-
-CONTAINERS
-#11 2/3 closed; open: #12
-
-UNCUT
-none
-
-MESSUNGEN
-keine Messungen seit <date>
-
-requests: 4
-exit 0
-```
-
-### E-BOARD-03 — a kindless container is never listed under `CONTAINERS`
+### E-BOARD-03 — a kindless container's own `--json` item carries `"container": null`
 
 Setup: bare-remote, fake `gh`, issue `#20` open with `children_closed`/
 `children_total` set on the forge but no recognized `kind`
 
 ```console
-$ aco board
-...
-CONTAINERS
-none
-...
+$ aco board --json
+{"ok": true, "reason": "projected", "items": [{"number": 20, "kind": null, "container": null, ...}], ...}
 exit 0
 ```
 
@@ -350,5 +297,15 @@ Setup: bare-remote, fake `gh`
 ```console
 $ aco board --new-token
 2> ERROR: --new-token requires --serve
+exit 2
+```
+
+### E-BOARD-16 — `aco board` naming no output mode refuses before any read
+
+Setup: none -- a directory outside any git repository
+
+```console
+$ aco board
+2> ERROR: aco board requires --json, --html, or --serve
 exit 2
 ```

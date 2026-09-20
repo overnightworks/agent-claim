@@ -27,11 +27,29 @@ presentation-only fields (`LaneEvent.rescopes`, `LaneMeasure.landing_wait_hours`
 `store.claim_lifecycle` and the `aco metrics` command that read this module's
 report are Lane 1b of #299, not yet landed. Each is a named future caller,
 not speculative surface; tests already exercise every one of these names.
+
+`BoardItem.priority_bucket`/`age_days` and `Board.stale` (issue #420) lost
+their one literal reader when `board.render` -- the text table `--json`/
+`--html` never needed -- was deleted: each is still part of `board_payload`'s
+own `--json` contract (`asdict` serializes every dataclass field whether or
+not any function reads it back by name), and tests already pin all three by
+name (`tests/test_board.py`'s `priority_bucket`/`stale` attribute
+assertions, `tests/test_cli.py`'s `"age_days"` envelope pin).
 """
 
 from datetime import UTC, date, datetime
 
-from agent_coordination.board import NoItemKind
+from agent_coordination.board import (
+    Board,
+    BoardItem,
+    BodyReadState,
+    Contract,
+    ExpectationProgress,
+    ExpectationState,
+    Measurements,
+    NoItemKind,
+    Stage,
+)
 from agent_coordination.board_serve import _BoardRequestHandler
 from agent_coordination.forge import Capability, ForgeUnsupportedError
 from agent_coordination.metrics import (
@@ -61,6 +79,57 @@ _size_class_stats_for_vulture = SizeClassStats(
 )
 _container_sum_for_vulture = ContainerSum(container="", hours=0.0, n_estimated=0, n_without_size=0)
 _parallelism_for_vulture = Parallelism(day=date(2000, 1, 1), overlapping_lanes=0)
+_board_item_for_vulture = BoardItem(
+    number=0,
+    title="",
+    labels=(),
+    kind=None,
+    priority_category=0,
+    priority_bucket="",
+    priority_order=0,
+    container=None,
+    container_parent=None,
+    scope=None,
+    contract=Contract(now=None, next=None, done_when=None),
+    next_step=None,
+    contract_complete=False,
+    projectionless_idea=False,
+    expectation_state=ExpectationState.NONE,
+    expectation_progress=ExpectationProgress(open=0, total=0),
+    ruling_landings=None,
+    ruling_old=None,
+    frozen_trigger=None,
+    open_blockers=(),
+    freed_on=None,
+    freed_days=None,
+    stage=Stage.TEXT_ONLY,
+    age_days=0,
+    idle_days=0,
+    active_claim=None,
+    claim_age=None,
+    claim_old=False,
+    unblocks_count=0,
+    score=0,
+    actionable=False,
+    actionable_reason=None,
+    read_state=BodyReadState.VALID,
+    size=None,
+    has_slices=False,
+    estimate=None,
+)
+_board_for_vulture = Board(
+    items=(),
+    ready_now=(),
+    stale=(),
+    recovery=(),
+    landings=(),
+    uncut=(),
+    repository="",
+    requests=0,
+    measurements=Measurements(
+        classes=(), unfinished=0, unparsed=0, since=None, as_of=date(2000, 1, 1)
+    ),
+)
 
 _referenced_only_for_vulture = (
     NoItemKind.DOCS,
@@ -79,4 +148,8 @@ _referenced_only_for_vulture = (
     _container_sum_for_vulture.n_estimated,
     _container_sum_for_vulture.n_without_size,
     _parallelism_for_vulture.overlapping_lanes,
+    _board_item_for_vulture.priority_bucket,
+    _board_item_for_vulture.age_days,
+    _board_item_for_vulture.freed_days,
+    _board_for_vulture.stale,
 )
