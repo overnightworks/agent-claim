@@ -1989,7 +1989,9 @@ def expectation_line_state(line: ExpectationLine) -> str:
 def expectation_line_summary(line: ExpectationLine) -> str:
     """`line.text` on one line, truncated to `EXPECTATION_LINE_TEXT_MAXIMUM`
     characters -- `rulings`' human form; `--json` carries the full text."""
-    return _brief(line.text, maximum=EXPECTATION_LINE_TEXT_MAXIMUM)
+    one_line = " ".join(line.text.split())
+    maximum = EXPECTATION_LINE_TEXT_MAXIMUM
+    return one_line if len(one_line) <= maximum else one_line[: maximum - 1] + "…"
 
 
 class ExpectationAlreadyRuledError(protocol.ClaimError):
@@ -3614,12 +3616,3 @@ def _actionable_reason(facts: _ActionabilityFacts) -> str | None:
     if facts.kind is ItemKind.CONTAINER:
         return "container; claim a child"
     return _claim_or_completeness_reason(facts)
-
-
-def _brief(value: str | None, *, maximum: int = 48) -> str:
-    # An absent value and `""` (a block skeleton's unfilled `next`, #150 §5)
-    # render identically: a fresh child shows nothing in this column.
-    if value is None or not value.strip():
-        return "-"
-    one_line = " ".join(value.split())
-    return one_line if len(one_line) <= maximum else one_line[: maximum - 1] + "…"
