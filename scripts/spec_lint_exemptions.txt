@@ -1,0 +1,4 @@
+# Ledger for scripts/spec_lint.py. One "file:line:rule — reason" per line, written
+# by hand only when a finding is deliberately accepted (issue #385). Empty today:
+# the calibration pass over all 23 specs/*.spec.md files needed none. A line missing
+# its " — reason" tail fails the run as its own malformed_exemption finding.

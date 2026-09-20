@@ -29,7 +29,7 @@ it, `<s>` an integer score.
 | that same container still names further work | NEXT-07 | NEXT-13 |
 | a landed-but-open item exists | LAND-53 (cited) | NEXT-14 |
 | an unworkable item exists beside the top action | NEXT-08 | NEXT-14 |
-| further free items exist, disjoint from the first action | NEXT-09, NEXT-22, NEXT-23 | NEXT-15 |
+| further free items exist, disjoint from the first action | NEXT-09, NEXT-21, NEXT-22 | NEXT-15 |
 | more than three such candidates | NEXT-10 | NEXT-15 |
 | the first action itself names no scope | NEXT-16 | NEXT-15 |
 | a candidate names no scope of its own | NEXT-17 | NEXT-15 |
@@ -59,8 +59,8 @@ it, `<s>` an integer score.
 ## `parallel:`
 
 - [ ] [NEXT-09] `parallel:` lists every further free item the walk placed, `<label> (<n> path[s])`, comma-joined, in board order, alongside the first action (see E-NEXT-05).
-- [ ] [NEXT-22] `parallel:` occupies live claims' scopes and the first action's scope, then walks further qualifying actions in board order, skipping a close proposal or recovery item outright (see E-NEXT-05).
-- [ ] [NEXT-23] A candidate whose `scope` stays disjoint (CLAIM-31/CLAIM-32's grammar) from everything occupied is placed, its `scope` then joining what's occupied for the rest of the walk (see E-NEXT-05).
+- [ ] [NEXT-21] `parallel:` occupies live claims' scopes and the first action's scope, then walks further qualifying actions in board order, skipping a close proposal or recovery item outright (see E-NEXT-05).
+- [ ] [NEXT-22] A candidate whose `scope` stays disjoint (CLAIM-31/CLAIM-32's grammar) from everything occupied is placed, its `scope` then joining what's occupied for the rest of the walk (see E-NEXT-05).
 - [ ] [NEXT-10] Beyond three placed candidates, only the first three are named, followed by `, and <n> more`; `--json`'s own `candidates` array still carries every one (see E-NEXT-05).
 - [ ] [NEXT-16] Once the first action names no scope, the tail collapses to `parallel: unknown (first action names no scope)`; `scope unknown:` is skipped, never printed as `none` (see E-NEXT-02).
 - [ ] [NEXT-17] `scope unknown:` lists, in board order, every candidate the walk could not place for lacking a scope of its own, or `none`; printed whenever the first action does name a scope.

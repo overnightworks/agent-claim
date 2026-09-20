@@ -47,7 +47,7 @@ jobs:
           path: coverage.xml
 
   gates:
-    name: Test-efficiency gates (test-budget, similar-methods, test-inventory)
+    name: Test-efficiency gates (test-budget, similar-methods, test-inventory, spec-lint)
     runs-on: ubuntu-latest
     steps:
       # Every gate measures against a merge-base, so the branch point must be reachable
@@ -72,6 +72,8 @@ jobs:
         run: uv run --locked python scripts/similar_methods.py --ci
       - name: Test inventory (rewritten-module assert-literal coverage vs the merge-base)
         run: uv run --locked python scripts/test_inventory.py --ci
+      - name: Spec lint (specs/*.spec.md style rules, no baseline)
+        run: uv run --locked python scripts/spec_lint.py --ci
 
   secrets:
     name: Secret scan
