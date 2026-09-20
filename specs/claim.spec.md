@@ -91,7 +91,7 @@ to the clause each names below.
 - [ ] [CLM-24] Deriving scope for a target missing or a pull request refuses by name before any slice-rule check runs, `reason: "target_invalid"` under `--json` (see E-CLM-07).
 - [ ] [CLM-25] The store's own refusal to write -- the identity or claim id already taken, or a resource conflict -- reports `reason: "claim_conflict"` under `--json`.
 - [ ] [CLM-26] Under `storage = "state-ref"`, `aco claim` resolves the state-ref forge like `aco rule`; `--repo` there refuses the same as PIN-04, `reason: "invalid_usage"`.
-- [ ] [CLM-27] Every other refusal -- a checkout precondition, scope grammar, an unsafe branch or claim id -- reports `reason: "unavailable"` under `--json`.
+- [ ] [CLM-27] Every other refusal the handler raises -- a checkout precondition, scope grammar, an unsafe branch or claim id -- reports `reason: "unavailable"`; a missing identity refuses through OUT-04.
 
 `reason`, by which refusal fired:
 
@@ -103,6 +103,7 @@ to the clause each names below.
 | CLAIM-55 (item names no scope), CLAIM-54 (scope mismatch), CLAIM-68 (malformed body while deriving) | `body_invalid` |
 | CLM-25 (identity, claim id, or resource conflict) | `claim_conflict` |
 | CLM-26 (`--repo` under `storage = state-ref`) | `invalid_usage` |
+| a missing agent identity, before the handler runs (OUT-04) | `precondition_failed` |
 
 ## Never
 

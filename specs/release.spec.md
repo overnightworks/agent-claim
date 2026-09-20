@@ -100,7 +100,7 @@ this file owns only when they appear at all.
 - [ ] [REL-20] A resolved `--merged` landing adds LAND-49's `freed:`/`next:` lines after `RELEASED` in text, or its keys to `--json`, present only then (see E-REL-02).
 - [ ] [REL-21] `--abandoned` never resolves the forge, reads the board, or prints `freed`/`next`/`hint` (LAND-39); its `--json` object carries neither key.
 - [ ] [REL-22] A `--merged` release whose post-commit board read fails prints LAND-38's `hint:` line, on stdout in text or stderr with `--json`; `freed`/`next` omitted (LAND-50) (see E-REL-06).
-- [ ] [REL-24] A release refusal past the parser (every ID but REL-01) prints `specs/output.spec.md`'s envelope, `reason` `precondition_failed`, exit `2` (see E-REL-07).
+- [ ] [REL-24] A release refusal past the parser (every ID but REL-01) prints `specs/output.spec.md`'s envelope, `reason` `precondition_failed`, exit `2`; REL-06..08 through OUT-04 (see E-REL-07).
 
 ## `--merged`'s own worktree/branch cleanup
 

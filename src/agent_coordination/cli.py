@@ -3938,12 +3938,24 @@ def _emit_json(ok: bool, reason: StrEnum, **payload: object) -> None:
     print(json.dumps(envelope))
 
 
+class PreDispatchReason(StrEnum):
+    """The one `reason` every refusal raised before the chosen command's own
+    handler runs reports under `--json` (issue #425): agent identity
+    resolution, and `release`'s own branch and override checks, refuse above
+    every handler, so `main`'s own sink owns their envelope here instead of
+    each command carrying a second `precondition_failed` member for a
+    refusal its handler never sees."""
+
+    PRECONDITION_FAILED = "precondition_failed"
+
+
 def _refuse(reason: StrEnum, error: protocol.ClaimError, *, as_json: bool) -> int:
-    """One shared refusal report for `ask`/`rule`/`brief` (issue #396):
-    `ERROR: <sentence>` on stderr exactly as `main`'s own generic handler
-    always printed it, then -- only under `--json` -- the envelope naming
-    this call's own reason instead of the dropped `error` key. Exit `2`,
-    the one exit every refusal past the parser still uses."""
+    """One shared refusal report for every `--json` command (issue #396) and
+    for `main`'s own pre-dispatch sink (issue #425): `ERROR: <sentence>` on
+    stderr exactly as `main`'s own generic handler always printed it, then
+    -- only under `--json` -- the envelope naming this call's own reason
+    instead of the dropped `error` key. Exit `2`, the one exit every refusal
+    past the parser still uses."""
     print(f"{CLI_ERROR_PREFIX}{error}", file=sys.stderr)
     if as_json:
         _emit_json(False, reason, message=str(error))
@@ -6858,11 +6870,13 @@ def _read_status_body_or_dispatch(parsed: argparse.Namespace) -> int:
 def main(arguments: list[str] | None = None) -> int:
     # One `ERROR:` site for parsing (`board.parse_item_reference` is an
     # argparse `type=` whose own refusal is a `ClaimError`), a local
-    # workspace operation, and an ordinary dispatch (issue #372). Every
-    # `--json` command now reports its own refusal through `_refuse`
-    # before ever reaching here (issue #425 finished that migration), so
-    # this sink only ever prints the plain `ERROR:` sentence -- never a
-    # second, unmigrated `--json` object.
+    # workspace operation, and an ordinary dispatch (issue #372). A refusal
+    # raised before the chosen command's own handler -- identity
+    # resolution, and `release`'s own branch and override checks -- reports
+    # through the same envelope here (issue #425), so a `--json` caller
+    # never reads a bare stderr sentence; a parser refusal has no parsed
+    # `--json` to read yet, so that one stays text.
+    parsed: argparse.Namespace | None = None
     try:
         parsed = _parser().parse_args(arguments)
         if parsed.command in {"_run-at-login", "register", "run", "login"}:
@@ -6871,8 +6885,11 @@ def main(arguments: list[str] | None = None) -> int:
             return _protect()
         return _read_status_body_or_dispatch(parsed)
     except protocol.ClaimError as error:
-        print(f"{CLI_ERROR_PREFIX}{error}", file=sys.stderr)
-        return 2
+        return _refuse(
+            PreDispatchReason.PRECONDITION_FAILED,
+            error,
+            as_json=bool(getattr(parsed, "json", False)),
+        )
 
 
 if __name__ == "__main__":

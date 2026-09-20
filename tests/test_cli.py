@@ -10740,6 +10740,70 @@ def test_cli_claim_and_release_json_errors_choose_their_own_shape(
     assert_refusal(captured.err, captured.out)
 
 
+def _prepare_pre_dispatch_refusal(
+    monkeypatch: pytest.MonkeyPatch, agent: str | None, branch: str | None
+) -> None:
+    """The world every pre-dispatch refusal below fires in: an identity when
+    the case is not about a missing one, and a checkout branch only where the
+    refusal is allowed to read one -- `None` forbids git outright."""
+    _set_agent_identity_env(monkeypatch, {checkout.ACO_AGENT_ENV: agent} if agent else None)
+    _forbid_github_construction(monkeypatch)
+    if branch is None:
+
+        def unused(arguments: list[str], **_kwargs: object) -> str:
+            pytest.fail("this refusal must fire before git is read")
+
+        monkeypatch.setattr(checkout, "_git_output", unused)
+        return
+    monkeypatch.setattr(checkout, "_git_output", lambda _arguments, **_kwargs: branch)
+
+
+@pytest.mark.parametrize(
+    ("arguments", "agent", "branch"),
+    [
+        pytest.param(_claim_without_agent_args(), None, None, id="claim-without-an-identity"),
+        pytest.param(
+            ["rescope", "72", "--add", "/repo/x.py"], None, None, id="rescope-without-an-identity"
+        ),
+        pytest.param(
+            ["release", "--abandoned", "stopped"], "Ada", "", id="release-without-issue-or-branch"
+        ),
+        pytest.param(
+            ["release", "72", "--abandoned", "stopped"], "Ada", "", id="release-without-claim-id"
+        ),
+        pytest.param(
+            ["release", "72", "--coordinator-override", "--abandoned", "takeover"],
+            "Ada",
+            None,
+            id="release-override-without-the-coordinator-role",
+        ),
+    ],
+)
+def test_cli_refusals_before_the_handler_print_the_shared_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    arguments: list[str],
+    agent: str | None,
+    branch: str | None,
+) -> None:
+    """Issue #425 review: identity resolution and `release`'s own branch and
+    override checks (REL-06..08) refuse above every handler, so `main`'s own
+    sink prints the envelope for them (OUT-04); the text form keeps the bare
+    `ERROR:` sentence it always printed."""
+    _prepare_pre_dispatch_refusal(monkeypatch, agent, branch)
+    text_status = issue_claim.main(["--repo", "example/agent-claim", *arguments])
+    text = capsys.readouterr()
+
+    _prepare_pre_dispatch_refusal(monkeypatch, agent, branch)
+    json_status = issue_claim.main(["--repo", "example/agent-claim", *arguments, "--json"])
+    envelope = capsys.readouterr()
+
+    assert (text_status, json_status) == (2, 2)
+    assert text.out == ""
+    assert envelope.err == text.err
+    _assert_json_refusal_object(envelope.err, envelope.out, reason="precondition_failed")
+
+
 def test_cli_claim_json_conflict_prints_the_stdout_error_object_not_a_success_shape(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
