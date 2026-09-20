@@ -220,7 +220,9 @@ default, `--json`, or a static `--html` page -- all three read-only.
 `--serve` instead runs a live page on 127.0.0.1 with a one-click ruling form
 per expectation line, so it is the one form of this command that writes; its
 loopback token persists across restarts and reinstalls (`--new-token` mints
-a fresh one), so the printed URL stays stable.
+a fresh one), so the token is always stable. The full printed URL is stable
+too only once the port is fixed with `--port`: the default `--port 0` picks
+a fresh ephemeral port on every start.
 Every item that carries a top-level `size = "S"|"M"|"L"` shows a measured
 estimate (`~4h (M, n=5)`) only once three or more same-size claims have
 landed; fewer measurements, including zero, show `schwach` instead. The
