@@ -1747,10 +1747,15 @@ def locate_agent_claim_block(body: str) -> LocatedBlock:
     return LocatedBlock(tomllib.loads(content), content_start, content_end, newline)
 
 
+# The shape one decoded JSON object takes -- one alias so `cast` names a
+# real type instead of repeating the `"dict[str, object]"` string literal
+# (python:S1192).
+_JsonObject = dict[str, object]
+
 # The shape a decoded homogeneous array of tables (`[[expectation]]`,
 # `[[slice]]`) or an `asdict`'d list of dataclasses takes -- one alias so
 # `cast` names a real type instead of repeating the string.
-_JsonRows = list[dict[str, object]]
+_JsonRows = list[_JsonObject]
 
 # `protocol.toml_string` is this repository's one TOML basic-string writer
 # (issue #378): it lives below this module in the Layers contract, so it is
@@ -3423,7 +3428,7 @@ def _project_landing_row(row: dict[str, object]) -> None:
     non-`null`, so a consumer never has to branch on which evidence
     dataclass produced a row."""
     row["committed_at"] = cast(datetime, row["committed_at"]).astimezone(UTC).isoformat()
-    evidence = cast("dict[str, object]", row.pop("evidence"))
+    evidence = cast(_JsonObject, row.pop("evidence"))
     row["sha"] = evidence.get("sha")
     row["pull_request"] = evidence.get("number")
 
@@ -3468,8 +3473,8 @@ def board_payload(board: Board) -> dict[str, object]:
         _project_landing_row(row)
     for finding in cast(_JsonRows, payload["uncut"]):
         _project_uncut_row_scope(finding)
-    _project_measurements(cast("dict[str, object]", payload["measurements"]))
-    return cast("dict[str, object]", _tuples_to_lists(payload))
+    _project_measurements(cast(_JsonObject, payload["measurements"]))
+    return cast(_JsonObject, _tuples_to_lists(payload))
 
 
 def _project_measurements(measurements: dict[str, object]) -> None:
