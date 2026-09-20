@@ -2,19 +2,18 @@
 
 `aco body --template` / `aco body --check`: the one command that composes a
 fresh skeleton or checks a piped one, without ever reading a live item. This
-file owns its own two mutually exclusive modes, their flag conflicts, and the
-`--check` `--json` envelope; `specs/body-block.spec.md` owns every defect and
-`body ok`/`body incomplete` sentence a checked block can carry (BODY-01..
-BODY-56) and this file cites those IDs rather than restating them.
-`specs/storage-pin.spec.md` owns the tracked-pin precondition `--check` reads
-(PIN-01); `[record]`'s own storage-gated validity is `specs/body-block.spec.md`'s
-own BODY-15/BODY-16. `specs/output.spec.md` owns the `--json` envelope itself
-(OUT-nn: key order, `ok`, `message`); this file names only `--check`'s own
-`reason` vocabulary (`valid`, `malformed`, `incomplete`, `invalid_usage`,
-`unavailable`). `--template`'s own two refusals (BDY-01, BDY-02) still reach
-`main`'s generic handler with `specs/release.spec.md`'s own `{"ok": false,
-"error": "<sentence>"}` object (REL-24), since `--template` names no `--json`
-output of its own to migrate.
+file owns its own two mutually exclusive modes and their flag conflicts;
+`specs/body-block.spec.md` owns every defect and `body ok`/`body incomplete`
+sentence a checked block can carry (BODY-01..BODY-56) and this file cites
+those IDs rather than restating them. `specs/storage-pin.spec.md` owns the
+tracked-pin precondition `--check` reads (PIN-01); `[record]`'s own
+storage-gated validity is `specs/body-block.spec.md`'s own BODY-15/BODY-16.
+`specs/output.spec.md` owns the `--json` envelope itself (OUT-nn: key order,
+`ok`, `message`); this file names only `--check`'s own `reason` vocabulary
+(`valid`, `malformed`, `incomplete`, `invalid_usage`, `unavailable`).
+`--template`'s own two refusals (BDY-01, BDY-02) still print
+`specs/release.spec.md`'s own `{"ok": false, "error": "<sentence>"}` object
+(REL-24), since `--template` names no `--json` output of its own to migrate.
 
 ## Behavior table
 

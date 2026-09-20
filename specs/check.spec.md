@@ -5,10 +5,10 @@ answers, since GitHub gives issues and pull requests the same number space.
 A pull request reads `specs/landing-grammar.spec.md`'s own classification,
 closing, and parent grammar (LAND-04..LAND-28); this file cites those IDs
 rather than restating them and owns only the command's own three-way
-dispatch, its issue-mode read of an item's own body contract, its `--json`
-envelope, and the checkout it needs to run at all. `specs/output.spec.md`
-owns the `--json` envelope itself (OUT-nn: key order, `ok`, `message`);
-this file names only `check`'s own `reason` values. `specs/body-block.spec.md`
+dispatch, its issue-mode read of an item's own body contract, and the
+checkout it needs to run at all. `specs/output.spec.md` owns the `--json`
+envelope itself (OUT-nn: key order, `ok`, `message`); this file names only
+`check`'s own `reason` values. `specs/body-block.spec.md`
 owns the exact `body malformed:`/`body incomplete:` sentences an issue's own
 shape can carry (BODY-01..BODY-52); `specs/storage-pin.spec.md` owns the
 `'<value>' is not an item reference` refusal for `<n>` itself (PIN-08) and
