@@ -39,6 +39,7 @@ prints `ERROR: <sentence>` on stderr, exit `2`, exactly as
 | named work item not open | LANDCMD-08 |
 | classification's own claim/parent/closing defect | LANDCMD-09 (LAND-14..28, cited) |
 | claim held by another agent or role | LANDCMD-10 |
+| `--coordinator-override` without `--role coordinator` | LANDCMD-19 |
 | checkout unclean or off the default branch | LANDCMD-11 |
 | every precondition holds | LANDCMD-12, LANDCMD-13 |
 | the pull request changed since it was read | LANDCMD-14 |
@@ -63,6 +64,7 @@ preflight, refused or not, exactly as `reset`'s own read does.
 - [ ] [LANDCMD-08] A classified work item that is not open refuses `work item #<n> is not open; it cannot be landed`, exit `2`; an issue-less pull request skips this check.
 - [ ] [LANDCMD-09] The classification's own claim, parent, and closing rules then apply (LAND-14..28): a defect refuses `pull request #<n> <that same defect sentence>`, exit `2`.
 - [ ] [LANDCMD-10] A claim held by another agent or role, with no explicit coordinator override, refuses (REL-12's sentence), exit `2`, before the merge.
+- [ ] [LANDCMD-19] `--coordinator-override` without `--role coordinator` refuses (CLAIM-39's sentence), exit `2`, before the merge -- the same role validation `release`'s own dispatch runs.
 - [ ] [LANDCMD-11] This checkout must sit on the default branch with nothing uncommitted, or `aco land` refuses `land must run from a clean checkout of the default branch '<branch>'`, exit `2`.
 
 ## Merge, composed by `aco land`

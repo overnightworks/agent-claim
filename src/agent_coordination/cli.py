@@ -5191,6 +5191,14 @@ def _land_preflight(
         if isinstance(structural, board.WorkItemClassification)
         else protocol.LaneIdentity()
     )
+    if parsed.coordinator_override:
+        # `release`'s own dispatch validates this before `_cmd_release` ever
+        # runs (`_release_branch_for`); `land` never routes through that
+        # function, so its own authorization path must call the same
+        # role-validating function itself (issue #405 review/gate finding),
+        # never merge on a bare `--coordinator-override` with no coordinator
+        # role behind it.
+        protocol._require_coordinator_override(parsed.role)
     _resolve_release_claimant(
         argparse.Namespace(
             agent=parsed.agent,
