@@ -1,0 +1,8 @@
+claim_id = "10ef05a9e6f944e787986b230e937739"
+agent = "Claude head (coordinator)"
+role = "builder"
+base = "d70c4156e3fbeeb9a414c0e5baa3b830a17ea97a"
+branch = "claude/issue-396-json-envelope"
+scope = ["specs/ask.spec.md", "specs/brief.spec.md", "specs/output.spec.md", "specs/release.spec.md", "specs/rule.spec.md", "src/agent_coordination/board.py", "src/agent_coordination/cli.py", "tests/test_cli.py"]
+opened_commit = "ee866ae3f45a2ac030d0829d5d402a6933bbffc4"
+whole_reason = "json envelope owner, output spec and three migrated commands with tests"
