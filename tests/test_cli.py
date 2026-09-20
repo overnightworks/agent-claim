@@ -12732,14 +12732,23 @@ def _land_preflight_client(
     body: str = f"Work-Item: #{WORK_ITEM_ISSUE}\n\nCloses #{WORK_ITEM_ISSUE}",
     item_closed: bool = False,
     claimed: bool = True,
+    claim_agent: str = "Ada",
 ) -> FakeForge:
     """A session `aco land 12` can preflight-refuse against, with no real
     git at all (issue #405): every scenario here fails before the checkout
     is ever consulted, unlike `_land_scenario`'s real-git happy path.
     `claimed=False` leaves the item with no live claim at all -- the other
-    half of LANDCMD-08's own ordering proof, alongside `item_closed`."""
+    half of LANDCMD-08's own ordering proof, alongside `item_closed`.
+    `claim_agent`, when it differs from `_patch_release_session`'s own
+    default session identity `Ada`, is the claim/parent/closing check's
+    existence proof standing beside a foreign claimant this session is not
+    authorized to land (issue #405 point 7)."""
     standing = (
-        (request("landing", "Ada", issue=WORK_ITEM_ISSUE, branch=LANDING_BRANCH, scope=("src",)),)
+        (
+            request(
+                "landing", claim_agent, issue=WORK_ITEM_ISSUE, branch=LANDING_BRANCH, scope=("src",)
+            ),
+        )
         if claimed
         else ()
     )
@@ -12908,6 +12917,25 @@ def test_land_refuses_a_closed_work_item_before_its_own_missing_claim(
 
     assert capsys.readouterr().err == (
         f"ERROR: work item #{WORK_ITEM_ISSUE} is not open; it cannot be landed\n"
+    )
+    assert client.merge_calls == []
+
+
+def test_land_refuses_a_foreign_claim_before_the_merge(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #405 point 7 review/gate finding: `_land_preflight` itself
+    authorizes this session against the live claim, reusing `release`'s own
+    claimant/coordinator-override check (`_resolve_release_claimant`) --
+    a claim held by another agent refuses before the merge, not only once
+    the delegated `release --merged` step runs after it."""
+    client = _land_preflight_client(monkeypatch, readiness=_land_readiness(), claim_agent="Grok")
+
+    assert issue_claim.main(["--repo", REPOSITORY, "land", "12"]) == 2
+
+    assert capsys.readouterr().err == (
+        "ERROR: only the original claimant may release; use an explicit coordinator "
+        "override (holder='Grok (builder)', this session='Ada (builder)')\n"
     )
     assert client.merge_calls == []
 

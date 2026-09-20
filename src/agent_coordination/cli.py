@@ -5121,10 +5121,10 @@ def _refuse_land_readiness(readiness: forge.LandingReadiness) -> None:
 
 def _land_preflight(
     client: github.GitHubForge,
-    claims_provider: Callable[[], tuple[protocol.ActiveClaim, ...]],
-    repository: str,
-    storage: board.Storage,
+    claims_provider: Callable[[], protocol.ClaimState],
+    context: _LandingCheckContext,
     number: int,
+    parsed: argparse.Namespace,
 ) -> tuple[forge.Landing, board.Classification, forge.LandingReadiness]:
     """Every read-only precondition `aco land` proves before its first write
     (issue #405): a green, open, mergeable pull request classifying exactly
@@ -5134,15 +5134,19 @@ def _land_preflight(
 
     In order: readiness (no local git read at all), the pull request's own
     shape, then the named item's live open state -- LANDCMD-08 before claim
-    validation (issue #405 review/gate finding) -- and only then
-    `claims_provider`, the one step that reads `refs/aco/state` locally, so
-    a pull request this preflight would refuse on GitHub's own answers
-    alone never pays for that read at all.
+    validation (issue #405 review/gate finding) -- then `claims_provider`,
+    the one step that reads `refs/aco/state` locally, so a pull request this
+    preflight would refuse on GitHub's own answers alone never pays for that
+    read at all, and finally this session's own authorization against the
+    exact claim just proven to exist (`_resolve_release_claimant`, `release`'s
+    own claimant/coordinator-override check, issue #405 review finding): a
+    claim held by another agent or role refuses here, before the merge,
+    rather than only once the delegated `release --merged` step runs after
+    it.
     """
     readiness = client.landing_readiness(number)
     _refuse_land_readiness(readiness)
     detail = client.landing(number)
-    context = _LandingCheckContext(client, repository, storage)
     structural = _structural_classification(context, detail)
     if isinstance(structural, board.ClassificationDefect):
         raise protocol.ClaimUnavailableError(f"pull request #{number} {structural.message}")
@@ -5152,9 +5156,27 @@ def _land_preflight(
             raise protocol.ClaimUnavailableError(
                 f"work item #{structural.item.number} is not open; it cannot be landed"
             )
-    defect = _classification_defect(context, claims_provider(), detail, structural)
+    observed = claims_provider()
+    defect = _classification_defect(context, tuple(observed.claims.values()), detail, structural)
     if defect is not None:
         raise protocol.ClaimUnavailableError(f"pull request #{number} {defect.message}")
+    identity: protocol.ClaimIdentity = (
+        protocol.IssueIdentity(structural.item.number)
+        if isinstance(structural, board.WorkItemClassification)
+        else protocol.LaneIdentity()
+    )
+    _resolve_release_claimant(
+        argparse.Namespace(
+            agent=parsed.agent,
+            role=parsed.role,
+            coordinator_override=parsed.coordinator_override,
+            branch=None,
+            claim_id=None,
+        ),
+        observed,
+        identity,
+        detail.source_branch,
+    )
     return detail, structural, readiness
 
 
@@ -5300,13 +5322,14 @@ def _cmd_land(parsed: argparse.Namespace, session: _WriteSession) -> None:
         default_branch = checkout.refuse_unclean_default_branch_checkout()
     else:
 
-        def claims_provider() -> tuple[protocol.ActiveClaim, ...]:
+        def claims_provider() -> protocol.ClaimState:
             _worktree, _canonical_remote, observed = _store_observation()
             _require_state_ref(observed)
-            return tuple(observed.claims.values())
+            return observed
 
+        context = _LandingCheckContext(client, repository, config.storage)
         detail, classification, readiness = _land_preflight(
-            client, claims_provider, repository, config.storage, number
+            client, claims_provider, context, number, parsed
         )
         default_branch = checkout.refuse_unclean_default_branch_checkout()
         merge_sha = _land_merge(client, detail, readiness, classification)
