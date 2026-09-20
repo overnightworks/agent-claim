@@ -2024,6 +2024,129 @@ def test_start_refuses_a_closed_or_missing_item(
     assert not (repo.parent / f"{repo.name}-worktrees").exists()
 
 
+def _state_ref_item_body(title: str, *, scope: list[str] | None = None) -> str:
+    data: dict[str, object] = {
+        "version": 1,
+        "now": "Ship it.",
+        "next": "keiner",
+        "done_when": "Merged.",
+        "record": {
+            "title": title,
+            "state": "open",
+            "kind": "task",
+            "labels": [],
+            "blocked_by": [],
+            "created_at": "2026-09-10T00:00:00Z",
+            "updated_at": "2026-09-10T00:00:00Z",
+        },
+    }
+    if scope is not None:
+        data["scope"] = scope
+    return f"Prose.\n\n```agent-claim\n{board.render_block(data)}```\n"
+
+
+def _real_state_ref_start_scenario(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> tuple[Path, Path, protocol.ObjectId]:
+    """A real bare-remote-backed, `storage = "state-ref"` repository (issue
+    #322 review finding 2) with item #314 open, untitled scope, ready for
+    `start` -- the state-ref counterpart of `_start_scenario`, real
+    `refs/aco/state` and all (`_use_real_store`), since `_FakeStore` cannot
+    see which directory a read ran against."""
+    _use_real_store(monkeypatch)
+    repo, remote = _real_repository_with_bare_remote(tmp_path)
+    config_dir = repo / ".agent-claim"
+    config_dir.mkdir()
+    (config_dir / "board.toml").write_text('storage = "state-ref"\n')
+    _real_git(repo, "add", ".agent-claim/board.toml")
+    _real_git(repo, "commit", "-q", "-m", "pin state-ref storage")
+    _push_repository_trunk(repo, "origin")
+    store.bootstrap(worktree=repo, remote=str(remote))
+    content = _state_ref_item_body("Fresh Slug Title").encode()
+    seeded_oid = store.hash_blob(repo, content)
+    store.commit_transition(
+        worktree=repo,
+        remote=str(remote),
+        subject=store.TransitionSubject(f"seed item {items.format_item_id(314)}"),
+        intent=protocol.ItemWriteIntent(
+            item_id=items.format_item_id(314),
+            expected=None,
+            new_oid=seeded_oid,
+            operation_id="item-op-314",
+        ),
+    )
+    _set_agent_identity_env(monkeypatch, {checkout.ACO_AGENT_ENV: "Codex Sol"})
+    _redirect_toplevel(monkeypatch, repo)
+    monkeypatch.chdir(repo)
+    return repo, remote, seeded_oid
+
+
+def test_start_under_state_ref_claims_from_the_worktree_it_creates(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Issue #322 review finding 2: under `storage = "state-ref"`, `start`
+    must claim through a forge directed at the worktree it just created,
+    never the one it cached from the caller checkout before that worktree
+    existed. A real bare remote and a real `refs/aco/state` (`_use_real_store`)
+    prove it end to end: the claim `start` prints is read back through
+    `store.fetch_state` scoped to the worktree path itself, not the
+    original checkout."""
+    repo, _remote, _seeded_oid = _real_state_ref_start_scenario(monkeypatch, tmp_path)
+    item_id = items.format_item_id(314)
+
+    status = issue_claim.main(["start", "314", "--scope", "src/x.py"])
+
+    assert status == 0
+    worktree = repo.parent / f"{repo.name}-worktrees" / _START_WORKTREE_NAME
+    claim_id = _claimed_line_id(capsys.readouterr().out, f"issue {item_id}")
+    live = store.fetch_state(worktree=worktree, remote="origin").claims
+    claim = live[protocol.claim_key(protocol.IssueIdentity(314), _START_BRANCH)]
+    assert claim.claim_id == claim_id
+    assert claim.scope == ("src/x.py",)
+
+
+def test_start_under_state_ref_claims_against_the_item_current_when_the_worktree_exists(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Issue #322 review finding 2 (the fix's own gate): item #314 gains a
+    `scope` after `start`'s pre-worktree forge read but before its claim
+    step, exactly the window a caller-checkout-cached forge cannot see. A
+    fresh forge built from the worktree after `resolve_or_create_worktree`
+    re-reads the item and refuses the now-mismatched `--scope`; a forge
+    reused from the pre-worktree read would still see no `scope` at all and
+    wrongly let the claim through."""
+    repo, remote, seeded_oid = _real_state_ref_start_scenario(monkeypatch, tmp_path)
+    item_id = items.format_item_id(314)
+    real_resolve_or_create_worktree = checkout.resolve_or_create_worktree
+
+    def advance_item_then_create_worktree(path: Path, branch: str, *, remote: str) -> None:
+        real_resolve_or_create_worktree(path, branch, remote=remote)
+        advanced = _state_ref_item_body("Fresh Slug Title", scope=["mismatched/path.py"]).encode()
+        advanced_oid = store.hash_blob(repo, advanced)
+        store.commit_transition(
+            worktree=repo,
+            remote=str(remote_path),
+            subject=store.TransitionSubject(f"advance item {item_id}"),
+            intent=protocol.ItemWriteIntent(
+                item_id=item_id,
+                expected=seeded_oid,
+                new_oid=advanced_oid,
+                operation_id="item-op-314-race",
+            ),
+        )
+
+    remote_path = remote
+    monkeypatch.setattr(checkout, "resolve_or_create_worktree", advance_item_then_create_worktree)
+
+    status = issue_claim.main(["start", "314", "--scope", "src/x.py"])
+
+    assert status == 2
+    assert capsys.readouterr().err == f"ERROR: {issue_claim.CLAIM_SCOPE_MISMATCH}\n"
+    worktree = repo.parent / f"{repo.name}-worktrees" / _START_WORKTREE_NAME
+    live = store.fetch_state(worktree=worktree, remote="origin").claims
+    assert protocol.claim_key(protocol.IssueIdentity(314), _START_BRANCH) not in live
+
+
 def test_claim_accepts_an_item_with_no_dependencies(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

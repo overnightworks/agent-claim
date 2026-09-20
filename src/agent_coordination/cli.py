@@ -2721,7 +2721,9 @@ class _StoreItemWriter:
         return new_state.items[item_id]
 
 
-def _state_ref_forge(repo: str | None, canonical_remote: str) -> state_board.StateRefBoard:
+def _state_ref_forge(
+    repo: str | None, canonical_remote: str, *, directory: Path | None = None
+) -> state_board.StateRefBoard:
     """The `state-ref` storage pin's forge (issues #248, #283): repository
     identity read host-neutrally from the canonical remote's own URL (issue
     #245's `RemoteLocation`, never GitHub's syntax), the default branch read
@@ -2735,6 +2737,12 @@ def _state_ref_forge(repo: str | None, canonical_remote: str) -> state_board.Sta
     `checkout.default_branch_name()` reads `origin/HEAD` specifically, not
     whatever `canonical_remote` names (a named residual: every repository
     piloting this pin today also names its canonical remote `origin`).
+
+    `directory` names the checkout this forge reads and writes through --
+    `start` (issue #322 review finding 2) hands it the freshly created
+    worktree so the worktree-scoped claim never reads a caller-checkout
+    snapshot cached before that worktree existed; every other caller omits
+    it and keeps the previous, process-cwd-bound behaviour.
     """
     _refuse_repo_under_state_ref(repo)
     location = _canonical_remote_location(canonical_remote)
@@ -2744,7 +2752,7 @@ def _state_ref_forge(repo: str | None, canonical_remote: str) -> state_board.Sta
         raise protocol.ClaimUnavailableError(
             "cannot resolve the default branch; run aco from a checkout with origin/HEAD set"
         )
-    worktree = Path.cwd()
+    worktree = Path.cwd() if directory is None else directory
     state = store.fetch_state(worktree=worktree, remote=canonical_remote)
     item_files = {} if state.tip is None else store.read_item_files(worktree, state.tip)
     return state_board.StateRefBoard(
@@ -3776,19 +3784,29 @@ class _LazyForge:
     never by the canonical remote's host: `github` (the default) builds
     `github.GitHubForge`; `state-ref` builds `state_board.StateRefBoard`
     from the state ref's own `items/` tree instead.
+
+    `directory` (issue #322 review finding 2) names the checkout this
+    forge resolves and reads through; omitted, it keeps the previous
+    process-cwd-bound resolution. `start` builds a fresh, undirected
+    instance against the caller checkout to read the item before its
+    worktree exists, then a second instance directed at that worktree for
+    the claim, rather than reusing this cache across both directories.
     """
 
-    def __init__(self, repo: str | None) -> None:
+    def __init__(self, repo: str | None, *, directory: Path | None = None) -> None:
         self._repo = repo
+        self._directory = directory
         self._resolved: forge.ForgeReader | None = None
 
     def __call__(self) -> forge.ForgeReader:
         if self._resolved is None:
-            toplevel = _resolve_toplevel()
+            toplevel = _resolve_toplevel(directory=self._directory)
             config = _board_config(toplevel)
             canonical_remote = config.canonical_remote
             if config.storage is board.Storage.STATE_REF:
-                self._resolved = _state_ref_forge(self._repo, canonical_remote)
+                self._resolved = _state_ref_forge(
+                    self._repo, canonical_remote, directory=self._directory
+                )
             else:
                 target = _resolved_forge_target(self._repo, canonical_remote)
                 self._resolved = github.GitHubForge(target)
@@ -4709,7 +4727,14 @@ def _cmd_start(parsed: argparse.Namespace, session: _WriteSession) -> int:
         resource=None,
         json=False,
     )
-    claim_session = _WriteSession(forge=session.forge, release_branch=None)
+    # A fresh forge directed at the worktree (issue #322 review finding 2),
+    # never `session.forge` itself: that instance is cached from the caller
+    # checkout by the item-existence read above, and reusing it here would
+    # let the worktree-scoped claim read a state-ref snapshot taken before
+    # the worktree existed instead of from the checkout it actually claims in.
+    claim_session = _WriteSession(
+        forge=_LazyForge(parsed.repo, directory=worktree_path), release_branch=None
+    )
     return _cmd_claim(claim_parsed, claim_session, directory=worktree_path)
 
 
