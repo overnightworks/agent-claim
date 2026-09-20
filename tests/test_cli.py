@@ -12796,11 +12796,21 @@ def _land_repository(tmp_path: Path, *, set_head: bool = True) -> Path:
 
 
 def _land_scenario(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, set_head: bool = True
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    set_head: bool = True,
+    claim_agent: str = "Ada",
 ) -> tuple[Path, FakeForge]:
+    """`claim_agent`, when it differs from the `Ada` session identity set
+    below, stands the same foreign claim `_land_preflight_client`'s own
+    `claim_agent` proves against a fake reader (issue #405 round-4 finding
+    5), but here against `land`'s real merge/checkout path, so a
+    `--coordinator-override --role coordinator` land of it can be proven
+    reaching the merge, not just proven refused without those flags."""
     repo = _land_repository(tmp_path, set_head=set_head)
     standing = request(
-        "landing", "Ada", issue=WORK_ITEM_ISSUE, branch=LANDING_BRANCH, scope=("src",)
+        "landing", claim_agent, issue=WORK_ITEM_ISSUE, branch=LANDING_BRANCH, scope=("src",)
     )
     client = FakeForge()
     client.landings[12] = landing_pull_request(
@@ -12864,9 +12874,7 @@ def _land_scenario(
             id="check-running-name-truncated",
         ),
         pytest.param(
-            _land_readiness(
-                checks=tuple(forge.CheckRun("x" * 300, None) for _ in range(5))
-            ),
+            _land_readiness(checks=tuple(forge.CheckRun("x" * 300, None) for _ in range(5))),
             "pull request #12 has checks still running: "
             + ", ".join([("x" * 39 + "…")] * 3)
             + ", and 2 more; wait for ev…",
@@ -13025,6 +13033,26 @@ def test_land_merges_a_green_pull_request_and_runs_the_release_path(
     assert client.landings[12].merge_commit == trunk_after
     out = capsys.readouterr().out
     assert "freed:" in out and "next:" in out
+
+
+def test_land_merges_a_foreign_claim_under_a_coordinator_override(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Issue #405 round-4 finding 5: `--coordinator-override --role
+    coordinator` against a claim held by another agent (`Grok`, not this
+    session's own `Ada`) reaches the merge and completes exactly like an
+    ordinary land -- `test_land_refuses_a_foreign_claim_before_the_merge`
+    proves the same claim refused without those flags."""
+    repo, client = _land_scenario(monkeypatch, tmp_path, claim_agent="Grok")
+
+    status = issue_claim.main(
+        ["--repo", REPOSITORY, "land", "12", "--coordinator-override", "--role", "coordinator"]
+    )
+
+    assert status == 0
+    [(number, head_sha, _title, _body)] = client.merge_calls
+    assert (number, head_sha) == (12, MERGE_COMMIT_SHA)
+    assert client.landings[12].merge_commit == _real_git(repo, "rev-parse", "main").stdout.strip()
 
 
 def _break_delete_branch(monkeypatch: pytest.MonkeyPatch, client: FakeForge) -> None:
