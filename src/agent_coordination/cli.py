@@ -5063,6 +5063,7 @@ class RuleReason(StrEnum):
     ALREADY_RULED = "already_ruled"
     LINE_OUT_OF_RANGE = "line_out_of_range"
     INVALID_ITEM = "invalid_item"
+    INVALID_USAGE = "invalid_usage"
     UNAVAILABLE = "unavailable"
 
 
@@ -5103,10 +5104,34 @@ def rule_item(
     return ruled_line, _rule_remaining_open(new_body, storage=config.storage)
 
 
+_RuleItemError = (
+    _TargetUnavailableError
+    | _InvalidTargetError
+    | board.ExpectationAlreadyRuledError
+    | board.ExpectationOutOfRangeError
+)
+
+
+def _rule_item_reason(error: _RuleItemError) -> RuleReason:
+    """`_cmd_rule`'s own mapping from `rule_item`'s four refusals to their
+    `--json` `reason` (issue #396): a bad target names `unavailable`
+    (forge cannot write) or `invalid_item` (missing item, pull request);
+    a bad line names `already_ruled` or `line_out_of_range`."""
+    if isinstance(error, _TargetUnavailableError):
+        return RuleReason.UNAVAILABLE
+    if isinstance(error, _InvalidTargetError):
+        return RuleReason.INVALID_ITEM
+    if isinstance(error, board.ExpectationAlreadyRuledError):
+        return RuleReason.ALREADY_RULED
+    return RuleReason.LINE_OUT_OF_RANGE
+
+
 def _cmd_rule(parsed: argparse.Namespace, session: _WriteSession) -> int:
     json_mode = parsed.json
     try:
         client = session.forge.writer()
+    except RepoMeaninglessUnderStateRefError as error:
+        return _refuse(RuleReason.INVALID_USAGE, error, json_mode=json_mode)
     except protocol.ClaimError as error:
         return _refuse(RuleReason.UNAVAILABLE, error, json_mode=json_mode)
     number = int(parsed.item)
@@ -5114,14 +5139,13 @@ def _cmd_rule(parsed: argparse.Namespace, session: _WriteSession) -> int:
         ruled_line, open_remaining = rule_item(
             client, number, parsed.line, parsed.ruling, parsed.note
         )
-    except _TargetUnavailableError as error:
-        return _refuse(RuleReason.UNAVAILABLE, error, json_mode=json_mode)
-    except _InvalidTargetError as error:
-        return _refuse(RuleReason.INVALID_ITEM, error, json_mode=json_mode)
-    except board.ExpectationAlreadyRuledError as error:
-        return _refuse(RuleReason.ALREADY_RULED, error, json_mode=json_mode)
-    except board.ExpectationOutOfRangeError as error:
-        return _refuse(RuleReason.LINE_OUT_OF_RANGE, error, json_mode=json_mode)
+    except (
+        _TargetUnavailableError,
+        _InvalidTargetError,
+        board.ExpectationAlreadyRuledError,
+        board.ExpectationOutOfRangeError,
+    ) as error:
+        return _refuse(_rule_item_reason(error), error, json_mode=json_mode)
     _emit_rule_result(number, ruled_line, open_remaining, json_mode=json_mode)
     return 0
 
@@ -5202,6 +5226,7 @@ class AskReason(StrEnum):
     INVALID_ITEM = "invalid_item"
     INVALID_EXPECTATION = "invalid_expectation"
     INVALID_PICTURE = "invalid_picture"
+    INVALID_USAGE = "invalid_usage"
     UNAVAILABLE = "unavailable"
 
 
@@ -5239,6 +5264,14 @@ def _read_picture_file(path: str) -> str:
         raise _PictureFileError(f"--picture {path} could not be read: {error}") from error
 
 
+def _ask_target_reason(error: _TargetUnavailableError | _InvalidTargetError) -> AskReason:
+    """`_cmd_ask`'s own mapping from `_require_writable_target`'s two
+    target refusals to their `--json` `reason` (issue #396)."""
+    if isinstance(error, _TargetUnavailableError):
+        return AskReason.UNAVAILABLE
+    return AskReason.INVALID_ITEM
+
+
 def _ask_expectation_reason(
     error: board.ExpectationTextError | board.ExpectationFieldError,
 ) -> AskReason:
@@ -5264,15 +5297,15 @@ def _cmd_ask(parsed: argparse.Namespace, session: _WriteSession) -> int:
     )
     try:
         client = session.forge.writer()
+    except RepoMeaninglessUnderStateRefError as error:
+        return _refuse(AskReason.INVALID_USAGE, error, json_mode=json_mode)
     except protocol.ClaimError as error:
         return _refuse(AskReason.UNAVAILABLE, error, json_mode=json_mode)
     number = int(parsed.item)
     try:
         body, config = _require_writable_target(client, number, command="ask")
-    except _TargetUnavailableError as error:
-        return _refuse(AskReason.UNAVAILABLE, error, json_mode=json_mode)
-    except _InvalidTargetError as error:
-        return _refuse(AskReason.INVALID_ITEM, error, json_mode=json_mode)
+    except (_TargetUnavailableError, _InvalidTargetError) as error:
+        return _refuse(_ask_target_reason(error), error, json_mode=json_mode)
     try:
         new_body = board.append_expectation(body, parsed.text, parsed.default, card=card)
     except (board.ExpectationTextError, board.ExpectationFieldError) as error:

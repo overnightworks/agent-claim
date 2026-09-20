@@ -3940,6 +3940,26 @@ def test_rule_refuses_a_non_github_canonical_remote_by_host(
     _assert_json_refusal_object(captured.err, captured.out, reason="unavailable")
 
 
+def test_rule_reports_invalid_usage_when_repo_is_given_under_state_ref(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """A new `RULE-10` cites `specs/storage-pin.spec.md`'s PIN-04: under
+    `storage = state-ref`, `--repo` is the wrong flag for this run,
+    reported through `--json` as `invalid_usage` -- `rule`'s forge
+    resolution must tell this apart from its generic `unavailable`
+    bucket, the same distinction `brief` already draws."""
+    _write_state_ref_pin(tmp_path)
+
+    status = issue_claim.main(
+        ["--repo", "acme/items", "rule", "258", "--line", "1", "--yes", "--json"]
+    )
+
+    captured = capsys.readouterr()
+    assert status == 2
+    assert captured.err == "ERROR: --repo is meaningless under storage = state-ref\n"
+    _assert_json_refusal_object(captured.err, captured.out, reason="invalid_usage")
+
+
 def test_rule_refuses_a_missing_item_before_any_write(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
@@ -4114,6 +4134,26 @@ def test_ask_refuses_a_non_github_canonical_remote_by_host(
     assert status == 2
     assert captured.err == "ERROR: no forge adapter for host file\n"
     _assert_json_refusal_object(captured.err, captured.out, reason="unavailable")
+
+
+def test_ask_reports_invalid_usage_when_repo_is_given_under_state_ref(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """A new `ASK-11` cites `specs/storage-pin.spec.md`'s PIN-04: under
+    `storage = state-ref`, `--repo` is the wrong flag for this run,
+    reported through `--json` as `invalid_usage` -- `ask`'s forge
+    resolution must tell this apart from its generic `unavailable`
+    bucket, the same distinction `brief` already draws."""
+    _write_state_ref_pin(tmp_path)
+
+    status = issue_claim.main(
+        ["--repo", "acme/items", "ask", "258", "--text", "New question?", "--json"]
+    )
+
+    captured = capsys.readouterr()
+    assert status == 2
+    assert captured.err == "ERROR: --repo is meaningless under storage = state-ref\n"
+    _assert_json_refusal_object(captured.err, captured.out, reason="invalid_usage")
 
 
 def test_ask_refuses_blank_text_before_any_write(
