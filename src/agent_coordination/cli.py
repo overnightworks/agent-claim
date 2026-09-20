@@ -21,6 +21,7 @@ from . import (
     board,
     board_html,
     board_serve,
+    body,
     checkout,
     forge,
     github,
@@ -91,9 +92,7 @@ def _resolved_identity(issue: int | None, branch: str) -> protocol.ClaimIdentity
     return protocol.LaneIdentity()
 
 
-def _claim_subject(
-    claim: protocol.ScopedClaim, storage: board.Storage = board.Storage.GITHUB
-) -> str:
+def _claim_subject(claim: protocol.ScopedClaim, storage: body.Storage = body.Storage.GITHUB) -> str:
     return (
         f"lane {claim.branch}"
         if isinstance(claim.identity, protocol.LaneIdentity)
@@ -637,7 +636,7 @@ def _add_ask_parser(commands: argparse._SubParsersAction) -> None:
     ask.add_argument("--text", required=True, help="the expectation line's prose")
     ask.add_argument(
         "--default",
-        choices=sorted(board.BLOCK_EXPECTATION_DEFAULTS),
+        choices=sorted(body.BLOCK_EXPECTATION_DEFAULTS),
         default="yes",
         help="the proposer's suggested outcome; default yes",
     )
@@ -645,7 +644,7 @@ def _add_ask_parser(commands: argparse._SubParsersAction) -> None:
         "--question",
         help=(
             "one operator-language sentence the card shows as its heading "
-            f"instead of --text; at most {board.EXPECTATION_QUESTION_MAXIMUM_CHARACTERS} characters"
+            f"instead of --text; at most {body.EXPECTATION_QUESTION_MAXIMUM_CHARACTERS} characters"
         ),
     )
     ask.add_argument("--example", help="one operator-language sentence illustrating the question")
@@ -654,7 +653,7 @@ def _add_ask_parser(commands: argparse._SubParsersAction) -> None:
         metavar="FILE.svg",
         help=(
             "a path to an inline-SVG file (root <svg>, no <script>, no external "
-            f"href, at most {board.EXPECTATION_PICTURE_MAXIMUM_BYTES} bytes) the card shows"
+            f"href, at most {body.EXPECTATION_PICTURE_MAXIMUM_BYTES} bytes) the card shows"
         ),
     )
     ask.add_argument("--json", action="store_true", help=JSON_HELP)
@@ -995,7 +994,7 @@ def _overlap_subjects(
 
 
 def _overlap_note(
-    claims_by_id: Mapping[str, protocol.ActiveClaim], peer_ids: set[str], storage: board.Storage
+    claims_by_id: Mapping[str, protocol.ActiveClaim], peer_ids: set[str], storage: body.Storage
 ) -> str | None:
     peers = [claims_by_id[claim_id] for claim_id in sorted(peer_ids) if claim_id in claims_by_id]
     if not peers:
@@ -1013,7 +1012,7 @@ class _ClaimReportContext:
     five-argument ceiling."""
 
     index: protocol.ClaimConflictIndex
-    storage: board.Storage
+    storage: body.Storage
 
 
 def _print_claim_status_lines(
@@ -1059,7 +1058,7 @@ def _status(
     claims: tuple[protocol.ActiveClaim, ...],
     issue: int | None,
     ages: Mapping[str, datetime],
-    storage: board.Storage,
+    storage: body.Storage,
     now: datetime | None = None,
 ) -> int:
     observed_at = (now or datetime.now(UTC)).astimezone(UTC)
@@ -1131,7 +1130,7 @@ def _status_json(
 
 
 def _status_path(
-    claims: tuple[protocol.ActiveClaim, ...], path: str, storage: board.Storage
+    claims: tuple[protocol.ActiveClaim, ...], path: str, storage: body.Storage
 ) -> None:
     holders = protocol.claims_holding_path(claims, path)
     if not holders:
@@ -1316,7 +1315,7 @@ def _freed_item_numbers(
 
 
 def _parent_closable_number(
-    client: forge.ForgeReader, closed_child: int, storage: board.Storage
+    client: forge.ForgeReader, closed_child: int, storage: body.Storage
 ) -> int | None:
     """The container `closed_child`'s own landing may just have completed
     (issue #348, the parent hint `release --merged`/`item close` share): its
@@ -1340,7 +1339,7 @@ def _release_landing(
     claims: tuple[protocol.ActiveClaim, ...],
     claim_ages: Mapping[str, datetime],
     landed: board.IssueReference | None,
-    storage: board.Storage,
+    storage: body.Storage,
 ) -> ReleaseLanding:
     """A merged release's own board read (issue #256): fetched once, lazily,
     only after the release transition already committed -- the caller wraps
@@ -1369,19 +1368,19 @@ def _release_landing(
     )
 
 
-def _release_freed_line(freed: tuple[int, ...], storage: board.Storage) -> str:
+def _release_freed_line(freed: tuple[int, ...], storage: body.Storage) -> str:
     return "freed: " + (
         ", ".join(board.item_label(number, storage) for number in freed) if freed else "none"
     )
 
 
-def _parent_closable_line(number: int | None, storage: board.Storage) -> str | None:
+def _parent_closable_line(number: int | None, storage: body.Storage) -> str | None:
     if number is None:
         return None
     return f"parent {board.item_label(number, storage)}: no open children — close it"
 
 
-def _release_next_line(item: board.BoardItem | None, storage: board.Storage) -> str:
+def _release_next_line(item: board.BoardItem | None, storage: body.Storage) -> str:
     if item is None:
         return "next: none"
     return f"next: {board.item_label(item.number, storage)} score {item.score}: {item.title}"
@@ -1569,7 +1568,7 @@ def _closed_item_numbers(
 
 
 def _closed_item_sizes(
-    client: forge.ForgeReader, numbers: frozenset[int], storage: board.Storage
+    client: forge.ForgeReader, numbers: frozenset[int], storage: body.Storage
 ) -> dict[int, metrics.Size | None]:
     """Each closed (or vanished) item's own current size, read once per
     number through the forge/state (issue #357 R2): a completed lane for a
@@ -1581,8 +1580,10 @@ def _closed_item_sizes(
     carried a `size` key."""
     sizes: dict[int, metrics.Size | None] = {}
     for number in numbers:
-        body = client.item_reference(number).body
-        sizes[number] = None if body is None else board.parse_body(body, storage=storage).size
+        raw_body = client.item_reference(number).body
+        sizes[number] = (
+            None if raw_body is None else body.parse_body(raw_body, storage=storage).size
+        )
     return sizes
 
 
@@ -1614,7 +1615,7 @@ def _board(
     container_numbers = tuple(
         issue.number
         for issue in issues
-        if issue.kind is board.ItemKind.CONTAINER and issue.children_total
+        if issue.kind is body.ItemKind.CONTAINER and issue.children_total
     )
     # Open and recently-merged pull requests and each container's children
     # are independent reads once `since` is known, so fetching them on
@@ -1689,12 +1690,12 @@ class _RulingsRow:
     order -- the detail `rulings` prints beneath the item's own summary."""
 
     item: board.BoardItem
-    progress: board.ExpectationProgress
-    lines: tuple[board.ExpectationLine, ...]
+    progress: body.ExpectationProgress
+    lines: tuple[body.ExpectationLine, ...]
 
 
 def _rulings_rows(
-    projected: board.Board, bodies: Mapping[int, str], *, storage: board.Storage
+    projected: board.Board, bodies: Mapping[int, str], *, storage: body.Storage
 ) -> tuple[_RulingsRow, ...]:
     """Every open board item that carries at least one `[[expectation]]`
     line, fully ruled ones included (issue #379) -- items with an open line
@@ -1719,13 +1720,13 @@ def _rulings_rows(
     )
     return tuple(
         _RulingsRow(
-            item, progress, board.expectation_lines(bodies.get(item.number, ""), storage=storage)
+            item, progress, body.expectation_lines(bodies.get(item.number, ""), storage=storage)
         )
         for item, progress in ranked
     )
 
 
-def _rulings_line_json(line: board.ExpectationLine) -> dict[str, object]:
+def _rulings_line_json(line: body.ExpectationLine) -> dict[str, object]:
     payload: dict[str, object] = {
         "index": line.index,
         "text": line.text,
@@ -1744,19 +1745,19 @@ def _rulings_line_json(line: board.ExpectationLine) -> dict[str, object]:
     return payload
 
 
-def _rulings_line_text(line: board.ExpectationLine) -> str:
-    state = board.expectation_line_state(line)
-    return f"  {line.index} {state}: {board.expectation_line_summary(line)}"
+def _rulings_line_text(line: body.ExpectationLine) -> str:
+    state = body.expectation_line_state(line)
+    return f"  {line.index} {state}: {body.expectation_line_summary(line)}"
 
 
-def _rulings_row_text(row: _RulingsRow, storage: board.Storage) -> str:
+def _rulings_row_text(row: _RulingsRow, storage: body.Storage) -> str:
     label = board.item_label(row.item.number, storage)
     header = f"{label} {row.progress.open}/{row.progress.total}: {row.item.title}"
     return "\n".join((header, *(_rulings_line_text(line) for line in row.lines)))
 
 
 def _rulings(
-    projected: board.Board, bodies: Mapping[int, str], *, as_json: bool, storage: board.Storage
+    projected: board.Board, bodies: Mapping[int, str], *, as_json: bool, storage: body.Storage
 ) -> None:
     rows = _rulings_rows(projected, bodies, storage=storage)
     if as_json:
@@ -1782,27 +1783,27 @@ def _rulings(
 
 
 def _ruling_pull_hint(item: board.BoardItem) -> str | None:
-    if item.expectation_state is board.ExpectationState.PROPOSED:
+    if item.expectation_state is body.ExpectationState.PROPOSED:
         return "expectations unruled: refine before the pull"
     if not item.ruling_old:
         return None
     return f"ruled {item.ruling_landings} landings ago: refine again at the pull"
 
 
-def _next_action_item_argument(number: int, storage: board.Storage) -> str:
+def _next_action_item_argument(number: int, storage: body.Storage) -> str:
     """The item reference `_parse_item_ref` accepts back as `_next_action_command`'s
     printed `aco` invocation's positional argument: the bare number under
     `Storage.GITHUB` -- unchanged, byte-identical to every command printed
     before the state-ref pin existed -- and `board.item_label`'s own id under
     `Storage.STATE_REF`, so a printed command is one a person can paste back
     in (issue #292, residual of #300)."""
-    if storage is board.Storage.STATE_REF:
+    if storage is body.Storage.STATE_REF:
         return board.item_label(number, storage)
     return str(number)
 
 
 def _next_action_command(
-    action: board.WorkItemAction | board.CutSliceAction, storage: board.Storage
+    action: board.WorkItemAction | board.CutSliceAction, storage: body.Storage
 ) -> str:
     """The exact `aco` invocation `_next` prints and `_next --json` carries
     as `command` -- one owner so text and JSON never name a different
@@ -1852,7 +1853,7 @@ def _next_action_reason(action: board.NextAction) -> NextReason:
     return NextReason.CLOSE_CONTAINER
 
 
-def _next_action_payload(action: board.NextAction, storage: board.Storage) -> dict[str, object]:
+def _next_action_payload(action: board.NextAction, storage: body.Storage) -> dict[str, object]:
     """The action-specific fields `_next_json` adds beyond `recovery`/`skipped`
     -- `_next_action_reason` now carries what an `"action"` key used to."""
     if isinstance(action, board.WorkItemAction):
@@ -1895,14 +1896,14 @@ PARALLEL_UNKNOWN_LINE = "parallel: unknown (first action names no scope)"
 PARALLEL_TEXT_LIMIT = 3
 
 
-def _parallel_candidate_label(candidate: board.ParallelCandidate, storage: board.Storage) -> str:
+def _parallel_candidate_label(candidate: board.ParallelCandidate, storage: body.Storage) -> str:
     label = board.item_label(candidate.number, storage)
     count = len(candidate.scope)
     unit = "path" if count == 1 else "paths"
     return f"{label} ({count} {unit})"
 
 
-def _parallel_line(parallel: board.ParallelSet, storage: board.Storage) -> str:
+def _parallel_line(parallel: board.ParallelSet, storage: body.Storage) -> str:
     """`next`'s own `parallel:` line: the unknown sentence when the first
     action itself names no scope, `none` when the walk placed nothing,
     otherwise every placed candidate capped at `PARALLEL_TEXT_LIMIT` --
@@ -1918,14 +1919,14 @@ def _parallel_line(parallel: board.ParallelSet, storage: board.Storage) -> str:
     return f"parallel: {protocol.named_with_overflow_count(labels, limit=PARALLEL_TEXT_LIMIT)}"
 
 
-def _scope_unknown_line(parallel: board.ParallelSet, storage: board.Storage) -> str:
+def _scope_unknown_line(parallel: board.ParallelSet, storage: body.Storage) -> str:
     if not parallel.scope_unknown:
         return "scope unknown: none"
     named = ", ".join(board.item_label(number, storage) for number in parallel.scope_unknown)
     return f"scope unknown: {named}"
 
 
-def _close_line(close: tuple[int, ...], storage: board.Storage) -> str:
+def _close_line(close: tuple[int, ...], storage: body.Storage) -> str:
     if not close:
         return "close: none"
     return "close: " + ", ".join(board.item_label(number, storage) for number in close)
@@ -1958,7 +1959,7 @@ class _NextReport:
     close: tuple[int, ...]
 
 
-def _next_json(report: _NextReport, storage: board.Storage) -> None:
+def _next_json(report: _NextReport, storage: body.Storage) -> None:
     reason = (
         _next_action_reason(report.action)
         if report.action is not None
@@ -1985,7 +1986,7 @@ def _next_json(report: _NextReport, storage: board.Storage) -> None:
     _emit_json(report.action is not None, reason, **payload)
 
 
-def _next_action_lines(action: board.NextAction, storage: board.Storage) -> list[str]:
+def _next_action_lines(action: board.NextAction, storage: body.Storage) -> list[str]:
     """The action-specific lines `_next` prints before `parallel:`/`close:`."""
     if isinstance(action, board.WorkItemAction):
         item = action.item
@@ -2015,7 +2016,7 @@ def _next_action_lines(action: board.NextAction, storage: board.Storage) -> list
     ]
 
 
-def _next(report: _NextReport, storage: board.Storage) -> None:
+def _next(report: _NextReport, storage: body.Storage) -> None:
     """A landed-but-open item is named before anything new is pulled; the
     parallel set and the zero-cost `close:` list are named right after the
     first action, unconditionally (issue #348) -- regardless of that
@@ -2127,7 +2128,7 @@ def _blocked_check(
     item: board.BoardItem | None,
     out_of_order_reason: str | None,
     repository: str,
-    storage: board.Storage,
+    storage: body.Storage,
 ) -> SliceCheck | None:
     if item is None or not item.open_blockers:
         return None
@@ -2169,9 +2170,9 @@ def _malformed_checks(item: board.BoardItem) -> tuple[SliceCheck, ...] | None:
     body-contract check (blocker state, completeness) never runs, since
     neither the parsed projections nor the blocker set can be trusted once
     the body itself failed to read."""
-    if item.read_state is board.BodyReadState.MALFORMED:
+    if item.read_state is body.BodyReadState.MALFORMED:
         return tuple(
-            SliceCheck("error", "body-contract", board.body_defect_text(defect))
+            SliceCheck("error", "body-contract", body.body_defect_text(defect))
             for defect in item.contract.defects
         )
     return None
@@ -2191,7 +2192,7 @@ def _body_contract_checks(item: board.BoardItem) -> tuple[SliceCheck, ...]:
     # but defect-free skeleton) is refused here exactly as it is invisible to
     # `next`, regardless of what else may also be true of it.
     if not item.contract_complete and not item.projectionless_idea:
-        missing = ", ".join(board.missing_or_empty_sections(contract))
+        missing = ", ".join(body.missing_or_empty_sections(contract))
         checks.append(
             SliceCheck(
                 "error",
@@ -2219,14 +2220,14 @@ def _slice_rule_checks(
     issue: int,
     projected: board.Board,
     out_of_order_reason: str | None,
-    storage: board.Storage,
+    storage: body.Storage,
 ) -> tuple[SliceCheck, ...]:
     checks: list[SliceCheck] = []
     out_of_order = _out_of_order_check(projected, issue, out_of_order_reason)
     if out_of_order is not None:
         checks.append(out_of_order)
     item = next((item for item in projected.items if item.number == issue), None)
-    if item is not None and item.kind is board.ItemKind.CONTAINER:
+    if item is not None and item.kind is body.ItemKind.CONTAINER:
         checks.append(
             SliceCheck("error", "container", f"#{issue} is a container; claim a child", issue=issue)
         )
@@ -2321,7 +2322,7 @@ class _LandingCheckContext:
 
     client: forge.ForgeReader
     repository: str
-    storage: board.Storage
+    storage: body.Storage
 
 
 @dataclass(frozen=True)
@@ -2339,11 +2340,11 @@ class _ParentRequirement:
     last_child: bool
 
 
-def _parent_body_finding(reference: board.IssueReference, parsed: board.ParsedBody) -> str:
+def _parent_body_finding(reference: board.IssueReference, parsed: body.ParsedBody) -> str:
     """Why a malformed parent body refuses the last-child rule before its
     `Next` line is ever consulted (#150)."""
     defect = parsed.contract.defects[0]
-    return f"has parent {reference} with a {board.body_defect_text(defect)}"
+    return f"has parent {reference} with a {body.body_defect_text(defect)}"
 
 
 def _parent_reference_defect(
@@ -2356,7 +2357,7 @@ def _parent_reference_defect(
             f"has parent {parent.reference} in another repository, "
             "whose children this check cannot read"
         )
-    if parent.kind is not board.ItemKind.CONTAINER:
+    if parent.kind is not body.ItemKind.CONTAINER:
         kind_text = parent.kind.value if parent.kind is not None else "unknown"
         return board.ClassificationDefect(
             f"has parent {parent.reference} of kind {kind_text}, which is not a "
@@ -2384,8 +2385,8 @@ def _parent_requirement(
     reference_defect = _parent_reference_defect(parent, context.repository)
     if reference_defect is not None:
         return reference_defect
-    parsed_parent = board.parse_body(parent.body, storage=context.storage)
-    if parsed_parent.read_state is not board.BodyReadState.VALID:
+    parsed_parent = body.parse_body(parent.body, storage=context.storage)
+    if parsed_parent.read_state is not body.BodyReadState.VALID:
         return board.ClassificationDefect(_parent_body_finding(parent.reference, parsed_parent))
     remaining = tuple(
         child
@@ -2529,14 +2530,14 @@ class CheckReason(StrEnum):
     issue #404): `valid` the only exit `0`; `blocked` the only exit `3`
     (a valid, complete issue with an open dependency); every other member
     exits `2`. `valid`/`malformed`/`incomplete` mirror
-    `board.BodyShapeVerdict`'s own three values -- the body-shape decision
+    `body.BodyShapeVerdict`'s own three values -- the body-shape decision
     `check` and `body --check` both read, never re-derived from a defect
     sentence's own prefix."""
 
-    VALID = board.BodyShapeVerdict.VALID.value
+    VALID = body.BodyShapeVerdict.VALID.value
     BLOCKED = "blocked"
-    MALFORMED = board.BodyShapeVerdict.MALFORMED.value
-    INCOMPLETE = board.BodyShapeVerdict.INCOMPLETE.value
+    MALFORMED = body.BodyShapeVerdict.MALFORMED.value
+    INCOMPLETE = body.BodyShapeVerdict.INCOMPLETE.value
     INVALID_CLASSIFICATION = "invalid_classification"
     MISSING = "missing"
     INVALID_USAGE = "invalid_usage"
@@ -2582,7 +2583,7 @@ def _pull_request_check(
     claims: tuple[protocol.ActiveClaim, ...],
     repository: str,
     number: int,
-    storage: board.Storage,
+    storage: body.Storage,
 ) -> CheckOutcome:
     detail = client.landing(number)
     context = _LandingCheckContext(client, repository, storage)
@@ -2626,27 +2627,27 @@ def _refused_issue(
 
 
 def _body_shape_defects(
-    body: str, *, storage: board.Storage = board.Storage.GITHUB
+    raw_body: str, *, storage: body.Storage = body.Storage.GITHUB
 ) -> tuple[str, ...]:
-    """`item edit`'s own accessor (issue #287) onto `board.body_shape_check`
+    """`item edit`'s own accessor (issue #287) onto `body.body_shape_check`
     (issue #404): only the defect sentences, never the verdict `check
     <item>` and `body --check` read for their own `--json` `reason`."""
-    return board.body_shape_check(body, storage=storage).defects
+    return body.body_shape_check(raw_body, storage=storage).defects
 
 
 def _issue_check(
     client: forge.ForgeReader,
     repository: str,
-    body: str,
+    raw_body: str,
     number: int,
     *,
-    storage: board.Storage,
+    storage: body.Storage,
 ) -> CheckOutcome:
     """Whether this issue's body is the contract a builder can start from:
     readable, complete, and unblocked. Its dependencies come from GitHub's
     own `blocked_by` relation, or the state-ref item's own `[record]` table
     under `storage = "state-ref"` -- a body never states them itself."""
-    shape = board.body_shape_check(body, storage=storage)
+    shape = body.body_shape_check(raw_body, storage=storage)
     if shape.defects:
         return _refused_issue(number, shape.defects[0], CheckReason(shape.verdict.value))
     blockers = board.open_dependency_blockers(client.list_board_dependencies(number), repository)
@@ -2679,20 +2680,20 @@ def _read_body_check_input() -> str:
 class BodyCheckReason(StrEnum):
     """`aco body --check`'s own `--json` `reason` vocabulary
     (`specs/body.spec.md`, issue #404): `valid`/`malformed`/`incomplete`
-    mirror `board.BodyShapeVerdict`'s own three values -- the same
+    mirror `body.BodyShapeVerdict`'s own three values -- the same
     body-shape decision `check <item>`'s own `CheckReason` reads."""
 
-    VALID = board.BodyShapeVerdict.VALID.value
-    MALFORMED = board.BodyShapeVerdict.MALFORMED.value
-    INCOMPLETE = board.BodyShapeVerdict.INCOMPLETE.value
+    VALID = body.BodyShapeVerdict.VALID.value
+    MALFORMED = body.BodyShapeVerdict.MALFORMED.value
+    INCOMPLETE = body.BodyShapeVerdict.INCOMPLETE.value
     UNAVAILABLE = "unavailable"
 
 
-def _body_check_report(check: board.BodyShapeCheck, *, as_json: bool) -> int:
-    """The one rendering of a `body --check` answer: `board.body_shape_check`'s
+def _body_check_report(check: body.BodyShapeCheck, *, as_json: bool) -> int:
+    """The one rendering of a `body --check` answer: `body.body_shape_check`'s
     own sentences, never truncated to the first, since there is no live
     item here to refuse a single verdict about."""
-    ok = check.verdict is board.BodyShapeVerdict.VALID
+    ok = check.verdict is body.BodyShapeVerdict.VALID
     if as_json:
         _emit_json(ok, BodyCheckReason(check.verdict.value), defects=list(check.defects))
     elif check.defects:
@@ -2716,10 +2717,10 @@ def _cmd_body(parsed: argparse.Namespace) -> int:
     as_json = parsed.json
     try:
         config = _board_config(_resolve_toplevel())
-        body = _read_body_check_input()
+        raw_body = _read_body_check_input()
     except protocol.ClaimError as error:
         return _refuse(BodyCheckReason.UNAVAILABLE, error, as_json=as_json)
-    check = board.body_shape_check(body, storage=config.storage)
+    check = body.body_shape_check(raw_body, storage=config.storage)
     return _body_check_report(check, as_json=as_json)
 
 
@@ -3000,7 +3001,7 @@ def _cmd_item_new(parsed: argparse.Namespace) -> int:
     port every other write command narrows to."""
     toplevel = _resolve_toplevel()
     config = _board_config(toplevel)
-    if config.storage is not board.Storage.STATE_REF:
+    if config.storage is not body.Storage.STATE_REF:
         raise protocol.ClaimUnavailableError(ITEM_NEW_GITHUB_REFUSAL)
     client = _state_ref_forge(parsed.repo, config.canonical_remote)
     parent_missing = (
@@ -3009,17 +3010,17 @@ def _cmd_item_new(parsed: argparse.Namespace) -> int:
     )
     if parent_missing:
         raise protocol.ClaimUnavailableError(f"#{parsed.parent} does not exist")
-    kind = board.ItemKind(parsed.kind)
+    kind = body.ItemKind(parsed.kind)
     skeleton = (
-        board.BLOCK_CONTAINER_SKELETON
-        if kind is board.ItemKind.CONTAINER
-        else board.BLOCK_CHILD_SKELETON
+        body.BLOCK_CONTAINER_SKELETON
+        if kind is body.ItemKind.CONTAINER
+        else body.BLOCK_CHILD_SKELETON
     )
-    body = _block_body_with_scope(skeleton, _requested_body_scope(parsed.scope))
-    body = _block_body_with_size(body, parsed.size)
-    body = _block_body_with_whole(body, _requested_whole_reason(parsed.whole))
+    new_body = _block_body_with_scope(skeleton, _requested_body_scope(parsed.scope))
+    new_body = _block_body_with_size(new_body, parsed.size)
+    new_body = _block_body_with_whole(new_body, _requested_whole_reason(parsed.whole))
     item_id = client.create_item(
-        title=parsed.title, body=body, kind=kind, parent=parsed.parent, origin=parsed.origin
+        title=parsed.title, body=new_body, kind=kind, parent=parsed.parent, origin=parsed.origin
     )
     _print_item_new_result(item_id, items.item_number(item_id), as_json=parsed.json)
     return 0
@@ -3062,17 +3063,17 @@ def _cmd_item_edit(parsed: argparse.Namespace) -> int:
         return _cmd_item_edit_whole(parsed)
     toplevel = _resolve_toplevel()
     config = _board_config(toplevel)
-    if config.storage is not board.Storage.STATE_REF:
+    if config.storage is not body.Storage.STATE_REF:
         raise protocol.ClaimUnavailableError(ITEM_EDIT_GITHUB_REFUSAL)
-    body = _read_body_check_input()
-    defects = _body_shape_defects(body, storage=board.Storage.STATE_REF)
+    new_body = _read_body_check_input()
+    defects = _body_shape_defects(new_body, storage=body.Storage.STATE_REF)
     if defects:
         raise protocol.ClaimUnavailableError(defects[0])
     client = _state_ref_forge(parsed.repo, config.canonical_remote)
     number = parsed.item
     if client.item_reference(number).state is forge.ItemState.MISSING:
         raise protocol.ClaimUnavailableError(_missing_item_refusal(number, client))
-    client.update_item_body(number, body)
+    client.update_item_body(number, new_body)
     _print_item_edit_result(
         items.format_item_id(number), number, client.item_oid(number), as_json=parsed.json
     )
@@ -3093,13 +3094,13 @@ def _cmd_item_edit_size(parsed: argparse.Namespace) -> int:
     client = _LazyForge(parsed.repo).writer()
     _require_update_item_body(client, command=ITEM_EDIT_SIZE_COMMAND)
     number = parsed.item
-    body = _item_body_or_refuse(client, number, command=ITEM_EDIT_SIZE_COMMAND)
+    current_body = _item_body_or_refuse(client, number, command=ITEM_EDIT_SIZE_COMMAND)
     storage = _board_config(_resolve_toplevel()).storage
     located = _located_block_or_refuse(
-        number, body, command=ITEM_EDIT_SIZE_COMMAND, storage=storage
+        number, current_body, command=ITEM_EDIT_SIZE_COMMAND, storage=storage
     )
     new_data = {**located.data, "size": parsed.size}
-    client.update_item_body(number, board.replace_agent_claim_block(body, located, new_data))
+    client.update_item_body(number, body.replace_agent_claim_block(current_body, located, new_data))
     _print_item_edit_size_result(number, parsed.size, as_json=parsed.json)
     return 0
 
@@ -3123,14 +3124,14 @@ def _cmd_item_edit_whole(parsed: argparse.Namespace) -> int:
     client = _LazyForge(parsed.repo).writer()
     _require_update_item_body(client, command=ITEM_EDIT_WHOLE_COMMAND)
     number = parsed.item
-    body = _item_body_or_refuse(client, number, command=ITEM_EDIT_WHOLE_COMMAND)
+    current_body = _item_body_or_refuse(client, number, command=ITEM_EDIT_WHOLE_COMMAND)
     storage = _board_config(_resolve_toplevel()).storage
     located = _located_block_or_refuse(
-        number, body, command=ITEM_EDIT_WHOLE_COMMAND, storage=storage
+        number, current_body, command=ITEM_EDIT_WHOLE_COMMAND, storage=storage
     )
     reason = protocol._outbound_text(parsed.whole, _WHOLE_REASON_LABEL, maximum=512)
     new_data = {**located.data, "whole": reason}
-    client.update_item_body(number, board.replace_agent_claim_block(body, located, new_data))
+    client.update_item_body(number, body.replace_agent_claim_block(current_body, located, new_data))
     _print_item_edit_whole_result(number, reason, as_json=parsed.json)
     return 0
 
@@ -3177,7 +3178,7 @@ def _cmd_item_close(parsed: argparse.Namespace) -> int:
     --merged`'s own parent hint (issue #348)."""
     toplevel = _resolve_toplevel()
     config = _board_config(toplevel)
-    if config.storage is not board.Storage.STATE_REF:
+    if config.storage is not body.Storage.STATE_REF:
         raise protocol.ClaimUnavailableError(ITEM_CLOSE_GITHUB_REFUSAL)
     number = parsed.item
     _worktree, _remote, observed = _store_observation()
@@ -3198,7 +3199,7 @@ def _cmd_item_close(parsed: argparse.Namespace) -> int:
         number=number,
         closed_at=closed_at,
         freed=_item_close_freed(client, number),
-        parent_closable=_parent_closable_number(client, number, board.Storage.STATE_REF),
+        parent_closable=_parent_closable_number(client, number, body.Storage.STATE_REF),
     )
     _print_item_close_result(result, as_json=parsed.json)
     return 0
@@ -3247,8 +3248,8 @@ def _print_item_close_result(result: _ItemCloseResult, *, as_json: bool) -> None
     # `item close` only ever runs under `storage = "state-ref"`
     # (`_cmd_item_close`'s own refusal otherwise), so `freed:`'s own id
     # chooser is fixed here rather than threaded as a further field.
-    print(_release_freed_line(result.freed, board.Storage.STATE_REF))
-    parent_line = _parent_closable_line(result.parent_closable, board.Storage.STATE_REF)
+    print(_release_freed_line(result.freed, body.Storage.STATE_REF))
+    parent_line = _parent_closable_line(result.parent_closable, body.Storage.STATE_REF)
     if parent_line is not None:
         print(parent_line)
 
@@ -3507,7 +3508,7 @@ class _LazyForge:
             toplevel = _resolve_toplevel(directory=self._directory)
             config = _board_config(toplevel)
             canonical_remote = config.canonical_remote
-            if config.storage is board.Storage.STATE_REF:
+            if config.storage is body.Storage.STATE_REF:
                 self._resolved = _state_ref_forge(
                     self._repo, canonical_remote, directory=self._directory
                 )
@@ -4351,7 +4352,7 @@ def _item_scope(
     open_by_number: Mapping[int, board.Issue],
     number: int,
     *,
-    storage: board.Storage,
+    storage: body.Storage,
 ) -> tuple[str, ...] | None:
     """The item's own top-level `scope = [...]` (issue #337). A malformed
     block refuses `_ClaimBodyInvalidError` here (issue #310 finding 43) --
@@ -4362,11 +4363,11 @@ def _item_scope(
     `_item_whole`'s own read stays tolerant of a malformed body instead: its
     caller is only ever an optional width-gate fallback, never a hard
     requirement the way a claim's own scope is."""
-    body = _item_target_body(client, open_by_number, number)
-    parsed = board.parse_body(body, storage=storage)
-    if parsed.read_state is board.BodyReadState.MALFORMED:
+    raw_body = _item_target_body(client, open_by_number, number)
+    parsed = body.parse_body(raw_body, storage=storage)
+    if parsed.read_state is body.BodyReadState.MALFORMED:
         defect = parsed.contract.defects[0]
-        raise _ClaimBodyInvalidError(f"#{number} {board.body_defect_text(defect)}")
+        raise _ClaimBodyInvalidError(f"#{number} {body.body_defect_text(defect)}")
     return parsed.scope
 
 
@@ -4375,7 +4376,7 @@ def _item_whole(
     open_by_number: Mapping[int, board.Issue],
     number: int,
     *,
-    storage: board.Storage,
+    storage: body.Storage,
 ) -> str | None:
     """The item's own top-level `whole = "<reason>"` (issue #399), read the
     same way `_item_scope` reads `scope` -- except a malformed body is never
@@ -4383,8 +4384,8 @@ def _item_whole(
     simply carries no `whole` for one, exactly as it did before issue #406,
     so the width gate's own refusal still fires instead of an unrelated
     defect message."""
-    body = _item_target_body(client, open_by_number, number)
-    return board.parse_body(body, storage=storage).whole
+    raw_body = _item_target_body(client, open_by_number, number)
+    return body.parse_body(raw_body, storage=storage).whole
 
 
 def _whole_from_item_body(
@@ -4424,7 +4425,7 @@ def _resolved_claim_request(
     requested: protocol.ClaimRequest,
     observed: protocol.ClaimState,
     session: _WriteSession,
-    storage: board.Storage,
+    storage: body.Storage,
 ) -> tuple[protocol.ClaimRequest, dict[int, board.Issue] | None]:
     """`requested` with its scope filled in for an issue-mode claim that
     omitted `--scope` (issue #337), paired with the open-board listing that
@@ -4458,7 +4459,7 @@ def _reject_scope_mismatch(
     open_by_number: Mapping[int, board.Issue],
     target_issue: int,
     scope: tuple[str, ...],
-    storage: board.Storage,
+    storage: body.Storage,
 ) -> None:
     """Refuses an explicit `--scope` whose canonical set differs from the
     target item's own body scope (issue #337) -- reusing the open board
@@ -4472,7 +4473,7 @@ def _reject_scope_mismatch(
     issue = open_by_number.get(target_issue)
     if issue is None:
         return
-    item_scope = board.parse_body(issue.body, storage=storage).scope
+    item_scope = body.parse_body(issue.body, storage=storage).scope
     if item_scope is not None and item_scope != scope:
         raise _ClaimBodyInvalidError(CLAIM_SCOPE_MISMATCH)
 
@@ -4513,7 +4514,7 @@ class _ClaimTargetContext:
     so a fresh issue claim that did not derive its scope still fetches the
     board exactly once, inside `_claim_target_checks` itself."""
 
-    storage: board.Storage
+    storage: body.Storage
     worktree: Path
     open_by_number: dict[int, board.Issue] | None
 
@@ -4686,7 +4687,7 @@ RESUME_SCOPE_MISMATCH = "live claim scope differs; release it first"
 def _print_start_resume(
     live: protocol.ActiveClaim,
     observed: protocol.ClaimState,
-    storage: board.Storage,
+    storage: body.Storage,
     parsed: argparse.Namespace,
     *,
     directory: Path,
@@ -4836,7 +4837,7 @@ def _cmd_release(parsed: argparse.Namespace, session: _WriteSession) -> None:
     issue = _optional_issue_number(parsed.issue)
     identity = _resolved_identity(issue, session.release_branch or "")
     storage = _board_config(_resolve_toplevel()).storage
-    if parsed.merged is not None and storage is board.Storage.STATE_REF:
+    if parsed.merged is not None and storage is body.Storage.STATE_REF:
         _cmd_release_landed(parsed, session, identity, storage)
         return
     merged = None if parsed.merged is None else _github_pull_request_number(parsed.merged)
@@ -5338,7 +5339,7 @@ def _cmd_land(parsed: argparse.Namespace, session: _WriteSession) -> None:
     `--coordinator-override` with no coordinator role behind it."""
     toplevel = _resolve_toplevel()
     config = _board_config(toplevel)
-    if config.storage is not board.Storage.GITHUB:
+    if config.storage is not body.Storage.GITHUB:
         raise protocol.ClaimUnavailableError(LAND_GITHUB_ONLY_REFUSAL)
     if parsed.coordinator_override:
         protocol._require_coordinator_override(parsed.role)
@@ -5414,7 +5415,7 @@ def _cmd_release_landed(
     parsed: argparse.Namespace,
     session: _WriteSession,
     identity: protocol.ClaimIdentity,
-    storage: board.Storage,
+    storage: body.Storage,
 ) -> None:
     """`release --merged <sha|empty>` under `storage = "state-ref"` (issue
     #359, LAND-47/LAND-52): the trunk walk (`checkout.trunk_landings`,
@@ -5484,7 +5485,7 @@ def _landing_report(
     identity: protocol.ClaimIdentity,
     worktree: Path,
     new_state: store.ClaimState,
-    storage: board.Storage,
+    storage: body.Storage,
 ) -> tuple[ReleaseLanding | None, str | None]:
     """The `(landing, hint)` pair `_cmd_release` prints once its release
     transition already committed (issue #256): a forge hiccup here can only
@@ -5529,7 +5530,7 @@ class ReleaseReport:
     client: forge.ForgeReader | None
     landing: ReleaseLanding | None
     hint: str | None
-    storage: board.Storage
+    storage: body.Storage
     worktree: checkout.WorktreeCleanupOutcome | None
 
 
@@ -5561,7 +5562,7 @@ def _cut_target(client: forge.ForgeWriter, number: int) -> board.Issue:
     target = next((issue for issue in open_issues if issue.number == number), None)
     if target is None:
         raise protocol.ClaimUnavailableError(f"#{number} is not an open container")
-    if target.kind is not board.ItemKind.CONTAINER:
+    if target.kind is not body.ItemKind.CONTAINER:
         raise protocol.ClaimUnavailableError(f"#{number} is not a container")
     parent = client.parent_issue(number)
     if parent is not None:
@@ -5629,30 +5630,30 @@ def _requested_body_scope(raw: list[str] | None) -> tuple[str, ...] | None:
     return None if raw is None else protocol.valid_scope(raw)
 
 
-def _block_body_with_scope(body: str, scope: tuple[str, ...] | None) -> str:
-    """`body`'s `agent-claim` block, with a top-level `scope = [...]`
-    written in (issue #337) -- the same write path `board.render_block`'s
+def _block_body_with_scope(raw_body: str, scope: tuple[str, ...] | None) -> str:
+    """`raw_body`'s `agent-claim` block, with a top-level `scope = [...]`
+    written in (issue #337) -- the same write path `body.render_block`'s
     other callers use (`locate_agent_claim_block` then
     `replace_agent_claim_block`), so `item new --scope` and `cut --scope`
-    never grow a second body-scope writer. `body` unchanged when `scope` is
-    `None`."""
+    never grow a second body-scope writer. `raw_body` unchanged when `scope`
+    is `None`."""
     if scope is None:
-        return body
-    located = board.locate_agent_claim_block(body)
+        return raw_body
+    located = body.locate_agent_claim_block(raw_body)
     new_data = {**located.data, "scope": list(scope)}
-    return board.replace_agent_claim_block(body, located, new_data)
+    return body.replace_agent_claim_block(raw_body, located, new_data)
 
 
-def _block_body_with_size(body: str, size: str | None) -> str:
-    """`body`'s `agent-claim` block, with a top-level `size = "S"|"M"|"L"`
-    written in (issue #357) -- the same write path `_block_body_with_scope`
-    uses, so `item new --size` never grows a second body writer. `body`
-    unchanged when `size` is `None`."""
+def _block_body_with_size(raw_body: str, size: str | None) -> str:
+    """`raw_body`'s `agent-claim` block, with a top-level
+    `size = "S"|"M"|"L"` written in (issue #357) -- the same write path
+    `_block_body_with_scope` uses, so `item new --size` never grows a
+    second body writer. `raw_body` unchanged when `size` is `None`."""
     if size is None:
-        return body
-    located = board.locate_agent_claim_block(body)
+        return raw_body
+    located = body.locate_agent_claim_block(raw_body)
     new_data = {**located.data, "size": size}
-    return board.replace_agent_claim_block(body, located, new_data)
+    return body.replace_agent_claim_block(raw_body, located, new_data)
 
 
 def _requested_whole_reason(raw: str | None) -> str | None:
@@ -5664,35 +5665,35 @@ def _requested_whole_reason(raw: str | None) -> str | None:
     return None if raw is None else protocol._outbound_text(raw, _WHOLE_REASON_LABEL, maximum=512)
 
 
-def _block_body_with_whole(body: str, whole: str | None) -> str:
-    """`body`'s `agent-claim` block, with a top-level `whole = "<reason>"`
-    written in (issue #399) -- the same write path `_block_body_with_size`
-    uses, so `item new --whole` never grows a second body writer. `body`
-    unchanged when `whole` is `None`."""
+def _block_body_with_whole(raw_body: str, whole: str | None) -> str:
+    """`raw_body`'s `agent-claim` block, with a top-level
+    `whole = "<reason>"` written in (issue #399) -- the same write path
+    `_block_body_with_size` uses, so `item new --whole` never grows a
+    second body writer. `raw_body` unchanged when `whole` is `None`."""
     if whole is None:
-        return body
-    located = board.locate_agent_claim_block(body)
+        return raw_body
+    located = body.locate_agent_claim_block(raw_body)
     new_data = {**located.data, "whole": whole}
-    return board.replace_agent_claim_block(body, located, new_data)
+    return body.replace_agent_claim_block(raw_body, located, new_data)
 
 
 def _cut_child_body(container: int, scope: tuple[str, ...] | None = None) -> str:
     """The body `cut` writes for a fresh child: one `Parent: #<container>`
-    line ahead of `board.BLOCK_CHILD_SKELETON`, plus the cut slice's own
+    line ahead of `body.BLOCK_CHILD_SKELETON`, plus the cut slice's own
     top-level `scope = [...]` (issue #337) when the cut carries one -- the
     linked row's own scope, or a filled `--scope`. A repeat `cut` after a
     partial failure reads the parent line back (`_orphan_names_container`)
     to tell `container`'s own orphan apart from an unrelated open issue that
     merely shares the row's title (#260)."""
-    return _block_body_with_scope(_body_with_parent(board.BLOCK_CHILD_SKELETON, container), scope)
+    return _block_body_with_scope(_body_with_parent(body.BLOCK_CHILD_SKELETON, container), scope)
 
 
-def _orphan_names_container(body: str, container: int) -> bool:
-    """Whether `body`'s first line is the `Parent: #<container>` line
+def _orphan_names_container(raw_body: str, container: int) -> bool:
+    """Whether `raw_body`'s first line is the `Parent: #<container>` line
     `_cut_child_body` writes -- the one signal that tells `container`'s own
     orphan apart from another open issue, another container's own failed
     cut, or a human-filed issue that happens to share the row's title."""
-    return board.first_line(body) == f"Parent: #{container}"
+    return body.first_line(raw_body) == f"Parent: #{container}"
 
 
 def _adoptable_child(
@@ -5730,7 +5731,7 @@ def _adoptable_child(
         for issue in client.list_open_board_issues()
         if issue.title == title
         and issue.number != container
-        and issue.kind is board.ItemKind.TASK
+        and issue.kind is body.ItemKind.TASK
         and not board.has_label(issue.labels, idea_label)
         and _orphan_names_container(issue.body, container)
         and client.parent_issue(issue.number) is None
@@ -5763,19 +5764,19 @@ def _block_slice_entries(data: Mapping[str, object]) -> list[dict[str, object]]:
     return [entry for entry in value if isinstance(entry, dict)]
 
 
-def _slice_row(entry: dict[str, object]) -> board.SliceRow:
+def _slice_row(entry: dict[str, object]) -> body.SliceRow:
     """One `[[slice]]` entry as `cut` sees it. `entry`'s own `scope` (issue
     #337), when it carries one, already passed `protocol.valid_scope` at
     `_located_block_or_refuse`'s own `parse_body` gate -- a body that failed
     that check never reaches here -- so this is the one canonicalizing pass,
     not a second validation of an already-checked value."""
     scope = protocol.valid_scope(entry["scope"]) if "scope" in entry else None
-    return board.SliceRow(cast(int, entry["index"]), cast(str, entry["title"]), scope)
+    return body.SliceRow(cast(int, entry["index"]), cast(str, entry["title"]), scope)
 
 
 def _cut_link(
     number: int, data: Mapping[str, object], row_number: int | None
-) -> board.SliceRow | None:
+) -> body.SliceRow | None:
     """Which `[[slice]]` entry `cut` links its fresh child to (#150 §7):
     without `--row`, the first entry when the block carries one; with `--row
     N`, the entry `N` names, refusing by name when the block has no `slice`
@@ -5797,7 +5798,7 @@ def _cut_link(
     return _slice_row(match)
 
 
-def _require_matching_title(number: int, link: board.SliceRow, title: str) -> None:
+def _require_matching_title(number: int, link: body.SliceRow, title: str) -> None:
     if title != link.title:
         raise protocol.ClaimUnavailableError(
             f"#{number}'s slice {link.index} is titled {link.title!r}; "
@@ -5806,28 +5807,28 @@ def _require_matching_title(number: int, link: board.SliceRow, title: str) -> No
 
 
 def _located_block_or_refuse(
-    number: int, body: str, *, command: str, storage: board.Storage = board.Storage.GITHUB
-) -> board.LocatedBlock:
-    """`body`'s located `agent-claim` block, or a by-name refusal before any
-    write: `cut`, `rule`, and `ask` all need a body `parse_body` reads as
+    number: int, raw_body: str, *, command: str, storage: body.Storage = body.Storage.GITHUB
+) -> body.LocatedBlock:
+    """`raw_body`'s located `agent-claim` block, or a by-name refusal before
+    any write: `cut`, `rule`, and `ask` all need a body `parse_body` reads as
     VALID before they touch it, and share this one gate so the message is
     the same shape for all three. `storage` is forwarded to `parse_body`
     unchanged (issue #283): a state-ref item's own `[record]` table must
     read as a known key, not a malformed one."""
-    parsed = board.parse_body(body, storage=storage)
-    if parsed.read_state is board.BodyReadState.MALFORMED:
+    parsed = body.parse_body(raw_body, storage=storage)
+    if parsed.read_state is body.BodyReadState.MALFORMED:
         defect = parsed.contract.defects[0]
         raise protocol.ClaimUnavailableError(
-            f"#{number} {board.body_defect_text(defect)}; {command} needs a valid agent-claim block"
+            f"#{number} {body.body_defect_text(defect)}; {command} needs a valid agent-claim block"
         )
-    return board.locate_agent_claim_block(body)
+    return body.locate_agent_claim_block(raw_body)
 
 
 CUT_ROW_SCOPE_ALREADY_SET = "slice {index} already names a scope; edit the container instead"
 
 
 def _cut_row_scope(
-    link: board.SliceRow | None, requested: tuple[str, ...] | None
+    link: body.SliceRow | None, requested: tuple[str, ...] | None
 ) -> tuple[str, ...] | None:
     """The scope `cut`'s fresh child inherits (issue #337): the linked
     row's own scope when it already has one -- `--scope` then refuses by
@@ -5846,7 +5847,7 @@ def _cut_slice(
     target: board.Issue,
     parsed: argparse.Namespace,
     idea_label: str | None,
-    storage: board.Storage,
+    storage: body.Storage,
 ) -> int:
     number = target.number
     located = _located_block_or_refuse(number, target.body, command="cut", storage=storage)
@@ -5863,7 +5864,7 @@ def _cut_slice(
                 parent=number,
                 title=parsed.title,
                 body=_cut_child_body(number, child_scope),
-                kind=board.ItemKind.TASK,
+                kind=body.ItemKind.TASK,
             )
         )
         if link is not None:
@@ -5873,7 +5874,7 @@ def _cut_slice(
                 if entry["index"] != link.index
             ]
             new_data = {**located.data, "slice": remaining}
-            new_body = board.replace_agent_claim_block(target.body, located, new_data)
+            new_body = body.replace_agent_claim_block(target.body, located, new_data)
             step = f"remove row {link.index} from #{number}'s agent-claim block"
             _link_created_child(client, number, new_body, child, step)
     except forge.ForgePartialChildCreationError as error:
@@ -5973,9 +5974,9 @@ def _require_writable_target(
     return body, config
 
 
-def _rule_remaining_open(new_body: str, *, storage: board.Storage) -> int:
+def _rule_remaining_open(new_body: str, *, storage: body.Storage) -> int:
     return sum(
-        1 for line in board.expectation_lines(new_body, storage=storage) if line.ruling is None
+        1 for line in body.expectation_lines(new_body, storage=storage) if line.ruling is None
     )
 
 
@@ -5992,7 +5993,7 @@ class RuleReason(StrEnum):
 
 
 def _emit_rule_result(
-    number: int, line: board.ExpectationLine, open_remaining: int, *, as_json: bool
+    number: int, line: body.ExpectationLine, open_remaining: int, *, as_json: bool
 ) -> None:
     ruling = cast(str, line.ruling)
     ruled_on = cast(date, line.ruled_on)
@@ -6012,7 +6013,7 @@ def _emit_rule_result(
 
 def rule_item(
     client: forge.ForgeWriter, number: int, line: int, ruling: str, note: str | None
-) -> tuple[board.ExpectationLine, int]:
+) -> tuple[body.ExpectationLine, int]:
     """`_cmd_rule`'s own write, extracted (issue #280) so `board --serve`'s
     `POST /rule` calls the exact same path a CLI `aco rule` invocation does
     -- one owner for "click -> ruled line", never a second one behind the
@@ -6020,19 +6021,19 @@ def rule_item(
     still has open; raises `protocol.ClaimError` by name for every refusal
     (already ruled, out of range, a bad outcome, a malformed or missing
     item), which both callers turn into their own by-name response."""
-    body, config = _require_writable_target(client, number, command="rule")
+    current_body, config = _require_writable_target(client, number, command="rule")
     ruled_on = datetime.now(UTC).date()
-    new_body = board.rule_expectation(body, line, ruling, ruled_on, note=note)
+    new_body = body.rule_expectation(current_body, line, ruling, ruled_on, note=note)
     client.update_item_body(number, new_body)
-    ruled_line = board.expectation_lines(new_body, storage=config.storage)[line - 1]
+    ruled_line = body.expectation_lines(new_body, storage=config.storage)[line - 1]
     return ruled_line, _rule_remaining_open(new_body, storage=config.storage)
 
 
 _RuleItemError = (
     _TargetUnavailableError
     | _InvalidTargetError
-    | board.ExpectationAlreadyRuledError
-    | board.ExpectationOutOfRangeError
+    | body.ExpectationAlreadyRuledError
+    | body.ExpectationOutOfRangeError
 )
 
 
@@ -6045,7 +6046,7 @@ def _rule_item_reason(error: _RuleItemError) -> RuleReason:
         return RuleReason.UNAVAILABLE
     if isinstance(error, _InvalidTargetError):
         return RuleReason.INVALID_ITEM
-    if isinstance(error, board.ExpectationAlreadyRuledError):
+    if isinstance(error, body.ExpectationAlreadyRuledError):
         return RuleReason.ALREADY_RULED
     return RuleReason.LINE_OUT_OF_RANGE
 
@@ -6066,8 +6067,8 @@ def _cmd_rule(parsed: argparse.Namespace, session: _WriteSession) -> int:
     except (
         _TargetUnavailableError,
         _InvalidTargetError,
-        board.ExpectationAlreadyRuledError,
-        board.ExpectationOutOfRangeError,
+        body.ExpectationAlreadyRuledError,
+        body.ExpectationOutOfRangeError,
     ) as error:
         return _refuse(_rule_item_reason(error), error, as_json=as_json)
     _emit_rule_result(number, ruled_line, open_remaining, as_json=as_json)
@@ -6139,7 +6140,7 @@ class _AskedLine:
     index: int
     text: str
     default: str
-    card: board.ExpectationCardFields
+    card: body.ExpectationCardFields
 
 
 class AskReason(StrEnum):
@@ -6180,7 +6181,7 @@ def _read_picture_file(path: str) -> str:
     """`--picture FILE.svg`'s own filesystem boundary (issue #295): read
     before any forge call, so a missing file refuses before the item body
     is even fetched. Content validation (size, `<svg>` root, no `<script>`,
-    no external `href`) is `board.append_expectation`'s -- one owner, shared
+    no external `href`) is `body.append_expectation`'s -- one owner, shared
     with the body parser's own defects."""
     try:
         return Path(path).read_text(encoding="utf-8")
@@ -6197,7 +6198,7 @@ def _ask_target_reason(error: _TargetUnavailableError | _InvalidTargetError) -> 
 
 
 def _ask_expectation_reason(
-    error: board.ExpectationTextError | board.ExpectationFieldError,
+    error: body.ExpectationTextError | body.ExpectationFieldError,
 ) -> AskReason:
     """`_cmd_ask`'s own mapping from `append_expectation`'s two card-content
     refusals (issue #396) to their `--json` `reason`: a blank `--text`
@@ -6205,7 +6206,7 @@ def _ask_expectation_reason(
     rule both name `invalid_expectation`; only a refused `--picture`
     (`ExpectationFieldError` whose `field` is `picture`) names
     `invalid_picture`, per `specs/ask.spec.md`'s ASK-07/ASK-10 split."""
-    if isinstance(error, board.ExpectationFieldError) and error.field == "picture":
+    if isinstance(error, body.ExpectationFieldError) and error.field == "picture":
         return AskReason.INVALID_PICTURE
     return AskReason.INVALID_EXPECTATION
 
@@ -6216,7 +6217,7 @@ def _cmd_ask(parsed: argparse.Namespace, session: _WriteSession) -> int:
         picture = _read_picture_file(parsed.picture) if parsed.picture else None
     except _PictureFileError as error:
         return _refuse(AskReason.INVALID_PICTURE, error, as_json=as_json)
-    card = board.ExpectationCardFields(
+    card = body.ExpectationCardFields(
         question=parsed.question, example=parsed.example, picture=picture
     )
     try:
@@ -6227,14 +6228,14 @@ def _cmd_ask(parsed: argparse.Namespace, session: _WriteSession) -> int:
         return _refuse(AskReason.UNAVAILABLE, error, as_json=as_json)
     number = int(parsed.item)
     try:
-        body, config = _require_writable_target(client, number, command="ask")
+        current_body, config = _require_writable_target(client, number, command="ask")
     except (_TargetUnavailableError, _InvalidTargetError) as error:
         return _refuse(_ask_target_reason(error), error, as_json=as_json)
     try:
-        new_body = board.append_expectation(body, parsed.text, parsed.default, card=card)
-    except (board.ExpectationTextError, board.ExpectationFieldError) as error:
+        new_body = body.append_expectation(current_body, parsed.text, parsed.default, card=card)
+    except (body.ExpectationTextError, body.ExpectationFieldError) as error:
         return _refuse(_ask_expectation_reason(error), error, as_json=as_json)
-    index = len(board.expectation_lines(new_body, storage=config.storage))
+    index = len(body.expectation_lines(new_body, storage=config.storage))
     client.update_item_body(number, new_body)
     asked = _AskedLine(
         item=number, index=index, text=parsed.text, default=parsed.default, card=card

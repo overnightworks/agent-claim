@@ -34,8 +34,9 @@ from test_cli import (
     _single_item_board_environment,
 )
 
-from agent_coordination import board, board_serve, checkout, forge, github, protocol, workspace
+from agent_coordination import board_serve, checkout, forge, github, protocol, workspace
 from agent_coordination import cli as issue_claim
+from agent_coordination.body import expectation_lines, rule_expectation
 
 OPEN_LINE_TEXT = "Brauchen wir Admin-Rechte?"
 SERVED_ITEM = 10
@@ -227,7 +228,7 @@ def test_post_rule_with_a_valid_token_writes_exactly_one_ruling_and_redirects(
     """Issue #295 proof 4: the single per-card form's `outcome` button
     (including `later`, the one served by the card's own submit button
     rather than a note-less command line) carries the note through to
-    `board.rule_expectation`'s ` Anmerkung: <note>` suffix. Issue #388 proof
+    `body.rule_expectation`'s ` Anmerkung: <note>` suffix. Issue #388 proof
     2: the follow-up page no longer shows the line as an open card with its
     three buttons -- it shows the ruled state, the note, and the
     `aco ask` hint instead, inside the item's own collapsible history."""
@@ -238,7 +239,7 @@ def test_post_rule_with_a_valid_token_writes_exactly_one_ruling_and_redirects(
 
     assert response.status == 303
     assert response.location == f"/?t={token}"
-    lines = board.expectation_lines(served_board.client.item_bodies[SERVED_ITEM])
+    lines = expectation_lines(served_board.client.item_bodies[SERVED_ITEM])
     assert len(lines) == 1
     assert lines[0].ruling == outcome
     assert lines[0].ruled_on == datetime.now(UTC).date()
@@ -1119,7 +1120,7 @@ def test_rule_item_refuses_an_already_ruled_line_by_name(
     client = _served_board_environment(monkeypatch, tmp_path)
     body = client.issue_references[SERVED_ITEM].body
     assert body is not None
-    once_ruled = board.rule_expectation(body, 1, "yes", datetime.now(UTC).date())
+    once_ruled = rule_expectation(body, 1, "yes", datetime.now(UTC).date())
     client.issue_references[SERVED_ITEM] = forge.ItemReference(
         forge.ItemState.OPEN, "Plain item", once_ruled
     )

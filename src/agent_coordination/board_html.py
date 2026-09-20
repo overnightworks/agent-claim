@@ -3,7 +3,7 @@
 Pure: no clock, no randomness, no `gh`/`git` call of its own. `cli.py`'s
 `board --html` (issue #276) and `board --serve` (issue #280) are its only two
 callers -- both already hold every read this module needs from
-`board.build_board`'s own inputs, `board.expectation_lines` (#240), and the
+`board.build_board`'s own inputs, `expectation_lines` (#240), and the
 store's live claims, so building `BoardPage` and rendering it costs nothing
 `board` was not already paying for. `render` stays the one state-to-page
 function for both: `served=None` writes `--html`'s static page,
@@ -39,6 +39,7 @@ from enum import StrEnum
 from typing import cast
 
 from . import board
+from .body import ExpectationState, Storage, expectation_line_state, expectation_lines
 
 RULE_OUTCOMES: tuple[str, ...] = ("yes", "no", "later")
 
@@ -134,8 +135,8 @@ class TopicPart:
 class RuledExpectation:
     """One already-ruled `[[expectation]]` line, kept for its own item's
     collapsible history (issue #388) rather than a "Wartet auf dich" card:
-    `text` and `state` come straight from `board.ExpectationLine`/
-    `board.expectation_line_state` -- the exact wording `aco rulings`
+    `text` and `state` come straight from `ExpectationLine`/
+    `expectation_line_state` -- the exact wording `aco rulings`
     prints -- so a ruled card's own confirmation can never drift from the
     state a fresh `board --json`/`rulings` read would show."""
 
@@ -178,11 +179,11 @@ class BoardPage:
     # `board.measurements_lines` -- the one text `aco board` and this page
     # both read, so the two never drift into separately worded sentences.
     measurements: board.Measurements
-    storage: board.Storage = board.Storage.GITHUB
+    storage: Storage = Storage.GITHUB
 
 
 def _expectation_cards(
-    item: board.BoardItem, body: str, *, storage: board.Storage
+    item: board.BoardItem, body: str, *, storage: Storage
 ) -> tuple[ExpectationCard, ...]:
     return tuple(
         ExpectationCard(
@@ -195,20 +196,20 @@ def _expectation_cards(
             example=line.example,
             picture=line.picture,
         )
-        for line in board.expectation_lines(body, storage=storage)
+        for line in expectation_lines(body, storage=storage)
         if line.ruling is None
     )
 
 
-def _ruled_expectations(body: str, *, storage: board.Storage) -> tuple[RuledExpectation, ...]:
+def _ruled_expectations(body: str, *, storage: Storage) -> tuple[RuledExpectation, ...]:
     """The complement of `_expectation_cards`: every already-ruled line of
     `body`'s own `agent-claim` block, read fresh from state (issue #388) --
     never carried across from the request that ruled it, so a page rendered
     long after the click shows exactly the same history a rendered-now one
     does."""
     return tuple(
-        RuledExpectation(line.text, board.expectation_line_state(line))
-        for line in board.expectation_lines(body, storage=storage)
+        RuledExpectation(line.text, expectation_line_state(line))
+        for line in expectation_lines(body, storage=storage)
         if line.ruling is not None
     )
 
@@ -218,7 +219,7 @@ def _lane_card(
     claimant: LaneClaimant,
     *,
     repository: str,
-    storage: board.Storage,
+    storage: Storage,
 ) -> LaneCard:
     blocked_by = ", ".join(
         board.open_blocker_label(reference, repository, storage) for reference in item.open_blockers
@@ -243,7 +244,7 @@ def _item_part_state(item: board.BoardItem) -> TopicPartState:
     closed one."""
     if item.active_claim:
         return TopicPartState.RUNNING
-    proposed = item.expectation_state is board.ExpectationState.PROPOSED
+    proposed = item.expectation_state is ExpectationState.PROPOSED
     if proposed or item.expectation_progress.open > 0:
         return TopicPartState.YOU
     return TopicPartState.OPEN
@@ -255,7 +256,7 @@ def _topic_part(
     bodies: Mapping[int, str],
     *,
     repository: str,
-    storage: board.Storage,
+    storage: Storage,
 ) -> TopicPart:
     """`child` is always open here: `board.py`'s own `_container_progress`
     filters `ContainerProgress.open_children` to `ChildState.OPEN` before
@@ -275,7 +276,7 @@ def _topic_part(
 
 
 def _standalone_topic(
-    item: board.BoardItem, body: str, *, repository: str, storage: board.Storage
+    item: board.BoardItem, body: str, *, repository: str, storage: Storage
 ) -> Topic:
     blocked_by = ", ".join(
         board.open_blocker_label(reference, repository, storage) for reference in item.open_blockers
@@ -293,7 +294,7 @@ def _standalone_topic(
 
 
 def _topics(
-    projected: board.Board, bodies: Mapping[int, str], *, storage: board.Storage
+    projected: board.Board, bodies: Mapping[int, str], *, storage: Storage
 ) -> tuple[Topic, ...]:
     """Containers (with their currently open children -- `board.py` never
     exposes a closed child's number or title, so those count only toward
@@ -339,14 +340,14 @@ class BoardSources:
     itself -- each already read by `board --html`'s own `board` fetch
     (issue #276): `bodies` (each open issue's body), `claimants` (the live
     store claims, keyed by the issue they hold), the live store's own tip,
-    and the repository's storage pin (for `board.expectation_lines` et al.).
+    and the repository's storage pin (for `expectation_lines` et al.).
     The Landungen view needs no source of its own any more (issue #371): it
     reads straight from `projected.landings`."""
 
     bodies: Mapping[int, str]
     claimants: Mapping[int, LaneClaimant]
     state_tip: str
-    storage: board.Storage = board.Storage.GITHUB
+    storage: Storage = Storage.GITHUB
 
 
 def build_page(projected: board.Board, sources: BoardSources) -> BoardPage:
@@ -437,8 +438,8 @@ def _card_heading(card: ExpectationCard) -> str:
 
 def _render_figure(card: ExpectationCard) -> str:
     """`card.picture`'s inline SVG verbatim, never `html.escape`d -- it was
-    already validated by board's picture rule at write time
-    (`board._expectation_picture_defect`)."""
+    already validated by the body-block codec's picture rule at write time
+    (`body._expectation_picture_defect`)."""
     return "" if card.picture is None else f"<figure>{card.picture}</figure>"
 
 
@@ -457,9 +458,7 @@ def _render_full_sentence(card: ExpectationCard) -> str:
     return f"<details><summary>Der volle Satz</summary><p>{_inline(card.text)}</p></details>"
 
 
-def _render_card(
-    card: ExpectationCard, served: ServedRuleForm | None, *, storage: board.Storage
-) -> str:
+def _render_card(card: ExpectationCard, served: ServedRuleForm | None, *, storage: Storage) -> str:
     if served is None:
         lines = "".join(_render_rule_line(card, outcome) for outcome in RULE_OUTCOMES)
         outcomes = f'<ul class="rule-lines">{lines}</ul>'
@@ -481,7 +480,7 @@ def _fact_row(label: str, value: str | None) -> str:
     return f"<div><dt>{label}</dt><dd>{_inline(value)}</dd></div>"
 
 
-def _render_lane(lane: LaneCard, *, storage: board.Storage) -> str:
+def _render_lane(lane: LaneCard, *, storage: Storage) -> str:
     facts = "".join(
         (
             (
@@ -503,13 +502,13 @@ def _render_lane(lane: LaneCard, *, storage: board.Storage) -> str:
     </article>"""
 
 
-def _part_label(part: TopicPart, *, storage: board.Storage) -> str:
+def _part_label(part: TopicPart, *, storage: Storage) -> str:
     title = f" {html.escape(part.title)}" if part.title else ""
     blocked = f" (blocked by {html.escape(part.blocked_by)})" if part.blocked_by else ""
     return f"{board.item_label(part.number, storage)}{title}{blocked}"
 
 
-def _render_part(part: TopicPart, *, storage: board.Storage) -> str:
+def _render_part(part: TopicPart, *, storage: Storage) -> str:
     history = _render_part_ruled_history(part)
     return (
         f'<li class="{part.state.value}"><span class="dot" aria-hidden="true"></span>'
@@ -560,7 +559,7 @@ def _render_part_ruled_history(part: TopicPart) -> str:
     return f'<details class="part-ruled"><summary>Verlauf</summary>{body}</details>'
 
 
-def _render_topic(topic: Topic, *, storage: board.Storage) -> str:
+def _render_topic(topic: Topic, *, storage: Storage) -> str:
     share = 0 if topic.total == 0 else round(100 * topic.closed / topic.total)
     parts = "".join(_render_part(part, storage=storage) for part in topic.parts)
     label = board.item_label(topic.item, storage)
@@ -585,7 +584,7 @@ def _render_topic(topic: Topic, *, storage: board.Storage) -> str:
       </li>"""
 
 
-def _render_landed(row: board.LandingRow, *, storage: board.Storage) -> str:
+def _render_landed(row: board.LandingRow, *, storage: Storage) -> str:
     date = row.committed_at.astimezone(UTC).date().isoformat()
     if isinstance(row.evidence, board.TrunkLandingEvidence):
         evidence = f"<code>{row.evidence.sha[: board.SHORT_SHA_LENGTH]}</code>"

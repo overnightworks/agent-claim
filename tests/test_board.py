@@ -1,7 +1,8 @@
-"""Behavioral tests for the pure `agent-claim` block write path `board.py`
-owns (#240): `rule_expectation`, `append_expectation`, and the
-`expectation_lines` projection `rule --line`, `ask`, and `rulings` all
-share. CLI wiring for `rule`/`ask`/`rulings` is covered in `tests/test_cli.py`."""
+"""Behavioral tests for the pure `agent-claim` block write path `body.py`
+owns (#240, moved from `board.py` by #419): `rule_expectation`,
+`append_expectation`, and the `expectation_lines` projection `rule --line`,
+`ask`, and `rulings` all share. CLI wiring for `rule`/`ask`/`rulings` is
+covered in `tests/test_cli.py`."""
 
 from __future__ import annotations
 
@@ -34,13 +35,41 @@ from board_fixtures import (
 )
 
 from agent_coordination import board, metrics, protocol
+from agent_coordination.body import (
+    BLOCK_CHILD_SKELETON,
+    EXPECTATION_LINE_TEXT_MAXIMUM,
+    EXPECTATION_PICTURE_MAXIMUM_BYTES,
+    EXPECTATION_QUESTION_MAXIMUM_CHARACTERS,
+    BodyReadState,
+    Contract,
+    ContractDefect,
+    ExpectationCardFields,
+    ExpectationLine,
+    ExpectationProgress,
+    ExpectationState,
+    ItemKind,
+    SliceRow,
+    Storage,
+    _expectation_picture_defect,
+    append_expectation,
+    body_defect_text,
+    expectation_line_state,
+    expectation_line_summary,
+    expectation_lines,
+    locate_agent_claim_block,
+    missing_or_empty_sections,
+    parse_body,
+    render_block,
+    replace_agent_claim_block,
+    rule_expectation,
+)
 from agent_coordination.protocol import ClaimError, ClaimRequest
 
 # A real expectation sentence from this repository's own issue #230 (#240's
 # brief: take a real body as the fixture template rather than a synthetic
 # one) -- German prose, an em dash, and multiple sentences, none of which
 # need TOML escaping. The block interior itself is rendered through
-# `board.render_block`, the production serializer, never hand-typed.
+# `render_block`, the production serializer, never hand-typed.
 ISSUE_230_EXPECTATION_TEXT = (
     "Ein gezogenes Forge-Issue wird von aco nie verändert, geschlossen oder "
     "umgehängt; nur ein Marker-Kommentar, wenn der Spiegel eingeschaltet ist. "
@@ -61,7 +90,7 @@ def issue_230_body(*, default: str = "later") -> str:
     `Blocked by` line, then a block carrying one still-*proposed* line built
     from its real (later-ruled) expectation text -- `default` lets a test
     ask for a body that is already fully ruled instead."""
-    interior = board.render_block(
+    interior = render_block(
         {
             "version": 1,
             "now": "Konzept v3 (15.09.2026) nach Plan-Review und Regel-Gegen-Check.",
@@ -82,26 +111,26 @@ def test_rule_expectation_rules_a_proposed_line(ruling: str) -> None:
         f'{MINIMAL_BLOCK_TOML}[[expectation]]\ntext = "Ship it?"\ndefault = "later"\n'
     )
 
-    new_body = board.rule_expectation(body, 1, ruling, date(2026, 9, 15))
+    new_body = rule_expectation(body, 1, ruling, date(2026, 9, 15))
 
-    assert board.expectation_lines(new_body) == (
-        board.ExpectationLine(1, "Ship it?", ruling, date(2026, 9, 15)),
+    assert expectation_lines(new_body) == (
+        ExpectationLine(1, "Ship it?", ruling, date(2026, 9, 15)),
     )
-    assert board.parse_body(new_body).expectation_state is board.ExpectationState.RULED
+    assert parse_body(new_body).expectation_state is ExpectationState.RULED
 
 
 @pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
 def test_rule_expectation_preserves_every_byte_outside_the_ruled_line(newline: str) -> None:
     body = issue_230_body().replace("\n", newline)
-    located = board.locate_agent_claim_block(body)
+    located = locate_agent_claim_block(body)
     prefix, suffix = body[: located.content_start], body[located.content_end :]
 
-    new_body = board.rule_expectation(body, 1, "yes", date(2026, 9, 15))
+    new_body = rule_expectation(body, 1, "yes", date(2026, 9, 15))
 
     assert new_body.startswith(prefix)
     assert new_body.endswith(suffix)
-    assert board.expectation_lines(new_body) == (
-        board.ExpectationLine(1, ISSUE_230_EXPECTATION_TEXT, "yes", date(2026, 9, 15)),
+    assert expectation_lines(new_body) == (
+        ExpectationLine(1, ISSUE_230_EXPECTATION_TEXT, "yes", date(2026, 9, 15)),
     )
 
 
@@ -114,7 +143,7 @@ def test_rule_expectation_refuses_an_already_ruled_line() -> None:
     ruled_at = date(2026, 9, 15)
 
     with pytest.raises(protocol.ClaimError, match="line 1 is already ruled"):
-        board.rule_expectation(body, 1, "no", ruled_at)
+        rule_expectation(body, 1, "no", ruled_at)
 
 
 @pytest.mark.parametrize("index", [0, 2])
@@ -126,7 +155,7 @@ def test_rule_expectation_refuses_an_out_of_range_line(index: int) -> None:
     ruled_at = date(2026, 9, 15)
 
     with pytest.raises(protocol.ClaimError, match="out of range"):
-        board.rule_expectation(body, index, "yes", ruled_at)
+        rule_expectation(body, index, "yes", ruled_at)
 
 
 def test_rule_expectation_refuses_an_unknown_ruling_value() -> None:
@@ -137,7 +166,7 @@ def test_rule_expectation_refuses_an_unknown_ruling_value() -> None:
     ruled_at = date(2026, 9, 15)
 
     with pytest.raises(protocol.ClaimError, match="ruling must be"):
-        board.rule_expectation(body, 1, "maybe", ruled_at)
+        rule_expectation(body, 1, "maybe", ruled_at)
 
 
 def test_rule_expectation_appends_a_note_to_the_ruled_line_text() -> None:
@@ -145,9 +174,9 @@ def test_rule_expectation_appends_a_note_to_the_ruled_line_text() -> None:
         f'{MINIMAL_BLOCK_TOML}[[expectation]]\ntext = "Ship it?"\ndefault = "later"\n'
     )
 
-    new_body = board.rule_expectation(body, 1, "yes", date(2026, 9, 15), note="Ja, sofort.")
+    new_body = rule_expectation(body, 1, "yes", date(2026, 9, 15), note="Ja, sofort.")
 
-    assert board.expectation_lines(new_body)[0].text == "Ship it? Anmerkung: Ja, sofort."
+    assert expectation_lines(new_body)[0].text == "Ship it? Anmerkung: Ja, sofort."
 
 
 # --- append_expectation ---
@@ -157,14 +186,14 @@ def test_rule_expectation_appends_a_note_to_the_ruled_line_text() -> None:
 def test_append_expectation_adds_a_proposed_line(default: str) -> None:
     body = agent_claim_body(MINIMAL_BLOCK_TOML)
 
-    new_body = board.append_expectation(body, "New question?", default)
+    new_body = append_expectation(body, "New question?", default)
 
-    assert board.expectation_lines(new_body) == (
-        board.ExpectationLine(1, "New question?", None, None, default=default),
+    assert expectation_lines(new_body) == (
+        ExpectationLine(1, "New question?", None, None, default=default),
     )
-    entries = board.locate_agent_claim_block(new_body).data["expectation"]
+    entries = locate_agent_claim_block(new_body).data["expectation"]
     assert entries == [{"text": "New question?", "default": default}]
-    assert board.parse_body(new_body).expectation_state is board.ExpectationState.PROPOSED
+    assert parse_body(new_body).expectation_state is ExpectationState.PROPOSED
 
 
 def test_append_expectation_appends_after_existing_lines() -> None:
@@ -172,25 +201,25 @@ def test_append_expectation_appends_after_existing_lines() -> None:
         f'{MINIMAL_BLOCK_TOML}[[expectation]]\ntext = "First"\ndefault = "yes"\n'
     )
 
-    new_body = board.append_expectation(body, "Second", "no")
+    new_body = append_expectation(body, "Second", "no")
 
-    assert board.expectation_lines(new_body) == (
-        board.ExpectationLine(1, "First", None, None, default="yes"),
-        board.ExpectationLine(2, "Second", None, None, default="no"),
+    assert expectation_lines(new_body) == (
+        ExpectationLine(1, "First", None, None, default="yes"),
+        ExpectationLine(2, "Second", None, None, default="no"),
     )
 
 
 @pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
 def test_append_expectation_preserves_every_byte_outside_the_appended_line(newline: str) -> None:
     body = issue_230_body(default="yes").replace("\n", newline)
-    located = board.locate_agent_claim_block(body)
+    located = locate_agent_claim_block(body)
     prefix, suffix = body[: located.content_start], body[located.content_end :]
 
-    new_body = board.append_expectation(body, "New question?", "yes")
+    new_body = append_expectation(body, "New question?", "yes")
 
     assert new_body.startswith(prefix)
     assert new_body.endswith(suffix)
-    assert board.expectation_lines(new_body)[-1] == board.ExpectationLine(
+    assert expectation_lines(new_body)[-1] == ExpectationLine(
         2, "New question?", None, None, default="yes"
     )
 
@@ -199,14 +228,14 @@ def test_append_expectation_refuses_empty_text() -> None:
     body = agent_claim_body(MINIMAL_BLOCK_TOML)
 
     with pytest.raises(protocol.ClaimError, match="non-empty"):
-        board.append_expectation(body, "   ", "yes")
+        append_expectation(body, "   ", "yes")
 
 
 def test_append_expectation_refuses_an_unknown_default() -> None:
     body = agent_claim_body(MINIMAL_BLOCK_TOML)
 
     with pytest.raises(protocol.ClaimError, match="default must be"):
-        board.append_expectation(body, "New question?", "maybe")
+        append_expectation(body, "New question?", "maybe")
 
 
 VALID_SVG_PICTURE = '<svg xmlns="http://www.w3.org/2000/svg"><circle cx="5" cy="5" r="4"/></svg>'
@@ -218,14 +247,14 @@ def test_append_expectation_writes_the_card_fields() -> None:
     them (every earlier `append_expectation` test) keeps reading `None` --
     absent keys leave the line unchanged."""
     body = agent_claim_body(MINIMAL_BLOCK_TOML)
-    card = board.ExpectationCardFields(
+    card = ExpectationCardFields(
         question="Ship it?", example="Release on Friday.", picture=VALID_SVG_PICTURE
     )
 
-    new_body = board.append_expectation(body, "New question?", "yes", card=card)
+    new_body = append_expectation(body, "New question?", "yes", card=card)
 
-    assert board.expectation_lines(new_body) == (
-        board.ExpectationLine(
+    assert expectation_lines(new_body) == (
+        ExpectationLine(
             1,
             "New question?",
             None,
@@ -236,7 +265,7 @@ def test_append_expectation_writes_the_card_fields() -> None:
             picture=VALID_SVG_PICTURE,
         ),
     )
-    entries = board.locate_agent_claim_block(new_body).data["expectation"]
+    entries = locate_agent_claim_block(new_body).data["expectation"]
     assert entries == [
         {
             "text": "New question?",
@@ -357,8 +386,8 @@ def test_append_expectation_writes_the_card_fields() -> None:
             id="srcdoc",
         ),
         pytest.param(
-            f"<svg>{'x' * board.EXPECTATION_PICTURE_MAXIMUM_BYTES}</svg>",
-            f"must be at most {board.EXPECTATION_PICTURE_MAXIMUM_BYTES} bytes",
+            f"<svg>{'x' * EXPECTATION_PICTURE_MAXIMUM_BYTES}</svg>",
+            f"must be at most {EXPECTATION_PICTURE_MAXIMUM_BYTES} bytes",
             id="oversized",
         ),
     ],
@@ -371,7 +400,7 @@ def test_expectation_picture_is_refused_by_both_the_parser_and_the_writer(
     `append_expectation` refuses the same picture before any write --
     `_expectation_picture_defect` is the one owner both share."""
     malformed_body = agent_claim_body(
-        board.render_block(
+        render_block(
             {
                 "version": 1,
                 "now": "N",
@@ -381,16 +410,16 @@ def test_expectation_picture_is_refused_by_both_the_parser_and_the_writer(
             }
         ).rstrip("\n")
     )
-    parsed = board.parse_body(malformed_body)
-    assert parsed.read_state is board.BodyReadState.MALFORMED
+    parsed = parse_body(malformed_body)
+    assert parsed.read_state is BodyReadState.MALFORMED
     assert parsed.contract.defects == (
-        board.ContractDefect("expectation[0].picture", f"expectation[0].picture {match}"),
+        ContractDefect("expectation[0].picture", f"expectation[0].picture {match}"),
     )
 
     valid_body = agent_claim_body(MINIMAL_BLOCK_TOML)
-    card = board.ExpectationCardFields(picture=picture)
+    card = ExpectationCardFields(picture=picture)
     with pytest.raises(protocol.ClaimError, match=re.escape(match)):
-        board.append_expectation(valid_body, "New question?", "yes", card=card)
+        append_expectation(valid_body, "New question?", "yes", card=card)
 
 
 def test_expectation_picture_allows_an_internal_anchor_href_with_surrounding_spaces() -> None:
@@ -400,13 +429,13 @@ def test_expectation_picture_allows_an_internal_anchor_href_with_surrounding_spa
     whitespace and misread it as an external value's first character (issue
     #300 residual 5, #234's own rule)."""
     picture = '<svg><a href = "#x"><circle cx="5" cy="5" r="4"/></a></svg>'
-    assert board._expectation_picture_defect(picture) is None
+    assert _expectation_picture_defect(picture) is None
 
     body = agent_claim_body(MINIMAL_BLOCK_TOML)
-    updated = board.append_expectation(
-        body, "New question?", "yes", card=board.ExpectationCardFields(picture=picture)
+    updated = append_expectation(
+        body, "New question?", "yes", card=ExpectationCardFields(picture=picture)
     )
-    assert board.parse_body(updated).read_state is board.BodyReadState.VALID
+    assert parse_body(updated).read_state is BodyReadState.VALID
 
 
 def test_expectation_picture_allows_an_unrelated_animation_to_an_external_url() -> None:
@@ -419,7 +448,7 @@ def test_expectation_picture_allows_an_unrelated_animation_to_an_external_url() 
         '<svg><animate attributeName="href" to="#ok"/>'
         '<animate attributeName="x" to="http://evil.example"/></svg>'
     )
-    assert board._expectation_picture_defect(picture) is None
+    assert _expectation_picture_defect(picture) is None
 
 
 def test_expectation_picture_allows_an_animated_href_with_every_values_segment_internal() -> None:
@@ -427,25 +456,23 @@ def test_expectation_picture_allows_an_animated_href_with_every_values_segment_i
     two internal anchors are as harmless as one, so a picture must not be
     refused just because `values` contains a semicolon."""
     picture = '<svg><animate attributeName="href" values="#a;#b"/></svg>'
-    assert board._expectation_picture_defect(picture) is None
+    assert _expectation_picture_defect(picture) is None
 
 
 def test_append_expectation_refuses_an_overlong_question() -> None:
     body = agent_claim_body(MINIMAL_BLOCK_TOML)
-    card = board.ExpectationCardFields(
-        question="Q" * (board.EXPECTATION_QUESTION_MAXIMUM_CHARACTERS + 1)
-    )
+    card = ExpectationCardFields(question="Q" * (EXPECTATION_QUESTION_MAXIMUM_CHARACTERS + 1))
 
     with pytest.raises(protocol.ClaimError, match="question must be at most"):
-        board.append_expectation(body, "New question?", "yes", card=card)
+        append_expectation(body, "New question?", "yes", card=card)
 
 
 def test_append_expectation_refuses_an_empty_example() -> None:
     body = agent_claim_body(MINIMAL_BLOCK_TOML)
-    card = board.ExpectationCardFields(example="   ")
+    card = ExpectationCardFields(example="   ")
 
     with pytest.raises(protocol.ClaimError, match="example must be a non-empty string"):
-        board.append_expectation(body, "New question?", "yes", card=card)
+        append_expectation(body, "New question?", "yes", card=card)
 
 
 def test_parse_body_still_refuses_an_unknown_expectation_key() -> None:
@@ -453,11 +480,11 @@ def test_parse_body_still_refuses_an_unknown_expectation_key() -> None:
     `picture`; any other key stays refused by name, unchanged."""
     toml_text = f'{MINIMAL_BLOCK_TOML}[[expectation]]\ntext = "E"\ndefault = "yes"\nnote = "x"\n'
 
-    parsed = board.parse_body(agent_claim_body(toml_text))
+    parsed = parse_body(agent_claim_body(toml_text))
 
-    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert parsed.read_state is BodyReadState.MALFORMED
     assert parsed.contract.defects == (
-        board.ContractDefect("expectation[0].note", "unknown key expectation[0].note"),
+        ContractDefect("expectation[0].note", "unknown key expectation[0].note"),
     )
 
 
@@ -467,11 +494,11 @@ def test_parse_body_refuses_a_non_string_expectation_question() -> None:
     case uses, not a TOML type error."""
     toml_text = f'{MINIMAL_BLOCK_TOML}[[expectation]]\ntext = "E"\ndefault = "yes"\nquestion = 1\n'
 
-    parsed = board.parse_body(agent_claim_body(toml_text))
+    parsed = parse_body(agent_claim_body(toml_text))
 
-    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert parsed.read_state is BodyReadState.MALFORMED
     assert parsed.contract.defects == (
-        board.ContractDefect(
+        ContractDefect(
             "expectation[0].question", "expectation[0].question must be a non-empty string"
         ),
     )
@@ -482,11 +509,11 @@ def test_parse_body_refuses_a_non_string_expectation_picture() -> None:
     is refused before any SVG-shape check runs."""
     toml_text = f'{MINIMAL_BLOCK_TOML}[[expectation]]\ntext = "E"\ndefault = "yes"\npicture = 1\n'
 
-    parsed = board.parse_body(agent_claim_body(toml_text))
+    parsed = parse_body(agent_claim_body(toml_text))
 
-    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert parsed.read_state is BodyReadState.MALFORMED
     assert parsed.contract.defects == (
-        board.ContractDefect("expectation[0].picture", "expectation[0].picture must be a string"),
+        ContractDefect("expectation[0].picture", "expectation[0].picture must be a string"),
     )
 
 
@@ -517,7 +544,7 @@ def test_render_block_round_trips_question_example_and_a_multiline_picture() -> 
         ],
     }
 
-    reparsed = tomllib.loads(board.render_block(data))
+    reparsed = tomllib.loads(render_block(data))
 
     assert reparsed == data
 
@@ -532,15 +559,15 @@ def test_expectation_lines_reports_index_text_ruling_and_ruled_on() -> None:
         '[[expectation]]\ntext = "Settled one"\nruling = "no"\nruled_on = 2026-09-01\n'
     )
 
-    assert board.expectation_lines(body) == (
-        board.ExpectationLine(1, "Open one", None, None, default="later"),
-        board.ExpectationLine(2, "Settled one", "no", date(2026, 9, 1)),
+    assert expectation_lines(body) == (
+        ExpectationLine(1, "Open one", None, None, default="later"),
+        ExpectationLine(2, "Settled one", "no", date(2026, 9, 1)),
     )
 
 
 def test_expectation_lines_reads_question_example_and_picture() -> None:
     body = agent_claim_body(
-        board.render_block(
+        render_block(
             {
                 "version": 1,
                 "now": "N",
@@ -558,8 +585,8 @@ def test_expectation_lines_reads_question_example_and_picture() -> None:
         ).rstrip("\n")
     )
 
-    assert board.expectation_lines(body) == (
-        board.ExpectationLine(
+    assert expectation_lines(body) == (
+        ExpectationLine(
             1,
             "Ship it?",
             None,
@@ -581,30 +608,30 @@ def test_expectation_lines_reads_question_example_and_picture() -> None:
     ids=["no_block", "malformed"],
 )
 def test_expectation_lines_is_empty_for_an_unaddressable_body(body: str) -> None:
-    assert board.expectation_lines(body) == ()
+    assert expectation_lines(body) == ()
 
 
 def test_expectation_line_state_names_open_or_the_ruling_and_date() -> None:
-    open_line = board.ExpectationLine(1, "Open one", None, None)
-    ruled_line = board.ExpectationLine(2, "Settled one", "no", date(2026, 9, 1))
+    open_line = ExpectationLine(1, "Open one", None, None)
+    ruled_line = ExpectationLine(2, "Settled one", "no", date(2026, 9, 1))
 
-    assert board.expectation_line_state(open_line) == "open"
-    assert board.expectation_line_state(ruled_line) == "ruled no 2026-09-01"
+    assert expectation_line_state(open_line) == "open"
+    assert expectation_line_state(ruled_line) == "ruled no 2026-09-01"
 
 
 def test_expectation_line_summary_truncates_long_text() -> None:
-    line = board.ExpectationLine(1, "x" * 150, None, None)
+    line = ExpectationLine(1, "x" * 150, None, None)
 
-    summary = board.expectation_line_summary(line)
+    summary = expectation_line_summary(line)
 
-    assert len(summary) == board.EXPECTATION_LINE_TEXT_MAXIMUM
+    assert len(summary) == EXPECTATION_LINE_TEXT_MAXIMUM
     assert summary.endswith("…")
 
 
 def test_expectation_line_summary_keeps_short_text_unchanged() -> None:
-    line = board.ExpectationLine(1, "Short.", None, None)
+    line = ExpectationLine(1, "Short.", None, None)
 
-    assert board.expectation_line_summary(line) == "Short."
+    assert expectation_line_summary(line) == "Short."
 
 
 def _slice_pull_request_body(epic: int) -> str:
@@ -628,9 +655,9 @@ def test_render_block_round_trips_every_field() -> None:
         '[[slice]]\nindex = 4\ntitle = "Block contract in issue bodies"\n'
         'scope = ["src/agent_coordination/board.py"]\n'
     )
-    located = board.locate_agent_claim_block(agent_claim_body(toml_text))
+    located = locate_agent_claim_block(agent_claim_body(toml_text))
 
-    reparsed = tomllib.loads(board.render_block(located.data))
+    reparsed = tomllib.loads(render_block(located.data))
 
     assert reparsed == located.data
 
@@ -653,7 +680,7 @@ def test_render_block_places_scope_before_expectation_and_slice_tables() -> None
         "scope": ["src/widget.py"],
     }
 
-    rendered = board.render_block(data)
+    rendered = render_block(data)
 
     assert rendered.index("scope =") < rendered.index("[[expectation]]")
     assert rendered.index("scope =") < rendered.index("[[slice]]")
@@ -669,7 +696,7 @@ def test_render_block_renders_scope_sorted() -> None:
         "slice": [{"index": 1, "title": "Row", "scope": ["b.py", "a.py"]}],
     }
 
-    rendered = board.render_block(data)
+    rendered = render_block(data)
 
     assert 'scope = ["docs/plan.md", "src/widget.py"]' in rendered
     assert 'scope = ["a.py", "b.py"]' in rendered
@@ -690,7 +717,7 @@ def test_render_block_refuses_a_duplicate_scope_entry() -> None:
     }
 
     with pytest.raises(protocol.InvalidClaimMarkerError, match="duplicate paths"):
-        board.render_block(data)
+        render_block(data)
 
 
 def test_render_block_re_renders_a_canonical_scope_body_byte_exact() -> None:
@@ -703,17 +730,17 @@ def test_render_block_re_renders_a_canonical_scope_body_byte_exact() -> None:
         scope=["docs/plan.md", "src/widget.py"],
         slice=[{"index": 1, "title": "Row", "scope": ["src/agent_coordination/board.py"]}],
     )
-    located = board.locate_agent_claim_block(body)
+    located = locate_agent_claim_block(body)
     interior = body[located.content_start : located.content_end]
 
-    assert board.render_block(located.data, located.newline) == interior
+    assert render_block(located.data, located.newline) == interior
 
 
 def test_render_block_escapes_quotes_and_backslashes() -> None:
     toml_text = f'{MINIMAL_BLOCK_TOML}[[slice]]\nindex = 1\ntitle = "Quote \\" and back\\\\slash"\n'
-    located = board.locate_agent_claim_block(agent_claim_body(toml_text))
+    located = locate_agent_claim_block(agent_claim_body(toml_text))
 
-    reparsed = tomllib.loads(board.render_block(located.data))
+    reparsed = tomllib.loads(render_block(located.data))
 
     assert reparsed == located.data
 
@@ -725,23 +752,23 @@ def test_replace_agent_claim_block_preserves_crlf_and_surrounding_bytes() -> Non
         'version = 1\r\nnow = "N"\r\nnext = "X"\r\ndone_when = "D"\r\n'
         "```\r\n\r\nProse after.\r\n"
     )
-    located = board.locate_agent_claim_block(body)
+    located = locate_agent_claim_block(body)
     new_data = {**located.data, "now": "Changed"}
 
-    new_body = board.replace_agent_claim_block(body, located, new_data)
+    new_body = replace_agent_claim_block(body, located, new_data)
 
     assert new_body.startswith("Prose before.\r\n\r\n```agent-claim\r\n")
     assert new_body.endswith("```\r\n\r\nProse after.\r\n")
     assert '\nnow = "Changed"\r\n' in new_body
-    assert board.parse_body(new_body).contract.now == "Changed"
+    assert parse_body(new_body).contract.now == "Changed"
 
 
 def test_render_block_emits_an_empty_slice_array_after_removing_the_final_entry() -> None:
     toml_text = f'{MINIMAL_BLOCK_TOML}[[slice]]\nindex = 1\ntitle = "Only slice"\n'
-    located = board.locate_agent_claim_block(agent_claim_body(toml_text))
+    located = locate_agent_claim_block(agent_claim_body(toml_text))
     new_data = {**located.data, "slice": []}
 
-    rendered = board.render_block(new_data)
+    rendered = render_block(new_data)
 
     assert "slice = []" in rendered
     assert tomllib.loads(rendered)["slice"] == []
@@ -755,7 +782,7 @@ def test_uncut_is_empty_when_the_block_carries_no_slice_entry() -> None:
         agent_claim_body(MINIMAL_BLOCK_TOML),
         "2026-08-20T00:00:00Z",
         "2026-08-20T00:00:00Z",
-        kind=board.ItemKind.CONTAINER,
+        kind=ItemKind.CONTAINER,
         children_closed=0,
         children_total=0,
     )
@@ -799,11 +826,11 @@ def test_timestamp_fails_loud_on_a_malformed_github_timestamp(raw_timestamp: str
 
 
 def test_child_skeleton_is_an_incomplete_contract_with_no_defects() -> None:
-    parsed = board.parse_body(board.BLOCK_CHILD_SKELETON)
+    parsed = parse_body(BLOCK_CHILD_SKELETON)
 
-    assert parsed.read_state is board.BodyReadState.VALID
+    assert parsed.read_state is BodyReadState.VALID
     assert parsed.contract_complete is False
-    assert parsed.contract == board.Contract("", "", "", ())
+    assert parsed.contract == Contract("", "", "", ())
 
 
 @pytest.mark.parametrize(
@@ -997,9 +1024,9 @@ def test_a_second_agent_claim_fence_inside_a_documentation_fence_is_not_read() -
         + '\n~~~\n```agent-claim\nversion = 1\nnow = "Example only."\n```\n~~~\n'
     )
 
-    parsed = board.parse_body(body)
+    parsed = parse_body(body)
 
-    assert parsed.read_state is board.BodyReadState.VALID
+    assert parsed.read_state is BodyReadState.VALID
     assert parsed.contract.now == "N"
 
 
@@ -1227,7 +1254,7 @@ def test_board_ranks_a_labelled_critical_item_ahead_of_a_bug_at_equal_score() ->
         "",
         "2026-08-20T00:00:00Z",
         "2026-08-20T00:00:00Z",
-        kind=board.ItemKind.BUG,
+        kind=ItemKind.BUG,
     )
     ci = board.Issue(30, "CI work", ("ci",), "", "2026-08-20T00:00:00Z", "2026-08-20T00:00:00Z")
 
@@ -1250,7 +1277,7 @@ def test_board_ranks_a_bug_last_inside_the_critical_category() -> None:
         "",
         "2026-08-20T00:00:00Z",
         "2026-08-20T00:00:00Z",
-        kind=board.ItemKind.BUG,
+        kind=ItemKind.BUG,
     )
     product = board.Issue(
         2, "Product work", ("product",), "", "2026-08-20T00:00:00Z", "2026-08-20T00:00:00Z"
@@ -1286,7 +1313,7 @@ def test_board_ranks_a_bug_ahead_of_a_higher_scoring_product_item() -> None:
         "",
         "2026-08-20T00:00:00Z",
         "2026-08-20T00:00:00Z",
-        kind=board.ItemKind.BUG,
+        kind=ItemKind.BUG,
     )
     in_flight_pull_request = board.PullRequest(90, "Fixes #2", "", "branch")
 
@@ -1308,7 +1335,7 @@ def test_board_ranks_a_blocker_ahead_of_a_last_open_child() -> None:
         "",
         "2026-08-20T00:00:00Z",
         "2026-08-20T00:00:00Z",
-        kind=board.ItemKind.CONTAINER,
+        kind=ItemKind.CONTAINER,
         children_closed=1,
         children_total=2,
     )
@@ -1353,7 +1380,7 @@ def test_completion_boost_requires_at_least_one_closed_sibling() -> None:
         "",
         "2026-08-20T00:00:00Z",
         "2026-08-20T00:00:00Z",
-        kind=board.ItemKind.CONTAINER,
+        kind=ItemKind.CONTAINER,
         children_closed=0,
         children_total=1,
     )
@@ -1383,7 +1410,7 @@ def test_board_shows_container_progress_and_refuses_it_as_actionable() -> None:
         complete_contract("Cut the next slice."),
         "2026-08-20T00:00:00Z",
         "2026-08-20T00:00:00Z",
-        kind=board.ItemKind.CONTAINER,
+        kind=ItemKind.CONTAINER,
         children_closed=1,
         children_total=2,
     )
@@ -1434,7 +1461,7 @@ def test_board_shows_a_container_child_blocked_by_another_open_issue() -> None:
         "",
         "2026-08-20T00:00:00Z",
         "2026-08-20T00:00:00Z",
-        kind=board.ItemKind.CONTAINER,
+        kind=ItemKind.CONTAINER,
         children_closed=0,
         children_total=1,
     )
@@ -1464,14 +1491,12 @@ def test_board_shows_a_container_child_blocked_by_another_open_issue() -> None:
 @pytest.mark.parametrize(
     ("storage", "blocker_label"),
     [
-        pytest.param(board.Storage.GITHUB, "#9", id="github"),
-        pytest.param(
-            board.Storage.STATE_REF, board.item_label(9, board.Storage.STATE_REF), id="state-ref"
-        ),
+        pytest.param(Storage.GITHUB, "#9", id="github"),
+        pytest.param(Storage.STATE_REF, board.item_label(9, Storage.STATE_REF), id="state-ref"),
     ],
 )
 def test_a_blocked_items_reason_names_the_blocker_by_the_id_under_the_pin(
-    storage: board.Storage, blocker_label: str
+    storage: Storage, blocker_label: str
 ) -> None:
     """`item.actionable_reason` (`_claim_or_completeness_reason`) names an
     open blocker by `open_blocker_label`'s own `storage`-gated id (issue
@@ -1504,7 +1529,7 @@ def test_board_json_splits_a_container_childs_foreign_blocker() -> None:
         agent_claim_body(MINIMAL_BLOCK_TOML),
         "2026-08-20T00:00:00Z",
         "2026-08-20T00:00:00Z",
-        kind=board.ItemKind.CONTAINER,
+        kind=ItemKind.CONTAINER,
         children_closed=0,
         children_total=1,
     )
@@ -1596,7 +1621,7 @@ def test_next_action_never_cuts_a_container_whose_slice_table_is_empty() -> None
         complete_contract("Cut the next slice.", done_when="All slices land."),
         "2026-08-20T00:00:00Z",
         "2026-08-20T00:00:00Z",
-        kind=board.ItemKind.CONTAINER,
+        kind=ItemKind.CONTAINER,
         children_closed=2,
         children_total=2,
     )
@@ -1619,7 +1644,7 @@ def test_next_action_closes_a_container_with_no_open_child_and_no_further_work()
         complete_contract("keiner", done_when="All slices land."),
         "2026-08-20T00:00:00Z",
         "2026-08-20T00:00:00Z",
-        kind=board.ItemKind.CONTAINER,
+        kind=ItemKind.CONTAINER,
         children_closed=3,
         children_total=3,
     )
@@ -1645,7 +1670,7 @@ def test_next_action_cuts_a_container_with_an_uncut_row_and_no_further_next_work
         complete_contract("", slice=slice_entries("Scheibe C")),
         "2026-08-20T00:00:00Z",
         "2026-08-20T00:00:00Z",
-        kind=board.ItemKind.CONTAINER,
+        kind=ItemKind.CONTAINER,
         children_closed=1,
         children_total=1,
     )
@@ -1668,7 +1693,7 @@ def test_container_progress_raises_when_an_open_child_contradicts_a_closed_summa
         "",
         "2026-08-20T00:00:00Z",
         "2026-08-20T00:00:00Z",
-        kind=board.ItemKind.CONTAINER,
+        kind=ItemKind.CONTAINER,
         children_closed=2,
         children_total=2,
     )
@@ -1696,7 +1721,7 @@ def test_container_progress_raises_when_no_open_child_contradicts_an_unclosed_su
         "",
         "2026-08-20T00:00:00Z",
         "2026-08-20T00:00:00Z",
-        kind=board.ItemKind.CONTAINER,
+        kind=ItemKind.CONTAINER,
         children_closed=1,
         children_total=2,
     )
@@ -1715,7 +1740,7 @@ def test_board_json_reports_an_uncut_slice_entry() -> None:
         complete_contract("Cut it.", slice=slice_entries("Undispatched slice")),
         "2026-08-20T00:00:00Z",
         "2026-08-20T00:00:00Z",
-        kind=board.ItemKind.CONTAINER,
+        kind=ItemKind.CONTAINER,
         children_closed=0,
         children_total=0,
     )
@@ -1723,7 +1748,7 @@ def test_board_json_reports_an_uncut_slice_entry() -> None:
         (container,), (), (), (), board.BoardConfig(), now=datetime(2026, 8, 21, tzinfo=UTC)
     )
 
-    assert projected.uncut == (board.UncutSlices(160, (board.SliceRow(1, "Undispatched slice"),)),)
+    assert projected.uncut == (board.UncutSlices(160, (SliceRow(1, "Undispatched slice"),)),)
     payload = board.board_payload(projected)
     assert payload["uncut"] == [
         {"item": 160, "rows": [{"index": 1, "title": "Undispatched slice"}]}
@@ -1754,7 +1779,7 @@ def test_board_json_carries_a_scoped_uncut_slice_row_canonically() -> None:
         ),
         "2026-08-20T00:00:00Z",
         "2026-08-20T00:00:00Z",
-        kind=board.ItemKind.CONTAINER,
+        kind=ItemKind.CONTAINER,
         children_closed=0,
         children_total=0,
     )
@@ -1764,7 +1789,7 @@ def test_board_json_carries_a_scoped_uncut_slice_row_canonically() -> None:
 
     assert projected.uncut == (
         board.UncutSlices(
-            160, (board.SliceRow(1, "Undispatched slice", ("docs/plan.md", "src/widget.py")),)
+            160, (SliceRow(1, "Undispatched slice", ("docs/plan.md", "src/widget.py")),)
         ),
     )
     payload = board.board_payload(projected)
@@ -1795,7 +1820,7 @@ def test_board_json_names_several_uncut_rows_by_index() -> None:
         ),
         "2026-08-20T00:00:00Z",
         "2026-08-20T00:00:00Z",
-        kind=board.ItemKind.CONTAINER,
+        kind=ItemKind.CONTAINER,
         children_closed=0,
         children_total=0,
     )
@@ -1807,9 +1832,9 @@ def test_board_json_names_several_uncut_rows_by_index() -> None:
         board.UncutSlices(
             122,
             (
-                board.SliceRow(5, "Fifth slice"),
-                board.SliceRow(6, "Sixth slice"),
-                board.SliceRow(7, "Seventh slice"),
+                SliceRow(5, "Fifth slice"),
+                SliceRow(6, "Sixth slice"),
+                SliceRow(7, "Seventh slice"),
             ),
         ),
     )
@@ -1834,7 +1859,7 @@ def test_next_action_skips_a_container_that_still_holds_an_open_child() -> None:
         "",
         "2026-08-20T00:00:00Z",
         "2026-08-20T00:00:00Z",
-        kind=board.ItemKind.CONTAINER,
+        kind=ItemKind.CONTAINER,
         children_closed=0,
         children_total=1,
     )
@@ -1946,8 +1971,8 @@ def test_landing_rows_credits_the_earliest_merged_pull_request_regardless_of_lis
         202, "Follow-up fix", "Closes #90.", "branch-b", merged_at="2026-08-15T00:00:00Z"
     )
 
-    listed_late_first = board.landing_rows((), (later, earlier), REPOSITORY, board.Storage.GITHUB)
-    listed_early_first = board.landing_rows((), (earlier, later), REPOSITORY, board.Storage.GITHUB)
+    listed_late_first = board.landing_rows((), (later, earlier), REPOSITORY, Storage.GITHUB)
+    listed_early_first = board.landing_rows((), (earlier, later), REPOSITORY, Storage.GITHUB)
 
     assert listed_late_first == listed_early_first
     (row,) = listed_late_first
@@ -1963,7 +1988,7 @@ def test_landing_rows_orders_equal_timestamp_rows_by_item_number() -> None:
     higher = board.TrunkLandingItem(82, "b" * 40, landed_at)
     lower = board.TrunkLandingItem(81, "a" * 40, landed_at)
 
-    rows = board.landing_rows((higher, lower), (), REPOSITORY, board.Storage.GITHUB)
+    rows = board.landing_rows((higher, lower), (), REPOSITORY, Storage.GITHUB)
 
     assert tuple(row.item for row in rows) == (81, 82)
 
@@ -2145,10 +2170,10 @@ def test_board_configuration_reads_and_validates_canonical_remote(tmp_path: Path
 
 def test_board_configuration_reads_and_validates_storage(tmp_path: Path) -> None:
     config_path = tmp_path / "board.toml"
-    assert board.load_config(config_path).storage is board.Storage.GITHUB
+    assert board.load_config(config_path).storage is Storage.GITHUB
 
     config_path.write_text('storage = "state-ref"\n')
-    assert board.load_config(config_path).storage is board.Storage.STATE_REF
+    assert board.load_config(config_path).storage is Storage.STATE_REF
 
     config_path.write_text('storage = "gitlab"\n')
     with pytest.raises(ClaimError, match="storage must be 'github' or 'state-ref'"):
@@ -2182,7 +2207,7 @@ def test_board_configuration_accepts_every_key_it_defines(tmp_path: Path) -> Non
     )
 
     assert board.load_config(config_path) == board.BoardConfig(
-        ("ux",), "idea", "upstream", board.Storage.STATE_REF
+        ("ux",), "idea", "upstream", Storage.STATE_REF
     )
 
 
@@ -2259,10 +2284,10 @@ def test_load_brief_config_refuses_a_malformed_rules_or_checks_list(
 
 
 def test_parse_body_reads_a_valid_minimal_block() -> None:
-    parsed = board.parse_body(agent_claim_body(MINIMAL_BLOCK_TOML))
+    parsed = parse_body(agent_claim_body(MINIMAL_BLOCK_TOML))
 
-    assert parsed.read_state is board.BodyReadState.VALID
-    assert parsed.contract == board.Contract("N", "X", "D", ())
+    assert parsed.read_state is BodyReadState.VALID
+    assert parsed.contract == Contract("N", "X", "D", ())
     assert parsed.contract_complete is True
     assert parsed.scope is None
 
@@ -2270,9 +2295,9 @@ def test_parse_body_reads_a_valid_minimal_block() -> None:
 def test_parse_body_reads_a_skeleton_block_as_incomplete_but_valid() -> None:
     skeleton = 'version = 1\nnow = ""\nnext = ""\ndone_when = ""\n'
 
-    parsed = board.parse_body(agent_claim_body(skeleton))
+    parsed = parse_body(agent_claim_body(skeleton))
 
-    assert parsed.read_state is board.BodyReadState.VALID
+    assert parsed.read_state is BodyReadState.VALID
     assert parsed.contract_complete is False
     assert parsed.projectionless is True
 
@@ -2293,40 +2318,38 @@ def test_missing_or_empty_sections_never_names_a_dependency_key(
 ) -> None:
     """A body carries no dependency key at all -- dependencies live on the
     forge -- so naming one would refuse every correctly migrated body."""
-    contract = board.parse_body(agent_claim_body(toml_text)).contract
+    contract = parse_body(agent_claim_body(toml_text)).contract
 
-    assert board.missing_or_empty_sections(contract) == missing
+    assert missing_or_empty_sections(contract) == missing
 
 
 def test_parse_body_treats_a_fenceless_body_as_malformed() -> None:
-    parsed = board.parse_body("## Now\nOld prose.\n")
+    parsed = parse_body("## Now\nOld prose.\n")
 
-    assert parsed.read_state is board.BodyReadState.MALFORMED
-    assert parsed.contract.defects == (board.ContractDefect("agent-claim", "no agent-claim block"),)
+    assert parsed.read_state is BodyReadState.MALFORMED
+    assert parsed.contract.defects == (ContractDefect("agent-claim", "no agent-claim block"),)
 
 
 def test_parse_body_refuses_multiple_agent_claim_blocks() -> None:
     body = agent_claim_body(MINIMAL_BLOCK_TOML) + agent_claim_body(MINIMAL_BLOCK_TOML)
 
-    parsed = board.parse_body(body)
+    parsed = parse_body(body)
 
-    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert parsed.read_state is BodyReadState.MALFORMED
     assert parsed.contract.defects[0].field == "agent-claim"
 
 
 def test_parse_body_refuses_an_unclosed_agent_claim_block() -> None:
-    parsed = board.parse_body("```agent-claim\nversion = 1\n")
+    parsed = parse_body("```agent-claim\nversion = 1\n")
 
-    assert parsed.read_state is board.BodyReadState.MALFORMED
-    assert parsed.contract.defects == (
-        board.ContractDefect("agent-claim", "unclosed agent-claim block"),
-    )
+    assert parsed.read_state is BodyReadState.MALFORMED
+    assert parsed.contract.defects == (ContractDefect("agent-claim", "unclosed agent-claim block"),)
 
 
 def test_parse_body_refuses_invalid_toml() -> None:
-    parsed = board.parse_body(agent_claim_body("this is not toml ="))
+    parsed = parse_body(agent_claim_body("this is not toml ="))
 
-    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert parsed.read_state is BodyReadState.MALFORMED
     assert parsed.contract.defects[0].field == "agent-claim"
 
 
@@ -2342,9 +2365,9 @@ def test_parse_body_orders_schema_defects_deterministically() -> None:
         "weird = 1\n"
     )
 
-    parsed = board.parse_body(agent_claim_body(toml_text))
+    parsed = parse_body(agent_claim_body(toml_text))
 
-    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert parsed.read_state is BodyReadState.MALFORMED
     assert [defect.field for defect in parsed.contract.defects] == [
         "version",
         "now",
@@ -2389,9 +2412,9 @@ def test_parse_body_validates_the_expectation_variant_union(
 ) -> None:
     toml_text = f"{MINIMAL_BLOCK_TOML}[[expectation]]\n{entry_toml}"
 
-    parsed = board.parse_body(agent_claim_body(toml_text))
+    parsed = parse_body(agent_claim_body(toml_text))
 
-    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert parsed.read_state is BodyReadState.MALFORMED
     assert parsed.contract.defects[0].field == expected_field
 
 
@@ -2402,37 +2425,37 @@ def test_parse_body_ruling_date_is_the_oldest_across_non_monotonic_expectations(
         '[[expectation]]\ntext = "B"\nruling = "yes"\nruled_on = 2026-08-01\n'
     )
 
-    parsed = board.parse_body(agent_claim_body(toml_text))
+    parsed = parse_body(agent_claim_body(toml_text))
 
-    assert parsed.read_state is board.BodyReadState.VALID
-    assert parsed.expectation_state is board.ExpectationState.RULED
+    assert parsed.read_state is BodyReadState.VALID
+    assert parsed.expectation_state is ExpectationState.RULED
     assert parsed.ruling_date == date(2026, 8, 1)
 
 
 def test_parse_body_refuses_a_frozen_until_that_is_not_a_table() -> None:
     toml_text = f'{MINIMAL_BLOCK_TOML}frozen_until = "not a table"\n'
 
-    parsed = board.parse_body(agent_claim_body(toml_text))
+    parsed = parse_body(agent_claim_body(toml_text))
 
-    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert parsed.read_state is BodyReadState.MALFORMED
     assert parsed.contract.defects[0].field == "frozen_until.trigger"
 
 
 def test_parse_body_refuses_a_non_table_expectation_entry() -> None:
     toml_text = f'{MINIMAL_BLOCK_TOML}expectation = ["oops"]\n'
 
-    parsed = board.parse_body(agent_claim_body(toml_text))
+    parsed = parse_body(agent_claim_body(toml_text))
 
-    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert parsed.read_state is BodyReadState.MALFORMED
     assert parsed.contract.defects[0].field == "expectation[0]"
 
 
 def test_parse_body_refuses_a_non_table_slice_entry() -> None:
     toml_text = f'{MINIMAL_BLOCK_TOML}slice = ["oops"]\n'
 
-    parsed = board.parse_body(agent_claim_body(toml_text))
+    parsed = parse_body(agent_claim_body(toml_text))
 
-    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert parsed.read_state is BodyReadState.MALFORMED
     assert parsed.contract.defects[0].field == "slice[0]"
 
 
@@ -2442,9 +2465,9 @@ def test_parse_body_refuses_a_duplicate_slice_index() -> None:
         '[[slice]]\nindex = 1\ntitle = "Second"\n'
     )
 
-    parsed = board.parse_body(agent_claim_body(toml_text))
+    parsed = parse_body(agent_claim_body(toml_text))
 
-    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert parsed.read_state is BodyReadState.MALFORMED
     assert parsed.contract.defects[0].field == "slice[1].index"
 
 
@@ -2458,9 +2481,9 @@ def test_parse_body_refuses_a_duplicate_slice_index() -> None:
 def test_parse_body_refuses_a_top_level_array_key_that_is_not_a_list(
     key: str, malformed_toml: str
 ) -> None:
-    parsed = board.parse_body(agent_claim_body(f"{MINIMAL_BLOCK_TOML}{malformed_toml}"))
+    parsed = parse_body(agent_claim_body(f"{MINIMAL_BLOCK_TOML}{malformed_toml}"))
 
-    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert parsed.read_state is BodyReadState.MALFORMED
     assert parsed.contract.defects[0].field == key
 
 
@@ -2482,9 +2505,9 @@ def test_parse_body_refuses_an_invalid_top_level_scope(
     other refusal (absolute, `..`, an empty entry) is `protocol.valid_scope`'s
     own sentence, forwarded verbatim -- the one path grammar `claim` already
     owns, never a second one (issue #331)."""
-    parsed = board.parse_body(agent_claim_body(f"{MINIMAL_BLOCK_TOML}{scope_toml}"))
+    parsed = parse_body(agent_claim_body(f"{MINIMAL_BLOCK_TOML}{scope_toml}"))
 
-    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert parsed.read_state is BodyReadState.MALFORMED
     defect = parsed.contract.defects[0]
     assert defect.field == "scope"
     assert expected_message_part in defect.message
@@ -2507,9 +2530,9 @@ def test_parse_body_refuses_an_invalid_slice_scope(
     only prefixed with the row (issue #331)."""
     toml_text = f'{MINIMAL_BLOCK_TOML}[[slice]]\nindex = 1\ntitle = "Row"\n{scope_toml}'
 
-    parsed = board.parse_body(agent_claim_body(toml_text))
+    parsed = parse_body(agent_claim_body(toml_text))
 
-    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert parsed.read_state is BodyReadState.MALFORMED
     defect = parsed.contract.defects[0]
     assert defect.field == "slice[0].scope"
     assert expected_message_part in defect.message
@@ -2520,34 +2543,34 @@ def test_parse_body_reads_a_valid_size(size: str) -> None:
     """Issue #357: `size` is a plain top-level block field -- valid under
     every storage, never nested under `[record]` (a `state-ref`-only table,
     BODY-15), since a GitHub-stored item has no such table at all."""
-    parsed = board.parse_body(agent_claim_body(f'{MINIMAL_BLOCK_TOML}size = "{size}"\n'))
+    parsed = parse_body(agent_claim_body(f'{MINIMAL_BLOCK_TOML}size = "{size}"\n'))
 
-    assert parsed.read_state is board.BodyReadState.VALID
+    assert parsed.read_state is BodyReadState.VALID
     assert parsed.size is metrics.Size(size)
 
 
 def test_parse_body_reads_no_size_as_none() -> None:
-    parsed = board.parse_body(agent_claim_body(MINIMAL_BLOCK_TOML))
+    parsed = parse_body(agent_claim_body(MINIMAL_BLOCK_TOML))
 
-    assert parsed.read_state is board.BodyReadState.VALID
+    assert parsed.read_state is BodyReadState.VALID
     assert parsed.size is None
 
 
 def test_parse_body_refuses_an_invalid_size() -> None:
-    parsed = board.parse_body(agent_claim_body(f'{MINIMAL_BLOCK_TOML}size = "XL"\n'))
+    parsed = parse_body(agent_claim_body(f'{MINIMAL_BLOCK_TOML}size = "XL"\n'))
 
-    assert parsed.read_state is board.BodyReadState.MALFORMED
-    assert parsed.contract.defects[0] == board.ContractDefect("size", "size must be S, M, or L")
+    assert parsed.read_state is BodyReadState.MALFORMED
+    assert parsed.contract.defects[0] == ContractDefect("size", "size must be S, M, or L")
 
 
 def test_parse_body_refuses_a_non_scalar_size_without_crashing() -> None:
     """A list or table `size` value must never reach the `in SIZE_VALUES`
     membership test unchecked (issue #357 G1): a type check ahead of it
     reports the same defect sentence instead of raising `TypeError`."""
-    parsed = board.parse_body(agent_claim_body(f'{MINIMAL_BLOCK_TOML}size = ["M"]\n'))
+    parsed = parse_body(agent_claim_body(f'{MINIMAL_BLOCK_TOML}size = ["M"]\n'))
 
-    assert parsed.read_state is board.BodyReadState.MALFORMED
-    assert parsed.contract.defects[0] == board.ContractDefect("size", "size must be S, M, or L")
+    assert parsed.read_state is BodyReadState.MALFORMED
+    assert parsed.contract.defects[0] == ContractDefect("size", "size must be S, M, or L")
 
 
 def test_render_block_places_size_before_expectation_and_slice_tables() -> None:
@@ -2561,7 +2584,7 @@ def test_render_block_places_size_before_expectation_and_slice_tables() -> None:
         "size": "M",
     }
 
-    rendered = board.render_block(data)
+    rendered = render_block(data)
 
     assert rendered.index("size =") < rendered.index("[[expectation]]")
     assert rendered.index("size =") < rendered.index("[[slice]]")
@@ -2572,38 +2595,34 @@ def test_parse_body_reads_a_valid_whole() -> None:
     """Issue #399: `whole` is a plain top-level block field -- `claim`/
     `start`'s own fallback for `--whole` when the call itself names none."""
     reason = "the four adapters share one lock"
-    parsed = board.parse_body(agent_claim_body(f'{MINIMAL_BLOCK_TOML}whole = "{reason}"\n'))
+    parsed = parse_body(agent_claim_body(f'{MINIMAL_BLOCK_TOML}whole = "{reason}"\n'))
 
-    assert parsed.read_state is board.BodyReadState.VALID
+    assert parsed.read_state is BodyReadState.VALID
     assert parsed.whole == reason
 
 
 def test_parse_body_reads_no_whole_as_none() -> None:
-    parsed = board.parse_body(agent_claim_body(MINIMAL_BLOCK_TOML))
+    parsed = parse_body(agent_claim_body(MINIMAL_BLOCK_TOML))
 
-    assert parsed.read_state is board.BodyReadState.VALID
+    assert parsed.read_state is BodyReadState.VALID
     assert parsed.whole is None
 
 
 def test_parse_body_refuses_a_blank_whole() -> None:
-    parsed = board.parse_body(agent_claim_body(f'{MINIMAL_BLOCK_TOML}whole = "   "\n'))
+    parsed = parse_body(agent_claim_body(f'{MINIMAL_BLOCK_TOML}whole = "   "\n'))
 
-    assert parsed.read_state is board.BodyReadState.MALFORMED
-    assert parsed.contract.defects[0] == board.ContractDefect(
-        "whole", "whole must be a non-empty string"
-    )
+    assert parsed.read_state is BodyReadState.MALFORMED
+    assert parsed.contract.defects[0] == ContractDefect("whole", "whole must be a non-empty string")
 
 
 def test_parse_body_refuses_a_non_string_whole_without_crashing() -> None:
     """A list or table `whole` value must never reach `.strip()` unchecked
     (mirrors issue #357 G1's own `size` guard): a type check ahead of it
     reports the same defect sentence instead of raising `AttributeError`."""
-    parsed = board.parse_body(agent_claim_body(f"{MINIMAL_BLOCK_TOML}whole = [1]\n"))
+    parsed = parse_body(agent_claim_body(f"{MINIMAL_BLOCK_TOML}whole = [1]\n"))
 
-    assert parsed.read_state is board.BodyReadState.MALFORMED
-    assert parsed.contract.defects[0] == board.ContractDefect(
-        "whole", "whole must be a non-empty string"
-    )
+    assert parsed.read_state is BodyReadState.MALFORMED
+    assert parsed.contract.defects[0] == ContractDefect("whole", "whole must be a non-empty string")
 
 
 def test_render_block_places_whole_before_expectation_and_slice_tables() -> None:
@@ -2617,7 +2636,7 @@ def test_render_block_places_whole_before_expectation_and_slice_tables() -> None
         "whole": "one lane owns every adapter",
     }
 
-    rendered = board.render_block(data)
+    rendered = render_block(data)
 
     assert rendered.index("whole =") < rendered.index("[[expectation]]")
     assert rendered.index("whole =") < rendered.index("[[slice]]")
@@ -2633,25 +2652,25 @@ def test_parse_body_refuses_scope_as_an_unknown_expectation_key() -> None:
         f'{MINIMAL_BLOCK_TOML}[[expectation]]\ntext = "E"\ndefault = "later"\nscope = ["src"]\n'
     )
 
-    parsed = board.parse_body(agent_claim_body(toml_text))
+    parsed = parse_body(agent_claim_body(toml_text))
 
-    assert parsed.read_state is board.BodyReadState.MALFORMED
-    assert parsed.contract.defects[0] == board.ContractDefect(
+    assert parsed.read_state is BodyReadState.MALFORMED
+    assert parsed.contract.defects[0] == ContractDefect(
         "expectation[0].scope", "unknown key expectation[0].scope"
     )
 
 
 def test_parse_body_scope_defects_surface_through_the_body_check_rendering_path() -> None:
     """`cli._body_shape_defects` -- what `aco body --check` and `check
-    <item>` both call -- is exactly `board.parse_body` plus
-    `board.body_defect_text` over its defects; proven at that board.py level
+    <item>` both call -- is exactly `parse_body` plus
+    `body_defect_text` over its defects; proven at that board.py level
     so this does not need `cli.py` at all (issue #331)."""
     body = agent_claim_body(f"{MINIMAL_BLOCK_TOML}scope = []\n")
 
-    parsed = board.parse_body(body)
+    parsed = parse_body(body)
 
-    assert parsed.read_state is board.BodyReadState.MALFORMED
-    reported = tuple(board.body_defect_text(defect) for defect in parsed.contract.defects)
+    assert parsed.read_state is BodyReadState.MALFORMED
+    reported = tuple(body_defect_text(defect) for defect in parsed.contract.defects)
     assert reported == ("body malformed: scope: scope must name at least one path",)
 
 
@@ -2661,27 +2680,27 @@ def test_parse_body_handles_a_body_with_no_trailing_newline() -> None:
     newline at all -- an ordinary GitHub body shape, not just a CRLF/LF one."""
     body = agent_claim_body(MINIMAL_BLOCK_TOML).rstrip("\n") + "\nProse with no trailing newline"
 
-    parsed = board.parse_body(body)
+    parsed = parse_body(body)
 
-    assert parsed.read_state is board.BodyReadState.VALID
+    assert parsed.read_state is BodyReadState.VALID
 
 
 def test_locate_agent_claim_block_fails_loud_with_no_recognized_fence() -> None:
     with pytest.raises(ClaimError, match="found no recognized agent-claim fence"):
-        board.locate_agent_claim_block("## Now\nOld prose.\n")
+        locate_agent_claim_block("## Now\nOld prose.\n")
 
 
 def test_locate_agent_claim_block_fails_loud_with_an_unclosed_fence() -> None:
     with pytest.raises(ClaimError, match="found no closed agent-claim fence"):
-        board.locate_agent_claim_block("```agent-claim\nversion = 1\n")
+        locate_agent_claim_block("```agent-claim\nversion = 1\n")
 
 
 def test_parse_body_reads_an_emptied_slice_array_as_nothing_left_to_cut() -> None:
     toml_text = f"{MINIMAL_BLOCK_TOML}slice = []\n"
 
-    parsed = board.parse_body(agent_claim_body(toml_text))
+    parsed = parse_body(agent_claim_body(toml_text))
 
-    assert parsed.read_state is board.BodyReadState.VALID
+    assert parsed.read_state is BodyReadState.VALID
     assert parsed.slices == ()
 
 
@@ -2690,9 +2709,9 @@ def test_parse_body_reads_slice_entries_as_still_uncut() -> None:
         f'{MINIMAL_BLOCK_TOML}[[slice]]\nindex = 4\ntitle = "Block contract in issue bodies"\n'
     )
 
-    parsed = board.parse_body(agent_claim_body(toml_text))
+    parsed = parse_body(agent_claim_body(toml_text))
 
-    assert parsed.slices == (board.SliceRow(4, "Block contract in issue bodies"),)
+    assert parsed.slices == (SliceRow(4, "Block contract in issue bodies"),)
 
 
 def test_parse_body_projects_scope_top_level_and_per_slice_canonically() -> None:
@@ -2709,11 +2728,11 @@ def test_parse_body_projects_scope_top_level_and_per_slice_canonically() -> None
         '[[slice]]\nindex = 1\ntitle = "Row"\nscope = ["b.py", "a.py"]\n'
     )
 
-    parsed = board.parse_body(agent_claim_body(toml_text))
+    parsed = parse_body(agent_claim_body(toml_text))
 
-    assert parsed.read_state is board.BodyReadState.VALID
+    assert parsed.read_state is BodyReadState.VALID
     assert parsed.scope == ("docs/plan.md", "src/widget.py")
-    assert parsed.slices == (board.SliceRow(1, "Row", ("a.py", "b.py")),)
+    assert parsed.slices == (SliceRow(1, "Row", ("a.py", "b.py")),)
 
 
 def test_parse_body_recognizes_a_crlf_fenced_block() -> None:
@@ -2724,17 +2743,17 @@ def test_parse_body_recognizes_a_crlf_fenced_block() -> None:
         "```\r\n\r\nProse after.\r\n"
     )
 
-    parsed = board.parse_body(body)
+    parsed = parse_body(body)
 
-    assert parsed.read_state is board.BodyReadState.VALID
-    assert parsed.contract == board.Contract("N", "X", "D", ())
+    assert parsed.read_state is BodyReadState.VALID
+    assert parsed.contract == Contract("N", "X", "D", ())
 
 
 def test_next_action_skips_a_blockless_childless_container() -> None:
     body = "## Now\nStill going.\n\n## Next\nDo the thing.\n"
     container = replace(
         board_issue(210, "Blockless container", body),
-        kind=board.ItemKind.CONTAINER,
+        kind=ItemKind.CONTAINER,
         children_closed=0,
         children_total=0,
     )
@@ -2756,7 +2775,7 @@ def test_next_action_skips_a_malformed_childless_container() -> None:
     body = agent_claim_body('version = 2\nnow = "N"\nnext = "X"\ndone_when = "D"\n')
     container = replace(
         board_issue(211, "Malformed container", body),
-        kind=board.ItemKind.CONTAINER,
+        kind=ItemKind.CONTAINER,
         children_closed=0,
         children_total=0,
     )
@@ -2781,28 +2800,28 @@ PARENT_ISSUE_REFERENCE = board.IssueReference(REPOSITORY, 79)
     ("kind", "children", "body", "expected"),
     [
         pytest.param(
-            board.ItemKind.TASK,
+            ItemKind.TASK,
             (),
             complete_contract("keiner"),
             None,
             id="a_non_container_parent_is_never_named",
         ),
         pytest.param(
-            board.ItemKind.CONTAINER,
+            ItemKind.CONTAINER,
             (board.ChildItem(80, board.ChildState.OPEN),),
             complete_contract("keiner"),
             None,
             id="an_open_child_keeps_the_parent_un_closable",
         ),
         pytest.param(
-            board.ItemKind.CONTAINER,
+            ItemKind.CONTAINER,
             (board.ChildItem(80, board.ChildState.CLOSED),),
             complete_contract("Cut it.", slice=slice_entries("Scheibe 1")),
             None,
             id="an_uncut_slice_row_keeps_the_parent_un_closable",
         ),
         pytest.param(
-            board.ItemKind.CONTAINER,
+            ItemKind.CONTAINER,
             (board.ChildItem(80, board.ChildState.CLOSED),),
             complete_contract("keiner"),
             79,
@@ -2811,7 +2830,7 @@ PARENT_ISSUE_REFERENCE = board.IssueReference(REPOSITORY, 79)
     ],
 )
 def test_closable_container_number_decides_by_kind_open_children_and_uncut_rows(
-    kind: board.ItemKind,
+    kind: ItemKind,
     children: tuple[board.ChildItem, ...],
     body: str,
     expected: int | None,
@@ -2820,7 +2839,7 @@ def test_closable_container_number_decides_by_kind_open_children_and_uncut_rows(
     this one decision with `next`'s `CloseContainerAction` branch."""
     parent = board.ParentIssue(PARENT_ISSUE_REFERENCE, body, kind)
 
-    assert board.closable_container_number(parent, children, board.Storage.GITHUB) == expected
+    assert board.closable_container_number(parent, children, Storage.GITHUB) == expected
 
 
 def test_a_complete_block_item_is_body_complete_with_no_dependency_projection() -> None:
@@ -3093,7 +3112,7 @@ def test_proposed_expectations_have_neither_fresh_nor_old() -> None:
         (issue,), (), (), (), board.BoardConfig(), now=datetime(2026, 8, 21, tzinfo=UTC)
     )
 
-    assert projected.items[0].expectation_state is board.ExpectationState.PROPOSED
+    assert projected.items[0].expectation_state is ExpectationState.PROPOSED
     assert projected.items[0].ruling_landings is None
     assert projected.items[0].ruling_old is None
 
@@ -3115,7 +3134,7 @@ def test_one_unruled_entry_among_ruled_ones_keeps_the_item_proposed() -> None:
         (issue,), (), (), (), board.BoardConfig(), now=datetime(2026, 8, 21, tzinfo=UTC)
     )
 
-    assert projected.items[0].expectation_state is board.ExpectationState.PROPOSED
+    assert projected.items[0].expectation_state is ExpectationState.PROPOSED
 
 
 def test_expectation_progress_counts_open_and_total_entries() -> None:
@@ -3130,10 +3149,10 @@ def test_expectation_progress_counts_open_and_total_entries() -> None:
         ],
     )
 
-    parsed = board.parse_body(body)
+    parsed = parse_body(body)
 
-    assert parsed.expectation_state is board.ExpectationState.PROPOSED
-    assert parsed.expectation_progress == board.ExpectationProgress(open=2, total=5)
+    assert parsed.expectation_state is ExpectationState.PROPOSED
+    assert parsed.expectation_progress == ExpectationProgress(open=2, total=5)
 
 
 @pytest.mark.parametrize(
@@ -3295,8 +3314,8 @@ def test_a_non_ascii_digit_in_a_hash_reference_is_not_an_issue_number() -> None:
 
 
 def test_body_defect_text_is_the_shared_renderer() -> None:
-    defect = board.ContractDefect("now", "missing")
-    assert board.body_defect_text(defect) == "body malformed: now: missing"
+    defect = ContractDefect("now", "missing")
+    assert body_defect_text(defect) == "body malformed: now: missing"
 
 
 @pytest.mark.parametrize(

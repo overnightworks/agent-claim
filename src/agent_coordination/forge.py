@@ -18,6 +18,7 @@ from enum import StrEnum
 from typing import Protocol
 
 from . import board
+from .body import ItemKind
 from .protocol import ClaimError
 
 
@@ -271,6 +272,6 @@ class ForgeWriter(ForgeReader, Protocol):
 
     def link_child(self, parent: int, child: int) -> None: ...
 
-    def create_child(self, *, parent: int, title: str, body: str, kind: board.ItemKind) -> int: ...
+    def create_child(self, *, parent: int, title: str, body: str, kind: ItemKind) -> int: ...
 
     def update_item_body(self, number: int, body: str) -> None: ...

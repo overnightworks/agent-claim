@@ -66,10 +66,34 @@ layers = [
     "github | state_board",
     "forge",
     "board",
-    "metrics",
     "items",
+    "body",
+    "metrics",
     "protocol | process | hook_input",
 ]
+# `metrics` moved below `body` (issue #419): it has no `agent_coordination`
+# import of its own (`metrics.py`'s own docstring), so nothing above
+# depended on its old position ahead of `items`/`body` -- moving it lets
+# `body` (the body-block codec) reach `metrics.Size` for its own
+# `size`/`[[expectation]]` schema, while `items` may still import `body`,
+# never the reverse.
+
+[[tool.importlinter.contracts]]
+name = "items does not import metrics"
+type = "forbidden"
+# The Layers contract above now places `metrics` below `items` (so `body`,
+# also below `items`, can reach it), which would otherwise let `items`
+# import `metrics` too -- a permission the layer order held before `body`
+# existed and had no reason to grant. This contract keeps that narrower
+# restriction on top of the wider layer order.
+# true checks only the direct edge: items legitimately reaches metrics
+# through the allowed items -> body -> metrics chain, so checking
+# indirectly would flag that permitted chain along with a genuine direct
+# items -> metrics import.
+source_modules = ["agent_coordination.items"]
+forbidden_modules = ["agent_coordination.metrics"]
+allow_indirect_imports = true
+as_packages = false
 
 [[tool.importlinter.contracts]]
 name = "The claim-state store is git transport only"

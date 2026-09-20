@@ -29,6 +29,17 @@ from test_store import _blob, _push_raw_state_tree, _raw_tree
 
 from agent_coordination import board, checkout, forge, items, process, protocol, store
 from agent_coordination import cli as issue_claim
+from agent_coordination.body import (
+    BLOCK_CHILD_SKELETON,
+    BLOCK_CONTAINER_SKELETON,
+    ExpectationLine,
+    ItemKind,
+    Storage,
+    expectation_lines,
+    locate_agent_claim_block,
+    parse_body,
+    render_block,
+)
 from agent_coordination.protocol import ClaimUnavailableError, MalformedStateTreeError
 from agent_coordination.state_board import ItemWriter, StateRefBoard
 
@@ -112,12 +123,12 @@ class _Projection:
 
 
 def _github_body(projection: _Projection) -> str:
-    return f"Prose.\n\n```agent-claim\n{board.render_block(projection.block_data())}```\n"
+    return f"Prose.\n\n```agent-claim\n{render_block(projection.block_data())}```\n"
 
 
 def _state_ref_body(projection: _Projection, record: dict[str, object]) -> str:
     data = {**projection.block_data(), "record": record}
-    return f"Prose.\n\n```agent-claim\n{board.render_block(data)}```\n"
+    return f"Prose.\n\n```agent-claim\n{render_block(data)}```\n"
 
 
 def _record(
@@ -172,7 +183,7 @@ CONTAINER_ISSUE = board.Issue(
     CONTAINER_BODY,
     "2026-09-10T00:00:00Z",
     "2026-09-15T00:00:00Z",
-    board.ItemKind.CONTAINER,
+    ItemKind.CONTAINER,
     children_closed=0,
     children_total=2,
     blocked_by_count=0,
@@ -184,7 +195,7 @@ CHILD_A_ISSUE = board.Issue(
     CHILD_A_BODY,
     "2026-09-10T00:00:00Z",
     "2026-09-15T00:00:00Z",
-    board.ItemKind.TASK,
+    ItemKind.TASK,
     blocked_by_count=0,
 )
 CHILD_B_ISSUE = board.Issue(
@@ -194,7 +205,7 @@ CHILD_B_ISSUE = board.Issue(
     CHILD_B_BODY,
     "2026-09-10T00:00:00Z",
     "2026-09-15T00:00:00Z",
-    board.ItemKind.TASK,
+    ItemKind.TASK,
     blocked_by_count=1,
 )
 GITHUB_ISSUES = (CONTAINER_ISSUE, CHILD_A_ISSUE, CHILD_B_ISSUE)
@@ -248,7 +259,7 @@ def _container_body_with_slices(slice_rows: tuple[tuple[int, str], ...]) -> str:
         "slice": [{"index": index, "title": title} for index, title in slice_rows],
         "record": _record(title="Epic", state="open", kind="container"),
     }
-    return f"Prose.\n\n```agent-claim\n{board.render_block(data)}```\n"
+    return f"Prose.\n\n```agent-claim\n{render_block(data)}```\n"
 
 
 def _item_files_with_container_slices(slice_rows: tuple[tuple[int, str], ...]) -> dict[str, bytes]:
@@ -274,7 +285,7 @@ def _item_files_with_one_scoped_slice(
         "slice": [entry],
         "record": _record(title="Epic", state="open", kind="container"),
     }
-    container_body = f"Prose.\n\n```agent-claim\n{board.render_block(data)}```\n"
+    container_body = f"Prose.\n\n```agent-claim\n{render_block(data)}```\n"
     return {**_item_files(), f"{CONTAINER_ID}.md": container_body.encode()}
 
 
@@ -383,7 +394,7 @@ def _decoded_record(body: str, item_id: str) -> items.ItemRecord:
     """`body`'s `[record]` table, decoded -- the same read `StateRefBoard`
     itself performs, used here to check a write's persisted result straight
     from the state ref, independent of any one adapter instance's view."""
-    parsed = board.parse_body(body, storage=board.Storage.STATE_REF)
+    parsed = parse_body(body, storage=Storage.STATE_REF)
     assert parsed.record is not None
     return items.parse_item_record(item_id, parsed.record)
 
@@ -675,7 +686,7 @@ class TestStateRefBoardAgainstARealStateTree:
         parent = state_ref_board.parent_issue(CHILD_A_NUMBER)
         assert parent is not None
         assert parent.reference == board.IssueReference(REPOSITORY_PATH, CONTAINER_NUMBER)
-        assert parent.kind is board.ItemKind.CONTAINER
+        assert parent.kind is ItemKind.CONTAINER
 
     def test_a_missing_number_is_missing(self, state_ref_board: StateRefBoard) -> None:
         assert state_ref_board.item_reference(999999).state is forge.ItemState.MISSING
@@ -730,7 +741,7 @@ LIVE_CLAIM_OPEN_PULL_REQUEST = board.PullRequest(
 def _projected(
     client: forge.BoardSource,
     *,
-    storage: board.Storage,
+    storage: Storage,
     claims: tuple[protocol.ScopedClaim, ...] = (),
 ) -> board.Board:
     """`projected_board` fed entirely from `client`'s own read methods --
@@ -743,7 +754,7 @@ def _projected(
     children = {
         issue.number: client.list_children(issue.number)
         for issue in issues
-        if issue.kind is board.ItemKind.CONTAINER
+        if issue.kind is ItemKind.CONTAINER
     }
     dependencies = {
         issue.number: client.list_board_dependencies(issue.number)
@@ -768,29 +779,25 @@ def _projected(
 
 
 def _rulings_lines(
-    client: forge.BoardSource, built: board.Board, *, storage: board.Storage
+    client: forge.BoardSource, built: board.Board, *, storage: Storage
 ) -> tuple[str, ...]:
     bodies = {issue.number: issue.body for issue in client.list_open_board_issues()}
     rows = issue_claim._rulings_rows(built, bodies, storage=storage)
     return tuple(issue_claim._rulings_row_text(row, storage) for row in rows)
 
 
-_EXPECTED_BOARD = _projected(_github_fake(), storage=board.Storage.GITHUB)
+_EXPECTED_BOARD = _projected(_github_fake(), storage=Storage.GITHUB)
 EXPECTED_BOARD_PAYLOAD = board.board_payload(_EXPECTED_BOARD)
 EXPECTED_NEXT_ACTION = board.next_action(_EXPECTED_BOARD)
-EXPECTED_RULINGS_LINES = _rulings_lines(
-    _github_fake(), _EXPECTED_BOARD, storage=board.Storage.GITHUB
-)
+EXPECTED_RULINGS_LINES = _rulings_lines(_github_fake(), _EXPECTED_BOARD, storage=Storage.GITHUB)
 # `rulings`' own header line names the item under the pin (issue #292):
 # `aco-xxxxxx` under state-ref, `#n` unchanged under github -- the same
 # shared scenario re-rendered under each storage, so the only sanctioned
 # difference is that one id-shaped prefix, never a second hand-built
 # expectation.
 EXPECTED_RULINGS_LINES_BY_STORAGE = {
-    board.Storage.GITHUB: EXPECTED_RULINGS_LINES,
-    board.Storage.STATE_REF: _rulings_lines(
-        _github_fake(), _EXPECTED_BOARD, storage=board.Storage.STATE_REF
-    ),
+    Storage.GITHUB: EXPECTED_RULINGS_LINES,
+    Storage.STATE_REF: _rulings_lines(_github_fake(), _EXPECTED_BOARD, storage=Storage.STATE_REF),
 }
 # `state-ref` projects the identical scenario, never `_EXPECTED_BOARD` itself
 # `replace`d: `item.actionable_reason` (issue #300 residual 2) is now baked
@@ -802,11 +809,11 @@ EXPECTED_RULINGS_LINES_BY_STORAGE = {
 # id-shaped pins, since this scenario carries no merged pull request at all
 # (issue #371 retired the one line that used to differ).
 EXPECTED_STATE_REF_BOARD_PAYLOAD = board.board_payload(
-    _projected(_github_fake(), storage=board.Storage.STATE_REF)
+    _projected(_github_fake(), storage=Storage.STATE_REF)
 )
 EXPECTED_BOARD_PAYLOAD_BY_STORAGE = {
-    board.Storage.GITHUB: EXPECTED_BOARD_PAYLOAD,
-    board.Storage.STATE_REF: EXPECTED_STATE_REF_BOARD_PAYLOAD,
+    Storage.GITHUB: EXPECTED_BOARD_PAYLOAD,
+    Storage.STATE_REF: EXPECTED_STATE_REF_BOARD_PAYLOAD,
 }
 
 # The same scenario plus `LIVE_CLAIM`, GitHub-side, as the shared expectation
@@ -818,15 +825,15 @@ EXPECTED_BOARD_PAYLOAD_BY_STORAGE = {
 # sanctioned difference stays the id-shaped pins.
 _EXPECTED_BOARD_WITH_LIVE_CLAIM = _projected(
     _github_fake(open_pull_requests=(LIVE_CLAIM_OPEN_PULL_REQUEST,)),
-    storage=board.Storage.GITHUB,
+    storage=Storage.GITHUB,
     claims=(LIVE_CLAIM,),
 )
 EXPECTED_BOARD_WITH_LIVE_CLAIM_PAYLOAD_BY_STORAGE = {
-    board.Storage.GITHUB: board.board_payload(_EXPECTED_BOARD_WITH_LIVE_CLAIM),
-    board.Storage.STATE_REF: board.board_payload(
+    Storage.GITHUB: board.board_payload(_EXPECTED_BOARD_WITH_LIVE_CLAIM),
+    Storage.STATE_REF: board.board_payload(
         _projected(
             _github_fake(open_pull_requests=(LIVE_CLAIM_OPEN_PULL_REQUEST,)),
-            storage=board.Storage.STATE_REF,
+            storage=Storage.STATE_REF,
             claims=(LIVE_CLAIM,),
         )
     ),
@@ -841,7 +848,7 @@ class TestStateRefInFlightWithoutPullRequests:
         blocking 2): its own honest in-flight signal for a live claim is the
         claim itself, never a PR-head match `open_branches` can never carry
         under this storage backend."""
-        built = _projected(state_ref_board, storage=board.Storage.STATE_REF, claims=(LIVE_CLAIM,))
+        built = _projected(state_ref_board, storage=Storage.STATE_REF, claims=(LIVE_CLAIM,))
 
         item = next(item for item in built.items if item.number == CHILD_A_NUMBER)
         assert item.stage is board.Stage.IN_FLIGHT
@@ -858,15 +865,15 @@ class TestTwoAdapterParity:
     @pytest.mark.parametrize(
         ("client_kind", "storage"),
         [
-            pytest.param("github", board.Storage.GITHUB, id="github"),
-            pytest.param("state-ref", board.Storage.STATE_REF, id="state-ref"),
+            pytest.param("github", Storage.GITHUB, id="github"),
+            pytest.param("state-ref", Storage.STATE_REF, id="state-ref"),
         ],
     )
     def test_board_next_and_rulings_match_the_shared_expectation(
         self,
         request: pytest.FixtureRequest,
         client_kind: str,
-        storage: board.Storage,
+        storage: Storage,
     ) -> None:
         client: forge.BoardSource = (
             _github_fake()
@@ -886,15 +893,15 @@ class TestTwoAdapterParity:
     @pytest.mark.parametrize(
         ("client_kind", "storage"),
         [
-            pytest.param("github", board.Storage.GITHUB, id="github"),
-            pytest.param("state-ref", board.Storage.STATE_REF, id="state-ref"),
+            pytest.param("github", Storage.GITHUB, id="github"),
+            pytest.param("state-ref", Storage.STATE_REF, id="state-ref"),
         ],
     )
     def test_a_live_claim_is_in_flight_identically_on_both_adapters(
         self,
         request: pytest.FixtureRequest,
         client_kind: str,
-        storage: board.Storage,
+        storage: Storage,
     ) -> None:
         """`LIVE_CLAIM` on Slice A reaches `Stage.IN_FLIGHT` on both
         adapters (issue #248, Grok final gate blocking 2) -- GitHub from
@@ -971,7 +978,7 @@ class TestStateRefBoardWrites:
         always fills both in (defaulting to `[]`) even when the source
         dict never set them. The one way a test can tell "the key was
         never delivered" apart from "the key was delivered empty"."""
-        projection_block = board.render_block(_CHILD_B_PROJECTION.block_data())
+        projection_block = render_block(_CHILD_B_PROJECTION.block_data())
         record_lines = (
             "\n[record]\n"
             'title = "Renamed B"\n'
@@ -1139,10 +1146,10 @@ class TestStateRefBoardWrites:
         _push_item_tree(bare_remote, worktree, _item_files())
         writer = self._writer(bare_remote, worktree)
         adapter = _fetch_state_ref_board(bare_remote, worktree, writer=writer)
-        body = f"Parent: #{CONTAINER_NUMBER}\n\n{board.BLOCK_CHILD_SKELETON}"
+        body = f"Parent: #{CONTAINER_NUMBER}\n\n{BLOCK_CHILD_SKELETON}"
 
         child_number = adapter.create_child(
-            parent=CONTAINER_NUMBER, title="Slice C", body=body, kind=board.ItemKind.TASK
+            parent=CONTAINER_NUMBER, title="Slice C", body=body, kind=ItemKind.TASK
         )
 
         reference = adapter.item_reference(child_number)
@@ -1245,7 +1252,7 @@ def _first_ruling_date(capsys: pytest.CaptureFixture[str]) -> str:
 
 
 def _filled_body(template: str, *, now: str, next_step: str, done_when: str) -> str:
-    """A fresh `board.BLOCK_CHILD_SKELETON`/`BLOCK_CONTAINER_SKELETON` body
+    """A fresh `BLOCK_CHILD_SKELETON`/`BLOCK_CONTAINER_SKELETON` body
     with its three blank projection keys filled -- the one substitution the
     README's "fill Now/Next/Done when" step performs before
     `body --check`/`item edit`."""
@@ -1479,8 +1486,8 @@ class TestCliStateRefForge:
         state = store.fetch_state(worktree=worktree, remote=remote_url)
         assert state.tip is not None
         stored = store.read_item_files(worktree, state.tip)[f"{CHILD_A_ID}.md"].decode()
-        lines = board.expectation_lines(stored, storage=board.Storage.STATE_REF)
-        assert lines[1] == board.ExpectationLine(
+        lines = expectation_lines(stored, storage=Storage.STATE_REF)
+        assert lines[1] == ExpectationLine(
             2,
             asked_text,
             None,
@@ -1597,7 +1604,7 @@ class TestCliStateRefForge:
         before_container = store.read_item_files(worktree, before_state.tip)[
             f"{CONTAINER_ID}.md"
         ].decode()
-        before_located = board.locate_agent_claim_block(before_container)
+        before_located = locate_agent_claim_block(before_container)
 
         status = issue_claim.main(["cut", str(CONTAINER_NUMBER), "--title", "Slice C"])
 
@@ -1616,7 +1623,7 @@ class TestCliStateRefForge:
         child_record = _decoded_record(item_files_after[f"{child_id}.md"].decode(), child_id)
         assert child_record.parent == CONTAINER_ID
         after_container = item_files_after[f"{CONTAINER_ID}.md"].decode()
-        after_located = board.locate_agent_claim_block(after_container)
+        after_located = locate_agent_claim_block(after_container)
         assert (
             before_container[: before_located.content_start]
             == (after_container[: after_located.content_start])
@@ -1669,7 +1676,7 @@ class TestCliStateRefForge:
         state = store.fetch_state(worktree=worktree, remote=remote_url)
         assert state.tip is not None
         container_body = store.read_item_files(worktree, state.tip)[f"{CONTAINER_ID}.md"].decode()
-        remaining = board.locate_agent_claim_block(container_body).data
+        remaining = locate_agent_claim_block(container_body).data
         assert remaining["slice"] == [{"index": 1, "title": "Slice C"}]
 
     def test_cut_row_refuses_a_missing_row_under_state_ref(
@@ -1715,7 +1722,7 @@ class TestCliStateRefForge:
             for name in item_files_after
             if items.item_number(items.item_id_from_filename(name)) == child_number
         ]
-        data = board.locate_agent_claim_block(item_files_after[f"{child_id}.md"].decode()).data
+        data = locate_agent_claim_block(item_files_after[f"{child_id}.md"].decode()).data
         scope = data.get("scope")
         return None if scope is None else protocol.valid_scope(scope)
 
@@ -1862,7 +1869,7 @@ class TestCliStateRefForge:
                     "record": _record(title="Epic", state="open", kind="container"),
                 }
                 competing_body = (
-                    f"Prose.\n\n```agent-claim\n{board.render_block(competing_data)}```\n"
+                    f"Prose.\n\n```agent-claim\n{render_block(competing_data)}```\n"
                 ).encode()
                 competing_intent = protocol.ItemWriteIntent(
                     item_id=CONTAINER_ID,
@@ -1903,7 +1910,7 @@ class TestCliStateRefForge:
         raced_container = store.read_item_files(worktree, after_first.tip)[
             f"{CONTAINER_ID}.md"
         ].decode()
-        raced_data = board.locate_agent_claim_block(raced_container).data
+        raced_data = locate_agent_claim_block(raced_container).data
         assert raced_data["now"] == "Competing edit landed mid-cut."
         assert raced_data["slice"] == [{"index": 1, "title": "Slice C"}]
 
@@ -1921,7 +1928,7 @@ class TestCliStateRefForge:
         first_item_files = store.read_item_files(worktree, after_first.tip)
         assert len(second_item_files) == len(first_item_files)
         final_container = second_item_files[f"{CONTAINER_ID}.md"].decode()
-        assert board.locate_agent_claim_block(final_container).data["slice"] == []
+        assert locate_agent_claim_block(final_container).data["slice"] == []
 
     def test_cut_adopts_a_child_created_by_item_new_with_the_matching_title(
         self,
@@ -1965,7 +1972,7 @@ class TestCliStateRefForge:
             created_id,
         }
         container_body = item_files_after[f"{CONTAINER_ID}.md"].decode()
-        assert board.locate_agent_claim_block(container_body).data["slice"] == []
+        assert locate_agent_claim_block(container_body).data["slice"] == []
         adopted_body = item_files_after[f"{created_id}.md"].decode()
         adopted_record = _decoded_record(adopted_body, created_id)
         assert adopted_record.parent == CONTAINER_ID
@@ -2192,7 +2199,7 @@ class TestCliStateRefForge:
         state = store.fetch_state(worktree=worktree, remote=remote_url)
         assert state.tip is not None
         stored = store.read_item_files(worktree, state.tip)[f"{printed}.md"].decode()
-        assert board.locate_agent_claim_block(stored).data["scope"] == ["src/a.py", "src/b.py"]
+        assert locate_agent_claim_block(stored).data["scope"] == ["src/a.py", "src/b.py"]
 
     def test_item_new_size_writes_the_top_level_field(
         self,
@@ -2216,7 +2223,7 @@ class TestCliStateRefForge:
         state = store.fetch_state(worktree=worktree, remote=remote_url)
         assert state.tip is not None
         stored = store.read_item_files(worktree, state.tip)[f"{printed}.md"].decode()
-        assert board.locate_agent_claim_block(stored).data["size"] == "M"
+        assert locate_agent_claim_block(stored).data["size"] == "M"
 
     def test_item_new_whole_writes_the_top_level_field(
         self,
@@ -2240,7 +2247,7 @@ class TestCliStateRefForge:
         state = store.fetch_state(worktree=worktree, remote=remote_url)
         assert state.tip is not None
         stored = store.read_item_files(worktree, state.tip)[f"{printed}.md"].decode()
-        assert board.locate_agent_claim_block(stored).data["whole"] == reason
+        assert locate_agent_claim_block(stored).data["whole"] == reason
 
     def test_item_new_size_refuses_an_invalid_value_before_any_write(
         self,
@@ -2619,7 +2626,7 @@ class TestCliStateRefForge:
         fresh = issue_claim.main(["item", "show", str(CHILD_A_NUMBER), "--json"])
         assert fresh == 0
         after_body = json.loads(capsys.readouterr().out)["body"]
-        assert board.locate_agent_claim_block(after_body).data["size"] == "L"
+        assert locate_agent_claim_block(after_body).data["size"] == "L"
         before_record = _decoded_record(before_body, CHILD_A_ID)
         after_record = _decoded_record(after_body, CHILD_A_ID)
         assert replace(after_record, updated_at=before_record.updated_at) == before_record
@@ -2649,7 +2656,7 @@ class TestCliStateRefForge:
         fresh = issue_claim.main(["item", "show", str(CHILD_A_NUMBER), "--json"])
         assert fresh == 0
         after_body = json.loads(capsys.readouterr().out)["body"]
-        assert board.locate_agent_claim_block(after_body).data["whole"] == reason
+        assert locate_agent_claim_block(after_body).data["whole"] == reason
         before_record = _decoded_record(before_body, CHILD_A_ID)
         after_record = _decoded_record(after_body, CHILD_A_ID)
         assert replace(after_record, updated_at=before_record.updated_at) == before_record
@@ -3148,7 +3155,7 @@ class TestCliStateRefForge:
         container_number = items.item_number(container_id)
 
         container_body = _filled_body(
-            board.BLOCK_CONTAINER_SKELETON,
+            BLOCK_CONTAINER_SKELETON,
             now="Land every slice.",
             next_step="Cut the first slice.",
             done_when="Both slices are closed.",
@@ -3167,7 +3174,7 @@ class TestCliStateRefForge:
         child_number = items.item_number(child_id)
 
         child_body = _filled_body(
-            board.BLOCK_CHILD_SKELETON,
+            BLOCK_CHILD_SKELETON,
             now="Build slice one.",
             next_step="Ship slice one.",
             done_when="Slice one is merged.",

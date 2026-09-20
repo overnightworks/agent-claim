@@ -8,7 +8,7 @@ file), routing exactly the two paths the ruled form names, and turning a
 caller-supplied page renderer and rule writer into HTTP responses. It never
 reads or writes board state itself -- `cli.py` stays the one owner of
 "state -> page" (`board_html.render`) and "click -> ruled line"
-(`board.rule_expectation` through the store); this module only carries their
+(`body.rule_expectation` through the store); this module only carries their
 calls over the socket, so it is also the one place in this package allowed
 to touch `http.server` at all.
 """

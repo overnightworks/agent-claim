@@ -57,6 +57,7 @@ from github_fixtures import LANDING_BRANCH, MERGE_COMMIT_SHA, WORK_ITEM_ISSUE
 from agent_coordination import (
     __version__,
     board,
+    body,
     checkout,
     forge,
     github,
@@ -137,8 +138,8 @@ class FakeForge:
     landing_comments: dict[int, str] = field(default_factory=dict)
     issue_references: dict[int, forge.ItemReference] = field(default_factory=dict)
     issue_reference_lookups: list[int] = field(default_factory=list)
-    created_children: list[tuple[int, str, str, board.ItemKind]] = field(default_factory=list)
-    created_issues: list[tuple[str, str, board.ItemKind]] = field(default_factory=list)
+    created_children: list[tuple[int, str, str, body.ItemKind]] = field(default_factory=list)
+    created_issues: list[tuple[str, str, body.ItemKind]] = field(default_factory=list)
     linked_children: list[tuple[int, int]] = field(default_factory=list)
     next_created_child_number: int = 900
     item_bodies: dict[int, str] = field(default_factory=dict)
@@ -168,7 +169,7 @@ class FakeForge:
     def capability(self, operation: forge.ForgeOperation) -> forge.Capability:
         return self.capability_overrides.get(operation, github.GITHUB_CAPABILITIES[operation])
 
-    def _create_issue(self, *, title: str, body: str, kind: board.ItemKind) -> int:
+    def _create_issue(self, *, title: str, body: str, kind: body.ItemKind) -> int:
         """This fake's mirror of `GitHubForge._create_issue`: a fresh issue
         with no recorded parent, immediately visible to
         `list_open_board_issues` -- the orphan shape a failed `link_child`
@@ -198,7 +199,7 @@ class FakeForge:
             board.IssueReference(self.repository.path, parent), ""
         )
 
-    def create_child(self, *, parent: int, title: str, body: str, kind: board.ItemKind) -> int:
+    def create_child(self, *, parent: int, title: str, body: str, kind: body.ItemKind) -> int:
         """This fake's mirror of `GitHubForge.create_child`: composed from
         `create_issue` and `link_child` exactly as the real adapter is
         (#260), so a relation failure leaves the same real orphan behind
@@ -325,13 +326,13 @@ class ReaderOnlyForge(FakeForge):
     independent of the `ForgeReader`/`ForgeWriter` annotations (documentation
     only; nothing type-checks in CI)."""
 
-    def _create_issue(self, *, title: str, body: str, kind: board.ItemKind) -> int:
+    def _create_issue(self, *, title: str, body: str, kind: body.ItemKind) -> int:
         pytest.fail("a read-only command must never create an issue")
 
     def link_child(self, parent: int, child: int) -> None:
         pytest.fail("a read-only command must never link a child")
 
-    def create_child(self, *, parent: int, title: str, body: str, kind: board.ItemKind) -> int:
+    def create_child(self, *, parent: int, title: str, body: str, kind: body.ItemKind) -> int:
         pytest.fail("a read-only command must never create a child")
 
     def update_item_body(self, number: int, body: str) -> None:
@@ -965,13 +966,13 @@ def test_board_skips_the_children_list_for_a_container_with_zero_children(
         board_issue(10, "Plain item", complete_contract("Ship #10.")),
         replace(
             board_issue(20, "Empty container", complete_contract("Ship #20.")),
-            kind=board.ItemKind.CONTAINER,
+            kind=body.ItemKind.CONTAINER,
             children_closed=0,
             children_total=0,
         ),
         replace(
             board_issue(30, "Container with children", complete_contract("Ship #30.")),
-            kind=board.ItemKind.CONTAINER,
+            kind=body.ItemKind.CONTAINER,
             children_closed=1,
             children_total=2,
         ),
@@ -1662,27 +1663,27 @@ PULLED_WITH_REFINING_FIRST = (
     [
         pytest.param(
             (),
-            board.ExpectationState.NONE,
+            body.ExpectationState.NONE,
             "#10 score -10: Work\nNext: Claim #10.\n"
             "Run: aco claim 10 --scope <paths>\n" + _UNKNOWN_SCOPE_NEXT_TAIL,
             id="no_expectation_entry_remains_actionable",
         ),
         pytest.param(
             (proposed_expectation("Name it.", default="yes"),),
-            board.ExpectationState.PROPOSED,
+            body.ExpectationState.PROPOSED,
             PULLED_WITH_REFINING_FIRST,
             id="proposed_expectations_are_pulled_with_refining_first",
         ),
         pytest.param(
             (ruled_expectation("Name it."), ruled_expectation("Remove it.", ruling="no")),
-            board.ExpectationState.RULED,
+            body.ExpectationState.RULED,
             "#10 score -10: Work\nNext: Claim #10.\n"
             "Run: aco claim 10 --scope <paths>\n" + _UNKNOWN_SCOPE_NEXT_TAIL,
             id="fully_ruled_expectations_remain_actionable",
         ),
         pytest.param(
             (ruled_expectation("Name it.", ruling="no"), proposed_expectation("Remove it.")),
-            board.ExpectationState.PROPOSED,
+            body.ExpectationState.PROPOSED,
             PULLED_WITH_REFINING_FIRST,
             id="mixed_expectations_are_pulled_with_refining_first",
         ),
@@ -1693,7 +1694,7 @@ def test_next_reports_expectation_state(
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
     expectations: tuple[dict[str, object], ...],
-    expected_state: board.ExpectationState,
+    expected_state: body.ExpectationState,
     expected_output: str,
 ) -> None:
     issue = board_issue(10, "Work", complete_contract("Claim #10.", expectation=list(expectations)))
@@ -2182,7 +2183,7 @@ def _state_ref_item_body(title: str, *, scope: list[str] | None = None) -> str:
     }
     if scope is not None:
         data["scope"] = scope
-    return f"Prose.\n\n```agent-claim\n{board.render_block(data)}```\n"
+    return f"Prose.\n\n```agent-claim\n{body.render_block(data)}```\n"
 
 
 def _real_state_ref_start_scenario(
@@ -3119,7 +3120,7 @@ def test_claim_refuses_a_container(
         "",
         "2026-08-20T00:00:00Z",
         "2026-08-20T00:00:00Z",
-        kind=board.ItemKind.CONTAINER,
+        kind=body.ItemKind.CONTAINER,
         children_closed=0,
         children_total=0,
     )
@@ -3154,10 +3155,10 @@ def test_claim_refuses_a_freshly_cut_childs_incomplete_skeleton(
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
 ) -> None:
-    """`cut`'s fresh child (`board.BLOCK_CHILD_SKELETON`) is defect-free but
+    """`cut`'s fresh child (`body.BLOCK_CHILD_SKELETON`) is defect-free but
     incomplete -- invisible to `next`, and now refused here too, exactly as
     ruled: `claim` requires a complete projection."""
-    child = board_issue(101, "Scheibe 1", board.BLOCK_CHILD_SKELETON)
+    child = board_issue(101, "Scheibe 1", body.BLOCK_CHILD_SKELETON)
     _configured_board_client(monkeypatch, tmp_path, open_issues=(child,))
     monkeypatch.setattr(
         issue_claim,
@@ -3239,7 +3240,7 @@ def _cut_container_issue(toml_text: str) -> board.Issue:
         agent_claim_body(toml_text),
         "2026-08-20T00:00:00Z",
         "2026-08-20T00:00:00Z",
-        kind=board.ItemKind.CONTAINER,
+        kind=body.ItemKind.CONTAINER,
         children_closed=0,
         children_total=0,
     )
@@ -3281,7 +3282,7 @@ def test_cut_refuses_a_container_that_already_has_a_parent(
 ) -> None:
     client = _configured_board_client(monkeypatch, tmp_path, open_issues=(_one_slice_container(),))
     client.parents[CUT_CONTAINER] = board.ParentIssue(
-        board.IssueReference(REPOSITORY, 1), "", board.ItemKind.CONTAINER
+        board.IssueReference(REPOSITORY, 1), "", body.ItemKind.CONTAINER
     )
 
     exit_code = issue_claim.main(
@@ -3345,7 +3346,7 @@ def test_cut_names_the_created_child_when_the_relation_post_fails(
             CUT_CONTAINER,
             "Scheibe 1",
             issue_claim._cut_child_body(CUT_CONTAINER),
-            board.ItemKind.TASK,
+            body.ItemKind.TASK,
         )
     ]
     assert client.item_bodies == {}
@@ -3418,10 +3419,10 @@ def test_cut_creates_a_child_and_removes_the_first_cuttable_slice(
             CUT_CONTAINER,
             "Scheibe 1",
             issue_claim._cut_child_body(CUT_CONTAINER, created_scope),
-            board.ItemKind.TASK,
+            body.ItemKind.TASK,
         )
     ]
-    new_data = board.locate_agent_claim_block(client.item_bodies[CUT_CONTAINER]).data
+    new_data = body.locate_agent_claim_block(client.item_bodies[CUT_CONTAINER]).data
     assert new_data["slice"] == remaining_slice
     assert capsys.readouterr().out == f"CUT #{CUT_CONTAINER} row 1 -> #{child}\n"
 
@@ -3459,7 +3460,7 @@ def test_cut_selects_a_row_by_number_and_removes_only_that_entry(
         "row": 2,
         "child": child,
     }
-    remaining = board.locate_agent_claim_block(client.item_bodies[CUT_CONTAINER]).data
+    remaining = body.locate_agent_claim_block(client.item_bodies[CUT_CONTAINER]).data
     assert remaining["slice"] == [{"index": 1, "title": "Scheibe 1"}]
 
 
@@ -3584,7 +3585,7 @@ def test_cut_refuses_a_blockless_container_before_any_write(
         "## Now\nOld prose.\n",
         "2026-08-20T00:00:00Z",
         "2026-08-20T00:00:00Z",
-        kind=board.ItemKind.CONTAINER,
+        kind=body.ItemKind.CONTAINER,
         children_closed=0,
         children_total=0,
     )
@@ -3639,7 +3640,7 @@ def test_cut_names_the_created_child_when_linking_fails(
             CUT_CONTAINER,
             "Scheibe 1",
             issue_claim._cut_child_body(CUT_CONTAINER),
-            board.ItemKind.TASK,
+            body.ItemKind.TASK,
         )
     ]
     err = capsys.readouterr().err
@@ -3670,7 +3671,7 @@ def _forge_with_existing_child(
     if child_state is board.ChildState.OPEN:
         open_issues = (
             *open_issues,
-            board_issue(child_number, child_title, child_body, kind=board.ItemKind.TASK),
+            board_issue(child_number, child_title, child_body, kind=body.ItemKind.TASK),
         )
     client = _configured_board_client(monkeypatch, tmp_path, open_issues=open_issues)
     _write_block_pin(tmp_path)
@@ -3712,7 +3713,7 @@ def test_cut_adopts_an_existing_open_child_instead_of_creating_one(
         "child": 950,
         "adopted": True,
     }
-    remaining = board.locate_agent_claim_block(client.item_bodies[CUT_CONTAINER]).data
+    remaining = body.locate_agent_claim_block(client.item_bodies[CUT_CONTAINER]).data
     assert remaining["slice"] == []
 
 
@@ -3750,7 +3751,7 @@ def test_cut_refuses_to_adopt_when_two_open_issues_match_the_row_title(
         951,
         "Scheibe 1",
         issue_claim._cut_child_body(CUT_CONTAINER),
-        kind=board.ItemKind.TASK,
+        kind=body.ItemKind.TASK,
     )
     monkeypatch.setattr(client, "list_open_board_issues", lambda: (_one_slice_container(), orphan))
 
@@ -3776,7 +3777,7 @@ def test_cut_refuses_to_adopt_when_two_open_issues_match_the_row_title(
                 951,
                 "Scheibe 1",
                 "Just an idea, someone should look into this.",
-                kind=board.ItemKind.TASK,
+                kind=body.ItemKind.TASK,
             ),
             None,
             id="human_filed_issue_with_a_free_text_body",
@@ -3787,7 +3788,7 @@ def test_cut_refuses_to_adopt_when_two_open_issues_match_the_row_title(
                 "Scheibe 1",
                 issue_claim._cut_child_body(CUT_CONTAINER),
                 labels=("idea",),
-                kind=board.ItemKind.TASK,
+                kind=body.ItemKind.TASK,
             ),
             "idea",
             id="idea_labelled_issue",
@@ -3797,15 +3798,13 @@ def test_cut_refuses_to_adopt_when_two_open_issues_match_the_row_title(
                 CUT_CONTAINER,
                 "Scheibe 1",
                 issue_claim._cut_child_body(CUT_CONTAINER),
-                kind=board.ItemKind.TASK,
+                kind=body.ItemKind.TASK,
             ),
             None,
             id="the_container_itself",
         ),
         pytest.param(
-            board_issue(
-                951, "Scheibe 1", issue_claim._cut_child_body(80), kind=board.ItemKind.TASK
-            ),
+            board_issue(951, "Scheibe 1", issue_claim._cut_child_body(80), kind=body.ItemKind.TASK),
             None,
             id="orphan_names_a_different_container_as_parent",
         ),
@@ -3843,7 +3842,7 @@ def test_cut_never_adopts_an_orphan_that_is_not_this_containers_recovery_shape(
             CUT_CONTAINER,
             "Scheibe 1",
             issue_claim._cut_child_body(CUT_CONTAINER),
-            board.ItemKind.TASK,
+            body.ItemKind.TASK,
         )
     ]
     assert capsys.readouterr().out == f"CUT #{CUT_CONTAINER} row 1 -> #{child}\n"
@@ -3878,7 +3877,7 @@ def test_cut_adopts_the_orphan_after_a_relation_partial_failure(
     assert first_exit_code == 2
     child = client.next_created_child_number - 1
     expected_body = issue_claim._cut_child_body(CUT_CONTAINER)
-    assert client.created_issues == [("Scheibe 1", expected_body, board.ItemKind.TASK)]
+    assert client.created_issues == [("Scheibe 1", expected_body, body.ItemKind.TASK)]
     assert client.linked_children == [(CUT_CONTAINER, child)]
     capsys.readouterr()
     client.fail_create_child_relation = False
@@ -3894,9 +3893,9 @@ def test_cut_adopts_the_orphan_after_a_relation_partial_failure(
     )
 
     assert second_exit_code == 0
-    assert client.created_issues == [("Scheibe 1", expected_body, board.ItemKind.TASK)]
+    assert client.created_issues == [("Scheibe 1", expected_body, body.ItemKind.TASK)]
     assert client.linked_children == [(CUT_CONTAINER, child), (CUT_CONTAINER, child)]
-    remaining = board.locate_agent_claim_block(client.item_bodies[CUT_CONTAINER]).data
+    remaining = body.locate_agent_claim_block(client.item_bodies[CUT_CONTAINER]).data
     assert remaining["slice"] == []
     assert capsys.readouterr().out == f"ADOPTED #{CUT_CONTAINER} row 1 -> #{child}\n"
 
@@ -3942,9 +3941,9 @@ def test_rule_writes_a_ruling_and_reports_remaining_open_lines(
 
     assert exit_code == 0
     assert capsys.readouterr().out == f"RULED #{RULE_ITEM} line 1 {ruling}; 1 line(s) still open\n"
-    lines = board.expectation_lines(client.item_bodies[RULE_ITEM])
-    assert lines[0] == board.ExpectationLine(1, "Ship it?", ruling, RULE_TODAY)
-    assert lines[1] == board.ExpectationLine(2, "Ship it too?", None, None, default="later")
+    lines = body.expectation_lines(client.item_bodies[RULE_ITEM])
+    assert lines[0] == body.ExpectationLine(1, "Ship it?", ruling, RULE_TODAY)
+    assert lines[1] == body.ExpectationLine(2, "Ship it too?", None, None, default="later")
 
 
 def test_rule_json_reports_item_index_ruling_date_and_open(
@@ -3993,7 +3992,7 @@ def test_rule_appends_a_note_to_the_ruled_line_via_cli(
     )
 
     assert exit_code == 0
-    lines = board.expectation_lines(client.item_bodies[RULE_ITEM])
+    lines = body.expectation_lines(client.item_bodies[RULE_ITEM])
     assert lines[0].text == "Ship it? Anmerkung: Ja, sofort."
 
 
@@ -4358,7 +4357,7 @@ def test_ask_writes_question_example_and_picture(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
     """Issue #295: `--question`/`--example`/`--picture FILE.svg` land on the
-    appended line -- the same `board.expectation_lines` projection `rulings`
+    appended line -- the same `body.expectation_lines` projection `rulings`
     reads. The human `ASKED` line stays exactly what it was before."""
     client = _client_with_item(
         monkeypatch, tmp_path, RULE_ITEM, agent_claim_body(MINIMAL_BLOCK_TOML)
@@ -4385,8 +4384,8 @@ def test_ask_writes_question_example_and_picture(
 
     assert exit_code == 0
     assert capsys.readouterr().out == f"ASKED #{RULE_ITEM} line 1: New question?\n"
-    assert board.expectation_lines(client.item_bodies[RULE_ITEM]) == (
-        board.ExpectationLine(
+    assert body.expectation_lines(client.item_bodies[RULE_ITEM]) == (
+        body.ExpectationLine(
             1,
             "New question?",
             None,
@@ -4603,9 +4602,9 @@ def test_next_prints_a_cut_command_block_mode_accepts_a_differing_next_line(
 
     assert cut_exit_code == 0
     child = client.next_created_child_number - 1
-    remaining_slice_entries = board.locate_agent_claim_block(
-        client.item_bodies[CUT_CONTAINER]
-    ).data["slice"]
+    remaining_slice_entries = body.locate_agent_claim_block(client.item_bodies[CUT_CONTAINER]).data[
+        "slice"
+    ]
     assert remaining_slice_entries == []
     assert capsys.readouterr().out == f"CUT #{CUT_CONTAINER} row 1 -> #{child}\n"
 
@@ -4860,7 +4859,7 @@ def test_next_names_a_cuttable_container_slice(
         ),
         "2026-08-20T00:00:00Z",
         "2026-08-20T00:00:00Z",
-        kind=board.ItemKind.CONTAINER,
+        kind=body.ItemKind.CONTAINER,
         children_closed=1,
         children_total=1,
     )
@@ -4952,7 +4951,7 @@ def test_next_prints_a_cut_command_that_cut_accepts(
         case.body,
         "2026-08-20T00:00:00Z",
         "2026-08-20T00:00:00Z",
-        kind=board.ItemKind.CONTAINER,
+        kind=body.ItemKind.CONTAINER,
         children_closed=1,
         children_total=1,
     )
@@ -4972,7 +4971,7 @@ def test_next_prints_a_cut_command_that_cut_accepts(
             case.container_number,
             case.expected_created_title,
             issue_claim._cut_child_body(case.container_number),
-            board.ItemKind.TASK,
+            body.ItemKind.TASK,
         )
     ]
     assert client.item_bodies == case.expected_item_bodies(child)
@@ -4999,7 +4998,7 @@ def test_next_prints_a_cut_command_that_cut_accepts_for_every_qualifying_contain
         complete_contract(_DIFFERING_NEXT_LINE, slice=slice_entries("Scheibe I-top")),
         "2026-08-20T00:00:00Z",
         "2026-08-20T00:00:00Z",
-        kind=board.ItemKind.CONTAINER,
+        kind=body.ItemKind.CONTAINER,
         children_closed=1,
         children_total=1,
     )
@@ -5010,7 +5009,7 @@ def test_next_prints_a_cut_command_that_cut_accepts_for_every_qualifying_contain
         complete_contract(_DIFFERING_NEXT_LINE, slice=slice_entries("Scheibe I")),
         "2026-08-20T00:00:00Z",
         "2026-08-20T00:00:00Z",
-        kind=board.ItemKind.CONTAINER,
+        kind=body.ItemKind.CONTAINER,
         children_closed=1,
         children_total=1,
     )
@@ -5025,7 +5024,7 @@ def test_next_prints_a_cut_command_that_cut_accepts_for_every_qualifying_contain
     assert top_action.container.number == 130
 
     for item in projected.items:
-        if item.kind is not board.ItemKind.CONTAINER:
+        if item.kind is not body.ItemKind.CONTAINER:
             continue
         isolated = projected_board(
             (containers_by_number[item.number],),
@@ -5038,7 +5037,7 @@ def test_next_prints_a_cut_command_that_cut_accepts_for_every_qualifying_contain
         action = board.next_action(isolated)
         assert isinstance(action, board.CutSliceAction)
 
-        command_line = issue_claim._next_action_lines(action, board.Storage.GITHUB)[1]
+        command_line = issue_claim._next_action_lines(action, body.Storage.GITHUB)[1]
         cut_arguments = shlex.split(command_line.removeprefix("Next: aco "))
         client = _configured_board_client(
             monkeypatch, tmp_path, open_issues=(containers_by_number[item.number],)
@@ -5060,7 +5059,7 @@ def test_next_json_names_a_cuttable_container_slice(
         complete_contract("Scheibe C", slice=slice_entries("Scheibe C")),
         "2026-08-20T00:00:00Z",
         "2026-08-20T00:00:00Z",
-        kind=board.ItemKind.CONTAINER,
+        kind=body.ItemKind.CONTAINER,
         children_closed=2,
         children_total=2,
     )
@@ -5088,7 +5087,7 @@ def test_next_names_a_closeable_container(
         complete_contract("keiner"),
         "2026-08-20T00:00:00Z",
         "2026-08-20T00:00:00Z",
-        kind=board.ItemKind.CONTAINER,
+        kind=body.ItemKind.CONTAINER,
         children_closed=3,
         children_total=3,
     )
@@ -5113,7 +5112,7 @@ def test_next_json_names_a_closeable_container(
         complete_contract("keiner"),
         "2026-08-20T00:00:00Z",
         "2026-08-20T00:00:00Z",
-        kind=board.ItemKind.CONTAINER,
+        kind=body.ItemKind.CONTAINER,
         children_closed=4,
         children_total=4,
     )
@@ -5147,7 +5146,7 @@ def test_next_names_a_container_with_no_slice_row_by_its_own_next_line(
         complete_contract("Schließen, sobald die letzte Bedingung erfüllt ist."),
         "2026-08-20T00:00:00Z",
         "2026-08-20T00:00:00Z",
-        kind=board.ItemKind.CONTAINER,
+        kind=body.ItemKind.CONTAINER,
         children_closed=2,
         children_total=2,
     )
@@ -5177,7 +5176,7 @@ def test_next_json_names_a_container_with_no_slice_row_by_its_own_next_line(
         complete_contract("Schließen, sobald die letzte Bedingung erfüllt ist."),
         "2026-08-20T00:00:00Z",
         "2026-08-20T00:00:00Z",
-        kind=board.ItemKind.CONTAINER,
+        kind=body.ItemKind.CONTAINER,
         children_closed=2,
         children_total=2,
     )
@@ -5248,7 +5247,7 @@ def test_next_parallel_set_uses_a_cut_proposals_own_row_scope(
         ),
         "2026-08-20T00:00:00Z",
         "2026-08-20T00:00:00Z",
-        kind=board.ItemKind.CONTAINER,
+        kind=body.ItemKind.CONTAINER,
         children_closed=0,
         children_total=0,
     )
@@ -5261,7 +5260,7 @@ def test_next_parallel_set_uses_a_cut_proposals_own_row_scope(
         ),
         "2026-08-20T00:00:00Z",
         "2026-08-20T00:00:00Z",
-        kind=board.ItemKind.CONTAINER,
+        kind=body.ItemKind.CONTAINER,
         children_closed=0,
         children_total=0,
     )
@@ -5274,7 +5273,7 @@ def test_next_parallel_set_uses_a_cut_proposals_own_row_scope(
         ),
         "2026-08-20T00:00:00Z",
         "2026-08-20T00:00:00Z",
-        kind=board.ItemKind.CONTAINER,
+        kind=body.ItemKind.CONTAINER,
         children_closed=0,
         children_total=0,
     )
@@ -5319,7 +5318,7 @@ def test_next_close_names_every_zero_cost_action_regardless_of_rank(
         complete_contract("keiner"),
         "2026-08-20T00:00:00Z",
         "2026-08-20T00:00:00Z",
-        kind=board.ItemKind.CONTAINER,
+        kind=body.ItemKind.CONTAINER,
         children_closed=2,
         children_total=2,
     )
@@ -5438,7 +5437,7 @@ def test_board_fetches_children_only_for_container_kinded_issues(
         "",
         "2026-08-20T00:00:00Z",
         "2026-08-20T00:00:00Z",
-        kind=board.ItemKind.CONTAINER,
+        kind=body.ItemKind.CONTAINER,
         children_closed=0,
         children_total=1,
     )
@@ -5468,16 +5467,16 @@ def test_the_body_fence_and_config_path_keep_their_agent_claim_names() -> None:
     state that is already written -- so they are protocol, not product name,
     and this test is what says so out loud.
     """
-    assert board.AGENT_CLAIM_FENCE_INFO == "agent-claim"
-    assert board.BLOCK_CHILD_SKELETON.startswith(f"```{board.AGENT_CLAIM_FENCE_INFO}\n")
+    assert body.AGENT_CLAIM_FENCE_INFO == "agent-claim"
+    assert body.BLOCK_CHILD_SKELETON.startswith(f"```{body.AGENT_CLAIM_FENCE_INFO}\n")
     assert board.CONFIG_PATH.as_posix() == ".agent-claim/board.toml"
 
 
 def test_body_contract_checks_names_a_blockless_container_by_its_no_block_defect() -> None:
-    body = "## Now\nOld prose.\n\n## Next\nDo the thing.\n"
+    raw_body = "## Now\nOld prose.\n\n## Next\nDo the thing.\n"
     blockless = replace(
-        board_issue(201, "Blockless container", body),
-        kind=board.ItemKind.CONTAINER,
+        board_issue(201, "Blockless container", raw_body),
+        kind=body.ItemKind.CONTAINER,
         children_closed=0,
         children_total=0,
     )
@@ -5593,7 +5592,7 @@ def test_blocked_check_reports_a_foreign_dependency_and_the_out_of_order_warning
     )
     item = next(item for item in projected.items if item.number == 304)
 
-    error_check = issue_claim._blocked_check(item, None, REPOSITORY, board.Storage.GITHUB)
+    error_check = issue_claim._blocked_check(item, None, REPOSITORY, body.Storage.GITHUB)
     assert error_check == issue_claim.SliceCheck(
         "error",
         "blocked",
@@ -5601,7 +5600,7 @@ def test_blocked_check_reports_a_foreign_dependency_and_the_out_of_order_warning
         "pass --out-of-order REASON to claim it anyway",
         issue=304,
     )
-    warning_check = issue_claim._blocked_check(item, "reason", REPOSITORY, board.Storage.GITHUB)
+    warning_check = issue_claim._blocked_check(item, "reason", REPOSITORY, body.Storage.GITHUB)
     assert warning_check is not None
     assert warning_check.level == "warning"
 
@@ -5624,10 +5623,10 @@ def test_blocked_check_labels_a_local_dependency_under_the_state_ref_pin() -> No
     )
     item = next(item for item in projected.items if item.number == 304)
 
-    check = issue_claim._blocked_check(item, None, REPOSITORY, board.Storage.STATE_REF)
+    check = issue_claim._blocked_check(item, None, REPOSITORY, body.Storage.STATE_REF)
 
     assert check is not None
-    assert board.item_label(9, board.Storage.STATE_REF) in check.text
+    assert board.item_label(9, body.Storage.STATE_REF) in check.text
     assert "#9" not in check.text
 
 
@@ -5879,9 +5878,9 @@ def test_status_scope_index_never_rescans_scope_pairs(
 
     monkeypatch.setattr(protocol, "claims_conflict", scope_pair_scan)
 
-    assert _status(claims, None, ages, board.Storage.GITHUB) == 0
+    assert _status(claims, None, ages, body.Storage.GITHUB) == 0
     assert capsys.readouterr().out.count("CLAIMED") == 50
-    assert _status(claims, 100, ages, board.Storage.GITHUB) == 0
+    assert _status(claims, 100, ages, body.Storage.GITHUB) == 0
     assert capsys.readouterr().out.count("CLAIMED") == 1
 
 
@@ -5893,7 +5892,7 @@ def test_status_reports_repository_scope_overlaps_as_notes(
     opened_at = datetime(2026, 8, 21, tzinfo=UTC)
     ages: dict[str, datetime] = {first.claim_id: opened_at, second.claim_id: opened_at}
 
-    exit_code = _status((first, second), None, ages, board.Storage.GITHUB)
+    exit_code = _status((first, second), None, ages, body.Storage.GITHUB)
 
     assert exit_code == 0
     rendered = capsys.readouterr().out
@@ -5901,7 +5900,7 @@ def test_status_reports_repository_scope_overlaps_as_notes(
     assert "CONFLICT" not in rendered
     assert "overlaps issue #73 (claim-b)" in rendered
     assert "overlaps issue #72 (cli-claim)" in rendered
-    assert _status((first, second), 72, ages, board.Storage.GITHUB) == 0
+    assert _status((first, second), 72, ages, body.Storage.GITHUB) == 0
     issue_rendered = capsys.readouterr().out
     assert issue_rendered.count("CLAIMED") == 2
     assert "overlaps issue #73 (claim-b)" in issue_rendered
@@ -5915,7 +5914,7 @@ def test_status_notes_a_scope_that_is_claimed_after_its_descendant(
     opened_at = datetime(2026, 8, 21, tzinfo=UTC)
     ages: dict[str, datetime] = {descendant.claim_id: opened_at, parent.claim_id: opened_at}
 
-    assert _status((descendant, parent), None, ages, board.Storage.GITHUB) == 0
+    assert _status((descendant, parent), None, ages, body.Storage.GITHUB) == 0
     rendered = capsys.readouterr().out
     assert rendered.count("CLAIMED") == 2
     assert "CONFLICT" not in rendered
@@ -6129,7 +6128,7 @@ def _landing_item_body(title: str) -> str:
             "updated_at": "2026-09-10T00:00:00Z",
         },
     }
-    return f"Prose.\n\n```agent-claim\n{board.render_block(data)}```\n"
+    return f"Prose.\n\n```agent-claim\n{body.render_block(data)}```\n"
 
 
 def _landing_item_oid(number: int) -> protocol.ObjectId:
@@ -6453,8 +6452,8 @@ def test_release_merged_under_state_ref_commits_once_then_refuses_a_replay_as_cl
     paths_after = _state_ref_paths(repo, tip_after)
     assert "claims/issue-10.toml" not in paths_after
     assert f"items/{item_id}.md" in paths_after
-    closed_body = board.parse_body(
-        _state_ref_blob(repo, tip_after, f"items/{item_id}.md"), storage=board.Storage.STATE_REF
+    closed_body = body.parse_body(
+        _state_ref_blob(repo, tip_after, f"items/{item_id}.md"), storage=body.Storage.STATE_REF
     )
     assert closed_body.record is not None
     closed_record = items.parse_item_record(item_id, closed_body.record)
@@ -8042,7 +8041,7 @@ def test_cli_rescope_requires_a_non_empty_current_branch(
 def test_status_direct_empty_claims_prints_unclaimed_repository_without_ledger(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    assert _status((), None, {}, board.Storage.GITHUB) == 0
+    assert _status((), None, {}, body.Storage.GITHUB) == 0
     assert capsys.readouterr().out == "UNCLAIMED repository\n"
 
 
@@ -11259,7 +11258,7 @@ def test_identity_conflict_still_marks_status_conflict(
     opened_at = datetime(2026, 8, 21, tzinfo=UTC)
     ages: dict[str, datetime] = {first.claim_id: opened_at, second.claim_id: opened_at}
 
-    assert _status((first, second), None, ages, board.Storage.GITHUB) == 2
+    assert _status((first, second), None, ages, body.Storage.GITHUB) == 2
     rendered = capsys.readouterr().out
     assert rendered.count("CONFLICT") == 2
 
@@ -11857,7 +11856,7 @@ def _released_last_child_client(
     client.parents[WORK_ITEM_ISSUE] = board.ParentIssue(
         board.IssueReference(REPOSITORY, PARENT_OF_WORK_ITEM),
         complete_contract("keiner"),
-        board.ItemKind.CONTAINER,
+        body.ItemKind.CONTAINER,
     )
     children = [board.ChildItem(WORK_ITEM_ISSUE, board.ChildState.CLOSED)]
     if sibling_open:
@@ -13582,7 +13581,7 @@ def parented_check_client(
     parent_body: str,
     open_children: tuple[board.IssueReference, ...],
     parent_repository: str = REPOSITORY,
-    parent_kind: board.ItemKind | None = board.ItemKind.CONTAINER,
+    parent_kind: body.ItemKind | None = body.ItemKind.CONTAINER,
 ) -> FakeForge:
     client = check_client(monkeypatch, landing_pull_request(body=body))
     client.parents[WORK_ITEM_ISSUE] = board.ParentIssue(
@@ -13718,7 +13717,7 @@ def test_check_refuses_a_parent_that_is_not_a_container(
         body="Work-Item: #72\n\nCloses #72",
         parent_body=complete_contract("keiner"),
         open_children=(),
-        parent_kind=board.ItemKind.TASK,
+        parent_kind=body.ItemKind.TASK,
     )
 
     assert run_check() == 2
@@ -14140,10 +14139,10 @@ def test_issue_check_labels_a_local_blocker_under_the_state_ref_pin() -> None:
         REPOSITORY,
         agent_claim_body(MINIMAL_BLOCK_TOML),
         CHECKED_ISSUE,
-        storage=board.Storage.STATE_REF,
+        storage=body.Storage.STATE_REF,
     )
 
-    local_label = board.item_label(7, board.Storage.STATE_REF)
+    local_label = board.item_label(7, body.Storage.STATE_REF)
     assert outcome.line == f"ISSUE #{CHECKED_ISSUE} blocked by {local_label}, other/repo#9"
 
 
@@ -15349,7 +15348,7 @@ def test_item_edit_size_writes_the_top_level_field_under_github_storage(
 
     assert exit_code == 0
     assert capsys.readouterr().out == f"EDITED #{RULE_ITEM} size=M\n"
-    assert board.locate_agent_claim_block(client.item_bodies[RULE_ITEM]).data["size"] == "M"
+    assert body.locate_agent_claim_block(client.item_bodies[RULE_ITEM]).data["size"] == "M"
 
 
 def test_item_edit_size_json_reports_the_item_and_size(
@@ -15401,7 +15400,7 @@ def test_item_edit_whole_writes_the_top_level_field_under_github_storage(
 
     assert exit_code == 0
     assert capsys.readouterr().out == f"EDITED #{RULE_ITEM} whole={reason}\n"
-    assert board.locate_agent_claim_block(client.item_bodies[RULE_ITEM]).data["whole"] == reason
+    assert body.locate_agent_claim_block(client.item_bodies[RULE_ITEM]).data["whole"] == reason
 
 
 def test_item_edit_whole_json_reports_the_item_and_reason(

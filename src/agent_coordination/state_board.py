@@ -36,6 +36,15 @@ from types import MappingProxyType
 from typing import Protocol, cast
 
 from . import board, forge, items
+from .body import (
+    RECORD_KEY,
+    BodyReadState,
+    ItemKind,
+    Storage,
+    locate_agent_claim_block,
+    parse_body,
+    replace_agent_claim_block,
+)
 from .protocol import ClaimUnavailableError, MalformedStateTreeError, ObjectId
 
 STATE_REF_CAPABILITIES: Mapping[forge.ForgeOperation, forge.Capability] = MappingProxyType(
@@ -115,11 +124,11 @@ def _decode_item(item_id: str, content: bytes, oid: ObjectId) -> _DecodedItem:
     """`content` turned into a `_DecodedItem`, or a loud refusal (ruling "a
     broken tree is corrupt state"): every item file must parse as a VALID
     `agent-claim` block carrying a `[record]` table, the same block grammar
-    `board.py` already reads, gated open to `record` only under
+    `body.py` already reads, gated open to `record` only under
     `Storage.STATE_REF`."""
     text = _decoded_text(item_id, content)
-    parsed = board.parse_body(text, storage=board.Storage.STATE_REF)
-    if parsed.read_state is not board.BodyReadState.VALID or parsed.record is None:
+    parsed = parse_body(text, storage=Storage.STATE_REF)
+    if parsed.read_state is not BodyReadState.VALID or parsed.record is None:
         raise MalformedStateTreeError(f"item {item_id} has a malformed agent-claim block")
     return _DecodedItem(record=items.parse_item_record(item_id, parsed.record), body=text, oid=oid)
 
@@ -130,13 +139,13 @@ def _with_record(body: str, record: items.ItemRecord) -> str:
     write composes a fresh `[record]` table, shared by `create_child` (a
     brand new one), `update_item_body` (an existing one with `updated_at`
     refreshed), and `close_item` (an existing one moved to `CLOSED`)."""
-    located = board.locate_agent_claim_block(body)
-    new_data = {**located.data, board.RECORD_KEY: items.record_table(record)}
-    return board.replace_agent_claim_block(body, located, new_data)
+    located = locate_agent_claim_block(body)
+    new_data = {**located.data, RECORD_KEY: items.record_table(record)}
+    return replace_agent_claim_block(body, located, new_data)
 
 
-def _item_kind(kind: str | None) -> board.ItemKind | None:
-    return board.ItemKind(kind) if kind is not None else None
+def _item_kind(kind: str | None) -> ItemKind | None:
+    return ItemKind(kind) if kind is not None else None
 
 
 def _delivered_content_fields(
@@ -155,9 +164,9 @@ def _delivered_content_fields(
     timestamps) stays `stored`'s own regardless of what a delivered record
     names for it -- `update_item_body` itself, never this helper, owns
     that half of the split."""
-    parsed = board.parse_body(body, storage=board.Storage.STATE_REF)
+    parsed = parse_body(body, storage=Storage.STATE_REF)
     delivered = parsed.record
-    if parsed.read_state is not board.BodyReadState.VALID or delivered is None:
+    if parsed.read_state is not BodyReadState.VALID or delivered is None:
         return stored.title, stored.labels, stored.blocked_by
     title = cast(str, delivered["title"]).strip() if "title" in delivered else stored.title
     labels = (
@@ -216,7 +225,7 @@ class StateRefBoard:
         record = decoded.record
         kind = _item_kind(record.kind)
         children_closed = children_total = None
-        if kind is board.ItemKind.CONTAINER:
+        if kind is ItemKind.CONTAINER:
             children = tuple(
                 child for child in self._items.values() if child.record.parent == item_id
             )
@@ -345,7 +354,7 @@ class StateRefBoard:
         parent_id: str | None,
         title: str,
         body: str,
-        kind: board.ItemKind,
+        kind: ItemKind,
         origin: str | None = None,
     ) -> str:
         """The one write every fresh state-ref item goes through (issues
@@ -380,7 +389,7 @@ class StateRefBoard:
         *,
         title: str,
         body: str,
-        kind: board.ItemKind,
+        kind: ItemKind,
         parent: int | None,
         origin: str | None = None,
     ) -> str:
@@ -399,7 +408,7 @@ class StateRefBoard:
             parent_id=parent_id, title=title, body=body, kind=kind, origin=origin
         )
 
-    def create_child(self, *, parent: int, title: str, body: str, kind: board.ItemKind) -> int:
+    def create_child(self, *, parent: int, title: str, body: str, kind: ItemKind) -> int:
         item_id = self.create_item(title=title, body=body, kind=kind, parent=parent)
         return self._items[item_id].record.number
 
