@@ -2606,14 +2606,23 @@ def _checked_classification(
 class CheckKind(StrEnum):
     """Which subject one `check` run read -- the `--json` discriminator.
 
-    Three values, because that is what the one dispatch request actually
-    distinguishes: GitHub gives issues and pull requests a single number
-    space, so a number that is not there was never proven to be either.
+    The number space holds three of them, because that is what the one
+    dispatch request actually distinguishes: GitHub gives issues and pull
+    requests a single number space, so a number that is not there was never
+    proven to be either. A trunk commit is the fourth: named by its `sha`,
+    read from local history instead of that number space (issue #435).
     """
 
     PULL_REQUEST = "pull_request"
     ISSUE = "issue"
     MISSING = "missing"
+    TRUNK_COMMIT = "trunk_commit"
+
+    @property
+    def subject_key(self) -> str:
+        """The `--json` key naming this kind's own subject: a trunk commit
+        answers about a `sha`, every number-space kind about a `number`."""
+        return "sha" if self is CheckKind.TRUNK_COMMIT else "number"
 
 
 class CheckReason(StrEnum):
@@ -2623,7 +2632,9 @@ class CheckReason(StrEnum):
     exits `2`. `valid`/`malformed`/`incomplete` mirror
     `body.BodyShapeVerdict`'s own three values -- the body-shape decision
     `check` and `body --check` both read, never re-derived from a defect
-    sentence's own prefix."""
+    sentence's own prefix. `not_on_trunk` is the trunk form's own member: a
+    commit the first-parent walk does not hold may well exist in this
+    repository, so it is never `missing`."""
 
     VALID = body.BodyShapeVerdict.VALID.value
     BLOCKED = "blocked"
@@ -2631,6 +2642,7 @@ class CheckReason(StrEnum):
     INCOMPLETE = body.BodyShapeVerdict.INCOMPLETE.value
     INVALID_CLASSIFICATION = "invalid_classification"
     MISSING = "missing"
+    NOT_ON_TRUNK = "not_on_trunk"
     INVALID_USAGE = "invalid_usage"
     UNAVAILABLE = "unavailable"
 
@@ -2638,12 +2650,14 @@ class CheckReason(StrEnum):
 @dataclass(frozen=True)
 class CheckOutcome:
     """One `check` answer: the line a human reads, and the `--json` `reason`
-    a caller acts on. `message` mirrors the line's own finding without its
-    `ISSUE #<n> `/`REFUSED: #<n> ` prefix; `blocked_by` is only ever set
-    together with `CheckReason.BLOCKED` (issue #404)."""
+    a caller acts on. `subject` is the number or the trunk `sha` the run was
+    asked about, printed under the key its own kind names; `message` mirrors
+    the line's own finding without its `ISSUE #<n> `/`REFUSED: #<n> `/
+    `REFUSED: <sha> ` prefix; `blocked_by` is only ever set together with
+    `CheckReason.BLOCKED` (issue #404)."""
 
     kind: CheckKind
-    number: int
+    subject: int | str
     line: str
     reason: CheckReason
     message: str | None = None
@@ -2658,7 +2672,10 @@ class CheckOutcome:
 
     def report(self, *, as_json: bool) -> int:
         if as_json:
-            payload: dict[str, object] = {"kind": self.kind.value, "number": self.number}
+            payload: dict[str, object] = {
+                "kind": self.kind.value,
+                self.kind.subject_key: self.subject,
+            }
             if self.blocked_by:
                 payload["blocked_by"] = list(self.blocked_by)
             if self.message is not None:
@@ -3830,46 +3847,48 @@ def _trunk_classification_text(classification: board.TrunkClassification) -> str
     return "Work-Item: " + ", ".join(f"#{number}" for number in classification.numbers)
 
 
-def _trunk_commit_classification_or_finding(
-    landing: checkout.TrunkLanding | None,
-) -> tuple[board.TrunkClassification | None, str | None]:
-    """`landing`'s own classification, or why `check <sha>` refuses instead
-    (issue #359, LAND-48): `None` is not on the walked first-parent trunk at
-    all, carries no trailer, or is a `ClassificationDefect`'s own message."""
+def _refused_trunk_commit(sha: str, finding: str, reason: CheckReason) -> CheckOutcome:
+    return CheckOutcome(CheckKind.TRUNK_COMMIT, sha, f"REFUSED: {sha} {finding}", reason, finding)
+
+
+def _trunk_commit_outcome(sha: str, landing: checkout.TrunkLanding | None) -> CheckOutcome:
+    """`sha`'s own answer (issue #359, LAND-48): the same three answers
+    `check <pr>` reads from a pull request body's classification
+    (LAND-04/LAND-06), read instead from the trailer block of `landing`, the
+    walked first-parent trunk's own entry for `sha` -- `None` when that walk
+    holds no such commit at all."""
     if landing is None:
-        return None, SHA_NOT_ON_TRUNK_DEFECT
+        return _refused_trunk_commit(sha, SHA_NOT_ON_TRUNK_DEFECT, CheckReason.NOT_ON_TRUNK)
     classification = landing.classification
     if classification is None:
-        return None, "carries no `Work-Item:` or `No-Item:` trailer"
+        return _refused_trunk_commit(
+            sha,
+            "carries no `Work-Item:` or `No-Item:` trailer",
+            CheckReason.INVALID_CLASSIFICATION,
+        )
     if isinstance(classification, board.ClassificationDefect):
-        return None, classification.message
-    return classification, None
+        return _refused_trunk_commit(
+            sha, classification.message, CheckReason.INVALID_CLASSIFICATION
+        )
+    return CheckOutcome(
+        CheckKind.TRUNK_COMMIT,
+        sha,
+        f"{sha} declares {_trunk_classification_text(classification)}",
+        CheckReason.VALID,
+    )
 
 
 def _check_trunk_commit(parsed: argparse.Namespace) -> int:
-    """`check <sha>` (issue #359, LAND-48): the same three answers `check
-    <pr>` reads from a pull request body's classification (LAND-04/LAND-06),
-    read instead from `sha`'s own trailer block on the first-parent trunk --
-    the same walk `release --merged <sha>` verifies against under `storage
-    = "state-ref"` (LAND-47/LAND-52), reused rather than re-derived here.
-    Needs no forge at all: a trunk commit's trailer is local history."""
+    """`check <sha>`: the trunk form of the one check, reporting through the
+    same envelope and the same exit codes the number forms use (issue #435).
+    Its walk is the one `release --merged <sha>` verifies against under
+    `storage = "state-ref"` (LAND-47/LAND-52), reused rather than re-derived
+    here. Needs no forge at all: a trunk commit's trailer is local history."""
     sha = cast(str, parsed.number)
     config = _board_config(_resolve_toplevel())
     landings = checkout.trunk_landings(config.canonical_remote, TRUNK_LANDING_DEPTH)
     landing = next((entry for entry in landings if entry.sha == sha), None)
-    classification, finding = _trunk_commit_classification_or_finding(landing)
-    if parsed.json:
-        payload: dict[str, object] = {"ok": finding is None, "sha": sha}
-        if finding is not None:
-            payload["refused"] = finding
-        print(json.dumps(payload))
-        return 1 if finding is not None else 0
-    if finding is not None:
-        print(f"REFUSED: {sha} {finding}", file=sys.stderr)
-        return 1
-    assert classification is not None
-    print(f"{sha} declares {_trunk_classification_text(classification)}")
-    return 0
+    return _trunk_commit_outcome(sha, landing).report(as_json=parsed.json)
 
 
 def _brief_claim(

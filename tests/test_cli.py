@@ -12576,7 +12576,7 @@ def test_check_sha_refuses_a_contradictory_trailer(
 
     status = issue_claim.main(["check", sha])
 
-    assert status == 1
+    assert status == 2
     err = capsys.readouterr().err
     assert err.startswith(f"REFUSED: {sha} carries")
     assert "one is required" not in err
@@ -14313,70 +14313,75 @@ def _check_sha(
     return repo, lambda ref: _real_git(repo, "rev-parse", ref).stdout.strip()
 
 
-@pytest.mark.parametrize(
-    ("landing_ref", "declaration"),
-    [
-        pytest.param("main~1", "Work-Item: #20", id="work-item"),
-        pytest.param("main", "No-Item: docs", id="no-item"),
-    ],
+_UNWALKED_SHA = "0" * 40
+
+_TRUNK_CHECK_CASES = (
+    pytest.param("main~1", "{sha} declares Work-Item: #20", "valid", None, 0, id="work-item"),
+    pytest.param("main", "{sha} declares No-Item: docs", "valid", None, 0, id="no-item"),
+    pytest.param(
+        "main~2",
+        "REFUSED: {sha} carries no `Work-Item:` or `No-Item:` trailer",
+        "invalid_classification",
+        "carries no `Work-Item:` or `No-Item:` trailer",
+        2,
+        id="no-trailer",
+    ),
+    pytest.param(
+        None,
+        "REFUSED: {sha} is not on the first-parent trunk",
+        "not_on_trunk",
+        "is not on the first-parent trunk",
+        2,
+        id="off-trunk",
+    ),
 )
-def test_check_sha_declares_its_trailer(
+
+
+def _expected_trunk_envelope(sha: str, reason: str, message: str | None) -> dict[str, object]:
+    """`specs/output.spec.md`'s envelope as `check <sha>` fills it: `ok` and
+    `reason` first, the commit under the `sha` key its own kind names, and a
+    refusal's sentence last -- no `refused` key anywhere (issue #435)."""
+    envelope: dict[str, object] = {
+        "ok": message is None,
+        "reason": reason,
+        "kind": "trunk_commit",
+        "sha": sha,
+    }
+    if message is not None:
+        envelope["message"] = message
+    return envelope
+
+
+@pytest.mark.parametrize(
+    ("landing_ref", "line", "reason", "message", "exit_code"), _TRUNK_CHECK_CASES
+)
+def test_check_sha_answers_in_text_and_json(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
-    landing_ref: str,
-    declaration: str,
+    landing_ref: str | None,
+    line: str,
+    reason: str,
+    message: str | None,
+    exit_code: int,
 ) -> None:
-    """Issue #359, LAND-48 (Beweis 3) / CI: a commit whose own trailer block
-    names `Work-Item:` or `No-Item:` prints the same declaration shape
-    `check <pr>` does, needing no forge at all -- a trunk commit's trailer
-    is local -- through `_trunk_classification_text`'s own two branches."""
+    """Issue #435 (LAND-48, LAND-57, LAND-58, CHECK-12..CHECK-14): one trunk
+    answer in both forms -- the human line on stdout when the commit
+    classifies and on stderr when it does not, the `--json` object the one
+    shared envelope carrying `check`'s own `reason` -- and one exit for both:
+    `0` for a classified commit, `2` for every defect, never `1`."""
     _repo, sha_of = _check_sha(monkeypatch, tmp_path)
+    sha = _UNWALKED_SHA if landing_ref is None else sha_of(landing_ref)
 
-    status = issue_claim.main(["check", sha_of(landing_ref)])
+    text_status = issue_claim.main(["check", sha])
+    printed = capsys.readouterr()
+    json_status = issue_claim.main(["check", sha, "--json"])
+    envelope = json.loads(capsys.readouterr().out)
 
-    assert status == 0
-    assert capsys.readouterr().out == f"{sha_of(landing_ref)} declares {declaration}\n"
-
-
-def test_check_sha_json_declares_a_classified_commit_as_ok(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
-) -> None:
-    _repo, sha_of = _check_sha(monkeypatch, tmp_path)
-
-    status = issue_claim.main(["check", sha_of("main"), "--json"])
-
-    assert status == 0
-    assert json.loads(capsys.readouterr().out) == {"ok": True, "sha": sha_of("main")}
-
-
-def test_check_sha_refuses_a_commit_with_no_trailer(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
-) -> None:
-    _repo, sha_of = _check_sha(monkeypatch, tmp_path)
-
-    status = issue_claim.main(["check", sha_of("main~2")])
-
-    assert status == 1
-    assert capsys.readouterr().err == (
-        f"REFUSED: {sha_of('main~2')} carries no `Work-Item:` or `No-Item:` trailer\n"
-    )
-
-
-def test_check_sha_refuses_a_commit_off_the_first_parent_trunk(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
-) -> None:
-    _repo, _sha_of = _check_sha(monkeypatch, tmp_path)
-    sha = "0" * 40
-
-    status = issue_claim.main(["check", sha, "--json"])
-
-    assert status == 1
-    assert json.loads(capsys.readouterr().out) == {
-        "ok": False,
-        "sha": sha,
-        "refused": "is not on the first-parent trunk",
-    }
+    expected_line = line.format(sha=sha) + "\n"
+    expected_streams = ("", expected_line) if message is not None else (expected_line, "")
+    assert (text_status, printed.out, printed.err) == (exit_code, *expected_streams)
+    assert (json_status, envelope) == (exit_code, _expected_trunk_envelope(sha, reason, message))
 
 
 def test_check_names_a_number_that_exists_in_neither_number_space(
