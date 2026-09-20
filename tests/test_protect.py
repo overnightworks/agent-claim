@@ -2096,17 +2096,20 @@ def test_rescope_denies_before_touching_the_store(
 # dependency (`canonical_remote_for`) as plain arguments.
 
 
-def _judge_worktree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, branch: str) -> Path:
+def _judge_worktree(tmp_path: Path, *, branch: str) -> Path:
     """A real bare-remote repository (`Setup: bare-remote`,
-    `specs/protect.spec.md`) with one linked, isolated worktree on `branch`."""
+    `specs/protect.spec.md`) with one linked, isolated worktree on `branch`
+    -- built entirely from its own explicit repository path, never a
+    process-cwd stub, since `judge`'s own tests must prove the same thing
+    `judge` itself proves: the verdict depends only on the payload's
+    absolute path, never on the process's cwd."""
     repo, _remote = _real_repository_with_bare_remote(tmp_path)
     (repo / "README.md").write_text("hello\n")
     _real_git(repo, "add", "README.md")
     _real_git(repo, "commit", "-q", "-m", "initial")
     _push_repository_trunk(repo, "origin")
     worktree = tmp_path / "repo-worktrees" / branch.replace("/", "-")
-    monkeypatch.chdir(repo)
-    checkout.create_linked_worktree(worktree, branch=branch, remote="origin")
+    checkout.create_linked_worktree(worktree, branch=branch, remote="origin", directory=repo)
     return worktree
 
 
@@ -2126,7 +2129,7 @@ def test_judge_denies_an_apply_patch_path_outside_the_live_claims_scope(
     `<path> outside claim scope` (PROT-20), `apply_patch`'s own distinct
     text for a path a live claim exists for but does not cover."""
     branch = "codex/issue-9-widget"
-    worktree = _judge_worktree(tmp_path, monkeypatch, branch=branch)
+    worktree = _judge_worktree(tmp_path, branch=branch)
     _set_agent_identity_env(monkeypatch, {checkout.ACO_AGENT_ENV: "Ada"})
     claim = _protect_active_claim("Ada", scope=("docs",), branch=branch)
     monkeypatch.setattr(
@@ -2155,7 +2158,7 @@ def test_judge_denies_a_bash_recognized_pattern_path_outside_the_live_claims_sco
     #380): a live claim whose scope misses the removed path denies naming
     both the recognized pattern and the path (PROT-33)."""
     branch = "codex/issue-9-widget"
-    worktree = _judge_worktree(tmp_path, monkeypatch, branch=branch)
+    worktree = _judge_worktree(tmp_path, branch=branch)
     _set_agent_identity_env(monkeypatch, {checkout.ACO_AGENT_ENV: "Ada"})
     claim = _protect_active_claim("Ada", scope=("docs",), branch=branch)
     monkeypatch.setattr(
@@ -2183,7 +2186,7 @@ def test_judge_denies_a_path_resolving_to_the_checkout_root_before_reading_the_s
     test if it is): a payload path that resolves to exactly the checkout
     root denies `path required`, the same reason as no path at all."""
     branch = "codex/issue-9-widget"
-    worktree = _judge_worktree(tmp_path, monkeypatch, branch=branch)
+    worktree = _judge_worktree(tmp_path, branch=branch)
     _set_agent_identity_env(monkeypatch, {checkout.ACO_AGENT_ENV: "Ada"})
     payload = {"toolName": "Edit", "toolInput": {"path": str(worktree)}}
 

@@ -533,15 +533,19 @@ def is_default_branch(branch: str, *, directory: Path | None = None) -> bool:
     return branch in DEFAULT_BRANCH_FALLBACK
 
 
-def _trunk_ref(remote: str) -> str:
-    """`remote`'s trunk ref: its recorded `HEAD` symbolic ref, or the
-    historical `{main, master}` guess when `remote` never recorded one
-    (issue #304, generalizing `_origin_head_ref`'s `origin`-only read to the
-    caller's own canonical remote -- `default_branch_name`/`is_default_branch`
-    keep reading `origin` specifically, since GitHub-repository discovery is
-    a separate axis from a repository's configured canonical remote)."""
+def _trunk_ref(remote: str, *, directory: Path | None = None) -> str:
+    """`remote`'s trunk ref, read from `directory` via `-C` when given or
+    the calling process's own cwd otherwise: its recorded `HEAD` symbolic
+    ref, or the historical `{main, master}` guess when `remote` never
+    recorded one (issue #304, generalizing `_origin_head_ref`'s
+    `origin`-only read to the caller's own canonical remote --
+    `default_branch_name`/`is_default_branch` keep reading `origin`
+    specifically, since GitHub-repository discovery is a separate axis from
+    a repository's configured canonical remote)."""
     try:
-        symbolic = _git_output(["symbolic-ref", "--quiet", f"refs/remotes/{remote}/HEAD"])
+        symbolic = _git_output(
+            ["symbolic-ref", "--quiet", f"refs/remotes/{remote}/HEAD"], directory=directory
+        )
     except ClaimError:
         symbolic = ""
     if symbolic:
@@ -553,7 +557,7 @@ def _trunk_ref(remote: str) -> str:
         "master",
     ):
         try:
-            _git_output(["rev-parse", "--verify", candidate])
+            _git_output(["rev-parse", "--verify", candidate], directory=directory)
             return candidate
         except ClaimError:
             continue
@@ -789,17 +793,26 @@ def branch_exists(branch: str) -> bool:
     raise ClaimError(process.git_failure_detail(result))
 
 
-def create_linked_worktree(path: Path, *, branch: str, remote: str) -> None:
+def create_linked_worktree(
+    path: Path, *, branch: str, remote: str, directory: Path | None = None
+) -> None:
     """Fetch `remote` and create a linked worktree at `path` on a fresh
     `branch`, from `remote`'s own trunk (issue #322): the two-step
     `git fetch`/`git worktree add` dance `ISOLATED_WORKTREE_RECIPE` used to
     spell out for a person to type by hand, run through this module's own
-    `_git_run` chokepoint so `start` opens no new subprocess call site."""
-    fetch = _git_run(["fetch", remote])
+    `_git_run` chokepoint so `start` opens no new subprocess call site.
+    Reads and writes `directory`'s own checkout via `-C` when given (issue
+    #394: `protect.judge`'s own direct tests build a worktree fixture from
+    an explicit repository path, never the test process's cwd) or the
+    calling process's own checkout otherwise (`start`'s own precondition,
+    unaffected by #394)."""
+    fetch = _git_run(["fetch", remote], directory=directory)
     if fetch.exit_status != 0:
         raise ClaimError(process.git_failure_detail(fetch))
-    start_point = _trunk_ref(remote)
-    result = _git_run(["worktree", "add", str(path), "-b", branch, start_point])
+    start_point = _trunk_ref(remote, directory=directory)
+    result = _git_run(
+        ["worktree", "add", str(path), "-b", branch, start_point], directory=directory
+    )
     if result.exit_status != 0:
         raise ClaimError(process.git_failure_detail(result))
 
