@@ -18,6 +18,7 @@ from board_fixtures import (
     complete_contract,
     projected_board,
     proposed_expectation,
+    ruled_expectation,
 )
 
 from agent_coordination import board, board_html, cli, items, metrics
@@ -26,7 +27,10 @@ GOLDEN_PATH = Path(__file__).parent / "board_html_golden.html"
 
 
 def _fixture_page(
-    *, storage: board.Storage = board.Storage.GITHUB, lane_blocked: bool = False
+    *,
+    storage: board.Storage = board.Storage.GITHUB,
+    lane_blocked: bool = False,
+    ruled_claimed_item_line: bool = False,
 ) -> board_html.BoardPage:
     """A container (#100) with two children -- one closed, one open and
     blocked (#101, blocked by #50) -- one open `[[expectation]]` line on
@@ -38,7 +42,12 @@ def _fixture_page(
     #556, issue #371: the Landungen view reuses that same wide matching, so
     both rows resolve to their own pull request, neither "PR nicht
     zugeordnet"). `lane_blocked` defaults to `False` so the GitHub golden page
-    stays untouched; only the state-ref proof below turns it on. The
+    stays untouched; only the state-ref proof below turns it on.
+    `ruled_claimed_item_line` (issue #388) defaults to `False` for the same
+    reason: it adds one already-ruled `[[expectation]]` line to #102's own
+    contract, moving its confirmation into #102's Topic history instead of
+    a "Wartet auf dich" card -- only the ruled golden page below turns it
+    on. The
     container (#100) also carries a top-level `size = "M"` (issue #357),
     measured into a real (non-weak) estimate by its own one completed lane
     plus two more completed `M` lanes on items this fixture never lists at
@@ -104,10 +113,20 @@ def _fixture_page(
         children_closed=1,
         children_total=2,
     )
+    claimed_item_expectation = (
+        [ruled_expectation("Ist das Feature-Flag schon aktiv? Anmerkung: Ja, seit Montag.")]
+        if ruled_claimed_item_line
+        else []
+    )
     claimed_item = board_issue(
         102,
         "Laufende Lane",
-        complete_contract("Fertigstellen.", now="Am Bauen.", done_when="Gemergt."),
+        complete_contract(
+            "Fertigstellen.",
+            now="Am Bauen.",
+            done_when="Gemergt.",
+            expectation=claimed_item_expectation,
+        ),
         blocked_by_count=1 if lane_blocked else 0,
     )
     landed_item = board_issue(103, "Kleine Verbesserung", complete_contract("Verifizieren."))
@@ -189,6 +208,18 @@ def _empty_page() -> board_html.BoardPage:
 def test_render_matches_the_golden_page_byte_for_byte() -> None:
     rendered = board_html.render(_fixture_page())
     assert rendered == GOLDEN_PATH.read_text(encoding="utf-8")
+
+
+RULED_GOLDEN_PATH = Path(__file__).parent / "board_html_golden_ruled.html"
+
+
+def test_render_matches_the_golden_ruled_page_byte_for_byte() -> None:
+    """Issue #388 proof 2: an already-ruled `[[expectation]]` line moves out
+    of "Wartet auf dich" into its own item's Topic history -- ruling, date,
+    text, and the `aco ask` hint, never a form or a button -- and every
+    other section of the page stays exactly as `GOLDEN_PATH` renders it."""
+    rendered = board_html.render(_fixture_page(ruled_claimed_item_line=True))
+    assert rendered == RULED_GOLDEN_PATH.read_text(encoding="utf-8")
 
 
 def test_render_labels_cards_topics_and_lanes_with_state_ref_ids() -> None:

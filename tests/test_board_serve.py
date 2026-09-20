@@ -9,9 +9,12 @@ argument is untouched by this module (proof 8)."""
 
 from __future__ import annotations
 
+import errno
 import http.client
 import io
+import os
 import socket
+import stat
 import sys
 import threading
 from collections.abc import Iterator
@@ -25,7 +28,7 @@ from board_fixtures import board_issue, complete_contract, proposed_expectation
 from cli_fixtures import stub_board_config_tracked
 from test_cli import FakeForge, _patch_store_write, _single_item_board_environment
 
-from agent_coordination import board, board_serve, checkout, forge, github, protocol
+from agent_coordination import board, board_serve, checkout, forge, github, protocol, workspace
 from agent_coordination import cli as issue_claim
 
 OPEN_LINE_TEXT = "Brauchen wir Admin-Rechte?"
@@ -66,6 +69,11 @@ class _ConsistentForge(FakeForge):
 
 
 def _served_board_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> _ConsistentForge:
+    # Issue #388: the token is now persisted to `${XDG_CONFIG_HOME}/aco/
+    # board-token` rather than minted in memory -- every test that starts a
+    # real server must point that root at `tmp_path`, or it would read and
+    # write the real operator's own token file.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     client = _ConsistentForge()
     body = complete_contract(
         "Ship #10.", expectation=[proposed_expectation(OPEN_LINE_TEXT, default="later")]
@@ -213,7 +221,10 @@ def test_post_rule_with_a_valid_token_writes_exactly_one_ruling_and_redirects(
     """Issue #295 proof 4: the single per-card form's `outcome` button
     (including `later`, the one served by the card's own submit button
     rather than a note-less command line) carries the note through to
-    `board.rule_expectation`'s ` Anmerkung: <note>` suffix."""
+    `board.rule_expectation`'s ` Anmerkung: <note>` suffix. Issue #388 proof
+    2: the follow-up page no longer shows the line as an open card with its
+    three buttons -- it shows the ruled state, the note, and the
+    `aco ask` hint instead, inside the item's own collapsible history."""
     token = served_board.server.token
     response = served_board.post_rule(
         {"t": token, "item": str(SERVED_ITEM), "line": "1", "outcome": outcome, "note": note}
@@ -225,10 +236,15 @@ def test_post_rule_with_a_valid_token_writes_exactly_one_ruling_and_redirects(
     assert len(lines) == 1
     assert lines[0].ruling == outcome
     assert lines[0].ruled_on == datetime.now(UTC).date()
-    assert lines[0].text == f"{OPEN_LINE_TEXT} Anmerkung: {note}"
+    ruled_text = f"{OPEN_LINE_TEXT} Anmerkung: {note}"
+    assert lines[0].text == ruled_text
 
-    follow_up = served_board.get(token=token)
-    assert OPEN_LINE_TEXT.encode() not in follow_up.body
+    follow_up = served_board.get(token=token).body.decode("utf-8")
+    assert '<div class="cards"><p class="empty">nichts</p></div>' in follow_up
+    assert f'<li class="ruled"><span>{ruled_text}</span>' in follow_up
+    ruled_state = f"ruled {outcome} {datetime.now(UTC).date().isoformat()}"
+    assert f'<span class="ruled-state">{ruled_state}</span>' in follow_up
+    assert f'<code>aco ask {SERVED_ITEM} --text "…"</code>' in follow_up
 
 
 def test_post_rule_with_a_wrong_token_is_forbidden_and_writes_nothing(
@@ -409,6 +425,156 @@ def test_board_serve_exits_cleanly_on_keyboard_interrupt(
     assert captured.err == ""
     assert captured.out.count("\n") == 1
     assert captured.out.strip().startswith("http://127.0.0.1:")
+
+
+def _free_loopback_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def _mint_and_capture_url(
+    capsys: pytest.CaptureFixture[str], port: int, *extra_arguments: str
+) -> str:
+    issue_claim.main(
+        ["--repo", "example/agent-claim", "board", "--serve", "--port", str(port), *extra_arguments]
+    )
+    return capsys.readouterr().out.strip()
+
+
+def test_board_serve_prints_the_same_url_on_a_second_start(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #388 proof 1: the token now lives in
+    `${XDG_CONFIG_HOME}/aco/board-token` (0600), minted once rather than per
+    start, so two starts on the same port print the identical URL."""
+    _served_board_environment(monkeypatch, tmp_path)
+    monkeypatch.setattr(board_serve._BoardHTTPServer, "serve_forever", lambda self: None)
+    port = _free_loopback_port()
+
+    first_url = _mint_and_capture_url(capsys, port)
+    second_url = _mint_and_capture_url(capsys, port)
+
+    assert first_url == second_url
+    token_path = workspace.default_board_token_path(os.environ)
+    assert stat.S_IMODE(token_path.stat().st_mode) == 0o600
+
+
+def test_new_token_mints_a_different_url(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #388 proof 1: `--new-token` replaces the persisted token, so the
+    next printed URL differs from the one before it."""
+    _served_board_environment(monkeypatch, tmp_path)
+    monkeypatch.setattr(board_serve._BoardHTTPServer, "serve_forever", lambda self: None)
+    port = _free_loopback_port()
+
+    first_url = _mint_and_capture_url(capsys, port)
+    second_url = _mint_and_capture_url(capsys, port, "--new-token")
+
+    assert first_url != second_url
+
+
+def test_a_board_token_file_with_a_permissive_mode_refuses(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #388 proof 1: a token file an operator (or another tool) left
+    group/other-readable refuses by name instead of being trusted -- it is
+    the one secret this command holds."""
+    _served_board_environment(monkeypatch, tmp_path)
+    monkeypatch.setattr(board_serve._BoardHTTPServer, "serve_forever", lambda self: None)
+    _mint_and_capture_url(capsys, _free_loopback_port())
+    token_path = workspace.default_board_token_path(os.environ)
+    token_path.chmod(0o644)
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "board", "--serve", "--port", str(_free_loopback_port())]
+    )
+
+    assert exit_code == 2
+    assert "must be private (mode 0600, found 0644)" in capsys.readouterr().err
+
+
+def _noop_render_page(_refused: str | None) -> str:
+    return ""
+
+
+def _noop_rule_item(*_args: object) -> board_serve.RuleOutcome:
+    return board_serve.RuleOutcome(refusal=None)
+
+
+def test_start_refuses_a_busy_port_naming_the_pid() -> None:
+    """Issue #388 proof 3: a port another process already holds refuses by
+    name instead of raising a raw `OSError`, naming that process's own PID
+    -- `--restart` is dropped in favor of this plus an ordinary `kill`."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as blocker:
+        blocker.bind(("127.0.0.1", 0))
+        blocker.listen(1)
+        busy_port = blocker.getsockname()[1]
+        expected_refusal = f"port {busy_port} is already in use by PID {os.getpid()}"
+
+        with pytest.raises(protocol.ClaimError, match=expected_refusal):
+            board_serve.start(
+                port=busy_port,
+                token="probe-token",
+                render_page=_noop_render_page,
+                rule_item=_noop_rule_item,
+            )
+
+
+def test_start_reraises_an_os_error_that_is_not_address_in_use(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`start`'s busy-port refusal (BOARD-35) only replaces `EADDRINUSE`;
+    any other bind failure still raises through as a plain `OSError`."""
+
+    def _raise_permission_denied(*_args: object, **_kwargs: object) -> None:
+        raise OSError(errno.EACCES, "denied")
+
+    monkeypatch.setattr(board_serve, "_BoardHTTPServer", _raise_permission_denied)
+
+    with pytest.raises(OSError, match="denied"):
+        board_serve.start(
+            port=0, token="probe-token", render_page=_noop_render_page, rule_item=_noop_rule_item
+        )
+
+
+def test_busy_port_refusal_names_no_pid_when_no_proc_row_matches() -> None:
+    """BOARD-35's fallback sentence: a port this process never actually
+    bound has no `/proc/net/tcp` row of its own, so the refusal names no
+    PID rather than guessing one."""
+    free_port = _free_loopback_port()
+
+    assert board_serve._busy_port_refusal(free_port) == (
+        f"port {free_port} is already in use; the owning process could not be identified"
+    )
+
+
+def test_pid_owning_socket_inode_returns_none_for_an_orphan_inode() -> None:
+    """No live process owns an inode nobody's `/proc/<pid>/fd` links to."""
+    assert board_serve._pid_owning_socket_inode("999999999999") is None
+
+
+def test_loopback_socket_inode_returns_none_when_proc_net_tcp_is_unreadable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _raise(*_args: object, **_kwargs: object) -> None:
+        raise OSError("no /proc")
+
+    monkeypatch.setattr(Path, "read_text", _raise)
+
+    assert board_serve._loopback_socket_inode(12345) is None
+
+
+def test_pid_owning_socket_inode_returns_none_when_proc_is_unreadable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _raise(*_args: object, **_kwargs: object) -> None:
+        raise OSError("no /proc")
+
+    monkeypatch.setattr(os, "listdir", _raise)
+
+    assert board_serve._pid_owning_socket_inode("1") is None
 
 
 def test_rule_item_refuses_an_already_ruled_line_by_name(

@@ -6,6 +6,7 @@ import fcntl
 import json
 import os
 import re
+import secrets
 import stat
 import tempfile
 import tomllib
@@ -123,13 +124,58 @@ class LoginRunResult:
     exit_status: int
 
 
-def default_config_path(environment: Mapping[str, str], home: Path | None = None) -> Path:
+def _config_root(environment: Mapping[str, str], home: Path | None = None) -> Path:
+    """The one `~/.config/aco/` directory every local configuration file
+    (the workspace registration, the board token) lives under -- shared so
+    a second file never resolves its own, diverging root."""
     configured = environment.get("XDG_CONFIG_HOME")
-    return (
-        (Path(configured) if configured else (home or Path.home()) / ".config")
-        / "aco"
-        / "workspace.toml"
-    )
+    return (Path(configured) if configured else (home or Path.home()) / ".config") / "aco"
+
+
+def default_config_path(environment: Mapping[str, str], home: Path | None = None) -> Path:
+    return _config_root(environment, home) / "workspace.toml"
+
+
+BOARD_TOKEN_BYTES = 32
+"""`secrets.token_urlsafe`'s own byte count for `board --serve`'s persistent
+loopback token (issue #388) -- matches the per-start token's prior entropy
+(#280), only now minted once and read back rather than minted per start."""
+
+
+def default_board_token_path(environment: Mapping[str, str], home: Path | None = None) -> Path:
+    """`board --serve`'s persistent token file (issue #388): the same
+    `~/.config/aco/` root `default_config_path` already owns, never a
+    second configuration source, so the printed URL stays stable across
+    restarts and reinstalls without adding a place to look for it."""
+    return _config_root(environment, home) / "board-token"
+
+
+def board_token(path: Path, *, mint_new: bool = False) -> str:
+    """`path`'s persistent token: read back when it already exists and a
+    fresh one was not requested, minted (`secrets.token_urlsafe`, written
+    0600 and atomically) otherwise -- `mint_new` is `--new-token`'s own
+    request to replace it. An existing file whose mode has drifted from
+    0600 refuses by name rather than being trusted: the token is the one
+    secret this command holds, and it is never logged anywhere but the one
+    printed URL line."""
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if not mint_new and path.exists():
+        return _read_board_token(path)
+    token = secrets.token_urlsafe(BOARD_TOKEN_BYTES)
+    _atomic_write(path, (token + "\n").encode())
+    return token
+
+
+_PRIVATE_FILE_MODE = 0o600
+
+
+def _read_board_token(path: Path) -> str:
+    mode = stat.S_IMODE(path.lstat().st_mode)
+    if mode != _PRIVATE_FILE_MODE:
+        raise WorkspaceError(
+            f"board token file {path} must be private (mode 0600, found {mode:04o})"
+        )
+    return path.read_text(encoding="utf-8").strip()
 
 
 def login_desktop_path(environment: Mapping[str, str], home: Path | None = None) -> Path:
