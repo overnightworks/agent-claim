@@ -1746,19 +1746,19 @@ def _rulings(
 ) -> None:
     rows = _rulings_rows(projected, bodies, storage=storage)
     if as_json:
-        print(
-            json.dumps(
-                [
-                    {
-                        "number": row.item.number,
-                        "title": row.item.title,
-                        "open": row.progress.open,
-                        "total": row.progress.total,
-                        "lines": [_rulings_line_json(line) for line in row.lines],
-                    }
-                    for row in rows
-                ]
-            )
+        _emit_json(
+            True,
+            RulingsReason.LISTED,
+            rulings=[
+                {
+                    "number": row.item.number,
+                    "title": row.item.title,
+                    "open": row.progress.open,
+                    "total": row.progress.total,
+                    "lines": [_rulings_line_json(line) for line in row.lines],
+                }
+                for row in rows
+            ],
         )
         return
     if not rows:
@@ -1810,12 +1810,40 @@ def _next_action_command(
     return f'aco cut {container_argument} --title "{action.cut_title}"'
 
 
+class NextReason(StrEnum):
+    """`aco next`'s own `--json` `reason` vocabulary (issue #412,
+    `specs/next.spec.md`): the action type -- `work_item`, `cut_slice`,
+    `close_container` -- names a success (`ok: true`) exactly as it did
+    when carried under the dropped `"action"` key; `nothing_actionable`
+    is the one `ok: false` outcome that still exits `0` in text (NEXT-01)
+    but exit `3` under `--json` alike, the sole reason exit `3` is ever
+    used. `invalid_usage` covers `--repo` under `storage = state-ref`
+    (PIN-04); every other refusal -- an unsupported forge host (BOARD-02),
+    a state-ref checkout with no resolvable default branch (PIN-05) --
+    falls to `unavailable`, matching `ask`/`rule`/`brief`'s own catch-all."""
+
+    WORK_ITEM = "work_item"
+    CUT_SLICE = "cut_slice"
+    CLOSE_CONTAINER = "close_container"
+    NOTHING_ACTIONABLE = "nothing_actionable"
+    INVALID_USAGE = "invalid_usage"
+    UNAVAILABLE = "unavailable"
+
+
+def _next_action_reason(action: board.NextAction) -> NextReason:
+    if isinstance(action, board.WorkItemAction):
+        return NextReason.WORK_ITEM
+    if isinstance(action, board.CutSliceAction):
+        return NextReason.CUT_SLICE
+    return NextReason.CLOSE_CONTAINER
+
+
 def _next_action_payload(action: board.NextAction, storage: board.Storage) -> dict[str, object]:
-    """The action-specific fields `_next_json` adds beyond `recovery`/`skipped`."""
+    """The action-specific fields `_next_json` adds beyond `recovery`/`skipped`
+    -- `_next_action_reason` now carries what an `"action"` key used to."""
     if isinstance(action, board.WorkItemAction):
         item = action.item
         payload: dict[str, object] = {
-            "action": "work_item",
             "number": item.number,
             "score": item.score,
             "title": item.title,
@@ -1830,7 +1858,6 @@ def _next_action_payload(action: board.NextAction, storage: board.Storage) -> di
         return payload
     if isinstance(action, board.CutSliceAction):
         return {
-            "action": "cut_slice",
             "number": action.container.number,
             "title": action.container.title,
             "slice": action.next_step,
@@ -1838,7 +1865,6 @@ def _next_action_payload(action: board.NextAction, storage: board.Storage) -> di
             "command": _next_action_command(action, storage),
         }
     return {
-        "action": "close_container",
         "number": action.container.number,
         "closed": action.container_progress.closed,
         "total": action.container_progress.total,
@@ -1919,8 +1945,12 @@ class _NextReport:
 
 
 def _next_json(report: _NextReport, storage: board.Storage) -> None:
+    reason = (
+        _next_action_reason(report.action)
+        if report.action is not None
+        else NextReason.NOTHING_ACTIONABLE
+    )
     payload: dict[str, object] = {
-        "action": None,
         "recovery": [
             {
                 "number": recovery_item.number,
@@ -1938,7 +1968,7 @@ def _next_json(report: _NextReport, storage: board.Storage) -> None:
     }
     if report.action is not None:
         payload.update(_next_action_payload(report.action, storage))
-    print(json.dumps(payload))
+    _emit_json(report.action is not None, reason, **payload)
 
 
 def _next_action_lines(action: board.NextAction, storage: board.Storage) -> list[str]:
@@ -4029,30 +4059,80 @@ def _cmd_board_html(parsed: argparse.Namespace, session: _ReadSession) -> None:
         print(rendered, end="")
 
 
-def _cmd_board(parsed: argparse.Namespace, session: _ReadSession) -> None:
-    if parsed.new_token:
-        # `--new-token` only ever mints through `--serve`'s own writer
-        # session (issue #388): reaching here means `--serve` was not
-        # given, so minting here would be a silent no-op the caller cannot
-        # observe rather than a refusal by name.
-        raise protocol.ClaimError("--new-token requires --serve")
-    if parsed.html is not None:
-        _cmd_board_html(parsed, session)
-        return
-    projected = _observed_board(session).board
-    if parsed.json:
-        print(board.board_json(projected))
-        return
+class BoardReason(StrEnum):
+    """`aco board`'s own `--json` `reason` vocabulary (issue #412,
+    `specs/board.spec.md`): `projected` the only success -- `--html` and
+    `--serve` never reach it, since neither ever sets `--json`.
+    `invalid_usage` covers `--new-token` without `--serve` (BOARD-39) and
+    `--repo` under `storage = state-ref` (PIN-04); every other refusal --
+    an unsupported forge host (BOARD-02), a state-ref checkout with no
+    resolvable default branch (PIN-05) -- falls to `unavailable`, matching
+    `ask`/`rule`/`brief`'s own catch-all."""
+
+    PROJECTED = "projected"
+    INVALID_USAGE = "invalid_usage"
+    UNAVAILABLE = "unavailable"
+
+
+class _BoardNewTokenUsageError(protocol.ClaimError):
+    """`--new-token` without `--serve` (BOARD-39): named so `--json` can
+    choose `invalid_usage` over the broad `unavailable` catch-all every
+    other `board` refusal falls to."""
+
+
+def _cmd_board(parsed: argparse.Namespace, session: _ReadSession) -> int:
+    as_json = parsed.json
+    try:
+        if parsed.new_token:
+            # `--new-token` only ever mints through `--serve`'s own writer
+            # session (issue #388): reaching here means `--serve` was not
+            # given, so minting here would be a silent no-op the caller
+            # cannot observe rather than a refusal by name.
+            raise _BoardNewTokenUsageError("--new-token requires --serve")
+        if parsed.html is not None:
+            _cmd_board_html(parsed, session)
+            return 0
+        projected = _observed_board(session).board
+    except _BoardNewTokenUsageError as error:
+        return _refuse(BoardReason.INVALID_USAGE, error, as_json=as_json)
+    except RepoMeaninglessUnderStateRefError as error:
+        return _refuse(BoardReason.INVALID_USAGE, error, as_json=as_json)
+    except protocol.ClaimError as error:
+        return _refuse(BoardReason.UNAVAILABLE, error, as_json=as_json)
+    if as_json:
+        _emit_json(True, BoardReason.PROJECTED, **board.board_payload(projected))
+        return 0
     storage = _board_config(_resolve_toplevel()).storage
     print(board.render(projected, storage=storage))
+    return 0
 
 
-def _cmd_rulings(parsed: argparse.Namespace, session: _ReadSession) -> None:
-    issues = session.forge().list_open_board_issues()
-    projected = _observed_board(session, issues=issues).board
+class RulingsReason(StrEnum):
+    """`aco rulings`' own `--json` `reason` vocabulary (issue #412,
+    `specs/rulings.spec.md`): `listed` the only success. `invalid_usage`
+    covers `--repo` under `storage = state-ref` (PIN-04); every other
+    refusal -- an unsupported forge host (BOARD-02), a state-ref checkout
+    with no resolvable default branch (PIN-05) -- falls to `unavailable`,
+    matching `ask`/`rule`/`brief`'s own catch-all."""
+
+    LISTED = "listed"
+    INVALID_USAGE = "invalid_usage"
+    UNAVAILABLE = "unavailable"
+
+
+def _cmd_rulings(parsed: argparse.Namespace, session: _ReadSession) -> int:
+    as_json = parsed.json
+    try:
+        issues = session.forge().list_open_board_issues()
+        projected = _observed_board(session, issues=issues).board
+    except RepoMeaninglessUnderStateRefError as error:
+        return _refuse(RulingsReason.INVALID_USAGE, error, as_json=as_json)
+    except protocol.ClaimError as error:
+        return _refuse(RulingsReason.UNAVAILABLE, error, as_json=as_json)
     bodies = {issue.number: issue.body for issue in issues}
     storage = _board_config(_resolve_toplevel()).storage
-    _rulings(projected, bodies, as_json=parsed.json, storage=storage)
+    _rulings(projected, bodies, as_json=as_json, storage=storage)
+    return 0
 
 
 def _next_action_container_number(action: board.NextAction | None) -> int | None:
@@ -4064,7 +4144,13 @@ def _next_action_container_number(action: board.NextAction | None) -> int | None
 
 
 def _cmd_next(parsed: argparse.Namespace, session: _ReadSession) -> int:
-    observed = _observed_board(session)
+    as_json = parsed.json
+    try:
+        observed = _observed_board(session)
+    except RepoMeaninglessUnderStateRefError as error:
+        return _refuse(NextReason.INVALID_USAGE, error, as_json=as_json)
+    except protocol.ClaimError as error:
+        return _refuse(NextReason.UNAVAILABLE, error, as_json=as_json)
     projected = observed.board
     action = board.next_action(projected)
     chosen_container = _next_action_container_number(action)
@@ -4077,7 +4163,7 @@ def _cmd_next(parsed: argparse.Namespace, session: _ReadSession) -> int:
         close=board.zero_cost_closes(projected),
     )
     storage = _board_config(_resolve_toplevel()).storage
-    if parsed.json:
+    if as_json:
         _next_json(report, storage)
     else:
         _next(report, storage)

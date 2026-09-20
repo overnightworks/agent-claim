@@ -7,12 +7,14 @@ which action it recommends: `parallel:`, `scope unknown:`, and `close:`
 three `NextAction` variants' own text and `--json`, the `RECOVERY`
 preamble and `SKIPPED` tail, and exit `0`/`3`. It cites rather than
 restates: the forge-resolution precondition (`specs/board.spec.md`,
-BOARD-01/BOARD-02), `RECOVERY`'s own content and its always-first
+BOARD-01/BOARD-02/BOARD-42), `RECOVERY`'s own content and its always-first
 placement (`specs/landing-grammar.spec.md`, LAND-53), the kind
 exclusion a container without a recognized `kind` gets from every
 container-shaped view (`specs/board.spec.md`, BOARD-08), and the scope
 overlap grammar `aco claim`'s own cost line already defines
-(`specs/claim-record.spec.md`, CLAIM-31/CLAIM-32). `<n>` is an
+(`specs/claim-record.spec.md`, CLAIM-31/CLAIM-32); `specs/output.spec.md`
+owns the `--json` envelope itself (OUT-nn: key order, `ok`, `message`)
+that wraps NEXT-11..13's own action fields. `<n>` is an
 item number, `<label>` an item as `specs/landing-grammar.spec.md` prints
 it, `<s>` an integer score.
 
@@ -21,6 +23,7 @@ it, `<s>` an integer score.
 | state \ trigger | text | `--json` |
 |---|---|---|
 | unsupported forge host / untracked pin | BOARD-01/02 (cited) | BOARD-01/02 (cited) |
+| `--repo` under `storage = "state-ref"` | BOARD-42 (cited) | BOARD-42 (cited), NEXT-24 |
 | no actionable item at all | NEXT-01 | NEXT-01 |
 | a work item is the top action | NEXT-02, NEXT-03 | NEXT-11 |
 | that item's expectations are proposed or old-ruled | NEXT-04 | NEXT-11 |
@@ -38,7 +41,7 @@ it, `<s>` an integer score.
 
 ## No actionable item
 
-- [ ] [NEXT-01] With nothing left to pull, `aco next` prints `No actionable item.`, still followed by the `parallel:`/`scope unknown:`/`close:` tail, exit `3`; `--json`'s `"action"` is `null`.
+- [ ] [NEXT-01] With nothing to pull, `next` prints `No actionable item.`, still followed by `parallel:`/`scope unknown:`/`close:`, exit `3`; `--json` is `{"ok": false, "reason": "nothing_actionable", ...}`.
 
 ## A work item action
 
@@ -74,11 +77,19 @@ it, `<s>` an integer score.
 
 ## `--json`
 
-- [ ] [NEXT-11] A work-item action adds `"action": "work_item"`, `number`, `score`, `title`, `next`, `command`, and `ruling_landings`/`ruling_old`/`ruling_hint` only per NEXT-04 (see E-NEXT-07).
-- [ ] [NEXT-12] A cut proposal's object adds `"action": "cut_slice"`, `number`, `title`, `slice`, `cut_title`, `command` (see E-NEXT-07).
-- [ ] [NEXT-13] A close proposal adds `"action": "close_container"`, `number`, `closed`, `total`, `next_step` -- never `command`/`cut_title`, since none exists to run (see E-NEXT-07).
-- [ ] [NEXT-14] The object always carries `recovery` (`{number, title, step}` each), `skipped` (`{number, reason}` each), and `close` (a bare number array), independent of `action`.
+- [ ] [NEXT-11] A work-item action's `reason` is `work_item` (`ok: true`), adding `number`, `score`, `title`, `next`, `command`, `ruling_landings`/`ruling_old`/`ruling_hint` per NEXT-04 (E-NEXT-07).
+- [ ] [NEXT-12] A cut proposal's `reason` is `"cut_slice"` (`ok: true`), the object adding `number`, `title`, `slice`, `cut_title`, `command` (see E-NEXT-07).
+- [ ] [NEXT-13] A close proposal's `reason` is `"close_container"` (`ok: true`), the object adding `number`, `closed`, `total`, `next_step` -- never `command`/`cut_title`, since none exists to run (see E-NEXT-07).
+- [ ] [NEXT-14] The object always carries `recovery` (`{number, title, step}` each), `skipped` (`{number, reason}` each), and `close` (a bare number array), independent of `reason`.
 - [ ] [NEXT-15] `parallel` always carries `first_scope_unknown`, `candidates` (`{number, scope}` each, uncapped), and `scope_unknown` (a bare number array).
+- [ ] [NEXT-24] `--json` on a dispatched refusal (BOARD-02, BOARD-42) prints OUT-nn's envelope with the sentence as `message` and `reason` from the table below, exit `2` (see E-NEXT-08).
+
+`reason`, by which refusal fired:
+
+| refusal | `reason` |
+|---|---|
+| PIN-04 (`--repo` under `storage = state-ref`) | `invalid_usage` |
+| BOARD-02 (no forge adapter for host), PIN-05 (no resolvable default branch) | `unavailable` |
 
 ## Never
 
@@ -87,6 +98,7 @@ it, `<s>` an integer score.
 - `parallel:`/`scope unknown:` never occupy or place a `board.recovery` item: a landed-but-open item is `close:`'s domain alone, never a `parallel:` candidate or an occupant that could crowd out a real free item behind it.
 - The first action's own row is never repeated inside `parallel:`'s candidate list, whatever its own scope is.
 - Exit `3` never carries any action-specific line: `No actionable item.` alone stands where `Next:`/`Run:` would.
+- Exit `3` is never returned for a refusal (NEXT-24's `invalid_usage`/`unavailable`): those exit `2`, matching every other emitter refusal; `3` is `nothing_actionable`'s alone.
 
 ## Examples
 
@@ -194,6 +206,17 @@ Setup: bare-remote, fake `gh`, container `#181` as in E-NEXT-03
 
 ```console
 $ aco next --json
-{"action": "cut_slice", "number": 181, "title": "Epic", "slice": "Scheibe C", "cut_title": "Scheibe C", "command": "aco cut 181 --title \"Scheibe C\"", "recovery": [], "skipped": [], "parallel": {"first_scope_unknown": false, "candidates": [], "scope_unknown": []}, "close": []}
+{"ok": true, "reason": "cut_slice", "number": 181, "title": "Epic", "slice": "Scheibe C", "cut_title": "Scheibe C", "command": "aco cut 181 --title \"Scheibe C\"", "recovery": [], "skipped": [], "parallel": {"first_scope_unknown": false, "candidates": [], "scope_unknown": []}, "close": []}
 exit 0
+```
+
+### E-NEXT-08 — `--json` refusal envelope, `--repo` under `storage = state-ref`
+
+Setup: bare-remote, `storage = "state-ref"` tracked
+
+```console
+$ aco --repo acme/items next --json
+2> ERROR: --repo is meaningless under storage = state-ref
+{"ok": false, "reason": "invalid_usage", "message": "--repo is meaningless under storage = state-ref"}
+exit 2
 ```

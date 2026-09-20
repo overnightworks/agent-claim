@@ -4,8 +4,10 @@
 `[[expectation]]` line, fully ruled ones too, read-only. This file owns its
 row and per-line text, its ordering, its `--json` shape, and its empty-board
 sentence. It cites the forge-resolution precondition `specs/board.spec.md`
-owns (BOARD-01/BOARD-02) rather than restating it, and the `RULE-01`/`ASK-01`
-write paths that fill the lines this command only reads. `<n>` is an
+owns (BOARD-01/BOARD-02/BOARD-42) rather than restating it, and the
+`RULE-01`/`ASK-01` write paths that fill the lines this command only reads;
+`specs/output.spec.md` owns the `--json` envelope itself (OUT-nn: key
+order, `ok`, `message`) that wraps RUL-05's own `rulings` array. `<n>` is an
 item number, `<label>` an item as `specs/landing-grammar.spec.md` prints
 it, `<k>` an expectation line's 1-based index.
 
@@ -14,10 +16,11 @@ it, `<k>` an expectation line's 1-based index.
 | state \ trigger | text | `--json` |
 |---|---|---|
 | unsupported forge host / untracked pin | BOARD-01/02 (cited) | BOARD-01/02 (cited) |
-| an item with an open expectation line | RUL-01, RUL-02 | RUL-05 |
-| several such items | RUL-03 | RUL-05 |
-| an item whose every line is already ruled | RUL-01, RUL-04 | RUL-05 |
-| a ruled line | RUL-02 | RUL-05 |
+| `--repo` under `storage = "state-ref"` | BOARD-42 (cited) | BOARD-42 (cited), RUL-09 |
+| an item with an open expectation line | RUL-01, RUL-02 | RUL-05, RUL-10 |
+| several such items | RUL-03 | RUL-05, RUL-10 |
+| an item whose every line is already ruled | RUL-01, RUL-04 | RUL-05, RUL-10 |
+| a ruled line | RUL-02 | RUL-05, RUL-10 |
 | a line's `question`/`example`/`picture` | — | RUL-06 |
 | no item on the whole board carries an expectation line | RUL-07 | RUL-08 |
 
@@ -30,13 +33,22 @@ it, `<k>` an expectation line's 1-based index.
 
 ## `--json`
 
-- [ ] [RUL-05] Each row is `{"number", "title", "open", "total", "lines"}`; each line is `{"index", "text", "ruling", "ruled_on"}`, both `null` when open, untruncated text (see E-RUL-03, E-RUL-05).
+- [ ] [RUL-05] `rulings --json` wraps OUT-nn (`reason: "listed"`) around a `rulings` array (see E-RUL-03, E-RUL-05).
+- [ ] [RUL-10] Each `rulings` row is `{"number", "title", "open", "total", "lines"}`; each line `{"index", "text", "ruling", "ruled_on"}`, both `null` when open, untruncated text (see E-RUL-03, E-RUL-05).
 - [ ] [RUL-06] A line's `question`/`example`/`picture` (`aco ask`, ASK-03) each add their own key, present only when that field was given.
+- [ ] [RUL-09] `--json` on a dispatched refusal (BOARD-02, BOARD-42) prints OUT-nn's envelope with the sentence as `message` and `reason` from the table below, exit `2` (see E-RUL-06).
+
+`reason`, by which refusal fired:
+
+| refusal | `reason` |
+|---|---|
+| PIN-04 (`--repo` under `storage = state-ref`) | `invalid_usage` |
+| BOARD-02 (no forge adapter for host), PIN-05 (no resolvable default branch) | `unavailable` |
 
 ## Empty board
 
 - [ ] [RUL-07] With no item on the whole board carrying an expectation line, text output is exactly `No expectation lines.`, exit `0` (see E-RUL-04).
-- [ ] [RUL-08] The same board's `--json` prints `[]`, exit `0` (see E-RUL-04).
+- [ ] [RUL-08] The same board's `--json` prints `{"ok": true, "reason": "listed", "rulings": []}`, exit `0` (see E-RUL-04).
 
 ## Never
 
@@ -87,7 +99,7 @@ Setup: bare-remote, fake `gh`, issue `#10` as in E-RUL-01
 
 ```console
 $ aco rulings --json
-[{"number": 10, "title": "Open expectation", "open": 1, "total": 2, "lines": [{"index": 1, "text": "Open decision 0.", "ruling": null, "ruled_on": null}, {"index": 2, "text": "Settled decision 0.", "ruling": "yes", "ruled_on": "2026-09-19"}]}]
+{"ok": true, "reason": "listed", "rulings": [{"number": 10, "title": "Open expectation", "open": 1, "total": 2, "lines": [{"index": 1, "text": "Open decision 0.", "ruling": null, "ruled_on": null}, {"index": 2, "text": "Settled decision 0.", "ruling": "yes", "ruled_on": "2026-09-19"}]}]}
 exit 0
 ```
 
@@ -100,7 +112,7 @@ $ aco rulings
 No expectation lines.
 exit 0
 $ aco rulings --json
-[]
+{"ok": true, "reason": "listed", "rulings": []}
 exit 0
 ```
 
@@ -115,6 +127,17 @@ $ aco rulings
   2 ruled yes 2026-09-19: Settled decision 1.
 exit 0
 $ aco rulings --json
-[{"number": 11, "title": "Fully ruled", "open": 0, "total": 2, "lines": [{"index": 1, "text": "Settled decision 0.", "ruling": "yes", "ruled_on": "2026-09-19"}, {"index": 2, "text": "Settled decision 1.", "ruling": "yes", "ruled_on": "2026-09-19"}]}]
+{"ok": true, "reason": "listed", "rulings": [{"number": 11, "title": "Fully ruled", "open": 0, "total": 2, "lines": [{"index": 1, "text": "Settled decision 0.", "ruling": "yes", "ruled_on": "2026-09-19"}, {"index": 2, "text": "Settled decision 1.", "ruling": "yes", "ruled_on": "2026-09-19"}]}]}
 exit 0
+```
+
+### E-RUL-06 — `--json` refusal envelope, `--repo` under `storage = state-ref`
+
+Setup: bare-remote, `storage = "state-ref"` tracked
+
+```console
+$ aco --repo acme/items rulings --json
+2> ERROR: --repo is meaningless under storage = state-ref
+{"ok": false, "reason": "invalid_usage", "message": "--repo is meaningless under storage = state-ref"}
+exit 2
 ```

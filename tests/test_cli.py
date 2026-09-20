@@ -534,6 +534,8 @@ def test_board_projects_fixture_json_without_github_writes(
     assert issue_claim.main(["--repo", "example/agent-claim", "board", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert set(payload) == {
+        "ok",
+        "reason",
         "items",
         "ready_now",
         "stale",
@@ -543,6 +545,7 @@ def test_board_projects_fixture_json_without_github_writes(
         "requests",
         "measurements",
     }
+    assert (payload["ok"], payload["reason"]) == (True, "projected")
     first = payload["items"][0]
     ten = next(item for item in payload["items"] if item["number"] == 10)
     eleven = next(item for item in payload["items"] if item["number"] == 11)
@@ -1141,23 +1144,27 @@ def test_rulings_renders_text_json_and_empty_success(
     )
 
     assert issue_claim.main([*rulings_command, "--json"]) == 0
-    assert json.loads(capsys.readouterr().out) == [
-        {
-            "number": 10,
-            "title": "Open expectation",
-            "open": 1,
-            "total": 2,
-            "lines": [
-                {"index": 1, "text": "Open decision 0.", "ruling": None, "ruled_on": None},
-                {
-                    "index": 2,
-                    "text": "Settled decision 0.",
-                    "ruling": "yes",
-                    "ruled_on": RULED_ON.isoformat(),
-                },
-            ],
-        }
-    ]
+    assert json.loads(capsys.readouterr().out) == {
+        "ok": True,
+        "reason": "listed",
+        "rulings": [
+            {
+                "number": 10,
+                "title": "Open expectation",
+                "open": 1,
+                "total": 2,
+                "lines": [
+                    {"index": 1, "text": "Open decision 0.", "ruling": None, "ruled_on": None},
+                    {
+                        "index": 2,
+                        "text": "Settled decision 0.",
+                        "ruling": "yes",
+                        "ruled_on": RULED_ON.isoformat(),
+                    },
+                ],
+            }
+        ],
+    }
 
     fully_ruled_issue = rulings_issue(
         11,
@@ -1175,28 +1182,32 @@ def test_rulings_renders_text_json_and_empty_success(
     )
 
     assert issue_claim.main([*rulings_command, "--json"]) == 0
-    assert json.loads(capsys.readouterr().out) == [
-        {
-            "number": 11,
-            "title": "Fully ruled",
-            "open": 0,
-            "total": 2,
-            "lines": [
-                {
-                    "index": 1,
-                    "text": "Settled decision 0.",
-                    "ruling": "yes",
-                    "ruled_on": RULED_ON.isoformat(),
-                },
-                {
-                    "index": 2,
-                    "text": "Settled decision 1.",
-                    "ruling": "yes",
-                    "ruled_on": RULED_ON.isoformat(),
-                },
-            ],
-        }
-    ]
+    assert json.loads(capsys.readouterr().out) == {
+        "ok": True,
+        "reason": "listed",
+        "rulings": [
+            {
+                "number": 11,
+                "title": "Fully ruled",
+                "open": 0,
+                "total": 2,
+                "lines": [
+                    {
+                        "index": 1,
+                        "text": "Settled decision 0.",
+                        "ruling": "yes",
+                        "ruled_on": RULED_ON.isoformat(),
+                    },
+                    {
+                        "index": 2,
+                        "text": "Settled decision 1.",
+                        "ruling": "yes",
+                        "ruled_on": RULED_ON.isoformat(),
+                    },
+                ],
+            }
+        ],
+    }
 
     monkeypatch.setattr(client, "list_open_board_issues", lambda: ())
 
@@ -1204,7 +1215,7 @@ def test_rulings_renders_text_json_and_empty_success(
     assert capsys.readouterr().out == "No expectation lines.\n"
 
     assert issue_claim.main([*rulings_command, "--json"]) == 0
-    assert json.loads(capsys.readouterr().out) == []
+    assert json.loads(capsys.readouterr().out) == {"ok": True, "reason": "listed", "rulings": []}
 
 
 def test_rulings_json_carries_question_example_and_picture(
@@ -1232,25 +1243,29 @@ def test_rulings_json_carries_question_example_and_picture(
     _configured_board_client(monkeypatch, tmp_path, open_issues=(open_issue,))
 
     assert issue_claim.main(["--repo", "example/agent-claim", "rulings", "--json"]) == 0
-    assert json.loads(capsys.readouterr().out) == [
-        {
-            "number": 10,
-            "title": "Open expectation",
-            "open": 1,
-            "total": 1,
-            "lines": [
-                {
-                    "index": 1,
-                    "text": "Open decision.",
-                    "ruling": None,
-                    "ruled_on": None,
-                    "question": "Ship it?",
-                    "example": "Release on Friday.",
-                    "picture": picture,
-                }
-            ],
-        }
-    ]
+    assert json.loads(capsys.readouterr().out) == {
+        "ok": True,
+        "reason": "listed",
+        "rulings": [
+            {
+                "number": 10,
+                "title": "Open expectation",
+                "open": 1,
+                "total": 1,
+                "lines": [
+                    {
+                        "index": 1,
+                        "text": "Open decision.",
+                        "ruling": None,
+                        "ruled_on": None,
+                        "question": "Ship it?",
+                        "example": "Release on Friday.",
+                        "picture": picture,
+                    }
+                ],
+            }
+        ],
+    }
 
 
 def rulings_issue(
@@ -1397,7 +1412,8 @@ _PARALLEL_LIVE_CLAIMS = (
             ("next", "--json"),
             0,
             {
-                "action": "work_item",
+                "ok": True,
+                "reason": "work_item",
                 "number": 11,
                 "score": 10,
                 "title": "Top work",
@@ -1471,13 +1487,14 @@ _PARALLEL_LIVE_CLAIMS = (
             ("next", "--json"),
             3,
             {
-                "action": None,
+                "ok": False,
+                "reason": "nothing_actionable",
                 "recovery": [],
                 "skipped": [],
                 "parallel": _EMPTY_PARALLEL_JSON,
                 "close": [],
             },
-            id="emits_action_null_on_a_fully_empty_board",
+            id="emits_nothing_actionable_on_a_fully_empty_board",
         ),
         pytest.param(
             _PARALLEL_ITEMS,
@@ -1499,7 +1516,8 @@ _PARALLEL_LIVE_CLAIMS = (
             ("next", "--json"),
             0,
             {
-                "action": "work_item",
+                "ok": True,
+                "reason": "work_item",
                 "number": 50,
                 "score": -10,
                 "title": "Alpha",
@@ -1655,7 +1673,8 @@ def test_next_pulls_an_unruled_item_and_names_only_unworkable_ones_as_skipped(
 
     assert issue_claim.main(["--repo", "example/agent-claim", "next", "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == {
-        "action": "work_item",
+        "ok": True,
+        "reason": "work_item",
         "number": 11,
         "score": 10,
         "title": "Needs rulings",
@@ -4473,7 +4492,7 @@ def test_next_prints_a_cut_command_block_mode_accepts_a_differing_next_line(
     json_exit_code = issue_claim.main(["--repo", "example/agent-claim", "next", "--json"])
     assert json_exit_code == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["action"] == "cut_slice"
+    assert payload["reason"] == "cut_slice"
     assert payload["slice"] == _DIFFERING_NEXT_LINE
     assert payload["cut_title"] == "Scheibe 1"
 
@@ -4968,7 +4987,7 @@ def test_next_json_names_a_cuttable_container_slice(
 
     assert exit_code == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["action"] == "cut_slice"
+    assert payload["reason"] == "cut_slice"
     assert payload["number"] == 181
     assert payload["title"] == "Epic"
     assert payload["slice"] == "Scheibe C"
@@ -5021,7 +5040,7 @@ def test_next_json_names_a_closeable_container(
 
     assert exit_code == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["action"] == "close_container"
+    assert payload["reason"] == "close_container"
     assert payload["number"] == 183
     assert payload["closed"] == 4
     assert payload["total"] == 4
@@ -5085,7 +5104,7 @@ def test_next_json_names_a_container_with_no_slice_row_by_its_own_next_line(
 
     assert exit_code == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["action"] == "close_container"
+    assert payload["reason"] == "close_container"
     assert payload["number"] == 188
     assert payload["closed"] == 2
     assert payload["total"] == 2
@@ -5643,7 +5662,8 @@ def test_next_pulls_a_configured_projectionless_idea_with_refinement_step(
 
     assert issue_claim.main(["--repo", "example/agent-claim", "next", "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == {
-        "action": "work_item",
+        "ok": True,
+        "reason": "work_item",
         "number": 10,
         "score": -20,
         "title": "Operator idea",
@@ -5675,7 +5695,8 @@ def test_next_keeps_an_unlabelled_projectionless_item_skipped_with_an_active_ide
 
     assert issue_claim.main(["--repo", "example/agent-claim", "next", "--json"]) == 3
     assert json.loads(capsys.readouterr().out) == {
-        "action": None,
+        "ok": False,
+        "reason": "nothing_actionable",
         "recovery": [],
         "skipped": [{"number": 10, "reason": "body incomplete: Now, Next, Done when"}],
         "parallel": _EMPTY_PARALLEL_JSON,
@@ -5944,6 +5965,56 @@ def test_repo_is_refused_under_the_state_ref_pin(
 
     assert status == 2
     assert capsys.readouterr().err == "ERROR: --repo is meaningless under storage = state-ref\n"
+
+
+@pytest.mark.parametrize(
+    "command", [["board", "--json"], ["rulings", "--json"], ["next", "--json"]]
+)
+def test_cli_board_family_reports_invalid_usage_when_repo_is_given_under_state_ref(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    command: list[str],
+) -> None:
+    """PIN-04, cited by BOARD-01/02 (`specs/board.spec.md`) and reused by
+    `rulings`/`next` (issue #412): all three resolve the same `_LazyForge`
+    `board` does, so `--repo` under `storage = state-ref` reports the same
+    `invalid_usage` `ask`/`rule`/`brief` already do, never their broad
+    `unavailable` catch-all."""
+    _write_state_ref_pin(tmp_path)
+
+    status = issue_claim.main(["--repo", "acme/items", *command])
+
+    captured = capsys.readouterr()
+    assert status == 2
+    assert captured.err == "ERROR: --repo is meaningless under storage = state-ref\n"
+    _assert_json_refusal_object(captured.err, captured.out, reason="invalid_usage")
+
+
+@pytest.mark.parametrize(
+    "command", [["board", "--json"], ["rulings", "--json"], ["next", "--json"]]
+)
+def test_cli_board_family_reports_unavailable_for_a_forge_adapter_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command: list[str],
+) -> None:
+    """The same generic catch-all `ask`/`rule`/`brief` already fall to
+    (issue #412): a forge adapter construction failure that is not
+    `RepoMeaninglessUnderStateRefError` reports `unavailable`, never
+    `invalid_usage`, for `board`, `rulings`, and `next` alike."""
+    monkeypatch.setattr(
+        github,
+        "GitHubForge",
+        lambda repository: (_ for _ in ()).throw(ClaimError("adapter failed")),
+    )
+
+    status = issue_claim.main(["--repo", "example/agent-claim", *command])
+
+    captured = capsys.readouterr()
+    assert status == 2
+    assert captured.err == "ERROR: adapter failed\n"
+    _assert_json_refusal_object(captured.err, captured.out, reason="unavailable")
 
 
 class _RefusingItemWriter:
