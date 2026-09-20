@@ -106,7 +106,8 @@ needs neither a fake `gh` nor a checkout at all.
 
 The text form's own literal is LAND-04's own fact, already driven by
 `specs/landing-grammar.spec.md`'s own E-LAND-02; this session drives only
-CHECK-01, this file's own `--json` envelope.
+CHECK-01, this file's own `reason` values inside `specs/output.spec.md`'s
+envelope.
 
 Setup: bare-remote, `.agent-claim/board.toml` tracked, fake `gh`, pull request `#57` by `Ada`, body `Work-Item: #42\n\nCloses #42`, an active claim on issue `#42` matching its head branch
 
