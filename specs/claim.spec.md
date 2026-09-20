@@ -5,14 +5,19 @@ first worktree edit. This file owns the command's own preconditions (an
 isolated worktree, a clean tree, `HEAD` matching `--base`), identity
 resolution (issue vs. lane), the slice-rule checks it runs against the open
 board (out-of-order, blocked, container, closed, missing, body-incomplete,
-missing-parent) and their `--out-of-order REASON` downgrade, and the
-`CLAIMED ...`/`--json` report. `specs/claim-record.spec.md` owns the record
-itself, the scope grammar, the width gate, roles, resources, overlap and the
-cost line (CLAIM-*); `specs/body-block.spec.md` owns a malformed body's own
-defect sentence (BODY-50) and an incomplete projection's own skip (BODY-51);
-`aco claim` reuses either sentence verbatim before any write (BODY-52). This
-file cites those IDs rather than restating them. `<n>` is a claimed issue
-number, `<path>` a repository-relative path, `<reason>` a free-text sentence.
+missing-parent) and their `--out-of-order REASON` downgrade, the
+`CLAIMED ...`/`--json` report, and its own `--json` `reason` vocabulary.
+`specs/output.spec.md` owns the `--json` envelope itself (OUT-nn: key
+order, `ok`, `message`); this file names only `claim`'s own `reason`
+values. `specs/claim-record.spec.md` owns the record itself, the scope
+grammar, the width gate, roles, resources, overlap, the cost line
+(CLAIM-*), the malformed-body-before-no-scope priority (CLAIM-68), and one
+claim's own `--json` field order (CLAIM-69); `specs/body-block.spec.md`
+owns a malformed body's own defect sentence (BODY-50) and an incomplete
+projection's own skip (BODY-51); `aco claim` reuses either sentence
+verbatim before any write (BODY-52). This file cites those IDs rather than
+restating them. `<n>` is a claimed issue number, `<path>` a repository-
+relative path, `<reason>` a free-text sentence.
 
 ## Behavior table
 
@@ -24,6 +29,7 @@ number, `<path>` a repository-relative path, `<reason>` a free-text sentence.
 | no `--scope` given | — | CLAIM-53, CLAIM-55 | CLM-06 |
 | branch not `docs/`/`fix/` prefixed | — | — | CLM-07 |
 | `--scope` differs from the item's own scope | CLAIM-54 | — | — |
+| target unreachable while deriving scope | — | CLM-24 | — |
 | higher-priority actionable item is free | CLM-08 | CLM-08 | — |
 | `--out-of-order REASON` given | CLM-09 | CLM-09 | — |
 | target is blocked | CLM-10 | CLM-10 | — |
@@ -40,6 +46,9 @@ number, `<path>` a repository-relative path, `<reason>` a free-text sentence.
 | wide scope, `--whole` omitted, the item's own body names one | CLM-21 | CLM-21 | — |
 | wide scope, neither `--whole` nor the item's own body names one | CLM-22 | CLM-22 | CLM-18 |
 | higher-priority item names neither `scope` nor a `[[slice]]` row | CLM-23 | CLM-23 | — |
+| the identity or claim id is already taken | CLM-25 | CLM-25 | CLM-25 |
+| `--repo` given, `storage = "state-ref"` | CLM-26 | CLM-26 | — |
+| every other refusal | CLM-27 | CLM-27 | CLM-27 |
 
 ## The checkout precondition
 
@@ -73,12 +82,27 @@ to the clause each names below.
 
 - [ ] [CLM-15] A replayed request (CLAIM-13) skips every slice-rule check and still prints `CLAIMED issue #<n>: <claim-id>`, even against a now-blocked, lower-ranked target (see E-CLM-04).
 - [ ] [CLM-16] With `--json`, a clean claim's warnings print to stderr not stdout, and land in the payload's `checks` array; without `--json` they print to stdout, ahead of `CLAIMED`.
-- [ ] [CLM-17] With `--json`, any error-level check refuses `{"refused": true, "issue": <n>, "checks": [...]}` on stdout, exit `2`, never the `{"ok": false, "error": ...}` REL-24 shape.
+- [ ] [CLM-17] With `--json`, any error-level check refuses the envelope, `reason: "precondition_failed"`, then `"issue": <n>, "checks": [...]`, exit `2` (see E-CLM-06).
 - [ ] [CLM-18] A scope tripping the width gate refuses before any write, in the wording `claim-record.spec.md` owns (CLAIM-25, CLAIM-26, CLAIM-29), exit `2`.
 - [ ] [CLM-19] A successful `--json` claim's object carries `versioned_files`, `versioned_files_total`, `share`, `touches` and `checks`, beside the fields CLAIM-* already owns.
 - [ ] [CLM-21] With `--whole` omitted, a target naming its own top-level `whole` admits a wide scope exactly as `--whole REASON` would; that sentence lands on the claim (see E-CLM-05).
 - [ ] [CLM-22] Neither `--whole` nor the target's own body `whole` present, the width gate's refusal ends `; pass --whole REASON or set whole in the body`, exit `2` (see E-CLM-05).
 - [ ] [CLM-23] A higher-ranked item naming neither `scope` nor a `[[slice]]` row is skipped by CLM-08's own walk (`specs/next.spec.md` NEXT-23); claiming past it costs no `--out-of-order`.
+- [ ] [CLM-24] Deriving scope for a target missing or a pull request refuses by name before any slice-rule check runs, `reason: "target_invalid"` under `--json` (see E-CLM-07).
+- [ ] [CLM-25] The store's own refusal to write -- the identity or claim id already taken, or a resource conflict -- reports `reason: "claim_conflict"` under `--json`.
+- [ ] [CLM-26] Under `storage = "state-ref"`, `aco claim` resolves the state-ref forge like `aco rule`; `--repo` there refuses the same as PIN-04, `reason: "invalid_usage"`.
+- [ ] [CLM-27] Every other refusal -- a checkout precondition, scope grammar, an unsafe branch or claim id -- reports `reason: "unavailable"` under `--json`.
+
+`reason`, by which refusal fired:
+
+| refusal | `reason` |
+|---|---|
+| CLM-01..14, CLM-18, CLM-20, CLM-22, CLM-23 and every refusal not named below | `unavailable` |
+| CLM-17 (an error-level check) | `precondition_failed` |
+| CLM-24 (a missing or pull-request target while deriving scope) | `target_invalid` |
+| CLAIM-55 (item names no scope), CLAIM-54 (scope mismatch), CLAIM-68 (malformed body while deriving) | `body_invalid` |
+| CLM-25 (identity, claim id, or resource conflict) | `claim_conflict` |
+| CLM-26 (`--repo` under `storage = state-ref`) | `invalid_usage` |
 
 ## Never
 
@@ -154,5 +178,26 @@ Setup: bare-remote, bootstrapped, a linked worktree on `ada/issue-43`, issue `#4
 ```console
 $ aco claim 43
 2> ERROR: scope is wide: 4 paths exceeds three; pass --whole REASON or set whole in the body
+exit 2
+```
+
+### E-CLM-06 — a blocked check refuses the envelope, `checks` beside it
+
+Setup: bare-remote, bootstrapped, a linked worktree on `ada/issue-12`, issue `#12` blocked by open issue `#11`
+
+```console
+$ aco claim 12 --scope src/lower.py --json
+{"ok": false, "reason": "precondition_failed", "issue": 12, "checks": [{"level": "error", "check": "blocked", "text": "#12 is blocked by #11 (open); pass --out-of-order REASON to claim it anyway", "slice": null, "issue": 11}]}
+exit 2
+```
+
+### E-CLM-07 — a target missing while deriving scope refuses `target_invalid`
+
+Setup: bare-remote, bootstrapped, a linked worktree on `ada/issue-72`, issue `#72` closed or missing
+
+```console
+$ aco claim 72 --json
+2> ERROR: #72 does not exist
+{"ok": false, "reason": "target_invalid", "message": "#72 does not exist"}
 exit 2
 ```

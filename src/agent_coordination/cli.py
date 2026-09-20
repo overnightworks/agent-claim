@@ -945,6 +945,27 @@ def _resource_fields(resource: protocol.ResourceHold | None) -> dict[str, object
     return {"resource": resource.name, "resource_value": resource.value}
 
 
+def _claim_identity_fields(claim: protocol.ActiveClaim) -> dict[str, object]:
+    """The one claim-identity dict every `--json` view of a live claim
+    shares -- `status`, `status --path`, `claim`, and `rescope` (issue #406,
+    #390 finding 6) each spread this instead of typing the same seven
+    fields out by hand a fifth time with their own drifting order. A view
+    still projects its own remaining fields explicitly beside it: `resource`/
+    `resource_value` (every view but `rescope`, which names no `--resource`
+    flag of its own), `whole` (`status` and `status --path` alone), and
+    whatever else is that view's own (`overlaps`/`age`/`old` for `status`,
+    `versioned_files`/`touches`/`checks` for `claim`)."""
+    return {
+        **_identity_json(claim.identity),
+        "claim_id": claim.claim_id,
+        "agent": claim.agent,
+        "role": claim.role,
+        "base": claim.base,
+        "branch": claim.branch,
+        "scope": list(claim.scope),
+    }
+
+
 def _overlap_subjects(
     claims_by_id: Mapping[str, protocol.ActiveClaim], peer_ids: set[str]
 ) -> list[dict[str, object]]:
@@ -1037,6 +1058,39 @@ def _status(
     return 0
 
 
+class StatusReason(StrEnum):
+    """`aco status`'s own `--json` `reason` vocabulary (issue #406,
+    `specs/status.spec.md` STAT-03/STAT-05): `claimed`, `unclaimed`, and
+    `conflict` are its own three read states. `status` is forge-free
+    (STAT-16) and never resolves a repository target, so it names no
+    `invalid_usage` of its own -- only `unavailable`, reached when
+    `store.fetch_state` refuses a rewritten or malformed state ref."""
+
+    CLAIMED = "claimed"
+    UNCLAIMED = "unclaimed"
+    CONFLICT = "conflict"
+    UNAVAILABLE = "unavailable"
+
+
+def _status_claim_json(
+    claim: protocol.ActiveClaim,
+    claims_by_id: Mapping[str, protocol.ActiveClaim],
+    index: protocol.ClaimConflictIndex,
+    ages: Mapping[str, datetime],
+    observed_at: datetime,
+) -> dict[str, object]:
+    age, old = _claim_age_fields(ages[claim.claim_id], observed_at)
+    return {
+        **_claim_identity_fields(claim),
+        **_resource_fields(claim.resource),
+        **({"whole": claim.whole_reason} if claim.whole_reason is not None else {}),
+        "overlaps": _overlap_subjects(claims_by_id, protocol._overlap_peer_ids(index, claim)),
+        "state": "CONFLICT" if claim.claim_id in index.conflict_ids else "CLAIMED",
+        "age": age,
+        "old": old,
+    }
+
+
 def _status_json(
     claims: tuple[protocol.ActiveClaim, ...],
     issue: int | None,
@@ -1047,39 +1101,19 @@ def _status_json(
     observed_at = (now or datetime.now(UTC)).astimezone(UTC)
     related, index = _status_claims(claims, issue)
     if not related:
-        state = "UNCLAIMED"
+        reason = StatusReason.UNCLAIMED
     elif any(claim.claim_id in index.conflict_ids for claim in related):
-        state = "CONFLICT"
+        reason = StatusReason.CONFLICT
     else:
-        state = "CLAIMED"
+        reason = StatusReason.CLAIMED
     claims_by_id: dict[str, protocol.ActiveClaim] = {claim.claim_id: claim for claim in claims}
-    payload = {
-        "issue": issue,
-        "state": state,
-        "tip": tip,
-        "claims": [
-            {
-                **_identity_json(claim.identity),
-                "agent": claim.agent,
-                "role": claim.role,
-                "base": claim.base,
-                "branch": claim.branch,
-                "claim_id": claim.claim_id,
-                "scope": list(claim.scope),
-                **_resource_fields(claim.resource),
-                **({"whole": claim.whole_reason} if claim.whole_reason is not None else {}),
-                "overlaps": _overlap_subjects(
-                    claims_by_id, protocol._overlap_peer_ids(index, claim)
-                ),
-                "state": "CONFLICT" if claim.claim_id in index.conflict_ids else "CLAIMED",
-                "age": _claim_age_fields(ages[claim.claim_id], observed_at)[0],
-                "old": _claim_age_fields(ages[claim.claim_id], observed_at)[1],
-            }
-            for claim in related
-        ],
-    }
-    print(json.dumps(payload))
-    return 2 if state == "CONFLICT" else 0
+    claims_payload = [
+        _status_claim_json(claim, claims_by_id, index, ages, observed_at) for claim in related
+    ]
+    _emit_json(
+        reason is not StatusReason.CONFLICT, reason, issue=issue, tip=tip, claims=claims_payload
+    )
+    return 2 if reason is StatusReason.CONFLICT else 0
 
 
 def _status_path(
@@ -1105,44 +1139,41 @@ def _status_path(
 
 def _status_path_json(claims: tuple[protocol.ActiveClaim, ...], path: str) -> int:
     holders = protocol.claims_holding_path(claims, path)
-    state = "UNCLAIMED" if not holders else "CLAIMED"
-    payload = {
-        "path": path,
-        "state": state,
-        "claims": [
-            {
-                **_identity_json(claim.identity),
-                "agent": claim.agent,
-                "role": claim.role,
-                "base": claim.base,
-                "branch": claim.branch,
-                "claim_id": claim.claim_id,
-                "scope": list(claim.scope),
-                **_resource_fields(claim.resource),
-                **({"whole": claim.whole_reason} if claim.whole_reason is not None else {}),
-                "state": "CLAIMED",
-            }
-            for claim in holders
-        ],
-    }
-    print(json.dumps(payload))
+    reason = StatusReason.UNCLAIMED if not holders else StatusReason.CLAIMED
+    claims_payload = [
+        {
+            **_claim_identity_fields(claim),
+            **_resource_fields(claim.resource),
+            **({"whole": claim.whole_reason} if claim.whole_reason is not None else {}),
+            "state": "CLAIMED",
+        }
+        for claim in holders
+    ]
+    _emit_json(True, reason, path=path, claims=claims_payload)
     return 0
 
 
+class RescopeReason(StrEnum):
+    """`aco rescope`'s own `--json` `reason` vocabulary (issue #406,
+    `specs/rescope.spec.md`): `rescoped` the only success. `invalid_usage`
+    covers a malformed `--add`/`--drop` value (a relative entry, one outside
+    the checkout, a comma-bearing entry matching no versioned file, or a
+    combination `protocol._combined_scope` refuses); `precondition_failed`
+    covers this claim's own current state disallowing the rescope (no live
+    claim on the target identity/branch, a different agent than the
+    claimant, or a scope too wide for the width gate without `--whole`).
+    Every other refusal -- an unresolved checkout, a missing state ref, a
+    corrupted claim record -- falls to `unavailable`, matching `ask`/`rule`/
+    `brief`'s own catch-all."""
+
+    RESCOPED = "rescoped"
+    PRECONDITION_FAILED = "precondition_failed"
+    INVALID_USAGE = "invalid_usage"
+    UNAVAILABLE = "unavailable"
+
+
 def _rescope_json(claimed: protocol.ActiveClaim) -> None:
-    print(
-        json.dumps(
-            {
-                **_identity_json(claimed.identity),
-                "claim_id": claimed.claim_id,
-                "agent": claimed.agent,
-                "role": claimed.role,
-                "base": claimed.base,
-                "branch": claimed.branch,
-                "scope": list(claimed.scope),
-            }
-        )
-    )
+    _emit_json(True, RescopeReason.RESCOPED, **_claim_identity_fields(claimed))
 
 
 @dataclass(frozen=True)
@@ -1155,6 +1186,32 @@ class ScopeVersioning:
     share: float
 
 
+class ClaimReason(StrEnum):
+    """`aco claim`'s own `--json` `reason` vocabulary (issue #406,
+    `specs/claim.spec.md`): `claimed` the only success. `precondition_failed`
+    covers the shared `checks` array `_refuse_claim` reports (out-of-order,
+    blocked, container, closed/missing, body-incomplete, missing-parent --
+    CLM-08..14). `target_invalid` and `body_invalid` are the two failures a
+    scope actually being *derived* from an item's own body can hit before
+    those checks ever run: the item itself is unusable (missing, a pull
+    request), or its body cannot supply or confirm a scope (a malformed
+    `agent-claim` block, no `scope` field, or one differing from an explicit
+    `--scope`). `claim_conflict` is `apply()`'s own single failure surface
+    for a claim write -- identity already claimed, claim id already
+    consumed, or a resource conflict or format issue -- never split further
+    here. Every other refusal -- a checkout precondition, scope grammar, an
+    unsafe branch or claim id -- falls to `unavailable`, matching `ask`/
+    `rule`/`brief`'s own catch-all."""
+
+    CLAIMED = "claimed"
+    PRECONDITION_FAILED = "precondition_failed"
+    TARGET_INVALID = "target_invalid"
+    BODY_INVALID = "body_invalid"
+    CLAIM_CONFLICT = "claim_conflict"
+    INVALID_USAGE = "invalid_usage"
+    UNAVAILABLE = "unavailable"
+
+
 def _claim_json(
     claimed: protocol.ActiveClaim,
     *,
@@ -1162,24 +1219,16 @@ def _claim_json(
     touches: tuple[protocol.ActiveClaim, ...],
     checks: tuple[SliceCheck, ...],
 ) -> int:
-    print(
-        json.dumps(
-            {
-                **_identity_json(claimed.identity),
-                "claim_id": claimed.claim_id,
-                "agent": claimed.agent,
-                "role": claimed.role,
-                "base": claimed.base,
-                "branch": claimed.branch,
-                "scope": list(claimed.scope),
-                **_resource_fields(claimed.resource),
-                "versioned_files": versioning.versioned_files,
-                "versioned_files_total": versioning.versioned_files_total,
-                "share": versioning.share,
-                "touches": [_touch_json(claim) for claim in touches],
-                "checks": [check.as_json() for check in checks],
-            }
-        )
+    _emit_json(
+        True,
+        ClaimReason.CLAIMED,
+        **_claim_identity_fields(claimed),
+        **_resource_fields(claimed.resource),
+        versioned_files=versioning.versioned_files,
+        versioned_files_total=versioning.versioned_files_total,
+        share=versioning.share,
+        touches=[_touch_json(claim) for claim in touches],
+        checks=[check.as_json() for check in checks],
     )
     return 0
 
@@ -2156,10 +2205,14 @@ def _slice_rule_checks(
     return tuple(checks)
 
 
-def _refuse_claim(json_mode: bool, issue: int | None, checks: tuple[SliceCheck, ...]) -> None:
-    if json_mode:
-        payload = {"refused": True, "issue": issue, "checks": [c.as_json() for c in checks]}
-        print(json.dumps(payload))
+def _refuse_claim(as_json: bool, issue: int | None, checks: tuple[SliceCheck, ...]) -> None:
+    if as_json:
+        _emit_json(
+            False,
+            ClaimReason.PRECONDITION_FAILED,
+            issue=issue,
+            checks=[c.as_json() for c in checks],
+        )
         return
     for check in checks:
         print(check.render(), file=sys.stderr)
@@ -2601,22 +2654,22 @@ def _cmd_body(parsed: argparse.Namespace) -> int:
     one under `storage = "github"`, the same gate `_state_ref_forge`'s own
     items already read through `_decode_item`."""
     if parsed.check:
-        json_mode = parsed.json
+        as_json = parsed.json
         if parsed.kind is not None or parsed.parent is not None:
             return _refuse(
                 BodyCheckReason.INVALID_USAGE,
                 protocol.ClaimUnavailableError(
                     "--kind and --parent apply only to --template, not --check"
                 ),
-                json_mode=json_mode,
+                as_json=as_json,
             )
         try:
             config = _board_config(_resolve_toplevel())
             body = _read_body_check_input()
         except protocol.ClaimError as error:
-            return _refuse(BodyCheckReason.UNAVAILABLE, error, json_mode=json_mode)
+            return _refuse(BodyCheckReason.UNAVAILABLE, error, as_json=as_json)
         check = board.body_shape_check(body, storage=config.storage)
-        return _body_check_report(check, as_json=json_mode)
+        return _body_check_report(check, as_json=as_json)
     if parsed.json:
         raise protocol.ClaimUnavailableError("--json applies only to --check, not --template")
     print(_body_template(parsed.kind or DEFAULT_BODY_TEMPLATE_KIND, parsed.parent), end="")
@@ -3446,7 +3499,7 @@ def _rescope_location(add: list[str] | None, drop: list[str] | None) -> Path:
     from there."""
     entries = (*(add or ()), *(drop or ()))
     if any(not Path(raw_path).is_absolute() for raw_path in entries):
-        raise protocol.ClaimUnavailableError(checkout.RELATIVE_PAYLOAD_PATH_DENIAL)
+        raise _RescopeInvalidUsageError(checkout.RELATIVE_PAYLOAD_PATH_DENIAL)
     if entries:
         return Path(entries[0]).parent
     return Path.cwd()
@@ -3466,7 +3519,7 @@ def _rescope_scope_entries(
     for raw_path in raw_paths:
         relative = checkout.relative_scope_entry(raw_path, toplevel=toplevel)
         if relative is None:
-            raise protocol.ClaimUnavailableError(
+            raise _RescopeInvalidUsageError(
                 f"{flag} path {raw_path!r} is outside the resolved checkout {toplevel}"
             )
         canonical.append(relative)
@@ -3520,7 +3573,7 @@ def _cmd_check(parsed: argparse.Namespace, session: _ReadSession) -> int:
     fetches the state ref."""
     if isinstance(parsed.number, str):
         return _check_trunk_commit(parsed)
-    json_mode = parsed.json
+    as_json = parsed.json
     number = int(parsed.number)
     try:
         client = session.forge()
@@ -3546,10 +3599,10 @@ def _cmd_check(parsed: argparse.Namespace, session: _ReadSession) -> int:
                 client, repository, reference.body or "", number, storage=config.storage
             )
     except RepoMeaninglessUnderStateRefError as error:
-        return _refuse(CheckReason.INVALID_USAGE, error, json_mode=json_mode)
+        return _refuse(CheckReason.INVALID_USAGE, error, as_json=as_json)
     except protocol.ClaimError as error:
-        return _refuse(CheckReason.UNAVAILABLE, error, json_mode=json_mode)
-    return outcome.report(as_json=json_mode)
+        return _refuse(CheckReason.UNAVAILABLE, error, as_json=as_json)
+    return outcome.report(as_json=as_json)
 
 
 def _trunk_classification_text(classification: board.TrunkClassification) -> str:
@@ -3737,14 +3790,14 @@ def _emit_json(ok: bool, reason: StrEnum, **payload: object) -> None:
     print(json.dumps(envelope))
 
 
-def _refuse(reason: StrEnum, error: protocol.ClaimError, *, json_mode: bool) -> int:
+def _refuse(reason: StrEnum, error: protocol.ClaimError, *, as_json: bool) -> int:
     """One shared refusal report for `ask`/`rule`/`brief` (issue #396):
     `ERROR: <sentence>` on stderr exactly as `main`'s own generic handler
     always printed it, then -- only under `--json` -- the envelope naming
     this call's own reason instead of the dropped `error` key. Exit `2`,
     the one exit every refusal past the parser still uses."""
     print(f"ERROR: {error}", file=sys.stderr)
-    if json_mode:
+    if as_json:
         _emit_json(False, reason, message=str(error))
     return 2
 
@@ -3824,18 +3877,18 @@ def _cmd_brief(parsed: argparse.Namespace, session: _ReadSession) -> int:
     (BRIEF-07, BRIEF-09's PIN-04/PIN-05, BRIEF-15, BRIEF-18's lane-tip read)
     reports through `_refuse`; anything else -- an unspecified forge read
     failure -- still reaches `main`'s own generic handler untouched."""
-    json_mode = parsed.json
+    as_json = parsed.json
     try:
         step_rules = _brief_step_rules_or_refusal(parsed.step)
     except protocol.ClaimError as error:
-        return _refuse(BriefReason.UNAVAILABLE, error, json_mode=json_mode)
+        return _refuse(BriefReason.UNAVAILABLE, error, as_json=as_json)
     item = int(parsed.item)
     try:
         client = session.forge()
     except RepoMeaninglessUnderStateRefError as error:
-        return _refuse(BriefReason.INVALID_USAGE, error, json_mode=json_mode)
+        return _refuse(BriefReason.INVALID_USAGE, error, as_json=as_json)
     except protocol.ClaimError as error:
-        return _refuse(BriefReason.UNAVAILABLE, error, json_mode=json_mode)
+        return _refuse(BriefReason.UNAVAILABLE, error, as_json=as_json)
     body = client.item_reference(item).body or ""
     worktree, _remote, state = _store_observation()
     live = _brief_live_claim(worktree, state, item)
@@ -3846,11 +3899,11 @@ def _cmd_brief(parsed: argparse.Namespace, session: _ReadSession) -> int:
         try:
             tip = _lane_tip(live.claim.branch)
         except protocol.ClaimError as error:
-            return _refuse(BriefReason.UNAVAILABLE, error, json_mode=json_mode)
+            return _refuse(BriefReason.UNAVAILABLE, error, as_json=as_json)
         touched = _touched_files(live.claim.base, tip) if tip is not None else ()
     observed_at = datetime.now(UTC)
     composition = _BriefComposition(body, live, observed_at, tip, touched, step_rules)
-    if json_mode:
+    if as_json:
         return _brief_json(composition)
     _print_brief(composition)
     return 0
@@ -3861,7 +3914,17 @@ def _cmd_status(parsed: argparse.Namespace) -> int:
     dispatched straight from `main` -- it never needs `_dispatch`'s ledger
     resolution (a cut-over repository may have no ledger issue left at all).
     It is forge-free (issue #245): `--repo` is meaningless here and unused.
+    Every `protocol.ClaimError` `_status_read` can raise -- a rewritten or
+    malformed state ref -- reports through `_refuse` as `unavailable` (issue
+    #406): `status` names no `invalid_usage` of its own (see `StatusReason`).
     """
+    try:
+        return _status_read(parsed)
+    except protocol.ClaimError as error:
+        return _refuse(StatusReason.UNAVAILABLE, error, as_json=parsed.json)
+
+
+def _status_read(parsed: argparse.Namespace) -> int:
     canonical_remote = _canonical_remote_name(_resolve_toplevel())
     worktree = Path.cwd()
     state = store.fetch_state(worktree=worktree, remote=canonical_remote)
@@ -4021,28 +4084,56 @@ def _cmd_next(parsed: argparse.Namespace, session: _ReadSession) -> int:
     return 0 if action is not None else 3
 
 
-def _cmd_rescope(parsed: argparse.Namespace, _session: _WriteSession) -> None:
+class _RescopeInvalidUsageError(protocol.ClaimError):
+    """A rescope `--add`/`--drop` value itself is malformed or contradictory
+    -- relative, outside the checkout, a comma-bearing entry matching no
+    versioned file, or a combination `protocol._combined_scope` refuses
+    (issue #406) -- named so `--json` can choose `invalid_usage` over the
+    broad `unavailable` every checkout- or store-level refusal falls to."""
+
+
+class _RescopePreconditionError(protocol.ClaimError):
+    """The rescope cannot proceed given this claim's own current state: no
+    live claim on the target identity/branch, a different agent than the
+    one holding it, or a scope too wide for the width gate without
+    `--whole` (issue #406) -- named so `--json` can choose
+    `precondition_failed`."""
+
+
+def _rescope_write(parsed: argparse.Namespace) -> int:
     path_checkout = _rescope_checkout(parsed)
     requested = _rescope_command(parsed, path_checkout)
     worktree = path_checkout.toplevel
     canonical_remote = _canonical_remote_name(worktree)
     observed = store.fetch_state(worktree=worktree, remote=canonical_remote)
     _require_state_ref(observed)
-    selected = _selected_store_claim(
-        observed, requested.identity, requested.branch, requested.claim_id
-    )
+    try:
+        selected = _selected_store_claim(
+            observed, requested.identity, requested.branch, requested.claim_id
+        )
+    except protocol.ClaimError as error:
+        raise _RescopePreconditionError(str(error)) from error
     if requested.agent != selected.agent:
-        raise protocol.ClaimUnavailableError(
+        raise _RescopePreconditionError(
             "only the original claimant may rescope "
             f"(holder={protocol._claimant_text(selected.agent, selected.role)!r}, "
             f"this session={protocol._claimant_text(requested.agent, selected.role)!r})"
         )
     versioned = checkout.versioned_paths(directory=worktree)
-    _reject_ungrounded_comma_scope(requested.add, versioned, flag="--add")
-    combined = protocol._combined_scope(selected.scope, requested.add, requested.drop)
-    _reject_wide_scope(
-        combined, versioned, requested.whole_reason or selected.whole_reason, directory=worktree
-    )
+    try:
+        _reject_ungrounded_comma_scope(requested.add, versioned, flag="--add")
+        combined = protocol._combined_scope(selected.scope, requested.add, requested.drop)
+    except protocol.ClaimError as error:
+        raise _RescopeInvalidUsageError(str(error)) from error
+    try:
+        _reject_wide_scope(
+            combined,
+            versioned,
+            requested.whole_reason or selected.whole_reason,
+            directory=worktree,
+        )
+    except protocol.ClaimError as error:
+        raise _RescopePreconditionError(str(error)) from error
     intent = protocol.RescopeIntent(
         claim_id=selected.claim_id,
         agent=requested.agent,
@@ -4060,13 +4151,68 @@ def _cmd_rescope(parsed: argparse.Namespace, _session: _WriteSession) -> None:
     rescoped = new_state.claims[protocol.claim_key(selected.identity, selected.branch)]
     if parsed.json:
         _rescope_json(rescoped)
-        return
+        return 0
     print(f"RESCOPED {_claim_subject(rescoped)}: {rescoped.claim_id}")
+    return 0
+
+
+def _cmd_rescope(parsed: argparse.Namespace, _session: _WriteSession) -> int:
+    """`rescope`'s own `--json` refusals (issue #406, `RescopeReason`):
+    `_rescope_write`'s two typed exceptions choose `invalid_usage`/
+    `precondition_failed`; every other `protocol.ClaimError` -- an
+    unresolved checkout, a missing state ref, a corrupted claim record --
+    falls to `unavailable`, matching `ask`/`rule`/`brief`'s own catch-all."""
+    as_json = parsed.json
+    try:
+        return _rescope_write(parsed)
+    except _RescopeInvalidUsageError as error:
+        return _refuse(RescopeReason.INVALID_USAGE, error, as_json=as_json)
+    except _RescopePreconditionError as error:
+        return _refuse(RescopeReason.PRECONDITION_FAILED, error, as_json=as_json)
+    except protocol.ClaimError as error:
+        return _refuse(RescopeReason.UNAVAILABLE, error, as_json=as_json)
 
 
 LANE_CLAIM_SCOPE_REQUIRED = "lane claim requires --scope; a lane names no item to derive it from"
 CLAIM_SCOPE_MISSING = "item names no scope; pass --scope"
 CLAIM_SCOPE_MISMATCH = "claim scope differs from the item's scope; correct the item first"
+
+
+class _ClaimTargetInvalidError(protocol.ClaimError):
+    """The item a claim's scope is being *derived* from is unusable --
+    missing, or a pull request -- discovered while reading its body, before
+    any slice-rule check ever runs (issue #406). Named so `--json` can
+    choose `target_invalid` over the broad `unavailable` every other claim
+    refusal falls to."""
+
+
+class _ClaimBodyInvalidError(protocol.ClaimError):
+    """The item a claim's scope is being *derived* from has a body that
+    cannot supply or confirm one -- a malformed `agent-claim` block (issue
+    #310 finding 43: named *before* "item names no scope", reusing the same
+    block-defect reader `body --check` uses), no `scope` field at all, or
+    one differing from an explicit `--scope` (issue #406). Named so
+    `--json` can choose `body_invalid`."""
+
+
+def _item_target_body(
+    client: forge.ForgeReader, open_by_number: Mapping[int, board.Issue], number: int
+) -> str:
+    """The item's own body for `_item_scope`/`_item_whole` (issue #337):
+    from `open_by_number` -- the open-board listing `claim` needs anyway
+    for its slice-rule checks -- when the target is open, so a derived
+    scope costs no separate body read; a closed, missing, or pull-request
+    target never appears there, and falls back to the one single-item
+    lookup `_issue_reference_state` uses for the same reason (issue #245),
+    raising `_ClaimTargetInvalidError` by name (issue #406) instead of
+    `_item_body_or_refuse`'s own generic refusal."""
+    issue = open_by_number.get(number)
+    if issue is not None:
+        return issue.body
+    try:
+        return _item_body_or_refuse(client, number, command="claim")
+    except protocol.ClaimError as error:
+        raise _ClaimTargetInvalidError(str(error)) from error
 
 
 def _item_scope(
@@ -4076,20 +4222,21 @@ def _item_scope(
     *,
     storage: board.Storage,
 ) -> tuple[str, ...] | None:
-    """The item's own top-level `scope = [...]` (issue #337): read from
-    `open_by_number` -- the open-board listing `claim` needs anyway for its
-    slice-rule checks -- when the target is open, so a derived scope costs
-    no separate body read; a closed, missing, or pull-request target never
-    appears there, and falls back to the one single-item lookup
-    `_issue_reference_state` uses for the same reason (issue #245). Both
-    project through `board.parse_body`, so a state-ref and a GitHub item are
-    read exactly alike, and a malformed body simply carries no scope rather
-    than failing `claim` with an unrelated defect message."""
-    issue = open_by_number.get(number)
-    body = (
-        issue.body if issue is not None else _item_body_or_refuse(client, number, command="claim")
-    )
-    return board.parse_body(body, storage=storage).scope
+    """The item's own top-level `scope = [...]` (issue #337). A malformed
+    block refuses `_ClaimBodyInvalidError` here (issue #310 finding 43) --
+    before this function's caller ever gets to name the less specific "item
+    names no scope" -- reading `read_state`/`contract.defects` the same way
+    `body --check` and `_located_block_or_refuse` already do, the one
+    block-defect reader every by-name body refusal in this file shares.
+    `_item_whole`'s own read stays tolerant of a malformed body instead: its
+    caller is only ever an optional width-gate fallback, never a hard
+    requirement the way a claim's own scope is."""
+    body = _item_target_body(client, open_by_number, number)
+    parsed = board.parse_body(body, storage=storage)
+    if parsed.read_state is board.BodyReadState.MALFORMED:
+        defect = parsed.contract.defects[0]
+        raise _ClaimBodyInvalidError(f"#{number} {board.body_defect_text(defect)}")
+    return parsed.scope
 
 
 def _item_whole(
@@ -4100,14 +4247,12 @@ def _item_whole(
     storage: board.Storage,
 ) -> str | None:
     """The item's own top-level `whole = "<reason>"` (issue #399), read the
-    same way `_item_scope` reads `scope`: from `open_by_number` when the
-    target is open, else the single-item fallback -- so this never costs a
-    second read when the caller already fetched the open board for its own
-    reason."""
-    issue = open_by_number.get(number)
-    body = (
-        issue.body if issue is not None else _item_body_or_refuse(client, number, command="claim")
-    )
+    same way `_item_scope` reads `scope` -- except a malformed body is never
+    a hard refusal here (see `_item_scope`'s own docstring): `parse_body`
+    simply carries no `whole` for one, exactly as it did before issue #406,
+    so the width gate's own refusal still fires instead of an unrelated
+    defect message."""
+    body = _item_target_body(client, open_by_number, number)
     return board.parse_body(body, storage=storage).whole
 
 
@@ -4174,7 +4319,7 @@ def _resolved_claim_request(
     open_by_number = {issue.number: issue for issue in client.list_open_board_issues()}
     item_scope = _item_scope(client, open_by_number, identity.issue, storage=storage)
     if item_scope is None:
-        raise protocol.ClaimUnavailableError(CLAIM_SCOPE_MISSING)
+        raise _ClaimBodyInvalidError(CLAIM_SCOPE_MISSING)
     return replace(requested, scope=item_scope), open_by_number
 
 
@@ -4198,7 +4343,7 @@ def _reject_scope_mismatch(
         return
     item_scope = board.parse_body(issue.body, storage=storage).scope
     if item_scope is not None and item_scope != scope:
-        raise protocol.ClaimUnavailableError(CLAIM_SCOPE_MISMATCH)
+        raise _ClaimBodyInvalidError(CLAIM_SCOPE_MISMATCH)
 
 
 def _scope_versioning(
@@ -4288,6 +4433,38 @@ def _claim_target_checks(
 def _cmd_claim(
     parsed: argparse.Namespace, session: _WriteSession, *, directory: Path | None = None
 ) -> int:
+    """`claim`'s own `--json` refusals (issue #406, `ClaimReason`):
+    `_claim_write`'s typed exceptions choose `target_invalid`/
+    `body_invalid`/`claim_conflict`; `RepoMeaninglessUnderStateRefError`
+    chooses `invalid_usage`; every other `protocol.ClaimError` -- a checkout
+    precondition, scope grammar, an unsafe branch or claim id -- falls to
+    `unavailable`, matching `ask`/`rule`/`brief`'s own catch-all."""
+    as_json = parsed.json
+    try:
+        return _claim_write(parsed, session, directory=directory)
+    except RepoMeaninglessUnderStateRefError as error:
+        return _refuse(ClaimReason.INVALID_USAGE, error, as_json=as_json)
+    except _ClaimTargetInvalidError as error:
+        return _refuse(ClaimReason.TARGET_INVALID, error, as_json=as_json)
+    except _ClaimBodyInvalidError as error:
+        return _refuse(ClaimReason.BODY_INVALID, error, as_json=as_json)
+    except _ClaimConflictError as error:
+        return _refuse(ClaimReason.CLAIM_CONFLICT, error, as_json=as_json)
+    except protocol.ClaimError as error:
+        return _refuse(ClaimReason.UNAVAILABLE, error, as_json=as_json)
+
+
+class _ClaimConflictError(protocol.ClaimError):
+    """`apply()`'s own single failure surface for a claim write -- identity
+    already claimed, claim id already consumed, or a resource conflict or
+    format issue -- wrapped around `store.commit_transition`'s one call
+    site in `_claim_write` (issue #406) so `--json` can choose
+    `claim_conflict` without splitting `apply`'s refusals further."""
+
+
+def _claim_write(
+    parsed: argparse.Namespace, session: _WriteSession, *, directory: Path | None = None
+) -> int:
     requested = _request(parsed, directory=directory)
     if isinstance(requested.identity, protocol.LaneIdentity) and not requested.scope:
         raise protocol.ClaimUnavailableError(LANE_CLAIM_SCOPE_REQUIRED)
@@ -4340,12 +4517,15 @@ def _cmd_claim(
         print(check.render(), file=sys.stderr if parsed.json else sys.stdout)
     if replayed is None:
         intent = _claim_intent_from_request(requested, uuid.uuid4().hex)
-        new_state = store.commit_transition(
-            worktree=worktree,
-            remote=canonical_remote,
-            subject=_transition_subject("claim", requested.identity, requested.branch),
-            intent=intent,
-        )
+        try:
+            new_state = store.commit_transition(
+                worktree=worktree,
+                remote=canonical_remote,
+                subject=_transition_subject("claim", requested.identity, requested.branch),
+                intent=intent,
+            )
+        except protocol.ClaimError as error:
+            raise _ClaimConflictError(str(error)) from error
         claimed = new_state.claims[protocol.claim_key(requested.identity, requested.branch)]
         live = tuple(new_state.claims.values())
     else:
@@ -5305,11 +5485,11 @@ class RuleReason(StrEnum):
 
 
 def _emit_rule_result(
-    number: int, line: board.ExpectationLine, open_remaining: int, *, json_mode: bool
+    number: int, line: board.ExpectationLine, open_remaining: int, *, as_json: bool
 ) -> None:
     ruling = cast(str, line.ruling)
     ruled_on = cast(date, line.ruled_on)
-    if json_mode:
+    if as_json:
         _emit_json(
             True,
             RuleReason.RULED,
@@ -5364,13 +5544,13 @@ def _rule_item_reason(error: _RuleItemError) -> RuleReason:
 
 
 def _cmd_rule(parsed: argparse.Namespace, session: _WriteSession) -> int:
-    json_mode = parsed.json
+    as_json = parsed.json
     try:
         client = session.forge.writer()
     except RepoMeaninglessUnderStateRefError as error:
-        return _refuse(RuleReason.INVALID_USAGE, error, json_mode=json_mode)
+        return _refuse(RuleReason.INVALID_USAGE, error, as_json=as_json)
     except protocol.ClaimError as error:
-        return _refuse(RuleReason.UNAVAILABLE, error, json_mode=json_mode)
+        return _refuse(RuleReason.UNAVAILABLE, error, as_json=as_json)
     number = int(parsed.item)
     try:
         ruled_line, open_remaining = rule_item(
@@ -5382,8 +5562,8 @@ def _cmd_rule(parsed: argparse.Namespace, session: _WriteSession) -> int:
         board.ExpectationAlreadyRuledError,
         board.ExpectationOutOfRangeError,
     ) as error:
-        return _refuse(_rule_item_reason(error), error, json_mode=json_mode)
-    _emit_rule_result(number, ruled_line, open_remaining, json_mode=json_mode)
+        return _refuse(_rule_item_reason(error), error, as_json=as_json)
+    _emit_rule_result(number, ruled_line, open_remaining, as_json=as_json)
     return 0
 
 
@@ -5467,8 +5647,8 @@ class AskReason(StrEnum):
     UNAVAILABLE = "unavailable"
 
 
-def _emit_ask_result(asked: _AskedLine, *, json_mode: bool) -> None:
-    if json_mode:
+def _emit_ask_result(asked: _AskedLine, *, as_json: bool) -> None:
+    if as_json:
         card_fields = {key: value for key, value in asdict(asked.card).items() if value is not None}
         _emit_json(
             True,
@@ -5524,35 +5704,35 @@ def _ask_expectation_reason(
 
 
 def _cmd_ask(parsed: argparse.Namespace, session: _WriteSession) -> int:
-    json_mode = parsed.json
+    as_json = parsed.json
     try:
         picture = _read_picture_file(parsed.picture) if parsed.picture else None
     except _PictureFileError as error:
-        return _refuse(AskReason.INVALID_PICTURE, error, json_mode=json_mode)
+        return _refuse(AskReason.INVALID_PICTURE, error, as_json=as_json)
     card = board.ExpectationCardFields(
         question=parsed.question, example=parsed.example, picture=picture
     )
     try:
         client = session.forge.writer()
     except RepoMeaninglessUnderStateRefError as error:
-        return _refuse(AskReason.INVALID_USAGE, error, json_mode=json_mode)
+        return _refuse(AskReason.INVALID_USAGE, error, as_json=as_json)
     except protocol.ClaimError as error:
-        return _refuse(AskReason.UNAVAILABLE, error, json_mode=json_mode)
+        return _refuse(AskReason.UNAVAILABLE, error, as_json=as_json)
     number = int(parsed.item)
     try:
         body, config = _require_writable_target(client, number, command="ask")
     except (_TargetUnavailableError, _InvalidTargetError) as error:
-        return _refuse(_ask_target_reason(error), error, json_mode=json_mode)
+        return _refuse(_ask_target_reason(error), error, as_json=as_json)
     try:
         new_body = board.append_expectation(body, parsed.text, parsed.default, card=card)
     except (board.ExpectationTextError, board.ExpectationFieldError) as error:
-        return _refuse(_ask_expectation_reason(error), error, json_mode=json_mode)
+        return _refuse(_ask_expectation_reason(error), error, as_json=as_json)
     index = len(board.expectation_lines(new_body, storage=config.storage))
     client.update_item_body(number, new_body)
     asked = _AskedLine(
         item=number, index=index, text=parsed.text, default=parsed.default, card=card
     )
-    _emit_ask_result(asked, json_mode=json_mode)
+    _emit_ask_result(asked, as_json=as_json)
     return 0
 
 

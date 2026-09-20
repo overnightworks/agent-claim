@@ -3,19 +3,22 @@
 `aco rescope` adds or drops paths on a live claim without releasing it. This
 file owns the command's own location resolution (`--add`/`--drop` absolute
 paths only, issue #314), its checkout preconditions, the scope-combining
-refusals, its own `_selected_store_claim` lookup (RESC-14), and the
-`RESCOPED ...`/`--json` report. `specs/claim-record.spec.md` owns the record
-itself, the width gate's literal and `--whole`'s own field (CLAIM-25..30), a
-foreign-claimant refusal (CLAIM-37), and that a rescope replaces only the
-scope while `claim_id`, `base` and age keep counting (CLAIM-49);
-`specs/protect.spec.md` owns the checkout resolver's `relative payload path`,
-`not in a repository`, `no commit on this branch` and `default branch
-unknown` sentences (PROT-09..11, PROT-13) that `rescope` shares verbatim,
-`protect`'s own docstring names the sharing; `specs/claim.spec.md` owns the
-issueless-lane branch refusal (CLM-07) `_resolved_identity` shares with
-`rescope` too. This file cites those IDs rather than restating them.
-`<flag>` is `--add` or `--drop`, `<path>` a path, `<claim-id>` the selected
-claim's own id.
+refusals, its own `_selected_store_claim` lookup (RESC-14), the
+`RESCOPED ...`/`--json` report, and its own `--json` `reason` vocabulary.
+`specs/output.spec.md` owns the `--json` envelope itself (OUT-nn: key
+order, `ok`, `message`); this file names only `rescope`'s own `reason`
+values. `specs/claim-record.spec.md` owns the record itself, the width
+gate's literal and `--whole`'s own field (CLAIM-25..30), a foreign-claimant
+refusal (CLAIM-37), that a rescope replaces only the scope while
+`claim_id`, `base` and age keep counting (CLAIM-49), and one claim's own
+`--json` field order (CLAIM-69); `specs/protect.spec.md` owns the checkout
+resolver's `relative payload path`, `not in a repository`, `no commit on
+this branch` and `default branch unknown` sentences (PROT-09..11, PROT-13)
+that `rescope` shares verbatim, `protect`'s own docstring names the
+sharing; `specs/claim.spec.md` owns the issueless-lane branch refusal
+(CLM-07) `_resolved_identity` shares with `rescope` too. This file cites
+those IDs rather than restating them. `<flag>` is `--add` or `--drop`,
+`<path>` a path, `<claim-id>` the selected claim's own id.
 
 ## Behavior table
 
@@ -37,6 +40,9 @@ claim's own id.
 | drop leaves nothing and nothing is added | — | RESC-09 | — | — |
 | combined scope is wide | RESC-10 | RESC-10 | — | RESC-11 |
 | a clean combine | RESC-12, RESC-13 | RESC-12, RESC-13 | — | RESC-12, RESC-13 |
+| a malformed `--add`/`--drop` value | RESC-15 | RESC-15 | RESC-15 | — |
+| this claim's own state disallows the rescope | RESC-16 | RESC-16 | RESC-16 | — |
+| every other refusal | RESC-17 | RESC-17 | RESC-17 | — |
 
 ## `--add`/`--drop` and their own checkout
 
@@ -59,7 +65,13 @@ claim's own id.
 - [ ] [RESC-10] A combined scope tripping the width gate refuses, in the wording `claim-record.spec.md` owns (CLAIM-25, CLAIM-26, CLAIM-29; see CLM-18), exit `2`.
 - [ ] [RESC-11] `--whole "<reason>"` admits a wide combined scope and replaces the stored `whole_reason`; an omitted `--whole` keeps a prior reason instead of clearing it.
 - [ ] [RESC-12] A clean combine prints `RESCOPED <subject>: <claim-id>`, exit `0` (see E-RESC-01).
-- [ ] [RESC-13] With `--json`, a clean combine prints one object with `issue`/`lane`, `claim_id`, `agent`, `role`, `base`, `branch`, `scope`: `42`/`null` for an issue, `null`/`true` for a lane (E-RESC-01).
+- [ ] [RESC-13] With `--json`, a clean combine prints the envelope, `reason: "rescoped"`, then `issue`/`lane`, `claim_id`, `agent`, `role`, `base`, `branch`, `scope` (`42`/`null` issue, `null`/`true` lane).
+
+## `--json`'s own `reason` vocabulary
+
+- [ ] [RESC-15] A malformed `--add`/`--drop` value (RESC-01, RESC-05..09) reports `reason: "invalid_usage"` under `--json`.
+- [ ] [RESC-16] No live claim to rescope (RESC-14), a foreign claimant (CLAIM-37), or a wide combined scope (RESC-10) reports `reason: "precondition_failed"` under `--json` (see E-RESC-04).
+- [ ] [RESC-17] Every other refusal -- an unresolved checkout (RESC-02..04, PROT-10, PROT-11, PROT-13) or a corrupted record -- reports `reason: "unavailable"`, matching `ask`/`rule`/`brief`'s own catch-all.
 
 ## Never
 
@@ -87,7 +99,7 @@ $ aco rescope 42 --add <worktree>/AGENTS.md
 RESCOPED issue #42: <claim-id>
 exit 0
 $ aco rescope 42 --drop <worktree>/AGENTS.md --json
-{"issue": 42, "lane": null, "claim_id": "<claim-id>", "agent": "Ada", "role": "builder", "base": "<sha>", "branch": "ada/issue-42", "scope": ["README.md"]}
+{"ok": true, "reason": "rescoped", "issue": 42, "lane": null, "claim_id": "<claim-id>", "agent": "Ada", "role": "builder", "base": "<sha>", "branch": "ada/issue-42", "scope": ["README.md"]}
 exit 0
 ```
 
@@ -108,5 +120,16 @@ Setup: bare-remote, bootstrapped, a linked worktree on `ada/issue-42`, already `
 ```console
 $ aco rescope 42 --drop <worktree>/README.md
 2> ERROR: rescope must leave a non-empty scope
+exit 2
+```
+
+### E-RESC-04 — no live claim to rescope refuses `precondition_failed`
+
+Setup: bare-remote, bootstrapped, a linked worktree on `ada/issue-42`, no live claim
+
+```console
+$ aco rescope 42 --add <worktree>/AGENTS.md --json
+2> ERROR: issue #42 has no active build claim
+{"ok": false, "reason": "precondition_failed", "message": "issue #42 has no active build claim"}
 exit 2
 ```

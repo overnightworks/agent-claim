@@ -3,10 +3,13 @@
 `aco status`: the one read of every live claim under `refs/aco/state`, plain
 text or `--json`, repository-wide, by issue, or by `--path`. This file owns
 the command's own argument shape, its `UNCLAIMED`/`CONFLICT` states, its own
-overlap note, its `--json` object shape, `--path`'s narrower read, and its
-forge-freedom. `specs/claim-record.spec.md` owns one claim's own identity,
-resource, and `whole:` line (CLAIM-01, CLAIM-29, CLAIM-36, CLAIM-41,
-CLAIM-47..50), and `specs/landing-grammar.spec.md` owns the storage-aware
+overlap note, its `--json` object shape and `reason` vocabulary, `--path`'s
+narrower read, and its forge-freedom. `specs/output.spec.md` owns the
+`--json` envelope itself (OUT-nn: key order, `ok`, `message`); this file
+names only `status`'s own `reason` values. `specs/claim-record.spec.md`
+owns one claim's own identity, resource, and `whole:` line (CLAIM-01,
+CLAIM-29, CLAIM-36, CLAIM-41, CLAIM-47..50) and its own `--json` field
+order (CLAIM-69); `specs/landing-grammar.spec.md` owns the storage-aware
 `<label>` convention every command's narrative output shares; this file
 cites those IDs rather than restating them. A refusal reaching this
 command's own sink prints `ERROR: <sentence>` on stderr, exit `2`, the
@@ -18,18 +21,21 @@ shared sink `specs/ref-store-cas.spec.md`'s own preamble already documents.
 | state \ trigger | `aco status` (text) | `aco status --json` | `aco status --path P` (text) | `aco status --path P --json` |
 |---|---|---|---|---|
 | no matching claim | STAT-01, STAT-02 | STAT-03 | STAT-10 | STAT-13 |
+| a matching claim, no conflict | — | STAT-17 | — | STAT-13 |
 | two claims share one identity | STAT-04 | STAT-05 | — | — |
 | a claim overlapping another's scope | STAT-06 | STAT-08 | — | — |
 | one holder, no extra fields | — | STAT-07, STAT-09 | STAT-11 | STAT-13 |
 | more than one holder of one path | — | — | STAT-12 | STAT-13 |
 | `storage = "state-ref"` | STAT-14 | STAT-15 | — | — |
 | `--repo`, or a non-GitHub canonical remote | STAT-16 | STAT-16 | STAT-16 | STAT-16 |
+| the fetched state ref itself is rewritten or malformed | STAT-18 | STAT-18 | STAT-18 | STAT-18 |
 
 ## The empty repository and an unclaimed issue
 
 - [ ] [STAT-01] `aco status` with no issue argument, against no live claims, prints `UNCLAIMED repository`, exit `0` (see E-STAT-02).
 - [ ] [STAT-02] `aco status <n>` against an issue with no live claim prints `UNCLAIMED issue <label>`, `<label>` the storage-aware form STAT-14 owns, exit `0`.
-- [ ] [STAT-03] `aco status --json`, with or without an issue argument, against no matching claims prints `{"issue": <n-or-null>, "state": "UNCLAIMED", "tip": <tip-or-null>, "claims": []}`.
+- [ ] [STAT-03] `aco status --json` against no matching claims prints the envelope, `reason: "unclaimed"`, then `"issue": <n-or-null>, "tip": <tip-or-null>, "claims": []`.
+- [ ] [STAT-17] `aco status --json` against a matching, non-conflicting claim reports `reason: "claimed"`, `ok: true`, exit `0`.
 
 ## `CONFLICT`, status's own read of two claims on one identity
 
@@ -39,7 +45,7 @@ already refuses a second one on the same identity (`specs/claim-record.spec.md`,
 CLAIM-11/CLAIM-12).
 
 - [ ] [STAT-04] Two live claims recorded under the same issue or lane identity both print `CONFLICT` in place of `CLAIMED` at the head of their own line, exit `2`.
-- [ ] [STAT-05] The same pair under `--json` reports the top-level `"state": "CONFLICT"` and each claim's own `"state": "CONFLICT"`, exit `2`.
+- [ ] [STAT-05] The same pair under `--json` reports `reason: "conflict"`, `ok: false`, and each claim's own `"state": "CONFLICT"`, exit `2`.
 
 ## Status's own overlap note
 
@@ -61,7 +67,7 @@ the peer and its claim id, never the meeting paths.
 - [ ] [STAT-10] `aco status --path P` against no holder prints `UNCLAIMED P`, exit `0` (see E-STAT-03).
 - [ ] [STAT-11] `aco status --path P` against one holder prints `CLAIMED P issue <label>: <agent> (<role>) claim=<claim-id>`, with no `base=`, `branch=`, or age field, exit `0` (see E-STAT-03, E-STAT-05).
 - [ ] [STAT-12] `aco status --path P` against more than one holder appends one line, `overlap: issue <label> (<claim-id>), issue <label> (<claim-id>)`, after every holder's own line (see E-STAT-05).
-- [ ] [STAT-13] `aco status --path P --json` prints `{"path": P, "state": ..., "claims": [...]}`, one object per holder, none carrying an `"overlaps"` key (see E-STAT-03).
+- [ ] [STAT-13] `aco status --path P --json` prints the envelope, `reason: "unclaimed"`/`"claimed"`, then `"path": P, "claims": [...]`, none carrying an `"overlaps"` key (see E-STAT-03).
 
 ## Storage-aware labels
 
@@ -71,6 +77,10 @@ the peer and its claim id, never the meeting paths.
 ## Forge-free
 
 - [ ] [STAT-16] `aco status` never resolves an item forge or reads a remote's own URL beyond its board-config check; `--repo` and a non-GitHub remote are no error, in text, `--json`, or `--path` (see E-STAT-04).
+
+## Every other refusal
+
+- [ ] [STAT-18] A rewritten `refs/aco/state` (CLAIM-50) or a malformed claim record reports through the shared sink and, under `--json`, `reason: "unavailable"`, exit `2`; `status` names no `invalid_usage` (STAT-16).
 
 ## Never
 
@@ -97,7 +107,7 @@ CLAIMED issue #42: Ada (builder) base=<sha> branch=ada/issue-42 claim=<claim-id>
   README.md
 exit 0
 $ aco status --json
-{"issue": null, "state": "CLAIMED", "tip": "<tip>", "claims": [{"issue": 42, "lane": null, "agent": "Ada", "role": "builder", "base": "<sha>", "branch": "ada/issue-42", "claim_id": "<claim-id>", "scope": ["README.md"], "resource": null, "resource_value": null, "overlaps": [], "state": "CLAIMED", "age": "0h 0m", "old": false}]}
+{"ok": true, "reason": "claimed", "issue": null, "tip": "<tip>", "claims": [{"issue": 42, "lane": null, "claim_id": "<claim-id>", "agent": "Ada", "role": "builder", "base": "<sha>", "branch": "ada/issue-42", "scope": ["README.md"], "resource": null, "resource_value": null, "overlaps": [], "state": "CLAIMED", "age": "0h 0m", "old": false}]}
 exit 0
 ```
 
@@ -113,7 +123,7 @@ $ aco status 42
 UNCLAIMED issue #42
 exit 0
 $ aco status --json
-{"issue": null, "state": "UNCLAIMED", "tip": "<tip>", "claims": []}
+{"ok": true, "reason": "unclaimed", "issue": null, "tip": "<tip>", "claims": []}
 exit 0
 ```
 
@@ -129,7 +139,7 @@ $ aco status --path README.md
 UNCLAIMED README.md
 exit 0
 $ aco status --path docs/PRODUCT.md --json
-{"path": "docs/PRODUCT.md", "state": "CLAIMED", "claims": [{"issue": 42, "lane": null, "agent": "Ada", "role": "builder", "base": "<sha>", "branch": "ada/issue-42", "claim_id": "<claim-id>", "scope": ["docs/PRODUCT.md"], "resource": null, "resource_value": null, "state": "CLAIMED"}]}
+{"ok": true, "reason": "claimed", "path": "docs/PRODUCT.md", "claims": [{"issue": 42, "lane": null, "claim_id": "<claim-id>", "agent": "Ada", "role": "builder", "base": "<sha>", "branch": "ada/issue-42", "scope": ["docs/PRODUCT.md"], "resource": null, "resource_value": null, "state": "CLAIMED"}]}
 exit 0
 ```
 
