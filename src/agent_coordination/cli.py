@@ -1815,9 +1815,9 @@ class NextReason(StrEnum):
     `specs/next.spec.md`): the action type -- `work_item`, `cut_slice`,
     `close_container` -- names a success (`ok: true`) exactly as it did
     when carried under the dropped `"action"` key; `nothing_actionable`
-    is the one `ok: false` outcome that still exits `0` in text (NEXT-01)
-    but exit `3` under `--json` alike, the sole reason exit `3` is ever
-    used. `invalid_usage` covers `--repo` under `storage = state-ref`
+    is the one `ok: false` outcome that exits `3` in text (NEXT-01) and
+    under `--json` alike, the sole reason exit `3` is ever used.
+    `invalid_usage` covers `--repo` under `storage = state-ref`
     (PIN-04); every other refusal -- an unsupported forge host (BOARD-02),
     a state-ref checkout with no resolvable default branch (PIN-05) --
     falls to `unavailable`, matching `ask`/`rule`/`brief`'s own catch-all."""
