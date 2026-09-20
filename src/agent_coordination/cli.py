@@ -574,7 +574,6 @@ def _add_land_parser(commands: argparse._SubParsersAction) -> None:
             "worktree whose branch is already merged is removed"
         ),
     )
-    land.add_argument("--json", action="store_true", help=JSON_HELP)
 
 
 def _add_rescope_parser(commands: argparse._SubParsersAction) -> None:
@@ -5211,7 +5210,10 @@ def _land_release(parsed: argparse.Namespace, issue: int | None, branch: str) ->
         claim_id=None,
         coordinator_override=parsed.coordinator_override,
         keep_worktree=parsed.keep_worktree,
-        json=parsed.json,
+        # `land` has no `--json` mode of its own (specs/land.spec.md): the
+        # delegated release path always reports in text, exactly as every
+        # other line `land` itself prints does.
+        json=False,
         repo=parsed.repo,
     )
     release_session = _WriteSession(forge=_LazyForge(parsed.repo), release_branch=branch)
