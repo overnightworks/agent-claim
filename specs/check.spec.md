@@ -85,7 +85,7 @@ is enough): <git detail>`.
 - The issue mode of `check` never fetches the state ref: only the pull-request mode reads the live claims LAND-15/LAND-16 need.
 - Under `storage = "state-ref"`, `check <n>` never reaches the pull-request path: no number under that storage is ever reported as a landing, so every `<n>` resolves to ISSUE or MISSING.
 - `check`'s own subject line is always the bare `#<n>`, in every mode, never the storage-aware `<label>` form `specs/landing-grammar.spec.md` defines for `aco next`/`release`'s own narrative lines.
-- `blocked` (CHECK-08) is the only outcome that exits `3`; every other refusal -- missing, malformed, incomplete, invalid_classification, or one that never reaches the dispatch at all -- exits `2`, and no outcome exits `1` any more.
+- `blocked` (CHECK-08) is the only outcome that exits `3`; every other refusal exits `2` (see the `reason`/exit table above), and no outcome exits `1` any more.
 - `check <sha>`'s own exit and `--json` shape are never this file's: `specs/landing-grammar.spec.md` owns LAND-48/LAND-60 unchanged.
 
 ## Examples
@@ -108,7 +108,7 @@ The text form's own literal is LAND-04's own fact, already driven by
 `specs/landing-grammar.spec.md`'s own E-LAND-02; this session drives only
 CHECK-01, this file's own `--json` envelope.
 
-Setup: bare-remote, `.agent-claim/board.toml` tracked, fake `gh`, pull request `#57` by `Ada`, body `Work-Item: #42\n\nCloses #42`, an active claim on issue `#42` matching the pull request's head branch
+Setup: bare-remote, `.agent-claim/board.toml` tracked, fake `gh`, pull request `#57` by `Ada`, body `Work-Item: #42\n\nCloses #42`, an active claim on issue `#42` matching its head branch
 
 ```console
 $ aco check 57 --json
