@@ -249,12 +249,19 @@ stdout, refusals included. Read it in that order -- the exit code, then
 is never `0`, so a script that reads stdout without it eventually parses a
 refusal as an answer (one did, 08.09.2026). `ok` and `reason` are always the
 object's first two keys, and `reason` is the token to branch on: a stable
-word from that command's own vocabulary, never a sentence to match against.
-The rest is payload, and a closing `message` repeats stderr's `ERROR:`
-sentence for a person to read. A non-zero exit is not always a refusal --
+word from that command's own vocabulary, never a sentence to match against,
+and never a payload key whose presence you test -- a success may carry `ok`
+and `reason` alone. A closing `message` is prose for a person, the sentence
+stderr's `ERROR:` line carries wherever the command writes one. A usage
+error the parser itself raises joins the same object, but only for a
+command that declares `--json`: `aco bootstrap --json` stays argparse's own
+text on stderr, stdout empty. A non-zero exit is not always a refusal --
 `next` exits non-zero on an empty board without refusing anything
-(`specs/next.spec.md`). `specs/output.spec.md` owns the envelope; each
-command's spec owns its own `reason` values.
+(`specs/next.spec.md`). `aco check <sha>` is the one carve-out left: it
+prints its object with no stderr sentence beside it, and the exit codes its
+own specs promise are reconciled in issue #435, not here.
+`specs/output.spec.md` owns the envelope; each command's spec owns its own
+`reason` values.
 
 ## Commands and their specs
 
