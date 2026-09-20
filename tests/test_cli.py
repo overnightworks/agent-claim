@@ -13047,6 +13047,27 @@ def test_check_json_discriminates_a_pull_request(
     assert json.loads(capsys.readouterr().out) == expected
 
 
+def test_check_json_pins_the_raw_envelope_text_for_a_valid_pull_request(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The raw bytes `check` prints on success (OUT-01's own key order,
+    `ok`/`reason`/`kind`/`number`, and its trailing newline), not just the
+    parsed dict `test_check_json_discriminates_a_pull_request` already
+    covers."""
+    check_client(
+        monkeypatch,
+        landing_pull_request(body=f"Work-Item: #{WORK_ITEM_ISSUE}\n\nCloses #{WORK_ITEM_ISSUE}"),
+    )
+
+    status = issue_claim.main(["--repo", REPOSITORY, "check", "12", "--json"])
+
+    assert status == 0
+    assert (
+        capsys.readouterr().out
+        == '{"ok": true, "reason": "valid", "kind": "pull_request", "number": 12}\n'
+    )
+
+
 @pytest.mark.parametrize(
     ("dependencies", "exit_code", "expected"),
     [
@@ -13265,11 +13286,10 @@ def test_body_check_json_carries_the_defect_list(
 ) -> None:
     monkeypatch.setattr(sys, "stdin", io.StringIO("no block\n"))
     assert body_check_main(extra=("--json",)) == 2
-    assert json.loads(capsys.readouterr().out) == {
-        "ok": False,
-        "reason": "malformed",
-        "defects": ["body malformed: agent-claim: no agent-claim block"],
-    }
+    assert capsys.readouterr().out == (
+        '{"ok": false, "reason": "malformed", '
+        '"defects": ["body malformed: agent-claim: no agent-claim block"]}\n'
+    )
 
 
 def test_body_check_json_reports_ok_with_an_empty_defect_list(
@@ -13277,7 +13297,7 @@ def test_body_check_json_reports_ok_with_an_empty_defect_list(
 ) -> None:
     monkeypatch.setattr(sys, "stdin", io.StringIO(agent_claim_body(MINIMAL_BLOCK_TOML)))
     assert body_check_main(extra=("--json",)) == 0
-    assert json.loads(capsys.readouterr().out) == {"ok": True, "reason": "valid", "defects": []}
+    assert capsys.readouterr().out == '{"ok": true, "reason": "valid", "defects": []}\n'
 
 
 class _NotUtf8Stdin:
