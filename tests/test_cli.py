@@ -3824,7 +3824,8 @@ def test_rule_json_reports_item_index_ruling_date_and_open(
     )
 
     assert exit_code == 0
-    assert json.loads(capsys.readouterr().out) == {
+    output = capsys.readouterr().out
+    expected = {
         "ok": True,
         "reason": "ruled",
         "item": RULE_ITEM,
@@ -3833,6 +3834,8 @@ def test_rule_json_reports_item_index_ruling_date_and_open(
         "ruled_on": RULE_TODAY.isoformat(),
         "open": 0,
     }
+    assert output == json.dumps(expected) + "\n"
+    assert json.loads(output) == expected
 
 
 def test_rule_appends_a_note_to_the_ruled_line_via_cli(
@@ -4024,7 +4027,8 @@ def test_ask_json_reports_item_index_text_and_default(
     )
 
     assert exit_code == 0
-    assert json.loads(capsys.readouterr().out) == {
+    output = capsys.readouterr().out
+    expected = {
         "ok": True,
         "reason": "asked",
         "item": RULE_ITEM,
@@ -4032,6 +4036,8 @@ def test_ask_json_reports_item_index_text_and_default(
         "text": "New question?",
         "default": "later",
     }
+    assert output == json.dumps(expected) + "\n"
+    assert json.loads(output) == expected
 
 
 def test_ask_refuses_a_blockless_item_before_any_write(
@@ -10160,10 +10166,13 @@ def _assert_json_refusal_object(err: str, out: str, *, reason: str) -> None:
     """`ask`/`rule`/`brief`'s own `_emit_json` refusal (issue #396,
     `specs/output.spec.md`): the identical sentence stderr already printed,
     now under `message`, next to `reason` instead of a dropped `error`
-    key."""
+    key. Compares the raw JSON text, not a parsed dict, so a reordering of
+    OUT-01's `ok`, `reason`, `message` sequence would fail this assertion."""
     assert err.startswith("ERROR: ")
     message = err.removeprefix("ERROR: ").rstrip("\n")
-    assert json.loads(out) == {"ok": False, "reason": reason, "message": message}
+    expected = {"ok": False, "reason": reason, "message": message}
+    assert out == json.dumps(expected) + "\n"
+    assert json.loads(out) == expected
 
 
 @pytest.mark.parametrize(
@@ -13672,7 +13681,8 @@ def test_cli_brief_json_prints_one_object_with_body_claim_tip_and_touched(
     status = issue_claim.main(["--repo", "example/agent-claim", "brief", "258", "--json"])
 
     assert status == 0
-    assert json.loads(capsys.readouterr().out) == {
+    output = capsys.readouterr().out
+    expected = {
         "ok": True,
         "reason": "composed",
         "body": "The item's own body.",
@@ -13688,6 +13698,8 @@ def test_cli_brief_json_prints_one_object_with_body_claim_tip_and_touched(
         "tip": tip,
         "touched": ["README.md"],
     }
+    assert output == json.dumps(expected) + "\n"
+    assert json.loads(output) == expected
 
 
 _DEFAULT_BRIEF_TOML = '[build]\nrules = ["Stay in scope."]\nchecks = ["ruff check ."]\n'
