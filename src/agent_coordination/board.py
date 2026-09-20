@@ -976,7 +976,7 @@ class ParsedBody:
     ruling_date: date | None
     frozen_trigger: str | None
     # The block's own top-level `scope = [...]` (issue #331), exactly the
-    # canonical (sorted, deduplicated) tuple `protocol._valid_scope` returns
+    # canonical (sorted, deduplicated) tuple `protocol.valid_scope` returns
     # -- the same function a live claim's own scope passes through, so the
     # two stay comparable regardless of typed order. `None` when the block
     # carries no `scope` key at all, never for an empty one
@@ -1121,13 +1121,13 @@ def _scope_value_defect(field_name: str, value: object) -> ContractDefect | None
     (`field_name="slice[N].scope"`) -- issue #331. Called only once the
     caller already knows the key is present; a present value must be a
     non-empty list, refused with this module's own sentence, and every
-    entry must pass `protocol._valid_scope` -- the one path grammar `claim`
+    entry must pass `protocol.valid_scope` -- the one path grammar `claim`
     already owns, whose own refusal becomes the defect sentence verbatim
     rather than a second grammar invented here."""
     if not isinstance(value, list) or not value:
         return ContractDefect(field_name, f"{field_name} {SCOPE_MUST_NAME_A_PATH}")
     try:
-        protocol._valid_scope(value)
+        protocol.valid_scope(value)
     except protocol.InvalidClaimMarkerError as error:
         return ContractDefect(field_name, str(error))
     return None
@@ -1150,13 +1150,13 @@ def _block_size_defect(data: dict[str, object]) -> ContractDefect | None:
 
 
 def _canonical_scope(value: object) -> tuple[str, ...]:
-    """`value`'s validated scope entries, in `protocol._valid_scope`'s own
+    """`value`'s validated scope entries, in `protocol.valid_scope`'s own
     canonical (sorted, deduplicated) order -- the one scope normaliser a
     live claim's own scope is built through too, so a body's projected
     `scope` and a claim's recorded `scope` stay comparable as tuples
     (issue #331). Callable only once a schema check (`_block_scope_defects`,
     `_block_slice_entry_defects`) has already proven `value` valid."""
-    return protocol._valid_scope(value)
+    return protocol.valid_scope(value)
 
 
 def _record_timestamp_defect(value: object, key_name: str) -> ContractDefect | None:
@@ -1748,11 +1748,11 @@ def _render_frozen_until(data: Mapping[str, object]) -> list[str]:
 def _render_scope_array(values: object) -> str:
     """`values`'s scope entries as a canonical TOML array: the one rendering
     `_render_scope` (top-level) and `_render_slices` (per row) both call,
-    routed through `protocol._valid_scope` -- the one scope canonicalizer
+    routed through `protocol.valid_scope` -- the one scope canonicalizer
     (issue #331 REVISE finding 2), rather than a second sort/dedupe owner
     here. Callable only once a schema check has already proven `values`
     valid, so this never itself refuses a duplicate."""
-    entries = protocol._valid_scope(values)
+    entries = protocol.valid_scope(values)
     return "[" + ", ".join(protocol.toml_string(value) for value in entries) + "]"
 
 

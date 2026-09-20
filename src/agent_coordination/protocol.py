@@ -321,12 +321,6 @@ def valid_scope(scope: object) -> tuple[str, ...]:
     return tuple(sorted(result))
 
 
-# `board.py` and several test modules outside this lane's own claim scope
-# (issue #394) still read this name; kept as a plain alias, never a second
-# implementation, until they move to the public name in their own lane.
-_valid_scope = valid_scope
-
-
 class WideScopeReason(StrEnum):
     """Which of the three wide-scope conditions tripped -- named so a
     refusal can print the one that actually fired instead of restating the
@@ -412,11 +406,6 @@ def scope_overlap_paths(left: tuple[str, ...], right: tuple[str, ...]) -> tuple[
 
 def scopes_overlap(left: tuple[str, ...], right: tuple[str, ...]) -> bool:
     return bool(scope_overlap_paths(left, right))
-
-
-# `cli.py`'s own non-`protect` scope-mismatch check outside this lane's
-# claim scope (issue #394) still reads this name.
-_scopes_overlap = scopes_overlap
 
 
 def named_with_overflow_count(

@@ -1129,7 +1129,7 @@ def test_protect_path_resolving_to_the_checkout_root_denies_path_required(
     itself resolves to exactly the checkout root: `work/subdir/..` queries
     git from the real descendant `work/subdir`, so the checkout resolves
     fine, while the full path resolves to `work` itself -- a repository-
-    relative scope entry of `"."`, which `protocol._valid_scope` refuses. A
+    relative scope entry of `"."`, which `protocol.valid_scope` refuses. A
     Bash-recognized path runs the identical gate (issue #380)."""
     _isolate_protect_home(monkeypatch, tmp_path)
     work = tmp_path / "work"

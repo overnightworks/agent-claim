@@ -269,7 +269,7 @@ def _request(
         role=role,
         base=base,
         branch=branch,
-        scope=() if arguments.scope is None else protocol._valid_scope(arguments.scope),
+        scope=() if arguments.scope is None else protocol.valid_scope(arguments.scope),
         claim_id=claim_id,
         out_of_order_reason=arguments.out_of_order,
         whole_reason=whole_reason,
@@ -3333,7 +3333,7 @@ def _rescope_scope_entries(
                 f"{flag} path {raw_path!r} is outside the resolved checkout {toplevel}"
             )
         canonical.append(relative)
-    return protocol._valid_scope(canonical)
+    return protocol.valid_scope(canonical)
 
 
 def _rescope_checkout(parsed: argparse.Namespace) -> checkout.PathCheckout:
@@ -4100,7 +4100,7 @@ def _print_start_resume(
     (review/gate finding: resume must not silently ignore it); `--whole` is
     never required here even when the live scope is wide, since the stored
     claim's own `whole_reason` already justified it once."""
-    if parsed.scope is not None and protocol._valid_scope(parsed.scope) != live.scope:
+    if parsed.scope is not None and protocol.valid_scope(parsed.scope) != live.scope:
         raise protocol.ClaimUnavailableError(RESUME_SCOPE_MISMATCH)
     print(f"CLAIMED {_claim_subject(live, storage)}: {live.claim_id}")
     versioning = _scope_versioning(
@@ -4618,8 +4618,8 @@ def _requested_body_scope(raw: list[str] | None) -> tuple[str, ...] | None:
     """A repeated `--scope` flag's canonical value, or `None` when it was
     never given -- `item new` and `cut` (issue #337) both take an optional
     `--scope`, so this is the one place either turns the raw flag list into
-    the same canonical form `protocol._valid_scope` produces for `claim`."""
-    return None if raw is None else protocol._valid_scope(raw)
+    the same canonical form `protocol.valid_scope` produces for `claim`."""
+    return None if raw is None else protocol.valid_scope(raw)
 
 
 def _block_body_with_scope(body: str, scope: tuple[str, ...] | None) -> str:
@@ -4737,11 +4737,11 @@ def _block_slice_entries(data: Mapping[str, object]) -> list[dict[str, object]]:
 
 def _slice_row(entry: dict[str, object]) -> board.SliceRow:
     """One `[[slice]]` entry as `cut` sees it. `entry`'s own `scope` (issue
-    #337), when it carries one, already passed `protocol._valid_scope` at
+    #337), when it carries one, already passed `protocol.valid_scope` at
     `_located_block_or_refuse`'s own `parse_body` gate -- a body that failed
     that check never reaches here -- so this is the one canonicalizing pass,
     not a second validation of an already-checked value."""
-    scope = protocol._valid_scope(entry["scope"]) if "scope" in entry else None
+    scope = protocol.valid_scope(entry["scope"]) if "scope" in entry else None
     return board.SliceRow(cast(int, entry["index"]), cast(str, entry["title"]), scope)
 
 
