@@ -243,11 +243,18 @@ for them. aco does not allocate work, merge code, or operate a lease server;
 it never writes provider configuration, and never touches `~/.claude`,
 `~/.codex`, or `~/.grok` except the one workspace mapping described above.
 
-Most commands accept `--json` for a machine-readable form; the refusal
-object a command's own error path prints on stderr, and the one exception --
-`next`, which exits non-zero without ever refusing anything -- are each
-command's own spec's fact (e.g. `specs/release.spec.md` and
-`specs/next.spec.md`), cited rather than repeated here.
+Most commands accept `--json` for a machine-readable form: one object on
+stdout, refusals included. Read it in that order -- the exit code, then
+`ok` and `reason`, then the payload. The exit code decides first: a refusal
+is never `0`, so a script that reads stdout without it eventually parses a
+refusal as an answer (one did, 08.09.2026). `ok` and `reason` are always the
+object's first two keys, and `reason` is the token to branch on: a stable
+word from that command's own vocabulary, never a sentence to match against.
+The rest is payload, and a closing `message` repeats stderr's `ERROR:`
+sentence for a person to read. A non-zero exit is not always a refusal --
+`next` exits non-zero on an empty board without refusing anything
+(`specs/next.spec.md`). `specs/output.spec.md` owns the envelope; each
+command's spec owns its own `reason` values.
 
 ## Commands and their specs
 
