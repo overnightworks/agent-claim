@@ -13019,13 +13019,15 @@ def test_land_reports_incomplete_follow_up_for_every_post_merge_step(
     assert len(client.merge_calls) == 1
 
 
-def test_land_reports_incomplete_follow_up_and_a_rerun_resumes_without_a_second_merge(
+def _land_merged_pending_release(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
-) -> None:
-    """Issue #405 Beweis 2: a failure after the merge names the exact
-    recovery line, never a second merge on rerun, and the rerun still closes
-    the item and frees the claim."""
-    _repo, client = _land_scenario(monkeypatch, tmp_path)
+) -> tuple[Path, FakeForge]:
+    """A pull request `aco land` already merged once, its own delegated
+    `release --merged` blocked by a failing close (issue #405 Beweis 2): the
+    shared rerun setup both the plain recovery proof and the release-routing
+    recovery proof resume from, `close_landed_item` restored to real once
+    this returns so the caller's own rerun can succeed."""
+    repo, client = _land_scenario(monkeypatch, tmp_path)
     real_close = client.close_landed_item
 
     def failing_close(number: int, *, pull_request: int) -> None:
@@ -13046,6 +13048,16 @@ def test_land_reports_incomplete_follow_up_and_a_rerun_resumes_without_a_second_
     assert client.closed_issues == set()
 
     monkeypatch.setattr(client, "close_landed_item", real_close)
+    return repo, client
+
+
+def test_land_reports_incomplete_follow_up_and_a_rerun_resumes_without_a_second_merge(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Issue #405 Beweis 2: a failure after the merge names the exact
+    recovery line, never a second merge on rerun, and the rerun still closes
+    the item and frees the claim."""
+    _repo, client = _land_merged_pending_release(monkeypatch, capsys, tmp_path)
 
     assert issue_claim.main(["--repo", REPOSITORY, "land", "12"]) == 0
 
@@ -13161,19 +13173,37 @@ def test_land_merge_body_composes_the_trailer_as_its_own_last_paragraph() -> Non
     assert bare == "No-Item: fix\n"
 
 
-def test_land_release_routing_reads_the_pull_requests_own_body() -> None:
-    """Issue #405: routing to `release --merged`'s own identity reads the
-    pull request body for classification only -- a `No-Item:` pull request
-    routes to no issue, and a classification defect refuses by name."""
-    no_item_detail = landing_pull_request(body="No-Item: docs")
-    assert issue_claim._land_release_routing(no_item_detail, REPOSITORY) == (
-        None,
-        LANDING_BRANCH,
-    )
+def test_land_release_routing_reuses_the_verified_classification_for_a_fresh_merge() -> None:
+    """Issue #405 point 4: a fresh merge routes `release --merged` straight
+    from the classification this same run's own preflight already verified
+    -- never a read of anything, pull request body included."""
+    work_item = board.WorkItemClassification(board.IssueReference(REPOSITORY, 72))
+    no_item = board.NoItemClassification(board.NoItemKind.DOCS)
 
-    unclassified_detail = landing_pull_request(body="Advances #72")
-    with pytest.raises(ClaimError, match="carries no `Work-Item:` or `No-Item:` line"):
-        issue_claim._land_release_routing(unclassified_detail, REPOSITORY)
+    assert issue_claim._land_release_routing(work_item, MERGE_COMMIT_SHA, REPOSITORY) == 72
+    assert issue_claim._land_release_routing(no_item, MERGE_COMMIT_SHA, REPOSITORY) is None
+
+
+def test_land_rerun_recovers_release_routing_after_the_body_changed(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Issue #405 point 4 (Befund 42 on #310's own risk): once merged,
+    `_land_release_routing` never re-reads the pull request's own mutable
+    body -- a fixer editing it away after the merge still leaves a rerun
+    able to recover the exact item the merge commit's own trailer names,
+    read exactly as `_verify_merged_release` reads it (issue #397, Befund
+    41)."""
+    _repo, client = _land_merged_pending_release(monkeypatch, capsys, tmp_path)
+
+    # A fixer edits the merged pull request's own body afterward (Befund 41):
+    # its classification line is gone, but the merge commit's own trailer
+    # `aco land` composed at merge time is untouched.
+    client.landings[12] = replace(client.landings[12], body="Advances #72")
+
+    assert issue_claim.main(["--repo", REPOSITORY, "land", "12"]) == 0
+
+    assert len(client.merge_calls) == 1
+    assert client.closed_issues == {WORK_ITEM_ISSUE}
 
 
 @pytest.mark.parametrize(

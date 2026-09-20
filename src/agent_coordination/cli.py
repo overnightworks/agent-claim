@@ -5241,21 +5241,36 @@ def _land_step(number: int, sha: str, step: str, action: Callable[[], None]) -> 
         ) from error
 
 
-def _land_release_routing(detail: forge.Landing, repository: str) -> tuple[int | None, str]:
-    """The `issue`/`branch` pair `aco land`'s own delegated `release
-    --merged` call is dispatched to (issue #405): read from the pull
-    request's own body for routing only -- never this landing's actual
-    closing authority, which `_verify_merged_release`'s merge-commit-trailer
-    read (issue #397, Befund 41) still owns regardless of what this
-    classification says."""
-    classification = board.parse_pull_request_classification(detail.body, repository)
-    if isinstance(classification, board.ClassificationDefect):
-        raise protocol.ClaimUnavailableError(
-            f"pull request #{detail.number} {classification.message}"
-        )
-    if isinstance(classification, board.WorkItemClassification):
-        return classification.item.number, detail.source_branch
-    return None, detail.source_branch
+def _land_release_routing(
+    classification: board.Classification | None, merge_sha: str, canonical_remote: str
+) -> int | None:
+    """The issue `aco land`'s own delegated `release --merged` call routes
+    to (issue #405 point 4): a fresh merge reuses the classification this
+    same run's own preflight already verified, never a re-read of the pull
+    request's own mutable body. `classification` is `None` only for a rerun
+    against a pull request `_cmd_land` found already merged -- preflight
+    never ran this time -- so this reads the merge commit's own trailer
+    instead, exactly as `_verify_merged_release` does (issue #397, Befund
+    41): the same authority a lane release itself checks, never the pull
+    request's `body`, which stays mutable long after the merge. Runs inside
+    the `release` step's own `_land_step` (issue #405 review finding), so a
+    defect here -- an edited body's classification long gone from the merge
+    commit's own history -- prints the ruled `MERGED ... follow-up
+    incomplete: release; re-run aco land <n>` line, never a bare refusal."""
+    if classification is not None:
+        if isinstance(classification, board.WorkItemClassification):
+            return classification.item.number
+        return None
+    landings = checkout.trunk_landings(canonical_remote, TRUNK_LANDING_DEPTH, fetch=True)
+    landing = next((entry for entry in landings if entry.sha == merge_sha), None)
+    trunk_classification = None if landing is None else landing.classification
+    if isinstance(trunk_classification, board.TrunkWorkItemClassification):
+        return trunk_classification.numbers[0]
+    if isinstance(trunk_classification, board.NoItemClassification):
+        return None
+    raise protocol.ClaimUnavailableError(
+        f"merge commit {merge_sha} carries no `Work-Item:` or `No-Item:` trailer"
+    )
 
 
 def _land_release(parsed: argparse.Namespace, issue: int | None, branch: str) -> None:
@@ -5316,10 +5331,15 @@ def _cmd_land(parsed: argparse.Namespace, session: _WriteSession) -> None:
     number = parsed.pull_request
     repository = client.repository.path
     detail = client.landing(number)
+    classification: board.Classification | None
     if detail.merged:
         assert detail.merge_commit is not None  # `merged` is true; github.py guarantees this.
         merge_sha = detail.merge_commit
         default_branch = checkout.refuse_unclean_default_branch_checkout()
+        # A rerun: this run's own preflight never ran, so it never verified a
+        # classification -- `_land_release_routing` reads the merge commit's
+        # own trailer instead (issue #405 point 4).
+        classification = None
     else:
 
         def claims_provider() -> protocol.ClaimState:
@@ -5333,7 +5353,6 @@ def _cmd_land(parsed: argparse.Namespace, session: _WriteSession) -> None:
         )
         default_branch = checkout.refuse_unclean_default_branch_checkout()
         merge_sha = _land_merge(client, detail, readiness, classification)
-    issue, branch = _land_release_routing(detail, repository)
     _land_step(
         number, merge_sha, "delete-branch", lambda: client.delete_branch(detail.source_branch)
     )
@@ -5345,7 +5364,16 @@ def _cmd_land(parsed: argparse.Namespace, session: _WriteSession) -> None:
             config.canonical_remote, default_branch, directory=toplevel
         ),
     )
-    _land_step(number, merge_sha, "release", lambda: _land_release(parsed, issue, branch))
+    _land_step(
+        number,
+        merge_sha,
+        "release",
+        lambda: _land_release(
+            parsed,
+            _land_release_routing(classification, merge_sha, config.canonical_remote),
+            detail.source_branch,
+        ),
+    )
     if _land_is_own_repository(toplevel):
         print(LAND_REINSTALL_LINE)
 
