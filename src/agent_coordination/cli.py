@@ -2576,6 +2576,7 @@ def _verify_merged_release(
     repository: str,
     identity: protocol.ClaimIdentity,
     merged: protocol.MergedRelease,
+    canonical_remote: str,
 ) -> _MergedLandingClose | None:
     """Refuse a `--merged` release the landing itself does not support, and
     report -- without yet closing anything -- whether the named work item is
@@ -2585,7 +2586,17 @@ def _verify_merged_release(
     or a transient forge failure there never runs ahead of authorization
     and never lands on an unauthorized attempt. `state_board.py`'s own
     `LandingIntent` path is `storage = state-ref`'s equivalent, so this only
-    ever runs under `storage = github` (see `_cmd_release`)."""
+    ever runs under `storage = github` (see `_cmd_release`).
+
+    An issue release's authority is the merge commit's own trailer block
+    (issue #397, Befund 41), verified through the walked first-parent trunk
+    exactly as `storage = state-ref` already does -- never the pull
+    request's own `body`, which stays mutable long after the merge and once
+    was edited to remove the very `Work-Item:` line a release depended on.
+    An issue-less lane still reads `body` to identify that it declares no
+    item at all (`No-Item:`); a lane closes nothing a trailer could
+    authorize instead.
+    """
     detail = client.landing(merged.pull_request)
     if not detail.merged:
         raise protocol.ClaimUnavailableError(f"pull request #{detail.number} is not merged")
@@ -2595,23 +2606,21 @@ def _verify_merged_release(
             f"pull request #{detail.number} merged into {detail.target_branch!r}, "
             f"not the default branch {default_branch!r}"
         )
-    classification = board.parse_pull_request_classification(detail.body, repository)
-    if isinstance(classification, board.ClassificationDefect):
-        raise protocol.ClaimUnavailableError(
-            f"pull request #{detail.number} {classification.message}"
-        )
     if isinstance(identity, protocol.LaneIdentity):
+        classification = board.parse_pull_request_classification(detail.body, repository)
+        if isinstance(classification, board.ClassificationDefect):
+            raise protocol.ClaimUnavailableError(
+                f"pull request #{detail.number} {classification.message}"
+            )
         if isinstance(classification, board.WorkItemClassification):
             raise protocol.ClaimUnavailableError(
                 f"pull request #{detail.number} names {classification.item}; "
                 "an issue-less lane needs a No-Item line"
             )
         return None
-    item = board.IssueReference(repository, identity.issue)
-    if not isinstance(classification, board.WorkItemClassification) or classification.item != item:
-        raise protocol.ClaimUnavailableError(
-            f"pull request #{detail.number} names {classification}, not work item #{identity.issue}"
-        )
+    assert detail.merge_commit is not None  # `detail.merged` is true; github.py guarantees this.
+    landings = checkout.trunk_landings(canonical_remote, TRUNK_LANDING_DEPTH, fetch=True)
+    _verify_merge_commit_authority(landings, detail.number, identity.issue, detail.merge_commit)
     reference = _fetch_issue_reference(client, identity.issue)
     if reference.state is forge.ItemState.OPEN:
         return _MergedLandingClose(identity.issue, detail.number)
@@ -4254,7 +4263,9 @@ def _cmd_release(parsed: argparse.Namespace, session: _WriteSession) -> None:
         # cast is honest, not a suppression: `_LazyForge.__call__` builds
         # exactly a `github.GitHubForge` for every other storage pin.
         client = cast(github.GitHubForge, session.forge())
-        pending_close = _verify_merged_release(client, client.repository.path, identity, outcome)
+        pending_close = _verify_merged_release(
+            client, client.repository.path, identity, outcome, canonical_remote
+        )
         if pending_close is not None:
             # Runs before the release transition below (issue #359 R1): a
             # close failure here -- a transient forge error, most often --
@@ -4368,27 +4379,57 @@ def _newest_landed_commit(landings: tuple[checkout.TrunkLanding, ...], number: i
     )
 
 
-def _landed_commit_by_sha(
+def _trunk_landing_defect(
     landings: tuple[checkout.TrunkLanding, ...], number: int, sha: str
-) -> str:
-    """`sha`, verified as `number`'s own landing commit (issue #359,
-    LAND-52): it must sit on the walked first-parent trunk and carry a
-    `Work-Item:` trailer naming exactly `number`, refused by name before
-    anything is written otherwise."""
+) -> str | None:
+    """Why `sha` does not authorize closing work item `number` from the
+    walked first-parent trunk (issue #359 LAND-52), or `None` when it does:
+    `sha` must sit on that trunk and carry a `Work-Item:` trailer naming
+    exactly `number`. One reader (`checkout.trunk_landings`) and one grammar
+    (`board.trunk_commit_classification`) for both `release --merged
+    <sha|empty>` under `storage = state-ref` and, since issue #397 (Befund
+    41), `release --merged <pr>` under `storage = github`'s own merge-commit
+    verification -- neither trusts a different notion of "landed"."""
     landing = next((entry for entry in landings if entry.sha == sha), None)
     if landing is None:
-        raise protocol.ClaimUnavailableError(f"{sha} is not on the first-parent trunk")
+        return "is not on the first-parent trunk"
     classification = landing.classification
     if classification is None:
-        raise protocol.ClaimUnavailableError(f"{sha} carries no `Work-Item:` trailer")
+        return "carries no `Work-Item:` trailer"
     if isinstance(classification, board.ClassificationDefect):
-        raise protocol.ClaimUnavailableError(f"{sha} {classification.message}")
+        return classification.message
     if (
         not isinstance(classification, board.TrunkWorkItemClassification)
         or number not in classification.numbers
     ):
-        raise protocol.ClaimUnavailableError(f"{sha} does not name work item #{number}")
-    return landing.sha
+        return f"does not name work item #{number}"
+    return None
+
+
+def _landed_commit_by_sha(
+    landings: tuple[checkout.TrunkLanding, ...], number: int, sha: str
+) -> str:
+    """`sha`, verified as `number`'s own landing commit (issue #359,
+    LAND-52): refused by name before anything is written otherwise."""
+    defect = _trunk_landing_defect(landings, number, sha)
+    if defect is not None:
+        raise protocol.ClaimUnavailableError(f"{sha} {defect}")
+    return sha
+
+
+def _verify_merge_commit_authority(
+    landings: tuple[checkout.TrunkLanding, ...], pull_request: int, number: int, sha: str
+) -> None:
+    """Refuse a github `release --merged <pr>` whose merge commit does not
+    authorize closing `number` (issue #397, Befund 41): the pull request's
+    own mutable body identified `number` only to get here (see
+    `_verify_merged_release`) -- this is the actual authority, the same
+    `_trunk_landing_defect` reads for `storage = state-ref`."""
+    defect = _trunk_landing_defect(landings, number, sha)
+    if defect is not None:
+        raise protocol.ClaimUnavailableError(
+            f"merge commit {sha} of pull request #{pull_request} {defect}"
+        )
 
 
 def _landed_commit(landings: tuple[checkout.TrunkLanding, ...], number: int, requested: str) -> str:

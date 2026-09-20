@@ -115,7 +115,15 @@ class ItemReference:
 
 @dataclass(frozen=True)
 class Landing:
-    """One pull/merge request read for its own sake, not for the board's stages."""
+    """One pull/merge request read for its own sake, not for the board's stages.
+
+    `merge_commit` is the sha GitHub itself recorded as the merge (`None`
+    until `merged` is true): `release --merged`'s own authority for what
+    this landing closes (issue #397) is that commit's own trailer block,
+    never this same read's mutable `body` -- a fixer can (and once did,
+    Befund 41) edit the body after the merge without touching what actually
+    landed.
+    """
 
     number: int
     author: str
@@ -124,6 +132,7 @@ class Landing:
     source_branch: str
     target_branch: str
     merged: bool
+    merge_commit: str | None
 
 
 class Capability(StrEnum):

@@ -84,7 +84,7 @@ spec would cite REL-03 rather than restate it.
 
 ## What a `--merged` release verifies and never checks
 
-- [ ] [REL-16] `release --merged <pr>`'s forge verification runs before anything is written; it is `specs/landing-grammar.spec.md`'s grammar (LAND-29..39, LAND-49, LAND-50, LAND-55), nothing added here.
+- [ ] [REL-16] `release --merged <pr>`'s forge verification runs before anything is written; it is `specs/landing-grammar.spec.md`'s grammar (LAND-29..39, LAND-49, LAND-50, LAND-55, LAND-62/63), nothing added here.
 - [ ] [REL-17] `release --merged` under `storage = "state-ref"` reads `<sha|empty>` against the local trunk walk, never a pull request or forge (LAND-47, LAND-52, LAND-56, LAND-59, `specs/landing-grammar.spec.md`).
 - [ ] [REL-23] `release` never reads the released item's own body contract, unlike issue-mode `claim` (`specs/body-block.spec.md` BODY-52).
 

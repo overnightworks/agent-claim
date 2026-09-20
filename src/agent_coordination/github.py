@@ -490,6 +490,11 @@ class GitHubForge:
         author = value.get("author")
         login = author.get("login") if isinstance(author, dict) else None
         merged_at = value.get("mergedAt")
+        merged = merged_at is not None
+        merge_commit_field = value.get("mergeCommit")
+        merge_commit = (
+            merge_commit_field.get("oid") if isinstance(merge_commit_field, dict) else None
+        )
         if (
             isinstance(number, bool)
             or not isinstance(number, int)
@@ -505,6 +510,8 @@ class GitHubForge:
                 isinstance(merged_at, str)
                 and protocol.RFC3339_TIMESTAMP_PATTERN.fullmatch(merged_at) is None
             )
+            or (merged and protocol.COMMIT_PATTERN.fullmatch(merge_commit or "") is None)
+            or (not merged and merge_commit is not None)
         ):
             raise forge.ForgeMalformedResponseError(MALFORMED_PULL_REQUEST)
         return forge.Landing(
@@ -514,7 +521,8 @@ class GitHubForge:
             source_repository,
             head_ref_name,
             base_ref_name,
-            merged_at is not None,
+            merged,
+            merge_commit,
         )
 
     def landing(self, number: int) -> forge.Landing:
@@ -527,7 +535,7 @@ class GitHubForge:
                 self.repository.path,
                 "--json",
                 "number,body,baseRefName,headRefName,headRepository,"
-                "headRepositoryOwner,author,mergedAt",
+                "headRepositoryOwner,author,mergedAt,mergeCommit",
                 "--jq",
                 ".",
             ]
@@ -913,6 +921,22 @@ class GitHubForge:
             input_data=json.dumps({"body": body}).encode("utf-8"),
         )
 
+    def _has_landing_comment(self, number: int, comment: str) -> bool:
+        """Whether `number` already carries `close_landed_item`'s own
+        deterministic comment (issue #397): a repeat run after a comment
+        that landed but a close that did not (a crash or a transient
+        failure between the two `_run` calls below) must read this before
+        posting the same comment a second time."""
+        raw = self._run(
+            ["api", f"repos/{self.repository}/issues/{number}/comments", "--jq", ".[] | {body}"]
+        )
+        for value in self._json_lines(raw, "issue comment"):
+            if not isinstance(value, dict) or not isinstance(value.get("body"), str):
+                raise forge.ForgeMalformedResponseError("GitHub returned a malformed issue comment")
+            if value["body"] == comment:
+                return True
+        return False
+
     def close_landed_item(self, number: int, *, pull_request: int) -> None:
         """Closes `number` itself instead of refusing (issue #359 Card 1):
         `release --merged <pr>` used to require the item already closed on
@@ -923,12 +947,16 @@ class GitHubForge:
         write at all. The comment lands first: a transient failure between
         the two calls then leaves an open issue explaining the pull request
         that is about to close it, never a closed issue with no record of
-        why.
+        why -- and repeat-safe (issue #397): a rerun that finds its own
+        comment already posted skips straight to the close, never doubling
+        it.
         """
-        self._run(
-            ["api", f"repos/{self.repository}/issues/{number}/comments", "--input", "-"],
-            input_data=json.dumps({"body": landing_comment(pull_request)}).encode("utf-8"),
-        )
+        comment = landing_comment(pull_request)
+        if not self._has_landing_comment(number, comment):
+            self._run(
+                ["api", f"repos/{self.repository}/issues/{number}/comments", "--input", "-"],
+                input_data=json.dumps({"body": comment}).encode("utf-8"),
+            )
         self._run(
             [
                 "api",
