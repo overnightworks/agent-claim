@@ -3,6 +3,6 @@ agent = "Claude head (coordinator)"
 role = "builder"
 base = "e60febe9c56157d6714f59354bd7b99459dbf071"
 branch = "claude/issue-392-store-bundle"
-scope = ["specs/ref-store-cas.spec.md", "src/agent_coordination/process.py", "src/agent_coordination/store.py", "tests/test_store.py"]
+scope = ["scripts/test_budget_ratchet.txt", "specs/ref-store-cas.spec.md", "src/agent_coordination/process.py", "src/agent_coordination/store.py", "tests/test_store.py"]
 opened_commit = "fbb1c278d14b980cfc6ed16e364a392552ff39ce"
 whole_reason = "store.py hygiene bundle: four audit findings in one module and its tests"
