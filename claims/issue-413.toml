@@ -1,8 +1,0 @@
-claim_id = "2c83f7e2894a4d19af9f2de64ea383ac"
-agent = "Claude head (coordinator)"
-role = "builder"
-base = "ff9194af6aeb050fc1e191bfc4c044632a6b43e4"
-branch = "claude/issue-413-exit-sweep"
-scope = ["specs/body.spec.md", "specs/bootstrap.spec.md", "specs/output.spec.md", "specs/protect.spec.md", "specs/reset.spec.md", "specs/start.spec.md", "specs/workspace.spec.md", "src/agent_coordination/cli.py", "src/agent_coordination/workspace.py", "tests/test_cli.py", "tests/test_workspace.py", "tests/test_workspace_cli.py"]
-opened_commit = "320bcea768757284948c91f9cd82147e2fe09ab9"
-whole_reason = "exit/JSON slice 6: non-JSON command exits and the frozen boundaries across workspace, cli and their specs"
