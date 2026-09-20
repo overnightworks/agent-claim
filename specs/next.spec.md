@@ -99,6 +99,7 @@ it, `<s>` an integer score.
 - The first action's own row is never repeated inside `parallel:`'s candidate list, whatever its own scope is.
 - Exit `3` never carries any action-specific line: `No actionable item.` alone stands where `Next:`/`Run:` would.
 - Exit `3` is never returned for a refusal (NEXT-24's `invalid_usage`/`unavailable`): those exit `2`, matching every other emitter refusal; `3` is `nothing_actionable`'s alone.
+- `next --json` never carries an `action` key; the action type is the `reason` token.
 
 ## Examples
 
