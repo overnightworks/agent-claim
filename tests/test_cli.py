@@ -12563,51 +12563,48 @@ _DEFAULT_BRIEF_TOML = '[build]\nrules = ["Stay in scope."]\nchecks = ["ruff chec
 _REAL_PATH_IS_TRACKED = checkout.path_is_tracked
 
 
-def _path_is_tracked_for_real_brief_config(path: str, *, directory: Path | None = None) -> bool:
-    """`path_is_tracked`, genuine for `.agent-claim/brief.toml` -- the file
-    the tests below actually assert tracked status for (issue #324) -- and
-    `True` for every other path, matching the module's own blanket
-    `stub_board_config_tracked` these tests otherwise still rely on for
-    `board.toml`'s unrelated storage-pin check."""
-    if path == board.BRIEF_CONFIG_PATH.as_posix():
-        return _REAL_PATH_IS_TRACKED(path, directory=directory)
-    return True
-
-
-def _write_repository_brief_config(
-    toplevel: Path, *, content: str = _DEFAULT_BRIEF_TOML, tracked: bool = True
+def _write_repository_agent_claim_configs(
+    toplevel: Path, *, brief_content: str = _DEFAULT_BRIEF_TOML, brief_tracked: bool = True
 ) -> None:
-    """`.agent-claim/brief.toml` inside a real, initialized git repository at
-    `toplevel`, the resolved checkout toplevel -- under this suite's autouse
-    `_isolate_git_toplevel` (`tests/conftest.py`), that root is `tmp_path`,
-    never the scratch lane repository nested inside it. `tracked` stages and
-    commits the file for real, the same proof `test_checkout.py`'s
-    `_tracked_board_config` gives `board.toml`'s own tracked-file gate
-    (issue #324); `tracked=False` leaves it on disk outside git's index, for
-    the genuine untracked-file refusal."""
+    """`.agent-claim/board.toml` and `.agent-claim/brief.toml`, both inside a
+    real, initialized git repository at `toplevel`, the resolved checkout
+    toplevel -- under this suite's autouse `_isolate_git_toplevel`
+    (`tests/conftest.py`), that root is `tmp_path`, never the scratch lane
+    repository nested inside it. `board.toml` is always tracked for real, the
+    same proof `test_checkout.py`'s `_tracked_board_config` gives its own
+    tracked-file gate: `_LazyForge` reads it (`_board_config`) on every
+    happy-path `--step` scenario below, so it must genuinely exist in the
+    index rather than lean on the module's blanket `stub_board_config_tracked`
+    (issue #324 review). `brief_tracked=False` leaves `brief.toml` on disk
+    outside git's index, for the genuine untracked-file refusal."""
     _real_git(toplevel, "init", "-q", "-b", "main")
     _real_git(toplevel, "config", "user.name", "Test")
     _real_git(toplevel, "config", "user.email", "test@example.com")
-    (toplevel / ".agent-claim").mkdir(exist_ok=True)
-    (toplevel / ".agent-claim" / "brief.toml").write_text(content)
-    if tracked:
-        _real_git(toplevel, "add", ".agent-claim/brief.toml")
-        _real_git(toplevel, "commit", "-q", "-m", "add brief config")
+    agent_claim = toplevel / ".agent-claim"
+    agent_claim.mkdir(exist_ok=True)
+    (agent_claim / "board.toml").write_text("")
+    _real_git(toplevel, "add", board.CONFIG_PATH.as_posix())
+    (agent_claim / "brief.toml").write_text(brief_content)
+    if brief_tracked:
+        _real_git(toplevel, "add", board.BRIEF_CONFIG_PATH.as_posix())
+    _real_git(toplevel, "commit", "-q", "-m", "add agent-claim configs")
 
 
 def _brief_step_scenario(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, content: str = _DEFAULT_BRIEF_TOML
 ) -> tuple[str, str]:
-    """The scratch lane repository, a tracked `.agent-claim/brief.toml`
-    genuinely `git add`-ed at the resolved toplevel, and issue #258's own
-    live claim -- the one arrangement `--step`'s text, `--json`, and
-    no-`--step` cases all share (issue #324). Reads `.agent-claim/brief.toml`'s
-    real tracked status instead of the file's blanket autouse stub. Returns
+    """The scratch lane repository, `.agent-claim/board.toml` and
+    `.agent-claim/brief.toml` both genuinely `git add`-ed at the resolved
+    toplevel, and issue #258's own live claim -- the one arrangement
+    `--step`'s text, `--json`, and no-`--step` cases all share (issue #324).
+    Reads both configs' real tracked status instead of the file's blanket
+    autouse stub, since `_LazyForge` reads `board.toml`'s own tracked-file
+    gate once the brief.toml check passes (issue #324 review). Returns
     `(base, tip)`; the repository itself is only `monkeypatch.chdir`-ed into,
     never asserted on."""
     repository, base, tip = _scratch_lane_repository(tmp_path)
-    _write_repository_brief_config(tmp_path, content=content)
-    monkeypatch.setattr(checkout, "path_is_tracked", _path_is_tracked_for_real_brief_config)
+    _write_repository_agent_claim_configs(tmp_path, brief_content=content)
+    monkeypatch.setattr(checkout, "path_is_tracked", _REAL_PATH_IS_TRACKED)
     client = FakeForge()
     client.issue_references[258] = forge.ItemReference(
         forge.ItemState.OPEN, "Brief", "The item's own body."
@@ -12755,9 +12752,9 @@ def test_cli_brief_step_refuses_with_no_usable_brief_config(
     storage pin), proven against the real `path_is_tracked` rather than a
     hand-rolled stub."""
     repository, _base, _tip = _scratch_lane_repository(tmp_path)
-    monkeypatch.setattr(checkout, "path_is_tracked", _path_is_tracked_for_real_brief_config)
+    monkeypatch.setattr(checkout, "path_is_tracked", _REAL_PATH_IS_TRACKED)
     if brief_toml_present:
-        _write_repository_brief_config(tmp_path, tracked=False)
+        _write_repository_agent_claim_configs(tmp_path, brief_tracked=False)
     else:
         _real_git(tmp_path, "init", "-q", "-b", "main")
 
