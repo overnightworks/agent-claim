@@ -17,7 +17,7 @@ import socket
 import stat
 import sys
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -568,6 +568,96 @@ def test_a_group_writable_board_token_directory_refuses(
     )
 
 
+def test_a_read_only_group_and_world_board_token_directory_is_accepted(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #388 (round 3): BOARD-41 only guards the WRITE bit -- `0755`,
+    an ordinary `umask 022` directory merely readable/executable by the
+    group and others, is not itself unsafe and a first start succeeds."""
+    _served_board_environment(monkeypatch, tmp_path)
+    token_directory = workspace.default_board_token_path(os.environ).parent
+    token_directory.mkdir(parents=True, exist_ok=True)
+    token_directory.chmod(0o755)
+    monkeypatch.setattr(board_serve._BoardHTTPServer, "serve_forever", lambda self: None)
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "board", "--serve", "--port", str(_free_loopback_port())]
+    )
+
+    assert exit_code == 0
+    assert capsys.readouterr().out.strip().startswith("http://127.0.0.1:")
+
+
+def test_a_group_writable_0775_board_token_directory_refuses(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #388 (round 3): `0775` carries the group WRITE bit `0755`
+    lacks, so it refuses exactly like the already-covered `0770` case."""
+    _served_board_environment(monkeypatch, tmp_path)
+    token_directory = workspace.default_board_token_path(os.environ).parent
+    token_directory.mkdir(parents=True, exist_ok=True)
+    token_directory.chmod(0o775)
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "board", "--serve", "--port", str(_free_loopback_port())]
+    )
+
+    assert exit_code == 2
+    assert "must be private and owned by this user" in capsys.readouterr().err
+
+
+def test_serve_refuses_when_the_token_directory_is_owner_unwritable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #388 (round 3): an owner-unwritable but otherwise private
+    `~/.config/aco` (`0500`) passes the directory check -- it is neither
+    group/world-writable nor a symlink -- but the first mint into it
+    refuses naming the token path instead of a raw `OSError` or
+    `_atomic_write`'s unrelated "login recovery state" wording."""
+    _served_board_environment(monkeypatch, tmp_path)
+    token_path = workspace.default_board_token_path(os.environ)
+    token_directory = token_path.parent
+    token_directory.mkdir(parents=True, exist_ok=True)
+    token_directory.chmod(0o500)
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "board", "--serve", "--port", str(_free_loopback_port())]
+    )
+
+    assert exit_code == 2
+    assert f"board token at {token_path} is not a valid token" in capsys.readouterr().err
+
+
+def test_new_token_refuses_when_the_token_directory_is_owner_unwritable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #388 (round 3): `--new-token`'s own mint hits the same
+    owner-unwritable directory as a first mint, through `_mint_board_token`
+    rather than `_first_board_token` -- it must refuse naming the token
+    path too, never `_atomic_write`'s unrelated "login recovery state"
+    wording."""
+    _served_board_environment(monkeypatch, tmp_path)
+    monkeypatch.setattr(board_serve._BoardHTTPServer, "serve_forever", lambda self: None)
+    token_path = workspace.default_board_token_path(os.environ)
+    _mint_and_capture_url(capsys, _free_loopback_port())
+    token_path.parent.chmod(0o500)
+
+    exit_code = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "board",
+            "--serve",
+            "--new-token",
+            "--port",
+            str(_free_loopback_port()),
+        ]
+    )
+
+    assert exit_code == 2
+    assert f"board token at {token_path} is not a valid token" in capsys.readouterr().err
+
+
 def test_a_symlinked_board_token_directory_refuses(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -588,7 +678,7 @@ def test_a_symlinked_board_token_directory_refuses(
     assert "must be private and owned by this user" in capsys.readouterr().err
 
 
-def test_read_board_token_refuses_a_file_not_owned_by_this_user(
+def test_read_board_token_refuses_a_non_regular_file(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Issue #388: `_read_board_token`'s own `fstat` check refuses a file
@@ -605,6 +695,109 @@ def test_read_board_token_refuses_a_file_not_owned_by_this_user(
 
     with pytest.raises(workspace.WorkspaceError, match="is not a valid token"):
         workspace._read_board_token(token_path)
+
+
+@pytest.mark.parametrize(
+    ("content", "patch_fstat"),
+    [
+        pytest.param(
+            b"x" * 43 + b"\n",
+            lambda monkeypatch: monkeypatch.setattr(
+                os,
+                "fstat",
+                lambda _fd: SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=os.getuid() + 1),
+            ),
+            id="wrong-owner",
+        ),
+        pytest.param(b"!" * 43 + b"\n", lambda _monkeypatch: None, id="non-url-safe-content"),
+        pytest.param(b"\xff" * 43 + b"\n", lambda _monkeypatch: None, id="invalid-utf8"),
+    ],
+)
+def test_read_board_token_refuses_untrusted_or_malformed_content(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    content: bytes,
+    patch_fstat: Callable[[pytest.MonkeyPatch], None],
+) -> None:
+    """Issue #388 (round 3): the required matrix over a file `_read_board_
+    token` must never trust -- owned by someone else, correctly sized but
+    not one url-safe token, or bytes that are not valid UTF-8 at all --
+    every one refusing the same named way rather than raising a bare
+    `UnicodeDecodeError` or trusting a faked owner."""
+    token_path = tmp_path / "board-token"
+    token_path.write_bytes(content)
+    token_path.chmod(0o600)
+    patch_fstat(monkeypatch)
+
+    with pytest.raises(workspace.WorkspaceError, match="is not a valid token"):
+        workspace._read_board_token(token_path)
+
+
+def test_read_board_token_refuses_a_fifo_without_hanging(tmp_path: Path) -> None:
+    """Issue #388 (round 3): `O_NONBLOCK` keeps a FIFO left at this path
+    from ever blocking `--serve` startup on a writer that may never arrive
+    -- `fstat`'s own `S_ISREG` check refuses it by name instead. Driven on
+    a thread with a timeout rather than `pytest.raises` directly, so a
+    regression that reintroduces the blocking open fails this test instead
+    of hanging the suite."""
+    token_path = tmp_path / "board-token"
+    os.mkfifo(token_path, mode=0o600)
+    outcome: list[BaseException | None] = []
+
+    def _read() -> None:
+        try:
+            workspace._read_board_token(token_path)
+        except Exception as error:
+            outcome.append(error)
+        else:
+            outcome.append(None)
+
+    reader = threading.Thread(target=_read, daemon=True)
+    reader.start()
+    reader.join(timeout=5)
+
+    assert not reader.is_alive(), "reading a FIFO must not block startup"
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], workspace.WorkspaceError)
+    assert "is not a valid token" in str(outcome[0])
+
+
+def test_two_concurrent_first_starts_converge_on_one_token(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Issue #388 proof 1 (round 3): two threads racing `_first_board_
+    token` for the same, not-yet-existing file publish exactly one token.
+    `os.link` is synchronized to fire only once both threads have finished
+    writing their own fully-fsynced temporary file, forcing the exact
+    interleaving the previous `O_CREAT | O_EXCL` mint mishandled -- the
+    loser must read the winner's complete file back, never an empty one."""
+    token_path = tmp_path / "board-token"
+    link_barrier = threading.Barrier(2)
+    real_link = os.link
+
+    def _synchronized_link(source: str, destination: str) -> None:
+        link_barrier.wait(timeout=5)
+        real_link(source, destination)
+
+    monkeypatch.setattr(os, "link", _synchronized_link)
+    tokens: list[str] = []
+    lock = threading.Lock()
+
+    def _mint() -> None:
+        token = workspace._first_board_token(token_path)
+        with lock:
+            tokens.append(token)
+
+    threads = [threading.Thread(target=_mint) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert len(tokens) == 2
+    assert tokens[0] == tokens[1]
+    assert stat.S_IMODE(token_path.stat().st_mode) == 0o600
+    assert workspace._read_board_token(token_path) == tokens[0]
 
 
 def test_ensure_board_token_directory_refuses_when_mkdir_fails(

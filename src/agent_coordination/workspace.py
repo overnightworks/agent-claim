@@ -164,25 +164,70 @@ def board_token(path: Path, *, mint_new: bool = False) -> str:
     _ensure_board_token_directory(path.parent)
     if mint_new:
         token = secrets.token_urlsafe(BOARD_TOKEN_BYTES)
-        _atomic_write(path, (token + "\n").encode())
+        _mint_board_token(path, token)
         return token
     return _first_board_token(path)
 
 
+def _write_temporary_token_file(directory: Path, name: str, content: bytes) -> str:
+    """A private (0600), fsynced temporary file in `directory` holding
+    `content`, ready to be published at `name`'s own path by `os.link` or
+    `os.replace` -- shared by both mint paths below so a token is only ever
+    visible at its final name once fully written, never as an empty or
+    partial file there."""
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{name}.", dir=directory)
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write(content)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temporary_name, _PRIVATE_FILE_MODE)
+    return temporary_name
+
+
+def _mint_board_token(path: Path, token: str) -> None:
+    """`--new-token`'s own mint: publishes by `os.replace`, an ordinary
+    atomic rename that always succeeds against whatever was at `path`
+    before -- there is only ever one `--new-token` writer, so none of
+    `_first_board_token`'s own first-writer race below applies here. Any
+    failure -- an owner-unwritable directory, a full disk -- refuses naming
+    the token path rather than raising a raw `OSError` or reaching
+    `_atomic_write`'s unrelated "login recovery state" wording, since this
+    path never touches that state."""
+    try:
+        temporary_name = _write_temporary_token_file(
+            path.parent, path.name, (token + "\n").encode()
+        )
+        os.replace(temporary_name, path)
+    except OSError as error:
+        raise WorkspaceError(_invalid_board_token_message(path)) from error
+
+
 def _first_board_token(path: Path) -> str:
-    """The token at `path`, minting it first when nothing is there yet.
-    `O_CREAT | O_EXCL` makes that mint atomic across processes: the loser of
-    two concurrent first starts hits `FileExistsError` and reads the
-    winner's file back instead of writing a second, diverging token."""
+    """The token at `path`, minting it first when nothing is there yet. The
+    mint writes a private, fsynced temporary file in the same directory and
+    publishes it with `os.link` rather than `O_CREAT | O_EXCL` on the final
+    path itself: `link` either creates `path` pointing at the same,
+    fully-written inode, or fails `EEXIST` because another process's mint
+    already won -- there is never a window where `path` exists but is still
+    empty, the way opening the final name directly for writing would leave
+    one. The loser reads the winner's file back instead of writing a
+    second, diverging token; an owner-unwritable directory refuses naming
+    the token path the same way `_mint_board_token` does."""
     token = secrets.token_urlsafe(BOARD_TOKEN_BYTES)
     try:
-        descriptor = os.open(
-            path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, _PRIVATE_FILE_MODE
+        temporary_name = _write_temporary_token_file(
+            path.parent, path.name, (token + "\n").encode()
         )
+    except OSError as error:
+        raise WorkspaceError(_invalid_board_token_message(path)) from error
+    try:
+        os.link(temporary_name, path)
     except FileExistsError:
         return _read_board_token(path)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        handle.write(token + "\n")
+    except OSError as error:
+        raise WorkspaceError(_invalid_board_token_message(path)) from error
+    finally:
+        os.unlink(temporary_name)
     return token
 
 
@@ -200,37 +245,54 @@ def _invalid_board_token_message(path: Path) -> str:
 
 
 def _read_board_token(path: Path) -> str:
-    """`path`'s token, opened `O_NOFOLLOW` and validated on the open
-    descriptor's own `fstat` -- a regular file, owned by this user, mode
-    0600 -- rather than on a separate `lstat`/`read_text` pair a concurrent
-    replace or a symlink swap could race between."""
+    """`path`'s token, opened `O_NOFOLLOW | O_NONBLOCK` and validated on the
+    open descriptor's own `fstat` -- a regular file, owned by this user,
+    mode 0600 -- rather than on a separate `lstat`/`read_text` pair a
+    concurrent replace or a symlink swap could race between. `O_NONBLOCK`
+    keeps a FIFO left at this path from blocking startup on a writer that
+    may never arrive; the `S_ISREG` check below refuses it by name the
+    moment `fstat` reports it, before any read is attempted. Content is
+    read as bytes and decoded only after every `fstat` check passes, so
+    invalid UTF-8 refuses the same named way an `OSError` on open or read
+    does, rather than raising a bare `UnicodeDecodeError`."""
     try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError as error:
         raise WorkspaceError(_invalid_board_token_message(path)) from error
-    with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
-        metadata = os.fstat(handle.fileno())
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
-            raise WorkspaceError(_invalid_board_token_message(path))
-        mode = stat.S_IMODE(metadata.st_mode)
-        if mode != _PRIVATE_FILE_MODE:
-            raise WorkspaceError(
-                f"board token file {path} must be private (mode 0600, found {mode:04o})"
-            )
-        contents = handle.read()
+    try:
+        with os.fdopen(descriptor, "rb") as handle:
+            metadata = os.fstat(handle.fileno())
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
+                raise WorkspaceError(_invalid_board_token_message(path))
+            mode = stat.S_IMODE(metadata.st_mode)
+            if mode != _PRIVATE_FILE_MODE:
+                raise WorkspaceError(
+                    f"board token file {path} must be private (mode 0600, found {mode:04o})"
+                )
+            raw = handle.read()
+    except OSError as error:
+        raise WorkspaceError(_invalid_board_token_message(path)) from error
+    try:
+        contents = raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise WorkspaceError(_invalid_board_token_message(path)) from error
     if not _BOARD_TOKEN_CONTENT_PATTERN.fullmatch(contents):
         raise WorkspaceError(_invalid_board_token_message(path))
     return contents.rstrip("\n")
 
 
 def _ensure_board_token_directory(path: Path) -> None:
-    """`board_token`'s own parent-directory guard (issue #388): the same
-    symlink/owner/mode shape `_ensure_private_directory` enforces for the
-    login launcher below, but naming the path and the actual mode in its
-    refusal -- the token is the one secret this directory holds, so an
-    existing, wrongly-shared `~/.config/aco` is checked exactly like a
-    freshly created one; `Path.mkdir(exist_ok=True)` never revisits an
-    existing directory's mode on its own."""
+    """`board_token`'s own parent-directory guard (issue #388): owned by
+    this user, not a symlink, and carrying neither the group nor the other
+    WRITE bit -- naming the path and the actual mode in its refusal, unlike
+    `_ensure_private_directory`'s own symlink/owner/mode shape for the login
+    launcher below. Only the WRITE bit is checked, so an ordinary `umask
+    022` directory (`0755`, merely group/world-readable) passes; a mint
+    still refuses by name if that mode leaves the directory itself
+    unwritable to its own owner. The token is the one secret this directory
+    holds, so an existing, wrongly-shared `~/.config/aco` is checked exactly
+    like a freshly created one; `Path.mkdir(exist_ok=True)` never revisits
+    an existing directory's mode on its own."""
     try:
         path.mkdir(mode=0o700, parents=True, exist_ok=True)
         metadata = path.lstat()
@@ -241,7 +303,7 @@ def _ensure_board_token_directory(path: Path) -> None:
         path.is_symlink()
         or not stat.S_ISDIR(metadata.st_mode)
         or metadata.st_uid != os.getuid()
-        or mode & 0o077
+        or mode & 0o022
     )
     if unsafe:
         raise WorkspaceError(
