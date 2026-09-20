@@ -1,0 +1,7 @@
+claim_id = "9a7a5fc09f614058b6d0916f8083a512"
+agent = "Claude head (coordinator)"
+role = "builder"
+base = "ff9194af6aeb050fc1e191bfc4c044632a6b43e4"
+branch = "claude/issue-414-branch-coverage"
+scope = [".github/workflows/ci.yml", "pyproject.toml"]
+opened_commit = "b46ad6b6e0f37bc1d494cbbc645cefdce3895799"
