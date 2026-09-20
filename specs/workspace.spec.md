@@ -9,8 +9,8 @@ owns the mapping's own shape and refusals, the three commands' printed lines
 and exit codes, and the login-attempt record. It never restates the pin or
 forge grammar `specs/storage-pin.spec.md` owns (PIN-01): none of these
 commands ever resolves an item forge or a `storage` pin, and REL-24's
-`{"ok": false, "error": ...}` `--json` refusal shape never applies here
-either, since none of the three ever accepts `--json` (see `## Never`).
+`specs/output.spec.md` refusal envelope never applies here either, since
+none of the three ever accepts `--json` (see `## Never`).
 `<path>` is the resolved `${XDG_CONFIG_HOME:-~/.config}/aco/workspace.toml`.
 
 ## Behavior table
@@ -163,7 +163,7 @@ login-attempt record `login status` later reads.
 
 ## Never
 
-- None of `register`, `run`, `login enable`, `login disable`, or `login status` accepts `--json`: the flag does not exist on their parsers, so a refusal never gets `{"ok": false, ...}` (REL-24's shape belongs to commands that do carry `--json`; contrast, not shared).
+- None of `register`, `run`, `login enable`, `login disable`, or `login status` accepts `--json`: the flag does not exist on their parsers, so a refusal never gets `specs/output.spec.md`'s envelope (REL-24's shape belongs to commands that do carry `--json`; contrast, not shared).
 - `_run-at-login` never checks `--repo` at all, even given: it is dispatched before any workspace `--repo` guard runs.
 - Beyond `${XDG_CONFIG_HOME:-~/.config}/aco/workspace.toml`, `${XDG_STATE_HOME:-~/.local/state}/aco/login-attempt.json`, and, only after `login enable`, `${XDG_CONFIG_HOME:-~/.config}/autostart/aco-workspace.desktop`, `register` also leaves the mapping's own `.lock` beside it, `run` leaves a `workspace.lock` inside the runtime directory, and `_run-at-login` leaves the login-attempt record's own `.lock`; none of the three is ever removed once created.
 - The login-attempt record never carries a provider UUID, workspace path, agent, model, configuration, environment, command line, or raw error text — only an attempt id, timestamps, completion state, project keys, and the public outcome names in `## Behavior table`.

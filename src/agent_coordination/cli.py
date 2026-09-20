@@ -1246,15 +1246,42 @@ def _claim_json(
     return 0
 
 
+class ReleaseReason(StrEnum):
+    """`aco release`'s own `--json` `reason` vocabulary (issue #425,
+    `specs/release.spec.md`): `merged`/`abandoned` name which outcome flag
+    the caller gave -- a state-ref `--merged` landing (`LandedRelease`)
+    reports `merged` too, since it is the same `--merged` outcome as a
+    github pull request landing, only verified against the trunk walk
+    instead of a pull request. `outcome`, this release's own prose sentence
+    (`"merged #<n>"`, `"abandoned: <explanation>"`, or `"landed <sha>"`),
+    stays a payload sibling rather than a second enum. Every refusal past
+    the parser (REL-01's usage errors excepted, which argparse itself
+    reports) is `precondition_failed`, matching REL-24's single shape:
+    this claim's own current state, its identity/branch resolution, or the
+    forge disallowing the release."""
+
+    MERGED = "merged"
+    ABANDONED = "abandoned"
+    PRECONDITION_FAILED = "precondition_failed"
+
+
+def _release_reason(outcome: protocol.ReleaseOutcome) -> ReleaseReason:
+    return (
+        ReleaseReason.ABANDONED
+        if isinstance(outcome, protocol.AbandonedRelease)
+        else ReleaseReason.MERGED
+    )
+
+
 def _release_json(report: ReleaseReport, landing: ReleaseLanding | None) -> None:
     released = report.selected
     payload: dict[str, object] = {
+        "outcome": report.outcome.reason,
         **_identity_json(released.identity),
         "branch": released.branch,
         "claim_id": released.claim_id,
         "agent": report.agent,
         "role": report.role if report.role is not None else released.role,
-        "reason": report.outcome.reason,
     }
     if landing is not None:
         payload["freed"] = list(landing.freed)
@@ -1262,7 +1289,7 @@ def _release_json(report: ReleaseReport, landing: ReleaseLanding | None) -> None
         payload["parent_closable"] = landing.parent_closable
     if report.worktree is not None:
         payload["worktree"] = worktree_cleanup_outcome_text(report.worktree)
-    print(json.dumps(payload))
+    _emit_json(True, _release_reason(report.outcome), **payload)
 
 
 @dataclass(frozen=True)
@@ -2986,6 +3013,32 @@ def _state_ref_forge(
 ITEM_NEW_GITHUB_REFUSAL = "items live on the forge; open the issue there"
 
 
+class ItemReason(StrEnum):
+    """`aco item`'s own `--json` `reason` vocabulary, shared across its four
+    subcommands (issue #425, `specs/item.spec.md`): `created`/`edited`/
+    `closed`/`shown` name each subcommand's own success. `body_invalid`
+    covers only `item edit`'s own piped-body shape check (`_body_shape_defects`,
+    the same check `body --check` runs), carrying `defects` the same way
+    (`BodyCheckReason`, issue #404). Every other refusal -- a `storage =
+    "github"` command, a missing item or parent, a pull request target, a
+    forge write capability, or a live claim still on the item -- is
+    `precondition_failed`, this command family's single generic bucket."""
+
+    CREATED = "created"
+    EDITED = "edited"
+    CLOSED = "closed"
+    SHOWN = "shown"
+    PRECONDITION_FAILED = "precondition_failed"
+    BODY_INVALID = "body_invalid"
+
+
+def _refuse_item_body_invalid(defects: tuple[str, ...], *, as_json: bool) -> int:
+    print(f"{CLI_ERROR_PREFIX}{defects[0]}", file=sys.stderr)
+    if as_json:
+        _emit_json(False, ItemReason.BODY_INVALID, defects=list(defects), message=defects[0])
+    return 2
+
+
 def _cmd_item_new(parsed: argparse.Namespace) -> int:
     """`aco item new` (issues #285, #316): the one write path for a fresh
     state-ref item -- `StateRefBoard.create_item`, the same CAS write
@@ -2998,37 +3051,42 @@ def _cmd_item_new(parsed: argparse.Namespace) -> int:
     never opens a GitHub issue on a repository's behalf. Never resolves
     the generic `_LazyForge` (issue #248) -- it calls `_state_ref_forge`
     directly, since `create_item` is not part of the generic `ForgeWriter`
-    port every other write command narrows to."""
-    toplevel = _resolve_toplevel()
-    config = _board_config(toplevel)
-    if config.storage is not body.Storage.STATE_REF:
-        raise protocol.ClaimUnavailableError(ITEM_NEW_GITHUB_REFUSAL)
-    client = _state_ref_forge(parsed.repo, config.canonical_remote)
-    parent_missing = (
-        parsed.parent is not None
-        and client.item_reference(parsed.parent).state is forge.ItemState.MISSING
-    )
-    if parent_missing:
-        raise protocol.ClaimUnavailableError(f"#{parsed.parent} does not exist")
-    kind = body.ItemKind(parsed.kind)
-    skeleton = (
-        body.BLOCK_CONTAINER_SKELETON
-        if kind is body.ItemKind.CONTAINER
-        else body.BLOCK_CHILD_SKELETON
-    )
-    new_body = _block_body_with_scope(skeleton, _requested_body_scope(parsed.scope))
-    new_body = _block_body_with_size(new_body, parsed.size)
-    new_body = _block_body_with_whole(new_body, _requested_whole_reason(parsed.whole))
-    item_id = client.create_item(
-        title=parsed.title, body=new_body, kind=kind, parent=parsed.parent, origin=parsed.origin
-    )
-    _print_item_new_result(item_id, items.item_number(item_id), as_json=parsed.json)
-    return 0
+    port every other write command narrows to. Every refusal reports
+    through the shared envelope as `precondition_failed` (issue #425)."""
+    as_json = parsed.json
+    try:
+        toplevel = _resolve_toplevel()
+        config = _board_config(toplevel)
+        if config.storage is not body.Storage.STATE_REF:
+            raise protocol.ClaimUnavailableError(ITEM_NEW_GITHUB_REFUSAL)
+        client = _state_ref_forge(parsed.repo, config.canonical_remote)
+        parent_missing = (
+            parsed.parent is not None
+            and client.item_reference(parsed.parent).state is forge.ItemState.MISSING
+        )
+        if parent_missing:
+            raise protocol.ClaimUnavailableError(f"#{parsed.parent} does not exist")
+        kind = body.ItemKind(parsed.kind)
+        skeleton = (
+            body.BLOCK_CONTAINER_SKELETON
+            if kind is body.ItemKind.CONTAINER
+            else body.BLOCK_CHILD_SKELETON
+        )
+        new_body = _block_body_with_scope(skeleton, _requested_body_scope(parsed.scope))
+        new_body = _block_body_with_size(new_body, parsed.size)
+        new_body = _block_body_with_whole(new_body, _requested_whole_reason(parsed.whole))
+        item_id = client.create_item(
+            title=parsed.title, body=new_body, kind=kind, parent=parsed.parent, origin=parsed.origin
+        )
+        _print_item_new_result(item_id, items.item_number(item_id), as_json=as_json)
+        return 0
+    except protocol.ClaimError as error:
+        return _refuse(ItemReason.PRECONDITION_FAILED, error, as_json=as_json)
 
 
 def _print_item_new_result(item_id: str, number: int, *, as_json: bool) -> None:
     if as_json:
-        print(json.dumps({"item": item_id, "number": number}))
+        _emit_json(True, ItemReason.CREATED, item=item_id, number=number)
     else:
         print(item_id)
 
@@ -3056,28 +3114,34 @@ def _cmd_item_edit(parsed: argparse.Namespace) -> int:
     on the forge, never governed by aco -- mirrors `item new`'s own refusal,
     and calls `_state_ref_forge` directly for the same reason (`create_item`/
     `update_item_body` are not part of the generic `ForgeWriter` port every
-    other write command narrows to)."""
+    other write command narrows to). A malformed piped body reports through
+    the shared envelope as `body_invalid`, with `body --check`'s own
+    `defects`; every other refusal is `precondition_failed` (issue #425)."""
     if parsed.size is not None:
         return _cmd_item_edit_size(parsed)
     if parsed.whole is not None:
         return _cmd_item_edit_whole(parsed)
-    toplevel = _resolve_toplevel()
-    config = _board_config(toplevel)
-    if config.storage is not body.Storage.STATE_REF:
-        raise protocol.ClaimUnavailableError(ITEM_EDIT_GITHUB_REFUSAL)
-    new_body = _read_body_check_input()
-    defects = _body_shape_defects(new_body, storage=body.Storage.STATE_REF)
-    if defects:
-        raise protocol.ClaimUnavailableError(defects[0])
-    client = _state_ref_forge(parsed.repo, config.canonical_remote)
-    number = parsed.item
-    if client.item_reference(number).state is forge.ItemState.MISSING:
-        raise protocol.ClaimUnavailableError(_missing_item_refusal(number, client))
-    client.update_item_body(number, new_body)
-    _print_item_edit_result(
-        items.format_item_id(number), number, client.item_oid(number), as_json=parsed.json
-    )
-    return 0
+    as_json = parsed.json
+    try:
+        toplevel = _resolve_toplevel()
+        config = _board_config(toplevel)
+        if config.storage is not body.Storage.STATE_REF:
+            raise protocol.ClaimUnavailableError(ITEM_EDIT_GITHUB_REFUSAL)
+        new_body = _read_body_check_input()
+        defects = _body_shape_defects(new_body, storage=body.Storage.STATE_REF)
+        if defects:
+            return _refuse_item_body_invalid(defects, as_json=as_json)
+        client = _state_ref_forge(parsed.repo, config.canonical_remote)
+        number = parsed.item
+        if client.item_reference(number).state is forge.ItemState.MISSING:
+            raise protocol.ClaimUnavailableError(_missing_item_refusal(number, client))
+        client.update_item_body(number, new_body)
+        _print_item_edit_result(
+            items.format_item_id(number), number, client.item_oid(number), as_json=as_json
+        )
+        return 0
+    except protocol.ClaimError as error:
+        return _refuse(ItemReason.PRECONDITION_FAILED, error, as_json=as_json)
 
 
 ITEM_EDIT_SIZE_COMMAND = "item edit --size"
@@ -3090,24 +3154,31 @@ def _cmd_item_edit_size(parsed: argparse.Namespace) -> int:
     above, this works under `storage = "github"` too, since it patches only
     the block's own top-level `size` key (never `[record]`, a
     `state-ref`-only table BODY-15 refuses under `github`) and leaves every
-    other byte untouched."""
-    client = _LazyForge(parsed.repo).writer()
-    _require_update_item_body(client, command=ITEM_EDIT_SIZE_COMMAND)
-    number = parsed.item
-    current_body = _item_body_or_refuse(client, number, command=ITEM_EDIT_SIZE_COMMAND)
-    storage = _board_config(_resolve_toplevel()).storage
-    located = _located_block_or_refuse(
-        number, current_body, command=ITEM_EDIT_SIZE_COMMAND, storage=storage
-    )
-    new_data = {**located.data, "size": parsed.size}
-    client.update_item_body(number, body.replace_agent_claim_block(current_body, located, new_data))
-    _print_item_edit_size_result(number, parsed.size, as_json=parsed.json)
-    return 0
+    other byte untouched. Every refusal reports through the shared envelope
+    as `precondition_failed` (issue #425)."""
+    as_json = parsed.json
+    try:
+        client = _LazyForge(parsed.repo).writer()
+        _require_update_item_body(client, command=ITEM_EDIT_SIZE_COMMAND)
+        number = parsed.item
+        current_body = _item_body_or_refuse(client, number, command=ITEM_EDIT_SIZE_COMMAND)
+        storage = _board_config(_resolve_toplevel()).storage
+        located = _located_block_or_refuse(
+            number, current_body, command=ITEM_EDIT_SIZE_COMMAND, storage=storage
+        )
+        new_data = {**located.data, "size": parsed.size}
+        client.update_item_body(
+            number, body.replace_agent_claim_block(current_body, located, new_data)
+        )
+        _print_item_edit_size_result(number, parsed.size, as_json=as_json)
+        return 0
+    except protocol.ClaimError as error:
+        return _refuse(ItemReason.PRECONDITION_FAILED, error, as_json=as_json)
 
 
 def _print_item_edit_size_result(number: int, size: str, *, as_json: bool) -> None:
     if as_json:
-        print(json.dumps({"item": number, "size": size}))
+        _emit_json(True, ItemReason.EDITED, item=number, size=size)
     else:
         print(f"EDITED #{number} size={size}")
 
@@ -3120,25 +3191,32 @@ def _cmd_item_edit_whole(parsed: argparse.Namespace) -> int:
     write, mirroring `_cmd_item_edit_size` over the same generic
     `ForgeWriter.update_item_body` -- works under `storage = "github"` too,
     since it patches only the block's own top-level `whole` key and leaves
-    every other byte untouched."""
-    client = _LazyForge(parsed.repo).writer()
-    _require_update_item_body(client, command=ITEM_EDIT_WHOLE_COMMAND)
-    number = parsed.item
-    current_body = _item_body_or_refuse(client, number, command=ITEM_EDIT_WHOLE_COMMAND)
-    storage = _board_config(_resolve_toplevel()).storage
-    located = _located_block_or_refuse(
-        number, current_body, command=ITEM_EDIT_WHOLE_COMMAND, storage=storage
-    )
-    reason = protocol._outbound_text(parsed.whole, _WHOLE_REASON_LABEL, maximum=512)
-    new_data = {**located.data, "whole": reason}
-    client.update_item_body(number, body.replace_agent_claim_block(current_body, located, new_data))
-    _print_item_edit_whole_result(number, reason, as_json=parsed.json)
-    return 0
+    every other byte untouched. Every refusal reports through the shared
+    envelope as `precondition_failed` (issue #425)."""
+    as_json = parsed.json
+    try:
+        client = _LazyForge(parsed.repo).writer()
+        _require_update_item_body(client, command=ITEM_EDIT_WHOLE_COMMAND)
+        number = parsed.item
+        current_body = _item_body_or_refuse(client, number, command=ITEM_EDIT_WHOLE_COMMAND)
+        storage = _board_config(_resolve_toplevel()).storage
+        located = _located_block_or_refuse(
+            number, current_body, command=ITEM_EDIT_WHOLE_COMMAND, storage=storage
+        )
+        reason = protocol._outbound_text(parsed.whole, _WHOLE_REASON_LABEL, maximum=512)
+        new_data = {**located.data, "whole": reason}
+        client.update_item_body(
+            number, body.replace_agent_claim_block(current_body, located, new_data)
+        )
+        _print_item_edit_whole_result(number, reason, as_json=as_json)
+        return 0
+    except protocol.ClaimError as error:
+        return _refuse(ItemReason.PRECONDITION_FAILED, error, as_json=as_json)
 
 
 def _print_item_edit_whole_result(number: int, reason: str, *, as_json: bool) -> None:
     if as_json:
-        print(json.dumps({"item": number, "whole": reason}))
+        _emit_json(True, ItemReason.EDITED, item=number, whole=reason)
     else:
         print(f"EDITED #{number} whole={reason}")
 
@@ -3147,7 +3225,7 @@ def _print_item_edit_result(
     item_id: str, number: int, oid: protocol.ObjectId, *, as_json: bool
 ) -> None:
     if as_json:
-        print(json.dumps({"item": item_id, "number": number, "oid": oid}))
+        _emit_json(True, ItemReason.EDITED, item=item_id, number=number, oid=oid)
     else:
         print(f"EDITED {item_id}")
 
@@ -3175,34 +3253,39 @@ def _cmd_item_close(parsed: argparse.Namespace) -> int:
     --merged`'s own `freed:` line -- open items whose only open local
     blocker was this one (`_freed_item_numbers`, issue #256; nothing new) --
     and, when this close was its parent's last open child, `release
-    --merged`'s own parent hint (issue #348)."""
-    toplevel = _resolve_toplevel()
-    config = _board_config(toplevel)
-    if config.storage is not body.Storage.STATE_REF:
-        raise protocol.ClaimUnavailableError(ITEM_CLOSE_GITHUB_REFUSAL)
-    number = parsed.item
-    _worktree, _remote, observed = _store_observation()
-    _require_state_ref(observed)
-    live_claim = observed.claims.get(protocol.claim_key(protocol.IssueIdentity(number), ""))
-    if live_claim is not None:
-        raise protocol.ClaimUnavailableError(
-            f"#{number} has a live claim "
-            f"({protocol._claimant_text(live_claim.agent, live_claim.role)}); "
-            "release the claim first"
+    --merged`'s own parent hint (issue #348). Every refusal reports through
+    the shared envelope as `precondition_failed` (issue #425)."""
+    as_json = parsed.json
+    try:
+        toplevel = _resolve_toplevel()
+        config = _board_config(toplevel)
+        if config.storage is not body.Storage.STATE_REF:
+            raise protocol.ClaimUnavailableError(ITEM_CLOSE_GITHUB_REFUSAL)
+        number = parsed.item
+        _worktree, _remote, observed = _store_observation()
+        _require_state_ref(observed)
+        live_claim = observed.claims.get(protocol.claim_key(protocol.IssueIdentity(number), ""))
+        if live_claim is not None:
+            raise protocol.ClaimUnavailableError(
+                f"#{number} has a live claim "
+                f"({protocol._claimant_text(live_claim.agent, live_claim.role)}); "
+                "release the claim first"
+            )
+        client = _state_ref_forge(parsed.repo, config.canonical_remote)
+        if client.item_reference(number).state is forge.ItemState.MISSING:
+            raise protocol.ClaimUnavailableError(_missing_item_refusal(number, client))
+        closed_at = client.close_item(number)
+        result = _ItemCloseResult(
+            item_id=items.format_item_id(number),
+            number=number,
+            closed_at=closed_at,
+            freed=_item_close_freed(client, number),
+            parent_closable=_parent_closable_number(client, number, body.Storage.STATE_REF),
         )
-    client = _state_ref_forge(parsed.repo, config.canonical_remote)
-    if client.item_reference(number).state is forge.ItemState.MISSING:
-        raise protocol.ClaimUnavailableError(_missing_item_refusal(number, client))
-    closed_at = client.close_item(number)
-    result = _ItemCloseResult(
-        item_id=items.format_item_id(number),
-        number=number,
-        closed_at=closed_at,
-        freed=_item_close_freed(client, number),
-        parent_closable=_parent_closable_number(client, number, body.Storage.STATE_REF),
-    )
-    _print_item_close_result(result, as_json=parsed.json)
-    return 0
+        _print_item_close_result(result, as_json=as_json)
+        return 0
+    except protocol.ClaimError as error:
+        return _refuse(ItemReason.PRECONDITION_FAILED, error, as_json=as_json)
 
 
 def _item_close_freed(client: forge.ForgeReader, number: int) -> tuple[int, ...]:
@@ -3233,15 +3316,13 @@ class _ItemCloseResult:
 
 def _print_item_close_result(result: _ItemCloseResult, *, as_json: bool) -> None:
     if as_json:
-        print(
-            json.dumps(
-                {
-                    "item": result.item_id,
-                    "number": result.number,
-                    "closed_at": result.closed_at,
-                    "parent_closable": result.parent_closable,
-                }
-            )
+        _emit_json(
+            True,
+            ItemReason.CLOSED,
+            item=result.item_id,
+            number=result.number,
+            closed_at=result.closed_at,
+            parent_closable=result.parent_closable,
         )
         return
     print(f"CLOSED {result.item_id}")
@@ -3283,26 +3364,31 @@ def _cmd_item_show(parsed: argparse.Namespace, session: _ReadSession) -> int:
     one header line -- read through the ordinary forge port, so it works
     identically under `storage = "github"` (the forge's own issue body) and
     `storage = "state-ref"` (the item file's own body); closing an item
-    never deletes it, so a closed item is shown exactly like an open one."""
-    client = session.forge()
-    number = parsed.item
-    reference = client.item_reference(number)
-    if reference.state is forge.ItemState.MISSING:
-        raise protocol.ClaimUnavailableError(_missing_item_refusal(number, client))
-    parent = client.parent_issue(number)
+    never deletes it, so a closed item is shown exactly like an open one.
+    A missing id -- or a forge that fails either read this header needs --
+    reports through the shared envelope as `precondition_failed` (issue
+    #425)."""
+    as_json = parsed.json
+    try:
+        client = session.forge()
+        number = parsed.item
+        reference = client.item_reference(number)
+        if reference.state is forge.ItemState.MISSING:
+            raise protocol.ClaimUnavailableError(_missing_item_refusal(number, client))
+        parent = client.parent_issue(number)
+    except protocol.ClaimError as error:
+        return _refuse(ItemReason.PRECONDITION_FAILED, error, as_json=as_json)
     body = reference.body or ""
-    if parsed.json:
-        print(
-            json.dumps(
-                {
-                    "item": items.format_item_id(number),
-                    "number": number,
-                    "state": _item_state_text(reference.state),
-                    "parent": _item_parent_id(parent),
-                    "origin": reference.origin,
-                    "body": body,
-                }
-            )
+    if as_json:
+        _emit_json(
+            True,
+            ItemReason.SHOWN,
+            item=items.format_item_id(number),
+            number=number,
+            state=_item_state_text(reference.state),
+            parent=_item_parent_id(parent),
+            origin=reference.origin,
+            body=body,
         )
         return 0
     print(_item_header(number, reference, parent))
@@ -3853,12 +3939,24 @@ def _emit_json(ok: bool, reason: StrEnum, **payload: object) -> None:
     print(json.dumps(envelope))
 
 
+class PreDispatchReason(StrEnum):
+    """The one `reason` every refusal raised before the chosen command starts
+    reports under `--json` (issue #425): agent identity resolution, and
+    `release`'s own branch and override checks, refuse before any command
+    runs, so `_dispatch` owns their envelope here instead of each command
+    carrying a second `precondition_failed` member for a refusal it never
+    sees itself."""
+
+    PRECONDITION_FAILED = "precondition_failed"
+
+
 def _refuse(reason: StrEnum, error: protocol.ClaimError, *, as_json: bool) -> int:
-    """One shared refusal report for `ask`/`rule`/`brief` (issue #396):
-    `ERROR: <sentence>` on stderr exactly as `main`'s own generic handler
-    always printed it, then -- only under `--json` -- the envelope naming
-    this call's own reason instead of the dropped `error` key. Exit `2`,
-    the one exit every refusal past the parser still uses."""
+    """One shared refusal report for every `--json` command (issue #396) and
+    for `_dispatch`'s own pre-start checks (issue #425): `ERROR: <sentence>`
+    on stderr exactly as `main`'s own generic sink always printed it, then
+    -- only under `--json` -- the envelope naming this call's own reason
+    instead of the dropped `error` key. Exit `2`, the one exit every refusal
+    past the parser still uses."""
     print(f"{CLI_ERROR_PREFIX}{error}", file=sys.stderr)
     if as_json:
         _emit_json(False, reason, message=str(error))
@@ -4833,13 +4931,25 @@ def _resolve_release_claimant(
     return _ResolvedRelease(selected, resolved_role)
 
 
-def _cmd_release(parsed: argparse.Namespace, session: _WriteSession) -> None:
+def _cmd_release(parsed: argparse.Namespace, session: _WriteSession) -> int:
+    """`release`'s own `--json` envelope (issue #425): every refusal this
+    function or `_cmd_release_landed` raises -- REL-01's own usage errors
+    excepted, which argparse itself reports before either ever runs -- is
+    caught here and reported as `precondition_failed`, rather than
+    escaping to `main`'s legacy `{"ok": false, "error": ...}` sink."""
+    as_json = parsed.json
+    try:
+        return _release_transition(parsed, session)
+    except protocol.ClaimError as error:
+        return _refuse(ReleaseReason.PRECONDITION_FAILED, error, as_json=as_json)
+
+
+def _release_transition(parsed: argparse.Namespace, session: _WriteSession) -> int:
     issue = _optional_issue_number(parsed.issue)
     identity = _resolved_identity(issue, session.release_branch or "")
     storage = _board_config(_resolve_toplevel()).storage
     if parsed.merged is not None and storage is body.Storage.STATE_REF:
-        _cmd_release_landed(parsed, session, identity, storage)
-        return
+        return _cmd_release_landed(parsed, session, identity, storage)
     merged = None if parsed.merged is None else _github_pull_request_number(parsed.merged)
     outcome = _release_outcome(merged, parsed.abandoned)
     worktree, canonical_remote, observed = _store_observation()
@@ -4904,6 +5014,7 @@ def _cmd_release(parsed: argparse.Namespace, session: _WriteSession) -> None:
         ),
         as_json=parsed.json,
     )
+    return 0
 
 
 WORKTREE_KEPT_FLAG_REASON = "--keep-worktree was given"
@@ -5288,7 +5399,12 @@ def _land_release(parsed: argparse.Namespace, issue: int | None, branch: str) ->
     cleanup -- `--branch` selects the lane by name without requiring this
     checkout to be on it (`_release_branch_for`'s own documented case: "the
     release may run from the coordinator's primary checkout"), exactly
-    where `land` runs from."""
+    where `land` runs from. Calls `_release_transition` directly, never
+    `_cmd_release` (issue #425): `land` needs a raised `ClaimError` here so
+    `_land_step` can convert it into its own ruled `MERGED ... follow-up
+    incomplete: release` line, not `_cmd_release`'s own caught-and-printed
+    `--json` refusal, which `land` never uses (`json=False` above) and
+    would otherwise print its sentence a second time."""
     release_parsed = argparse.Namespace(
         issue=issue,
         agent=parsed.agent,
@@ -5306,7 +5422,7 @@ def _land_release(parsed: argparse.Namespace, issue: int | None, branch: str) ->
         repo=parsed.repo,
     )
     release_session = _WriteSession(forge=_LazyForge(parsed.repo), release_branch=branch)
-    _cmd_release(release_parsed, release_session)
+    _release_transition(release_parsed, release_session)
 
 
 def _land_is_own_repository(toplevel: Path) -> bool:
@@ -5416,7 +5532,7 @@ def _cmd_release_landed(
     session: _WriteSession,
     identity: protocol.ClaimIdentity,
     storage: body.Storage,
-) -> None:
+) -> int:
     """`release --merged <sha|empty>` under `storage = "state-ref"` (issue
     #359, LAND-47/LAND-52): the trunk walk (`checkout.trunk_landings`,
     issue #304) names, or verifies, the landing commit; one
@@ -5478,6 +5594,7 @@ def _cmd_release_landed(
         ),
         as_json=parsed.json,
     )
+    return 0
 
 
 def _landing_report(
@@ -5595,23 +5712,53 @@ def _link_created_child(
         ) from error
 
 
+class CutReason(StrEnum):
+    """`aco cut`'s own `--json` `reason` vocabulary (issue #425,
+    `specs/cut.spec.md`): `cut`/`adopted` mirror the text form's own
+    `CUT`/`ADOPTED` verb -- whether `child` was freshly created or an
+    already-open child GitHub already recorded (#260). Every refusal
+    before any write is `precondition_failed`; a write that created the
+    child but failed to finish recording it
+    (`forge.ForgePartialChildCreationError`) is `partial_write` instead,
+    carrying `written`/`failed` as structured siblings rather than only
+    the prose sentence stderr already printed."""
+
+    CUT = "cut"
+    ADOPTED = "adopted"
+    PRECONDITION_FAILED = "precondition_failed"
+    PARTIAL_WRITE = "partial_write"
+
+
 def _print_cut_result(
     number: int, row_index: int | None, child: int, *, as_json: bool, adopted: bool
 ) -> None:
-    """Print `cut`'s result, `adopted` naming whether `child` was an already-open
-    child GitHub already recorded rather than one just created (#260). Today's
-    (`adopted=False`) shape is exactly what `cut` has always printed -- no
-    `adopted` key, `CUT` as the verb -- so a run that hits no matching child
-    is byte-identical to before this behaviour existed."""
+    """Print `cut`'s result: the text form's `CUT`/`ADOPTED` verb becomes
+    `--json`'s own `reason` (issue #425) -- `adopted` no longer needs its
+    own boolean sibling once the envelope's `reason` already names it."""
     if as_json:
-        payload: dict[str, object] = {"container": number, "row": row_index, "child": child}
-        if adopted:
-            payload["adopted"] = True
-        print(json.dumps(payload))
+        _emit_json(
+            True,
+            CutReason.ADOPTED if adopted else CutReason.CUT,
+            container=number,
+            row=row_index,
+            child=child,
+        )
         return
     suffix = "" if row_index is None else f" row {row_index}"
     verb = "ADOPTED" if adopted else "CUT"
     print(f"{verb} #{number}{suffix} -> #{child}")
+
+
+class _CutPartialWriteError(protocol.ClaimError):
+    """Wraps `forge.ForgePartialChildCreationError` so `_cmd_cut` can choose
+    `partial_write`'s own structured `--json` shape (`written`, `failed`)
+    without parsing the wrapped error's prose (mirrors `ask`/`rule`'s own
+    `_TargetUnavailableError`/`_InvalidTargetError`, issue #396)."""
+
+    def __init__(self, error: forge.ForgePartialChildCreationError) -> None:
+        self.written = error.child
+        self.failed = error.step
+        super().__init__(f"{error}; re-run the same cut -- it adopts the child")
 
 
 def _body_with_parent(skeleton: str, parent: int | None) -> str:
@@ -5878,10 +6025,7 @@ def _cut_slice(
             step = f"remove row {link.index} from #{number}'s agent-claim block"
             _link_created_child(client, number, new_body, child, step)
     except forge.ForgePartialChildCreationError as error:
-        raise protocol.ClaimUnavailableError(
-            f"created #{error.child} but failed to {error.step}: {error.cause}; "
-            "re-run the same cut -- it adopts the child"
-        ) from error
+        raise _CutPartialWriteError(error) from error
     _print_cut_result(
         number,
         None if link is None else link.index,
@@ -5892,22 +6036,45 @@ def _cut_slice(
     return 0
 
 
+def _refuse_cut_partial_write(error: _CutPartialWriteError, *, as_json: bool) -> int:
+    print(f"{CLI_ERROR_PREFIX}{error}", file=sys.stderr)
+    if as_json:
+        _emit_json(
+            False,
+            CutReason.PARTIAL_WRITE,
+            written=error.written,
+            failed=error.failed,
+            message=str(error),
+        )
+    return 2
+
+
 def _cmd_cut(parsed: argparse.Namespace, session: _WriteSession) -> int:
-    client = session.forge.writer()
-    number = int(parsed.issue)
-    for operation in (
-        forge.ForgeOperation.CREATE_CHILD,
-        forge.ForgeOperation.LINK_CHILD,
-        forge.ForgeOperation.UPDATE_ITEM_BODY,
-    ):
-        if client.capability(operation) is not forge.Capability.READ_WRITE:
-            raise protocol.ClaimUnavailableError(
-                f"this forge cannot {operation.value}; cut the slice by hand"
-            )
-    config = _load_board_config(client, _resolve_toplevel())
-    return _cut_slice(
-        client, _cut_target(client, number), parsed, config.idea_label, config.storage
-    )
+    """`cut`'s own `--json` envelope (issue #425): a partial write reports
+    through `_refuse_cut_partial_write`'s own structured shape; every other
+    refusal past the parser is `precondition_failed`, matching this
+    command's single generic refusal bucket."""
+    as_json = parsed.json
+    try:
+        client = session.forge.writer()
+        number = int(parsed.issue)
+        for operation in (
+            forge.ForgeOperation.CREATE_CHILD,
+            forge.ForgeOperation.LINK_CHILD,
+            forge.ForgeOperation.UPDATE_ITEM_BODY,
+        ):
+            if client.capability(operation) is not forge.Capability.READ_WRITE:
+                raise protocol.ClaimUnavailableError(
+                    f"this forge cannot {operation.value}; cut the slice by hand"
+                )
+        config = _load_board_config(client, _resolve_toplevel())
+        return _cut_slice(
+            client, _cut_target(client, number), parsed, config.idea_label, config.storage
+        )
+    except _CutPartialWriteError as error:
+        return _refuse_cut_partial_write(error, as_json=as_json)
+    except protocol.ClaimError as error:
+        return _refuse(CutReason.PRECONDITION_FAILED, error, as_json=as_json)
 
 
 def _missing_item_refusal(number: int, client: forge.ForgeReader) -> str:
@@ -6555,16 +6722,35 @@ def _dispatch_item(parsed: argparse.Namespace) -> int:
     return _cmd_item_show(parsed, _ReadSession(forge=_LazyForge(parsed.repo)))
 
 
-def _dispatch(parsed: argparse.Namespace) -> int:
+def _resolved_before_the_command_starts(parsed: argparse.Namespace) -> str | None:
+    """Everything a writer needs settled before its own command starts
+    (issue #425): the agent identity it claims under, and `release`'s own
+    branch and override checks, which read the checkout rather than the
+    claim record. Returns `release`'s branch, `None` for every other
+    command."""
     if parsed.command in {"claim", "release", "rescope", "land"}:
         parsed.agent = checkout.resolved_agent(parsed.agent)
+    return _release_branch_for(parsed) if parsed.command == "release" else None
+
+
+def _dispatch(parsed: argparse.Namespace) -> int:
+    # Only the pre-start checks report through the shared envelope (issue
+    # #425); a refusal a command raises itself owns its own `reason`, so the
+    # dispatch below stays outside this boundary.
+    try:
+        release_branch = _resolved_before_the_command_starts(parsed)
+    except protocol.ClaimError as error:
+        return _refuse(
+            PreDispatchReason.PRECONDITION_FAILED,
+            error,
+            as_json=bool(getattr(parsed, "json", False)),
+        )
     if parsed.command == "item":
         return _dispatch_item(parsed)
     entry = _COMMAND_TABLE[parsed.command]
     if entry.session is _CommandSession.FORGE_FREE:
         result = entry.handler(parsed)
         return 0 if result is None else result
-    release_branch = _release_branch_for(parsed) if parsed.command == "release" else None
     forge_accessor = _LazyForge(parsed.repo)
     if parsed.command == "board" and parsed.serve:
         # `board --serve` writes through a click (issue #280), so it needs
@@ -6704,10 +6890,10 @@ def _read_status_body_or_dispatch(parsed: argparse.Namespace) -> int:
 def main(arguments: list[str] | None = None) -> int:
     # One `ERROR:` site for parsing (`board.parse_item_reference` is an
     # argparse `type=` whose own refusal is a `ClaimError`), a local
-    # workspace operation, and an ordinary dispatch (issue #372). `parsed`
-    # stays `None` through a parse-time refusal, so that path keeps printing
-    # the plain sentence alone, without a `--json` flag to read.
-    parsed: argparse.Namespace | None = None
+    # workspace operation, and an ordinary dispatch (issue #372). Whatever
+    # reaches here prints the plain sentence alone: a parser refusal has no
+    # parsed `--json` to read yet, and a refusal a command raises past its
+    # own reported vocabulary must not be dressed as one (issue #425).
     try:
         parsed = _parser().parse_args(arguments)
         if parsed.command in {"_run-at-login", "register", "run", "login"}:
@@ -6717,8 +6903,6 @@ def main(arguments: list[str] | None = None) -> int:
         return _read_status_body_or_dispatch(parsed)
     except protocol.ClaimError as error:
         print(f"{CLI_ERROR_PREFIX}{error}", file=sys.stderr)
-        if getattr(parsed, "json", False):
-            print(json.dumps({"ok": False, "error": str(error)}))
         return 2
 
 

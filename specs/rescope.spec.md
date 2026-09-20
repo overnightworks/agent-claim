@@ -71,7 +71,7 @@ those IDs rather than restating them. `<flag>` is `--add` or `--drop`,
 
 - [ ] [RESC-15] A malformed `--add`/`--drop` value (RESC-01, RESC-05..09) reports `reason: "invalid_usage"` under `--json`.
 - [ ] [RESC-16] No live claim to rescope (RESC-14), a foreign claimant (CLAIM-37), or a wide combined scope (RESC-10) reports `reason: "precondition_failed"` under `--json` (see E-RESC-04).
-- [ ] [RESC-17] Every other refusal -- an unresolved checkout (RESC-02..04, PROT-10, PROT-11, PROT-13) or a corrupted record -- reports `reason: "unavailable"`, matching `ask`/`rule`/`brief`'s own catch-all.
+- [ ] [RESC-17] Every other refusal the handler raises -- an unresolved checkout (RESC-02..04, PROT-10, PROT-11, PROT-13) or a corrupted record -- reports `reason: "unavailable"` (a missing identity: OUT-05).
 
 ## Never
 

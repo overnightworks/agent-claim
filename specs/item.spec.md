@@ -21,9 +21,10 @@ owns the scope canonicalization grammar (CLAIM-19..CLAIM-23) `item new
 --scope` reuses -- never CLAIM-18's comma-versioned-file check, which only
 `aco claim`/`rescope` apply; `specs/ref-store-cas.spec.md` owns the stale-oid refusal
 (CAS-20) a second `item edit`/`item close` from the same snapshot meets;
-`specs/release.spec.md` owns the `--json` refusal object's own shape
-(REL-24). This file cites those IDs rather than restating them. A refusal
-reaching `main`'s own sink prints `ERROR: <sentence>` on stderr, exit `2`.
+`specs/output.spec.md` owns the `--json` envelope itself (key order, `ok`,
+`message`); this file names only its own `reason` vocabulary (ITEM-17,
+ITEM-25) and cites the others by ID. A refusal prints `ERROR: <sentence>`
+on stderr, exit `2`, and with `--json` also that envelope.
 `<item-id>` is a minted `aco-xxxxxx` id, `<n>` its number, `<oid>`/`<sha>` the
 runner's own git object ids.
 
@@ -45,6 +46,7 @@ runner's own git object ids.
 | `storage = "github"` | PIN-09 | ITEM-11 | PIN-10 | PIN-11 |
 | a delivered `[record]`, present or absent | — | — | ITEM-12..ITEM-14 | — |
 | `item show`/`edit`/`close --json` | — | ITEM-09 | ITEM-15 | ITEM-16 |
+| `item edit`'s own malformed piped body | — | — | ITEM-25 | — |
 | a refusal reached with `--json` | ITEM-17, ITEM-18 | ITEM-17, ITEM-18 | ITEM-17, ITEM-18 | ITEM-17, ITEM-18 |
 
 ## `item new`
@@ -68,7 +70,7 @@ runner's own git object ids.
 
 - [ ] [ITEM-07] `aco item show ITEM` prints one header, `<id> · #<n> · <state> · parent <parent-or-none> · origin <origin-or-none>`, then the stored body byte-exact, exit `0` (see E-ITEM-02).
 - [ ] [ITEM-08] A closed item prints ITEM-07's same header, `state closed`; closing rewrites the body's `[record]` with `state = "closed"`, `closed_at`, and `updated_at`, the rest byte-identical.
-- [ ] [ITEM-09] `aco item show ITEM --json` prints `{"item", "number", "state", "parent", "origin", "body"}`, `parent`/`origin` `null` when unset (see E-ITEM-02).
+- [ ] [ITEM-09] `aco item show ITEM --json` prints the envelope, `reason: "shown"`, then `item`, `number`, `state`, `parent`, `origin`, `body` (`parent`/`origin` `null` when unset) (see E-ITEM-02).
 - [ ] [ITEM-10] `aco item show ITEM` against an unknown id refuses `#<n> does not exist in <owner/repo>`, exit `2`.
 - [ ] [ITEM-11] `aco item show ITEM` under `storage = "github"` reads the forge issue's own body through ITEM-07/ITEM-09's same header and `--json` shape.
 
@@ -77,24 +79,25 @@ runner's own git object ids.
 - [ ] [ITEM-12] `aco item edit ITEM < BODY` takes `title`, `labels`, `blocked_by` from a delivered `[record]` when the piped body carries one valid (see E-ITEM-03).
 - [ ] [ITEM-13] `aco item edit ITEM`'s every other field — `parent`, `state`, `origin`, `kind`, `created_at`, `closed_at` — stays this item's own stored value; `updated_at` always moves to now.
 - [ ] [ITEM-14] A delivered body carrying no `[record]` table at all leaves `title`, `labels`, `blocked_by` unchanged too, exactly `item edit`'s own pre-#287 behaviour.
-- [ ] [ITEM-15] `aco item edit ITEM --json` prints `{"item", "number", "oid"}`, `oid` the freshly written blob's own oid (see E-ITEM-03).
+- [ ] [ITEM-15] `aco item edit ITEM --json` prints the envelope, `reason: "edited"`, then `item`, `number`, `oid` (the freshly written blob's own oid) (see E-ITEM-03).
 - [ ] [ITEM-21] `item edit --size S|M|L` patches only the top-level `size`, reads no stdin, works under both storages; state-ref also bumps `record.updated_at`.
 
   ```
   $ aco item edit <item-id> --size L
   patches size = "L" only; every other field, including the body outside it, is untouched
   ```
-- [ ] [ITEM-22] `item edit --size` prints `EDITED #<n> size=<S|M|L>` (`--json`: `{"item", "size"}`); an invalid value is refused by argparse before any write.
-- [ ] [ITEM-24] `item edit --whole REASON` patches only the top-level `whole`, reads no stdin, works under both storages, prints `EDITED #<n> whole=<reason>` (`--json`: `{"item", "whole"}`).
+- [ ] [ITEM-22] `item edit --size` prints `EDITED #<n> size=<S|M|L>` (`--json`: the envelope, `reason: "edited"`, then `item`, `size`); an invalid value is refused by argparse before any write.
+- [ ] [ITEM-24] `item edit --whole REASON` patches only the top-level `whole`, reads no stdin, works under both storages, prints `EDITED #<n> whole=<reason>` (`--json`: `reason: "edited"`, `item`, `whole`).
 
 ## `item close`
 
-- [ ] [ITEM-16] `aco item close ITEM --json` prints `{"item", "number", "closed_at"}`; only `item`/`number` overlap ITEM-09's `{"item", "number", "state", "parent", "origin", "body"}` (see E-ITEM-04).
+- [ ] [ITEM-16] `aco item close ITEM --json` prints `reason: "closed"`, then `item`, `number`, `closed_at`, `parent_closable` (issue #348's parent hint); overlaps ITEM-09's `item`/`number` (see E-ITEM-04).
 
-## `--json` and the refusal object
+## `--json` and the shared envelope
 
-- [ ] [ITEM-17] Every runtime refusal from `item new`/`show`/`edit`/`close`, reached with `--json`, also prints REL-24's own `{"ok": false, "error": "<sentence>"}` object, exit `2`.
-- [ ] [ITEM-18] An argparse-level refusal — a malformed `--origin`, or an item argument PIN-08 refuses — prints only the `ERROR:` line, exit `2`; `--json` never adds ITEM-17's object there.
+- [ ] [ITEM-17] Every other runtime refusal from `item new`/`show`/`edit`/`close`, reached with `--json`, prints `specs/output.spec.md`'s envelope, `reason: "precondition_failed"`, exit `2`.
+- [ ] [ITEM-18] An argparse-level refusal — a malformed `--origin`, or an item argument PIN-08 refuses — prints only the `ERROR:` line, exit `2`; `--json` never adds an envelope object there.
+- [ ] [ITEM-25] `item edit`'s own malformed piped body (PIN-24) reports `reason: "body_invalid"` instead, `defects` the same list `body --check`'s own `--json` carries, exit `2`.
 
 ## Never
 
@@ -120,7 +123,7 @@ $ aco item new --title "Ship it"
 <item-id>
 exit 0
 $ aco item new --title "Docs pass" --kind container --scope docs/README.md --scope docs/PRODUCT.md --json
-{"item": "<item-id-2>", "number": <n2>}
+{"ok": true, "reason": "created", "item": "<item-id-2>", "number": <n2>}
 exit 0
 ```
 
@@ -149,7 +152,7 @@ updated_at = "<updated_at>"
 ```
 exit 0
 $ aco item show <item-id> --json
-{"item": "<item-id>", "number": <n>, "state": "open", "parent": null, "origin": null, "body": "```agent-claim\nversion = 1\nnow = \"\"\nnext = \"\"\ndone_when = \"\"\n\n[record]\ntitle = \"Ship it\"\nstate = \"open\"\nkind = \"task\"\nlabels = []\nblocked_by = []\ncreated_at = \"<created_at>\"\nupdated_at = \"<updated_at>\"\n```\n"}
+{"ok": true, "reason": "shown", "item": "<item-id>", "number": <n>, "state": "open", "parent": null, "origin": null, "body": "```agent-claim\nversion = 1\nnow = \"\"\nnext = \"\"\ndone_when = \"\"\n\n[record]\ntitle = \"Ship it\"\nstate = \"open\"\nkind = \"task\"\nlabels = []\nblocked_by = []\ncreated_at = \"<created_at>\"\nupdated_at = \"<updated_at>\"\n```\n"}
 exit 0
 ````
 
@@ -177,7 +180,7 @@ next = "Ship it."
 done_when = "It is built."
 ```
 BODY
-{"item": "<item-id>", "number": <n>, "oid": "<oid>"}
+{"ok": true, "reason": "edited", "item": "<item-id>", "number": <n>, "oid": "<oid>"}
 exit 0
 ````
 
@@ -193,7 +196,7 @@ CLOSED <item-a>
 freed: <item-b>
 exit 0
 $ aco item close <item-c> --json
-{"item": "<item-c>", "number": <n-c>, "closed_at": "<closed_at>"}
+{"ok": true, "reason": "closed", "item": "<item-c>", "number": <n-c>, "closed_at": "<closed_at>", "parent_closable": null}
 exit 0
 ```
 
@@ -211,5 +214,18 @@ $ aco item edit 42
 exit 2
 $ aco item close 42
 2> ERROR: the forge closes its issues; aco never governs them
+exit 2
+```
+
+### E-ITEM-06 — `item edit --json` on a malformed piped body
+
+Setup: bare-remote, `storage = "state-ref"` tracked, bootstrapped, `<item-id>` already open
+
+```console
+$ aco item edit <item-id> --json <<'BODY'
+no block
+BODY
+{"ok": false, "reason": "body_invalid", "defects": ["body malformed: agent-claim: no agent-claim block"], "message": "body malformed: agent-claim: no agent-claim block"}
+2> ERROR: body malformed: agent-claim: no agent-claim block
 exit 2
 ```

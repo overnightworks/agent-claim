@@ -3264,6 +3264,33 @@ def test_cut_refuses_a_non_container(
     assert f"ERROR: #{CUT_CONTAINER} is not a container" in capsys.readouterr().err
 
 
+def test_cut_json_refusal_reports_precondition_failed(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Issue #425: every `cut` refusal before any write -- here CUT-02's own
+    non-container target -- reports through the shared envelope as
+    `precondition_failed`, never a bare object."""
+    plain = board_issue(CUT_CONTAINER, "Not a container", complete_contract("Ship it."))
+    _configured_board_client(monkeypatch, tmp_path, open_issues=(plain,))
+
+    exit_code = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "cut",
+            str(CUT_CONTAINER),
+            "--title",
+            "Scheibe 1",
+            "--json",
+        ]
+    )
+
+    assert exit_code == 2
+    captured = capsys.readouterr()
+    assert f"ERROR: #{CUT_CONTAINER} is not a container" in captured.err
+    _assert_json_refusal_object(captured.err, captured.out, reason="precondition_failed")
+
+
 def test_cut_refuses_a_number_that_names_no_open_issue(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
@@ -3353,6 +3380,45 @@ def test_cut_names_the_created_child_when_the_relation_post_fails(
     err = capsys.readouterr().err
     assert f"created #{child} but failed to record #{child} as a sub-issue" in err
     assert "re-run the same cut -- it adopts the child" in err
+
+
+def test_cut_json_reports_partial_write_with_written_and_failed(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Issue #425: a partial write's own `--json` shape carries `written`/
+    `failed` as structured siblings next to `reason: "partial_write"`,
+    never only the prose sentence stderr already printed."""
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(_one_slice_container(),))
+    client.fail_create_child_relation = True
+
+    exit_code = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "cut",
+            str(CUT_CONTAINER),
+            "--title",
+            "Scheibe 1",
+            "--json",
+        ]
+    )
+
+    assert exit_code == 2
+    child = client.next_created_child_number - 1
+    captured = capsys.readouterr()
+    message = (
+        f"created #{child} but failed to record #{child} as a sub-issue of #{CUT_CONTAINER}: "
+        "relation POST failed (simulated); re-run the same cut -- it adopts the child"
+    )
+    assert captured.err == f"ERROR: {message}\n"
+    expected = {
+        "ok": False,
+        "reason": "partial_write",
+        "written": child,
+        "failed": f"record #{child} as a sub-issue of #{CUT_CONTAINER}",
+        "message": message,
+    }
+    assert captured.out == json.dumps(expected) + "\n"
 
 
 def _write_block_pin(tmp_path: Path) -> None:
@@ -3456,6 +3522,8 @@ def test_cut_selects_a_row_by_number_and_removes_only_that_entry(
     assert exit_code == 0
     child = client.next_created_child_number - 1
     assert json.loads(capsys.readouterr().out) == {
+        "ok": True,
+        "reason": "cut",
         "container": CUT_CONTAINER,
         "row": 2,
         "child": child,
@@ -3708,10 +3776,11 @@ def test_cut_adopts_an_existing_open_child_instead_of_creating_one(
     assert client.created_children == []
     assert client.created_issues == []
     assert json.loads(capsys.readouterr().out) == {
+        "ok": True,
+        "reason": "adopted",
         "container": CUT_CONTAINER,
         "row": 1,
         "child": 950,
-        "adopted": True,
     }
     remaining = body.locate_agent_claim_block(client.item_bodies[CUT_CONTAINER]).data
     assert remaining["slice"] == []
@@ -10514,7 +10583,7 @@ def test_cli_claim_json_prints_acquired_claim_object(
         "flags",
         "agent",
         "role",
-        "reason",
+        "outcome",
     ),
     [
         (
@@ -10588,7 +10657,7 @@ def test_cli_release_json_prints_effective_posted_identity(
     flags: tuple[str, ...],
     agent: str,
     role: str,
-    reason: str,
+    outcome: str,
 ) -> None:
     lane = not issue_argument
     standing = request(
@@ -10612,26 +10681,19 @@ def test_cli_release_json_prints_effective_posted_identity(
         capsys.readouterr().out
         == json.dumps(
             {
+                "ok": True,
+                "reason": "abandoned",
+                "outcome": outcome,
                 **identity_fields,
                 "branch": branch,
                 "claim_id": "mine",
                 "agent": agent,
                 "role": role,
-                "reason": reason,
             }
         )
         + "\n"
     )
     assert store.fetch_state(worktree=Path("."), remote="origin").claims == {}
-
-
-def _assert_json_error_object_mirrors_stderr(err: str, out: str) -> None:
-    """`main`'s general `ClaimError` sink (issue #199): a `--json` caller's
-    stdout object states exactly the sentence stderr already printed --
-    never a second, drifting copy of the error text."""
-    assert err.startswith("ERROR: ")
-    message = err.removeprefix("ERROR: ").rstrip("\n")
-    assert json.loads(out) == {"ok": False, "error": message}
 
 
 def _assert_json_refusal_object(err: str, out: str, *, reason: str) -> None:
@@ -10657,8 +10719,8 @@ def _assert_json_refusal_object(err: str, out: str, *, reason: str) -> None:
         ),
         pytest.param(
             ["release", "72", "--agent", "Ada", "--claim-id", "mine", "--abandoned", "stopped"],
-            _assert_json_error_object_mirrors_stderr,
-            id="release-still-legacy-error-object",
+            lambda err, out: _assert_json_refusal_object(err, out, reason="precondition_failed"),
+            id="release-precondition-failed",
         ),
     ],
 )
@@ -10669,13 +10731,77 @@ def test_cli_claim_and_release_json_errors_choose_their_own_shape(
     assert_refusal: Callable[[str, str], None],
 ) -> None:
     """`claim`'s own dirty-tree checkout precondition (issue #406) reports
-    through the shared emitter, `reason: unavailable`; `release` still
-    prints its own unmigrated `{"ok": false, "error": ...}` shape."""
+    through the shared emitter, `reason: unavailable`; `release`'s own
+    generic refusal bucket (issue #425) reports `reason: precondition_failed`."""
     _patch_status_cli(monkeypatch, FakeForge())
 
     assert issue_claim.main(["--repo", "example/agent-claim", *arguments, "--json"]) == 2
     captured = capsys.readouterr()
     assert_refusal(captured.err, captured.out)
+
+
+def _prepare_pre_dispatch_refusal(
+    monkeypatch: pytest.MonkeyPatch, agent: str | None, branch: str | None
+) -> None:
+    """The world every pre-dispatch refusal below fires in: an identity when
+    the case is not about a missing one, and a checkout branch only where the
+    refusal is allowed to read one -- `None` forbids git outright."""
+    _set_agent_identity_env(monkeypatch, {checkout.ACO_AGENT_ENV: agent} if agent else None)
+    _forbid_github_construction(monkeypatch)
+    if branch is None:
+
+        def unused(arguments: list[str], **_kwargs: object) -> str:
+            pytest.fail("this refusal must fire before git is read")
+
+        monkeypatch.setattr(checkout, "_git_output", unused)
+        return
+    monkeypatch.setattr(checkout, "_git_output", lambda _arguments, **_kwargs: branch)
+
+
+@pytest.mark.parametrize(
+    ("arguments", "agent", "branch"),
+    [
+        pytest.param(_claim_without_agent_args(), None, None, id="claim-without-an-identity"),
+        pytest.param(
+            ["rescope", "72", "--add", "/repo/x.py"], None, None, id="rescope-without-an-identity"
+        ),
+        pytest.param(
+            ["release", "--abandoned", "stopped"], "Ada", "", id="release-without-issue-or-branch"
+        ),
+        pytest.param(
+            ["release", "72", "--abandoned", "stopped"], "Ada", "", id="release-without-claim-id"
+        ),
+        pytest.param(
+            ["release", "72", "--coordinator-override", "--abandoned", "takeover"],
+            "Ada",
+            None,
+            id="release-override-without-the-coordinator-role",
+        ),
+    ],
+)
+def test_cli_refusals_before_the_handler_print_the_shared_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    arguments: list[str],
+    agent: str | None,
+    branch: str | None,
+) -> None:
+    """Issue #425 review: identity resolution and `release`'s own branch and
+    override checks (REL-06..08) refuse before the named command starts, so
+    they print the shared envelope (OUT-05); the text form keeps the bare
+    `ERROR:` sentence it always printed."""
+    _prepare_pre_dispatch_refusal(monkeypatch, agent, branch)
+    text_status = issue_claim.main(["--repo", "example/agent-claim", *arguments])
+    text = capsys.readouterr()
+
+    _prepare_pre_dispatch_refusal(monkeypatch, agent, branch)
+    json_status = issue_claim.main(["--repo", "example/agent-claim", *arguments, "--json"])
+    envelope = capsys.readouterr()
+
+    assert (text_status, json_status) == (2, 2)
+    assert text.out == ""
+    assert envelope.err == text.err
+    _assert_json_refusal_object(envelope.err, envelope.out, reason="precondition_failed")
 
 
 def test_cli_claim_json_conflict_prints_the_stdout_error_object_not_a_success_shape(
@@ -11812,6 +11938,26 @@ def test_release_merged_reports_the_json_freed_list_and_next_pick(
     payload = json.loads(capsys.readouterr().out)
     assert payload["freed"] == scenario.freed
     assert payload["next"] == scenario.next_number
+
+
+def test_release_merged_json_reports_ok_reason_merged_and_outcome(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #425: a `--merged` release's own `reason` is the stable token
+    `merged`, distinct from `outcome`'s own prose sentence."""
+    client = merged_release_client(monkeypatch, body="Work-Item: #72\n\nCloses #72")
+    client.closed_issues.add(WORK_ITEM_ISSUE)
+    monkeypatch.setattr(issue_claim, "_fetch_issue_reference", _LIVE_FETCH_ISSUE_REFERENCE)
+
+    exit_code = issue_claim.main(
+        ["--repo", REPOSITORY, "release", str(WORK_ITEM_ISSUE), "--merged", "12", "--json"]
+    )
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["reason"] == "merged"
+    assert payload["outcome"] == "merged #12"
 
 
 def test_release_merged_prints_the_freed_and_next_lines(
@@ -14959,6 +15105,10 @@ def test_cli_brief_reports_branch_not_found_when_the_claim_branch_is_gone(
     ]
 
 
+def _unreadable_item_reference(_number: int) -> forge.ItemReference:
+    raise ClaimError("simulated forge read failure")
+
+
 def test_cli_brief_refuses_when_the_lane_tip_read_fails_outright(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
@@ -14984,6 +15134,29 @@ def test_cli_brief_refuses_when_the_lane_tip_read_fails_outright(
 
     assert status == 2
     assert capsys.readouterr().err == "ERROR: simulated git failure\n"
+
+
+def test_cli_brief_json_leaves_an_unspecified_forge_failure_as_the_bare_sentence(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Issue #425 review: the shared `precondition_failed` envelope covers
+    only what runs before a command starts. A failure `brief` itself does not
+    name keeps the plain `ERROR:` sentence and exit `2`, never a `reason`
+    outside BRIEF's own vocabulary."""
+    repository, base, _tip = _scratch_lane_repository(tmp_path)
+    client = FakeForge()
+    monkeypatch.setattr(github, "GitHubForge", lambda _repository: client)
+    monkeypatch.setattr(client, "item_reference", _unreadable_item_reference)
+    claim = _brief_claim(base)
+    _patch_store_write(monkeypatch, claim, ages={claim.claim_id: datetime(2026, 8, 20, tzinfo=UTC)})
+    monkeypatch.chdir(repository)
+
+    status = issue_claim.main(["--repo", "example/agent-claim", "brief", "258", "--json"])
+
+    captured = capsys.readouterr()
+    assert status == 2
+    assert captured.err == "ERROR: simulated forge read failure\n"
+    assert captured.out == ""
 
 
 def test_cli_brief_json_prints_one_object_with_body_claim_tip_and_touched(
@@ -15318,6 +15491,30 @@ def test_item_new_refuses_under_github_storage(capsys: pytest.CaptureFixture[str
     assert capsys.readouterr().err == "ERROR: items live on the forge; open the issue there\n"
 
 
+def test_item_new_json_reports_ok_reason_created(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Issue #425: a fresh item's own `--json` success carries `reason:
+    "created"` first, ahead of the minted `item`/`number` pair."""
+    _write_state_ref_pin(tmp_path)
+    client = FakeForge(repository=forge.RepositoryId("file", (), str(tmp_path)))
+    item_id = items.format_item_id(42)
+    monkeypatch.setattr(client, "create_item", lambda **_kwargs: item_id, raising=False)
+    monkeypatch.setattr(
+        issue_claim, "_state_ref_forge", lambda _repo, _remote, *, directory=None: client
+    )
+
+    status = issue_claim.main(["item", "new", "--title", "Fresh Item", "--json"])
+
+    assert status == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "ok": True,
+        "reason": "created",
+        "item": item_id,
+        "number": 42,
+    }
+
+
 def test_item_edit_refuses_under_github_storage(capsys: pytest.CaptureFixture[str]) -> None:
     """Issue #287 proof 7: under `storage = "github"` (the default), `item
     edit` refuses by name -- forge issues are edited on the forge, never
@@ -15370,7 +15567,12 @@ def test_item_edit_size_json_reports_the_item_and_size(
     )
 
     assert exit_code == 0
-    assert json.loads(capsys.readouterr().out) == {"item": RULE_ITEM, "size": "S"}
+    assert json.loads(capsys.readouterr().out) == {
+        "ok": True,
+        "reason": "edited",
+        "item": RULE_ITEM,
+        "size": "S",
+    }
 
 
 def test_item_edit_size_refuses_an_invalid_value_before_any_write(
@@ -15381,6 +15583,27 @@ def test_item_edit_size_refuses_an_invalid_value_before_any_write(
 
     assert exited.value.code == 2
     assert "invalid choice" in capsys.readouterr().err
+
+
+def test_item_edit_size_refuses_through_the_shared_precondition_failed_envelope(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Issue #425: `item edit --size`'s own runtime refusal -- here the
+    forge refusing `update_item_body` -- reports through the shared
+    envelope as `precondition_failed`."""
+    client = _client_with_item(
+        monkeypatch, tmp_path, RULE_ITEM, agent_claim_body(MINIMAL_BLOCK_TOML)
+    )
+    client.capability_overrides[forge.ForgeOperation.UPDATE_ITEM_BODY] = forge.Capability.READ_ONLY
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "item", "edit", str(RULE_ITEM), "--size", "M", "--json"]
+    )
+
+    assert exit_code == 2
+    captured = capsys.readouterr()
+    assert "this forge cannot update_item_body; item edit --size by hand" in captured.err
+    _assert_json_refusal_object(captured.err, captured.out, reason="precondition_failed")
 
 
 def test_item_edit_whole_writes_the_top_level_field_under_github_storage(
@@ -15423,7 +15646,42 @@ def test_item_edit_whole_json_reports_the_item_and_reason(
     )
 
     assert exit_code == 0
-    assert json.loads(capsys.readouterr().out) == {"item": RULE_ITEM, "whole": reason}
+    assert json.loads(capsys.readouterr().out) == {
+        "ok": True,
+        "reason": "edited",
+        "item": RULE_ITEM,
+        "whole": reason,
+    }
+
+
+def test_item_edit_whole_refuses_through_the_shared_precondition_failed_envelope(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Issue #425: `item edit --whole`'s own runtime refusal -- here the
+    forge refusing `update_item_body` -- reports through the shared
+    envelope as `precondition_failed`."""
+    client = _client_with_item(
+        monkeypatch, tmp_path, RULE_ITEM, agent_claim_body(MINIMAL_BLOCK_TOML)
+    )
+    client.capability_overrides[forge.ForgeOperation.UPDATE_ITEM_BODY] = forge.Capability.READ_ONLY
+
+    exit_code = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "item",
+            "edit",
+            str(RULE_ITEM),
+            "--whole",
+            "a reason",
+            "--json",
+        ]
+    )
+
+    assert exit_code == 2
+    captured = capsys.readouterr()
+    assert "this forge cannot update_item_body; item edit --whole by hand" in captured.err
+    _assert_json_refusal_object(captured.err, captured.out, reason="precondition_failed")
 
 
 def test_item_close_refuses_under_github_storage(capsys: pytest.CaptureFixture[str]) -> None:
@@ -15440,8 +15698,9 @@ def test_item_close_prints_json_under_the_state_ref_pin(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
     """Issue #289: `item close ITEM --json` under `storage = "state-ref"`
-    prints `{"item", "number", "closed_at", "parent_closable"}` and returns
-    before the plain-text `CLOSED`/`freed:` lines, the branch
+    prints the shared envelope, `reason: "closed"`, then `{"item", "number",
+    "closed_at", "parent_closable"}`, and returns before the plain-text
+    `CLOSED`/`freed:` lines, the branch
     `test_item_close_refuses_under_github_storage`'s refusal never reaches.
     `parent_closable` (issue #348) is `null` here: `42` names no parent on
     this fake."""
@@ -15459,6 +15718,8 @@ def test_item_close_prints_json_under_the_state_ref_pin(
 
     assert status == 0
     assert json.loads(capsys.readouterr().out) == {
+        "ok": True,
+        "reason": "closed",
         "item": items.format_item_id(42),
         "number": 42,
         "closed_at": "2026-09-16T12:00:00Z",
@@ -15502,6 +15763,8 @@ def test_item_show_as_json_reads_the_fake_forge_body_under_github_storage(
     assert status == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload == {
+        "ok": True,
+        "reason": "shown",
         "item": items.format_item_id(42),
         "number": 42,
         "state": "open",
@@ -15522,6 +15785,117 @@ def test_item_show_refuses_an_unknown_id(
 
     assert status == 2
     assert capsys.readouterr().err == f"ERROR: #42 does not exist in {REPOSITORY}\n"
+
+
+def test_item_show_refuses_when_the_parent_read_fails(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #425 review: the parent read the header needs is inside `item
+    show`'s own refusal boundary, so a forge that fails it reports the same
+    envelope, never an error escaping past every `--json` printer."""
+    sentence = "GitHub returned a malformed parent issue"
+
+    def prepare() -> FakeForge:
+        client = FakeForge()
+        client.issue_references[42] = forge.ItemReference(
+            forge.ItemState.OPEN, "Title", "Body text.\n", False
+        )
+
+        def failing_parent_read(_number: int) -> board.ParentIssue | None:
+            raise forge.ForgeMalformedResponseError(sentence)
+
+        monkeypatch.setattr(client, "parent_issue", failing_parent_read)
+        monkeypatch.setattr(github, "GitHubForge", lambda _repository: client)
+        return client
+
+    prepare()
+    text_status = issue_claim.main(["--repo", REPOSITORY, "item", "show", "42"])
+    text = capsys.readouterr()
+
+    prepare()
+    json_status = issue_claim.main(["--repo", REPOSITORY, "item", "show", "42", "--json"])
+    envelope = capsys.readouterr()
+
+    assert (text_status, json_status) == (2, 2)
+    assert (text.out, text.err) == ("", f"ERROR: {sentence}\n")
+    assert envelope.err == text.err
+    _assert_json_refusal_object(envelope.err, envelope.out, reason="precondition_failed")
+
+
+def _item_new_github_storage_refusal(
+    _monkeypatch: pytest.MonkeyPatch, _tmp_path: Path
+) -> list[str]:
+    return ["item", "new", "--title", "X", "--json"]
+
+
+def _item_edit_github_storage_refusal(
+    _monkeypatch: pytest.MonkeyPatch, _tmp_path: Path
+) -> list[str]:
+    return ["item", "edit", "42", "--json"]
+
+
+def _item_close_github_storage_refusal(
+    _monkeypatch: pytest.MonkeyPatch, _tmp_path: Path
+) -> list[str]:
+    return ["item", "close", "42", "--json"]
+
+
+def _item_show_unknown_id_refusal(monkeypatch: pytest.MonkeyPatch, _tmp_path: Path) -> list[str]:
+    client = FakeForge()
+    client.issue_references[42] = forge.ItemReference(forge.ItemState.MISSING)
+    monkeypatch.setattr(github, "GitHubForge", lambda _repository: client)
+    return ["--repo", REPOSITORY, "item", "show", "42", "--json"]
+
+
+@pytest.mark.parametrize(
+    "build_arguments",
+    [
+        _item_new_github_storage_refusal,
+        _item_edit_github_storage_refusal,
+        _item_close_github_storage_refusal,
+        _item_show_unknown_id_refusal,
+    ],
+    ids=["new", "edit", "close", "show"],
+)
+def test_item_refuses_through_the_shared_precondition_failed_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    build_arguments: Callable[[pytest.MonkeyPatch, Path], list[str]],
+) -> None:
+    """Issue #425: every runtime refusal from `item new`/`edit`/`close`/
+    `show`, reached with `--json`, reports through the shared envelope as
+    `precondition_failed` -- never a bare object."""
+    arguments = build_arguments(monkeypatch, tmp_path)
+
+    status = issue_claim.main(arguments)
+
+    assert status == 2
+    captured = capsys.readouterr()
+    _assert_json_refusal_object(captured.err, captured.out, reason="precondition_failed")
+
+
+def test_item_edit_json_reports_body_invalid_with_defects(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Issue #425: `item edit`'s own malformed piped body reports
+    `reason: "body_invalid"`, with `body --check`'s own `defects` list as a
+    structured sibling, before any forge is ever resolved."""
+    _write_state_ref_pin(tmp_path)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("no block"))
+
+    status = issue_claim.main(["item", "edit", "42", "--json"])
+
+    assert status == 2
+    captured = capsys.readouterr()
+    defect = "body malformed: agent-claim: no agent-claim block"
+    assert captured.err == f"ERROR: {defect}\n"
+    assert json.loads(captured.out) == {
+        "ok": False,
+        "reason": "body_invalid",
+        "defects": [defect],
+        "message": defect,
+    }
 
 
 # `reset` (issue #298): real bare `file://` remotes and real checkouts
