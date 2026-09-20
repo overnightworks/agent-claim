@@ -14224,28 +14224,6 @@ def test_item_edit_whole_json_reports_the_item_and_reason(
     assert json.loads(capsys.readouterr().out) == {"item": RULE_ITEM, "whole": reason}
 
 
-def test_requested_whole_reason_bounds_the_flags_own_text() -> None:
-    """`item new --whole`'s own text passes through the same bound
-    `claim`'s own `--whole` already enforces (issue #399)."""
-    reason = "one lane owns every adapter"
-
-    assert issue_claim._requested_whole_reason(None) is None
-    assert issue_claim._requested_whole_reason(reason) == reason
-
-
-def test_block_body_with_whole_writes_or_skips_the_top_level_field() -> None:
-    """`item new`'s own body writer for `--whole` (issue #399), mirroring
-    `_block_body_with_size`: unchanged when `whole` is `None`, else the
-    block's own top-level `whole` field."""
-    body = agent_claim_body(MINIMAL_BLOCK_TOML)
-    reason = "one lane owns every adapter"
-
-    written = issue_claim._block_body_with_whole(body, reason)
-
-    assert board.locate_agent_claim_block(written).data["whole"] == reason
-    assert issue_claim._block_body_with_whole(body, None) == body
-
-
 def test_item_close_refuses_under_github_storage(capsys: pytest.CaptureFixture[str]) -> None:
     """Issue #289 proof 6: under `storage = "github"` (the default), `item
     close` refuses by name -- the forge closes its own issues, aco never

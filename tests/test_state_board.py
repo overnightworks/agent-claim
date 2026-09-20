@@ -2218,6 +2218,30 @@ class TestCliStateRefForge:
         stored = store.read_item_files(worktree, state.tip)[f"{printed}.md"].decode()
         assert board.locate_agent_claim_block(stored).data["size"] == "M"
 
+    def test_item_new_whole_writes_the_top_level_field(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+    ) -> None:
+        """Issue #399: `item new --whole REASON` writes the block's own
+        top-level `whole = "REASON"`, mirroring
+        `test_item_new_size_writes_the_top_level_field`."""
+        self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, _item_files())
+        reason = "one lane owns every adapter"
+
+        status = issue_claim.main(["item", "new", "--title", "Whole Item", "--whole", reason])
+
+        assert status == 0
+        printed = capsys.readouterr().out.strip()
+        remote_url = f"file://{bare_remote}"
+        state = store.fetch_state(worktree=worktree, remote=remote_url)
+        assert state.tip is not None
+        stored = store.read_item_files(worktree, state.tip)[f"{printed}.md"].decode()
+        assert board.locate_agent_claim_block(stored).data["whole"] == reason
+
     def test_item_new_size_refuses_an_invalid_value_before_any_write(
         self,
         monkeypatch: pytest.MonkeyPatch,
