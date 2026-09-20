@@ -28,7 +28,7 @@ from cli_fixtures import (
     stub_board_config_tracked,
 )
 
-from agent_coordination import board, checkout, protocol, store
+from agent_coordination import board, checkout, hook_input, protocol, store
 from agent_coordination import cli as issue_claim
 from agent_coordination.protocol import ClaimError
 
@@ -270,7 +270,7 @@ def test_protect_denied_checkout_validation_never_reads_the_store(
 @pytest.mark.parametrize(
     "payload",
     [
-        {"toolName": "Bash", "toolInput": {"path": "src/cli.py", "command": "rm -rf /"}},
+        {"toolName": "Bash", "toolInput": {"command": "git diff"}},
         {"tool_name": "run_terminal_command", "tool_input": {"command": "git status"}},
         {"toolName": "Read", "toolInput": {"path": "src/secret.py"}},
         {"toolName": "read_file", "toolInput": {"path": "src/secret.py"}},
@@ -774,6 +774,254 @@ def test_protect_apply_patch_denies_with_claim_first_when_no_session_claim_exist
     _assert_protect_decision(capsys, decision="deny", reason="claim first")
 
 
+_BASH_WRITE_COMMAND_TEMPLATES: tuple[tuple[str, str], ...] = (
+    ("cat > {path} <<EOF\ncontent\nEOF", hook_input.PATTERN_REDIRECT_OVERWRITE),
+    ("echo hi >> {path}", hook_input.PATTERN_REDIRECT_APPEND),
+    ("tee {path}", hook_input.PATTERN_TEE),
+    ("sed -i 's/a/b/' {path}", hook_input.PATTERN_SED_IN_PLACE),
+    ("mv {path} src/renamed.py", hook_input.PATTERN_MOVE),
+    ("cp src/source.py {path}", hook_input.PATTERN_COPY),
+    ("rm {path}", hook_input.PATTERN_REMOVE),
+    ("git checkout -- {path}", hook_input.PATTERN_GIT_CHECKOUT),
+    ("git restore {path}", hook_input.PATTERN_GIT_RESTORE),
+)
+
+
+def _write_target_payload(target: Path) -> dict[str, object]:
+    return {"toolName": "write", "toolInput": {"path": str(target)}}
+
+
+def _bash_rm_target_payload(target: Path) -> dict[str, object]:
+    return {"toolName": "Bash", "toolInput": {"command": f"rm {target}"}}
+
+
+_TARGET_PATH_PAYLOAD_BUILDERS = (_write_target_payload, _bash_rm_target_payload)
+
+
+_BASH_OUTSIDE_SCOPE_PATH = "docs/widget.md"
+_BASH_INSIDE_SCOPE_PATH = "src/widget.py"
+
+
+def _bash_scope_case(
+    template: str, pattern: str, *, path: str, denied: bool
+) -> tuple[str, int, str | None]:
+    command = template.format(path=path)
+    if not denied:
+        return command, 0, None
+    return command, 2, f"{pattern} {path} outside claim scope"
+
+
+@pytest.mark.parametrize(
+    ("command", "status", "reason"),
+    [
+        *(
+            _bash_scope_case(template, pattern, path=_BASH_OUTSIDE_SCOPE_PATH, denied=True)
+            for template, pattern in _BASH_WRITE_COMMAND_TEMPLATES
+        ),
+        *(
+            _bash_scope_case(template, pattern, path=_BASH_INSIDE_SCOPE_PATH, denied=False)
+            for template, pattern in _BASH_WRITE_COMMAND_TEMPLATES
+        ),
+    ],
+)
+def test_protect_bash_judges_a_recognized_pattern_path_by_claim_scope(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+    status: int,
+    reason: str | None,
+) -> None:
+    """Issue #380: every write pattern `hook_input.hook_command_paths`
+    recognizes runs the same Checkout/Default-Branch/Claim-Scope chain as
+    an `Edit` path, resolved against the payload's own `cwd` since Bash's
+    own paths are relative (PROT-31). A path inside the live claim's scope
+    allows exactly like a covered `Edit` path; one outside it denies naming
+    both the pattern and the path (PROT-33) -- for `mv` reporting its own
+    (untouched) source rather than its in-scope destination, since `mv`
+    judges every operand; `cp` here is tested on its destination alone
+    (issue #380 delta), the only operand it actually writes."""
+    _isolate_protect_home(monkeypatch, tmp_path)
+    work = tmp_path / "work"
+    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
+    _patch_protect_git(monkeypatch, work)
+    _patch_protect_claim(monkeypatch, scope=("src",))
+
+    assert (
+        _protect_main(
+            monkeypatch,
+            {"toolName": "Bash", "toolInput": {"command": command}, "cwd": str(work)},
+        )
+        == status
+    )
+    _assert_protect_decision(capsys, decision="deny" if reason else "allow", reason=reason)
+
+
+def test_protect_bash_allows_a_recognized_pattern_path_outside_every_repository(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """PROT-32: unlike an `Edit` path (PROT-10's own "not in a repository"
+    deny), a Bash-recognized path outside every git checkout allows -- a
+    shell command routinely touches `/tmp` or a system path `protect` holds
+    no claim to judge. The absolute path here also proves PROT-09 does not
+    apply to Bash: no `cwd` is given at all, yet the write is still judged
+    (and allowed) rather than denied as a relative payload path."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    outside = tmp_path / "not-a-repository"
+    outside.mkdir()
+    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
+
+    assert (
+        _protect_main(
+            monkeypatch,
+            {"toolName": "Bash", "toolInput": {"command": f"rm {outside / 'x'}"}},
+        )
+        == 0
+    )
+    _assert_protect_decision(capsys, decision="allow")
+
+
+def test_protect_bash_allows_a_relative_path_when_the_payload_carries_no_cwd(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """PROT-31's second half: a relative Bash-recognized path with no `cwd`
+    in the payload at all cannot be resolved without guessing, and a wrong
+    guess would deny legitimate work `protect` has no way to tell from a
+    real out-of-scope write -- so it allows rather than risk a false deny
+    (`specs/protect.spec.md`'s own `## Never`). No claim is set up at all:
+    a resolver that fell back to guessing a cwd would deny `claim first`
+    here instead of allowing. `_forbid_protect_git_github_and_identity`'s
+    own `_resolved_agent` stub is left in place, unlike the sibling tests
+    below: this path must never resolve identity at all (issue #380 delta,
+    review finding: resolving it eagerly, before this allow, used to turn an
+    unresolvable identity into a wrongful PROT-08 deny here)."""
+    _isolate_protect_home(monkeypatch, tmp_path)
+    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
+    _forbid_protect_git_github_and_identity(monkeypatch)
+
+    assert (
+        _protect_main(
+            monkeypatch,
+            {"toolName": "Bash", "toolInput": {"command": "rm docs/widget.md"}},
+        )
+        == 0
+    )
+    _assert_protect_decision(capsys, decision="allow")
+
+
+def test_protect_bash_denies_a_relative_path_resolved_against_the_payloads_own_cwd(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The companion to the no-`cwd` allow above: once a `cwd` is given, a
+    relative path resolves against it and is judged exactly like an
+    already-absolute one, denying when it sits outside the live claim."""
+    _isolate_protect_home(monkeypatch, tmp_path)
+    work = tmp_path / "work"
+    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
+    _patch_protect_git(monkeypatch, work)
+    _patch_protect_claim(monkeypatch, scope=("src",))
+
+    assert (
+        _protect_main(
+            monkeypatch,
+            {
+                "toolName": "Bash",
+                "toolInput": {"command": "rm docs/widget.md"},
+                "cwd": str(work),
+            },
+        )
+        == 2
+    )
+    _assert_protect_decision(
+        capsys, decision="deny", reason="rm docs/widget.md outside claim scope"
+    )
+
+
+def test_protect_bash_cd_changes_the_directory_for_the_rest_of_the_command(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Issue #380 delta, decision 4: a literal `cd <path> &&` changes the
+    directory a later relative path resolves against -- even into a
+    different checkout than the payload's own `cwd`, judged there exactly
+    as an absolute path in that checkout would be. Were `cd` not tracked,
+    `docs/widget.md` would resolve under the payload's own `cwd`
+    (`elsewhere`, no checkout at all) and allow outright instead."""
+    _isolate_protect_home(monkeypatch, tmp_path)
+    work = tmp_path / "work"
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
+    _patch_protect_git(monkeypatch, work)
+    _patch_protect_claim(monkeypatch, scope=("src",))
+
+    assert (
+        _protect_main(
+            monkeypatch,
+            {
+                "toolName": "Bash",
+                "toolInput": {"command": f"cd {work} && rm docs/widget.md"},
+                "cwd": str(elsewhere),
+            },
+        )
+        == 2
+    )
+    _assert_protect_decision(
+        capsys, decision="deny", reason="rm docs/widget.md outside claim scope"
+    )
+
+
+def test_protect_bash_allows_a_command_with_no_recognized_pattern_without_identity_or_git(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """PROT-30: `grep`, `ls`, `pytest`, and `git diff` name no recognized
+    write pattern at all, so `protect` never even resolves identity, git,
+    or the store for them -- the same "cannot judge what it cannot see"
+    limit README documents for the read-only tools (issue #380)."""
+    _isolate_protect_home(monkeypatch, tmp_path)
+    _set_agent_identity_env(monkeypatch)
+    _forbid_protect_git_github_and_identity(monkeypatch)
+
+    assert (
+        _protect_main(
+            monkeypatch,
+            {"toolName": "Bash", "toolInput": {"command": "grep foo bar.py && ls && pytest"}},
+        )
+        == 0
+    )
+    _assert_protect_decision(capsys, decision="allow")
+
+
+@pytest.mark.parametrize(
+    "tool_input",
+    [{}, {"command": 1}],
+    ids=["missing-command", "non-string-command"],
+)
+def test_protect_bash_allows_a_missing_or_non_string_command(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    tool_input: dict[str, object],
+) -> None:
+    _isolate_protect_home(monkeypatch, tmp_path)
+    _set_agent_identity_env(monkeypatch)
+    _forbid_protect_git_github_and_identity(monkeypatch)
+
+    assert _protect_main(monkeypatch, {"toolName": "Bash", "toolInput": tool_input}) == 0
+    _assert_protect_decision(capsys, decision="allow")
+
+
 def test_protect_unknown_tool_name_denies_with_a_repair_sentence(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -864,10 +1112,12 @@ def test_protect_denies_not_main_for_a_custom_or_unresolved_default_branch(
     _assert_protect_decision(capsys, decision="deny", reason=expected_reason)
 
 
+@pytest.mark.parametrize("payload_for", _TARGET_PATH_PAYLOAD_BUILDERS, ids=["write", "bash-rm"])
 def test_protect_path_resolving_to_the_checkout_root_denies_path_required(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
+    payload_for: Callable[[Path], dict[str, object]],
 ) -> None:
     """`PATH_REQUIRED` fires when the payload path's own checkout resolves
     (issue #314 repeat gate, finding 2 fallout: the pre-fix fake answered
@@ -877,23 +1127,15 @@ def test_protect_path_resolving_to_the_checkout_root_denies_path_required(
     itself resolves to exactly the checkout root: `work/subdir/..` queries
     git from the real descendant `work/subdir`, so the checkout resolves
     fine, while the full path resolves to `work` itself -- a repository-
-    relative scope entry of `"."`, which `protocol._valid_scope` refuses."""
+    relative scope entry of `"."`, which `protocol._valid_scope` refuses. A
+    Bash-recognized path runs the identical gate (issue #380)."""
     _isolate_protect_home(monkeypatch, tmp_path)
     work = tmp_path / "work"
     _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
     _patch_protect_git(monkeypatch, work)
     _forbid_github_construction(monkeypatch)
 
-    assert (
-        _protect_main(
-            monkeypatch,
-            {
-                "toolName": "write",
-                "toolInput": {"path": str(work / "subdir" / "..")},
-            },
-        )
-        == 2
-    )
+    assert _protect_main(monkeypatch, payload_for(work / "subdir" / "..")) == 2
     _assert_protect_decision(capsys, decision="deny", reason="path required")
 
 
@@ -1012,6 +1254,7 @@ def test_protect_non_claim_error_from_write_path_denies_json_without_traceback(
     }
 
 
+@pytest.mark.parametrize("payload_for", _TARGET_PATH_PAYLOAD_BUILDERS, ids=["write", "bash-rm"])
 @pytest.mark.parametrize(
     ("failure", "match"),
     [
@@ -1031,7 +1274,10 @@ def test_protect_maps_every_store_error_to_cannot_reach_the_state_ref(
     capsys: pytest.CaptureFixture[str],
     failure: protocol.ClaimError,
     match: str,
+    payload_for: Callable[[Path], dict[str, object]],
 ) -> None:
+    """Issue #380: a Bash-recognized path shares this same store-failure
+    mapping, since it reads the identical `_protect_cached_claim_state_or_denial`."""
     _isolate_protect_home(monkeypatch, tmp_path)
     work = tmp_path / "work"
     _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
@@ -1042,13 +1288,7 @@ def test_protect_maps_every_store_error_to_cannot_reach_the_state_ref(
 
     monkeypatch.setattr(store, "fetch_state", fake_fetch_state)
 
-    assert (
-        _protect_main(
-            monkeypatch,
-            {"toolName": "write", "toolInput": {"path": str(work / "src/widget.py")}},
-        )
-        == 2
-    )
+    assert _protect_main(monkeypatch, payload_for(work / "src/widget.py")) == 2
     captured = capsys.readouterr()
     payload = json.loads(captured.out)
     assert payload["decision"] == "deny"
@@ -1206,6 +1446,148 @@ def _protect_real_repo_with_worktree(
     (worktree / "src").mkdir()
     (worktree / "docs").mkdir()
     return main, worktree
+
+
+def test_protect_bash_denies_deleting_a_linked_worktrees_own_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """PROT-14 reused for a Bash-recognized path (issue #380 delta, gate
+    finding): a path naming a linked worktree's own root directory exactly
+    -- `rm -rf ../<repo>-worktrees/issue-1-x` -- has a *parent*
+    (`<repo>-worktrees/`) that is never itself a git checkout, so resolving
+    the checkout from only the parent finds nothing. Trying the path itself
+    too still finds that checkout and denies it as that checkout's own root
+    (PROT-14), rather than silently allowing the whole checkout's deletion
+    through PROT-32's "outside every repository" allow."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
+    _use_real_path_is_tracked(monkeypatch)
+    main, worktree = _protect_real_repo_with_worktree(tmp_path)
+    monkeypatch.chdir(main)
+
+    assert (
+        _protect_main(
+            monkeypatch,
+            {
+                "toolName": "Bash",
+                "toolInput": {"command": f"rm -rf {worktree}"},
+                "cwd": str(main),
+            },
+        )
+        == 2
+    )
+    _assert_protect_decision(capsys, decision="deny", reason="path required")
+
+
+def test_protect_bash_judges_an_ordinary_directory_by_its_own_checkout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A real directory that is *not* itself a checkout root -- `rm -rf
+    <worktree>/docs` -- still reaches the ordinary claim-scope gate rather
+    than PROT-14's checkout-root denial: `_protect_checkout_denial`'s own
+    directory branch finds it is not the root it names, so it falls back to
+    the cheaper parent-first lookup exactly like a non-directory path
+    would (issue #380 delta, gate finding: `resolve_path_checkout(path)`
+    only decides the root question, never replaces the parent lookup for
+    every other directory)."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
+    _use_real_path_is_tracked(monkeypatch)
+    main, worktree = _protect_real_repo_with_worktree(tmp_path)
+    monkeypatch.chdir(main)
+    _patch_protect_claim(monkeypatch, branch="codex/issue-72-widget", scope=("src",))
+
+    assert (
+        _protect_main(
+            monkeypatch,
+            {
+                "toolName": "Bash",
+                "toolInput": {"command": f"rm -rf {worktree / 'docs'}"},
+                "cwd": str(main),
+            },
+        )
+        == 2
+    )
+    _assert_protect_decision(capsys, decision="deny", reason="rm docs outside claim scope")
+
+
+def _protect_real_repo_with_nested_worktree(
+    tmp_path: Path, *, slug: str = "issue-1-x"
+) -> tuple[Path, Path]:
+    """A real repository (`outer`) with one linked worktree nested *inside*
+    its own working tree (`outer/nested-worktrees/<slug>`), unlike
+    `_protect_real_repo_with_worktree`'s sibling layout: the nested root's
+    own parent directory sits inside `outer`'s checkout, so `git -C parent`
+    resolves to `outer` rather than to nothing -- the shape PROT-36 (issue
+    #380 round 4, gate finding) exists for, since a parent-first lookup
+    would otherwise let `outer`'s own checkout silently answer for a path
+    that is itself a different, nested checkout's own root."""
+    outer = tmp_path / "outer-repo"
+    outer.mkdir()
+    _real_git(outer, "init", "-q", "-b", "main")
+    _real_git(outer, "config", "user.name", "Test")
+    _real_git(outer, "config", "user.email", "test@example.com")
+    (outer / "README.md").write_text("hello\n")
+    (outer / ".agent-claim").mkdir()
+    (outer / ".agent-claim" / "board.toml").write_text("")
+    _real_git(outer, "add", "-f", "README.md", ".agent-claim/board.toml")
+    _real_git(outer, "commit", "-q", "-m", "initial")
+    _real_git(outer, "remote", "add", "origin", "https://example.invalid/example/repo.git")
+    _real_git(outer, "update-ref", "refs/remotes/origin/main", "HEAD")
+    _real_git(outer, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+    nested = outer / "nested-worktrees" / slug
+    nested.parent.mkdir(parents=True, exist_ok=True)
+    _real_git(outer, "worktree", "add", "-q", str(nested), "-b", f"codex/{slug}")
+    return outer, nested
+
+
+@pytest.mark.parametrize("payload_for", _TARGET_PATH_PAYLOAD_BUILDERS, ids=["write", "bash-rm"])
+@pytest.mark.parametrize(
+    "root_form",
+    [lambda root: root, lambda root: root / ".." / root.name, lambda root: root / "."],
+    ids=["exact", "dot-dot", "dot"],
+)
+def test_protect_denies_deleting_a_nested_worktrees_own_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    payload_for: Callable[[Path], dict[str, object]],
+    root_form: Callable[[Path], Path],
+) -> None:
+    """PROT-36 (issue #380 round 4, gate finding): a linked worktree whose
+    own root's *parent* directory sits inside another, outer git checkout
+    must still be judged by its own checkout -- resolved directly from the
+    root itself, before the outer checkout's parent-first lookup ever gets
+    a say -- so deleting it still denies `path required` (PROT-14) rather
+    than the outer checkout's own scope silently authorizing it. Proven for
+    both a payload path (`Write`, the accepted Edit-family behaviour change
+    this round) and a Bash-recognized one (`rm`), since both share the same
+    checkout-resolution chain, and for a lexically equivalent but
+    unnormalized spelling of the same root (`nested/../nested`, `nested/.`)
+    -- a covering outer claim must not stand in for the nested checkout
+    root's own PROT-14 gate just because the payload path never collapsed
+    its own `..`/`.` segments (issue #380 round 4 delta, gate finding 7)."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
+    _use_real_path_is_tracked(monkeypatch)
+    outer, nested = _protect_real_repo_with_nested_worktree(tmp_path)
+    monkeypatch.chdir(outer)
+    payload = payload_for(root_form(nested))
+    if payload["toolName"] == "Bash":
+        payload["cwd"] = str(outer)
+
+    assert _protect_main(monkeypatch, payload) == 2
+    _assert_protect_decision(capsys, decision="deny", reason="path required")
 
 
 @pytest.mark.parametrize(
@@ -1520,6 +1902,7 @@ def _real_worktree_on_default_branch_target(tmp_path: Path) -> Path:
     return worktree / "README.md"
 
 
+@pytest.mark.parametrize("payload_for", _TARGET_PATH_PAYLOAD_BUILDERS, ids=["write", "bash-rm"])
 @pytest.mark.parametrize(
     "build_target",
     [_real_main_checkout_target, _real_worktree_on_default_branch_target],
@@ -1530,6 +1913,7 @@ def test_protect_denies_not_main_for_a_real_checkout(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     build_target: Callable[[Path], Path],
+    payload_for: Callable[[Path], dict[str, object]],
 ) -> None:
     """Finding R3 and gate G4, against real checkouts rather than
     `_patch_protect_git`'s mock: a payload path in the real shared main
@@ -1539,7 +1923,8 @@ def test_protect_denies_not_main_for_a_real_checkout(
     -- `resolve_path_checkout`'s structural MAIN/LINKED_WORKTREE split alone
     stopped catching this once issue #314 dropped the old branch-name check,
     so a live claim matching that worktree's agent/branch/scope would
-    otherwise be honoured there exactly as if it were a real lane)."""
+    otherwise be honoured there exactly as if it were a real lane). A
+    Bash-recognized path runs the identical gate (issue #380)."""
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
@@ -1548,23 +1933,24 @@ def test_protect_denies_not_main_for_a_real_checkout(
     monkeypatch.chdir(tmp_path)
     _forbid_github_construction(monkeypatch)
 
-    assert (
-        _protect_main(monkeypatch, {"toolName": "write", "toolInput": {"path": str(target)}}) == 2
-    )
+    assert _protect_main(monkeypatch, payload_for(target)) == 2
     _assert_protect_decision(capsys, decision="deny", reason="not main")
 
 
+@pytest.mark.parametrize("payload_for", _TARGET_PATH_PAYLOAD_BUILDERS, ids=["write", "bash-rm"])
 def test_protect_denies_a_checkout_with_no_commit_yet(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
+    payload_for: Callable[[Path], dict[str, object]],
 ) -> None:
     """Gate G3: a freshly `git init`ed checkout with no commit yet -- an
     unborn branch -- still names a real branch (`git branch --show-current`
     reads the symbolic ref's target regardless of whether it resolves to a
     commit), so without a successful-HEAD requirement its name could
     coincidentally match a still-live claim's and be authorized despite
-    naming no real history."""
+    naming no real history. A Bash-recognized path runs the identical gate
+    (issue #380)."""
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
@@ -1576,9 +1962,7 @@ def test_protect_denies_a_checkout_with_no_commit_yet(
     _forbid_github_construction(monkeypatch)
     target = unborn / "widget.py"
 
-    assert (
-        _protect_main(monkeypatch, {"toolName": "write", "toolInput": {"path": str(target)}}) == 2
-    )
+    assert _protect_main(monkeypatch, payload_for(target)) == 2
     _assert_protect_decision(capsys, decision="deny", reason=checkout.NO_COMMIT_CHECKOUT_REASON)
 
 
