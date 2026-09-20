@@ -5173,7 +5173,10 @@ def _land_preflight(
     own claimant/coordinator-override check, issue #405 review finding): a
     claim held by another agent or role refuses here, before the merge,
     rather than only once the delegated `release --merged` step runs after
-    it.
+    it. `_cmd_land`'s own entry already validated `--coordinator-override`'s
+    role (issue #405 round-4 finding 1) -- before this preflight, and before
+    the fresh/rerun split that skips it entirely on a rerun -- so this
+    function itself never repeats that check.
     """
     readiness = client.landing_readiness(number)
     _refuse_land_readiness(readiness)
@@ -5196,14 +5199,6 @@ def _land_preflight(
         if isinstance(structural, board.WorkItemClassification)
         else protocol.LaneIdentity()
     )
-    if parsed.coordinator_override:
-        # `release`'s own dispatch validates this before `_cmd_release` ever
-        # runs (`_release_branch_for`); `land` never routes through that
-        # function, so its own authorization path must call the same
-        # role-validating function itself (issue #405 review/gate finding),
-        # never merge on a bare `--coordinator-override` with no coordinator
-        # role behind it.
-        protocol._require_coordinator_override(parsed.role)
     _resolve_release_claimant(
         argparse.Namespace(
             agent=parsed.agent,
@@ -5361,11 +5356,18 @@ def _cmd_land(parsed: argparse.Namespace, session: _WriteSession) -> None:
     unchanged. A pull request `landing` already finds merged -- a resumed
     run after an earlier step failed -- skips preflight and the merge
     itself entirely: `merge_landing` never runs twice for the same pull
-    request."""
+    request. `--coordinator-override`'s own role is validated here, at
+    entry, before that fresh/rerun split and before any read (issue #405
+    round-4 finding 1): a rerun skips `_land_preflight` entirely, so a
+    check placed only there left a rerun free to delete the branch and
+    fast-forward -- and `_cmd_release` free to close the item -- on a bare
+    `--coordinator-override` with no coordinator role behind it."""
     toplevel = _resolve_toplevel()
     config = _board_config(toplevel)
     if config.storage is not board.Storage.GITHUB:
         raise protocol.ClaimUnavailableError(LAND_GITHUB_ONLY_REFUSAL)
+    if parsed.coordinator_override:
+        protocol._require_coordinator_override(parsed.role)
     client = cast(github.GitHubForge, session.forge())
     number = parsed.pull_request
     repository = client.repository.path

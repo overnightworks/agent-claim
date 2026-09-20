@@ -30,6 +30,7 @@ prints `ERROR: <sentence>` on stderr, exit `2`, exactly as
 | state \ trigger | `aco land <n>` |
 |---|---|
 | `storage = "state-ref"` | LANDCMD-01 |
+| `--coordinator-override` without `--role coordinator` | LANDCMD-19 |
 | pull request not open | LANDCMD-02 |
 | not mergeable | LANDCMD-03 |
 | no CI checks at all | LANDCMD-04 |
@@ -39,7 +40,6 @@ prints `ERROR: <sentence>` on stderr, exit `2`, exactly as
 | named work item not open | LANDCMD-08 |
 | classification's own claim/parent/closing defect | LANDCMD-09 (LAND-14..28, cited) |
 | claim held by another agent or role | LANDCMD-10 |
-| `--coordinator-override` without `--role coordinator` | LANDCMD-19 |
 | checkout unclean or off the default branch | LANDCMD-11 |
 | every precondition holds | LANDCMD-12, LANDCMD-13 |
 | the pull request changed since it was read | LANDCMD-14 |
@@ -55,6 +55,7 @@ this worktree's own fetch anchor and lineage stamp stay untouched by a
 preflight, refused or not, exactly as `reset`'s own read does.
 
 - [ ] [LANDCMD-01] Under `storage = "state-ref"`, `aco land <n>` refuses `aco land is a github command; storage = state-ref has no pull requests to land`, exit `2`, before any read.
+- [ ] [LANDCMD-19] `--coordinator-override` without `--role coordinator` refuses (CLAIM-39's sentence), exit `2`, at `aco land`'s own entry -- before any read, so also before a rerun skips the rest of preflight.
 - [ ] [LANDCMD-02] A pull request that is not open refuses `pull request #<n> is not open; it cannot be landed`, exit `2`.
 - [ ] [LANDCMD-03] A pull request whose own `mergeable_state` is not `clean` refuses `pull request #<n> is not mergeable (<state>)`, exit `2`.
 - [ ] [LANDCMD-04] A pull request exposing no CI checks against its own head commit refuses `pull request #<n> exposes no CI checks; cannot verify green CI`, exit `2`.
@@ -64,7 +65,6 @@ preflight, refused or not, exactly as `reset`'s own read does.
 - [ ] [LANDCMD-08] A classified work item that is not open refuses `work item #<n> is not open; it cannot be landed`, exit `2`; an issue-less pull request skips this check.
 - [ ] [LANDCMD-09] The classification's own claim, parent, and closing rules then apply (LAND-14..28): a defect refuses `pull request #<n> <that same defect sentence>`, exit `2`.
 - [ ] [LANDCMD-10] A claim held by another agent or role, with no explicit coordinator override, refuses (REL-12's sentence), exit `2`, before the merge.
-- [ ] [LANDCMD-19] `--coordinator-override` without `--role coordinator` refuses (CLAIM-39's sentence), exit `2`, before the merge -- the same role validation `release`'s own dispatch runs.
 - [ ] [LANDCMD-11] This checkout must sit on the default branch with nothing uncommitted, or `aco land` refuses `land must run from a clean checkout of the default branch '<branch>'`, exit `2`.
 
 ## Merge, composed by `aco land`
@@ -78,7 +78,7 @@ preflight, refused or not, exactly as `reset`'s own read does.
 - [ ] [LANDCMD-15] A failure deleting the branch, fast-forwarding, or in the delegated `release --merged` prints `MERGED pull request #<n> as <sha>; follow-up incomplete: <step>; re-run aco land <n>`, exit `2`.
 - [ ] [LANDCMD-16] Deleting the merged branch is idempotent: a forge already reporting it absent is success, not a refusal.
 - [ ] [LANDCMD-17] In this package's own repository, a successful landing's last line is `reinstall: uv tool install --force --from . agent-coordination`; any other repository prints nothing further.
-- [ ] [LANDCMD-18] A rerun against an already-merged pull request skips preflight and the merge, verifies the trailer as `release --merged` does (LAND-62, LAND-64), and resumes -- never a second merge.
+- [ ] [LANDCMD-18] A rerun skips every preflight check but LANDCMD-19 and the merge, verifies the trailer as `release --merged` does (LAND-62, LAND-64), and resumes -- never a second merge.
 
 ## Never
 

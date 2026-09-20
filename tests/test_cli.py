@@ -13154,6 +13154,48 @@ def test_land_reports_incomplete_follow_up_and_a_rerun_resumes_without_a_second_
     assert client.closed_issues == {WORK_ITEM_ISSUE}
 
 
+def _land_mark_already_merged(client: FakeForge) -> None:
+    """Simulate `land` having already merged pull request 12 in an earlier
+    run (issue #405 round-4 finding 1): the fake forge's own landing record
+    is the one signal `_cmd_land` reads to tell a rerun from a fresh run, so
+    a rerun test never needs to actually run the merge first."""
+    client.landings[12] = replace(client.landings[12], merged=True, merge_commit=MERGE_COMMIT_SHA)
+
+
+@pytest.mark.parametrize(
+    "override_arguments",
+    [
+        pytest.param(["--coordinator-override"], id="omitted-role"),
+        pytest.param(["--coordinator-override", "--role", "builder"], id="wrong-role"),
+    ],
+)
+def test_land_rerun_refuses_a_coordinator_override_with_no_valid_role_before_any_side_effect(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    override_arguments: list[str],
+) -> None:
+    """Issue #405 round-4 finding 1: an already-merged rerun skips
+    `_land_preflight` entirely, so a coordinator-override role check placed
+    only there would leave a rerun free to delete the branch, fast-forward,
+    and let the delegated `release --merged` step close the item on a bare
+    `--coordinator-override` with no coordinator role behind it.
+    `_cmd_land`'s own entry validates this before the fresh/rerun split, so
+    none of that runs."""
+    repo, client = _land_scenario(monkeypatch, tmp_path)
+    _land_mark_already_merged(client)
+    trunk_before = _real_git(repo, "rev-parse", "main").stdout.strip()
+
+    status = issue_claim.main(["--repo", REPOSITORY, "land", "12", *override_arguments])
+
+    assert status == 2
+    assert capsys.readouterr().err == "ERROR: a coordinator override requires --role coordinator\n"
+    assert client.merge_calls == []
+    assert client.deleted_branches == []
+    assert client.closed_issues == set()
+    assert _real_git(repo, "rev-parse", "main").stdout.strip() == trunk_before
+
+
 def test_land_refuses_under_the_state_ref_pin(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
