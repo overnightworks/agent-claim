@@ -1,0 +1,8 @@
+claim_id = "428b68c32d7d4895bc079168f461fb12"
+agent = "Claude head (coordinator)"
+role = "builder"
+base = "5be7d22c841af0522288a440b0b18afcf2a42428"
+branch = "claude/issue-404-check-exit"
+scope = ["specs/body.spec.md", "specs/check.spec.md", "specs/output.spec.md", "src/agent_coordination/board.py", "src/agent_coordination/cli.py", "src/agent_coordination/protocol.py", "tests/test_cli.py", "tests/test_state_board.py"]
+opened_commit = "df11732ab59305a6d0e3bc0e190cf43499399071"
+whole_reason = "exit/JSON slice 2: check and body --check across cli, board, protocol, two specs and tests"
