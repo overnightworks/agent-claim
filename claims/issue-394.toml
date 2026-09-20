@@ -1,0 +1,8 @@
+claim_id = "eb20b4dbff5246dfaaabd84886720a70"
+agent = "Claude head (coordinator)"
+role = "builder"
+base = "d70c4156e3fbeeb9a414c0e5baa3b830a17ea97a"
+branch = "claude/issue-394-protect-module"
+scope = ["pyproject.toml", "src/agent_coordination/checkout.py", "src/agent_coordination/cli.py", "src/agent_coordination/hook_input.py", "src/agent_coordination/protect.py", "src/agent_coordination/protocol.py", "tests/test_hook_input.py", "tests/test_protect.py"]
+opened_commit = "7d423b49265ba2f32eb264913a9b1e96325655e2"
+whole_reason = "protect.py extraction: judgement module, its callers, layer rule and tests"
