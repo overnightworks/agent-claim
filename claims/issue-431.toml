@@ -1,8 +1,0 @@
-claim_id = "fa928707cafb4a2fa0f633a5192c32d3"
-agent = "Claude head (coordinator)"
-role = "builder"
-base = "3bedf83f0b5a032a84ea2b3a58fc8af24efdd79e"
-branch = "claude/issue-431-board-identity"
-scope = ["specs/board.spec.md", "specs/workspace.spec.md", "src/agent_coordination/board_html.py", "src/agent_coordination/cli.py", "src/agent_coordination/workspace.py", "tests/test_board_html.py", "tests/test_board_serve.py", "tests/test_cli.py", "tests/test_workspace.py"]
-opened_commit = "5c19bbc68aa726e0ab9831bad7c12263aa5b3488"
-whole_reason = "eine Identität über Token-Pfad, Seite und Specs; die Teile sind ohne einander falsch"
