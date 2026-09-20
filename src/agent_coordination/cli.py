@@ -4169,11 +4169,13 @@ def _board_html_page(
         history=_claim_history(worktree, observed),
     )
     bodies = {issue.number: issue.body for issue in issues}
-    config = _board_config(_resolve_toplevel())
+    toplevel = _resolve_toplevel()
+    config = _board_config(toplevel)
     sources = board_html.BoardSources(
         bodies=bodies,
         claimants=_lane_claimants(observed),
         state_tip="" if observed.tip is None else str(observed.tip),
+        checkout=toplevel,
         storage=config.storage,
     )
     page = board_html.build_page(projected, sources)
@@ -6242,8 +6244,11 @@ def _cmd_rule(parsed: argparse.Namespace, session: _WriteSession) -> int:
     return 0
 
 
-def _board_token_path() -> Path:
-    return workspace.default_board_token_path(os.environ)
+def _board_token_location(repository: forge.RepositoryId) -> workspace.BoardTokenLocation:
+    """`board --serve`'s token file for the repository this command already
+    resolved (issue #431) -- one board, one token, so the URL an operator
+    opens can only ever reach this repository's own served board."""
+    return workspace.default_board_token_location(repository.path, os.environ)
 
 
 def _board_server(parsed: argparse.Namespace, session: _WriteSession) -> board_serve.BoardServer:
@@ -6264,7 +6269,9 @@ def _board_server(parsed: argparse.Namespace, session: _WriteSession) -> board_s
     token_holder: list[str] = []
 
     def resolve_token() -> str:
-        token = workspace.board_token(_board_token_path(), mint_new=parsed.new_token)
+        token = workspace.board_token(
+            _board_token_location(client.repository), mint_new=parsed.new_token
+        )
         token_holder.append(token)
         return token
 

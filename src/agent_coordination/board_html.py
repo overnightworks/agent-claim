@@ -36,6 +36,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC
 from enum import StrEnum
+from pathlib import Path
 from typing import cast
 
 from . import board
@@ -168,6 +169,10 @@ class BoardPage:
     live `board.Board`."""
 
     repository: str
+    # The checkout this page was rendered from (issue #431): the page names
+    # it beside the repository, so two boards open side by side say which
+    # one an operator is ruling on.
+    checkout: Path
     state_tip: str
     cards: tuple[ExpectationCard, ...]
     lanes: tuple[LaneCard, ...]
@@ -340,13 +345,15 @@ class BoardSources:
     itself -- each already read by `board --html`'s own `board` fetch
     (issue #276): `bodies` (each open issue's body), `claimants` (the live
     store claims, keyed by the issue they hold), the live store's own tip,
-    and the repository's storage pin (for `expectation_lines` et al.).
+    the checkout the command ran in (issue #431), and the repository's
+    storage pin (for `expectation_lines` et al.).
     The Landungen view needs no source of its own any more (issue #371): it
     reads straight from `projected.landings`."""
 
     bodies: Mapping[int, str]
     claimants: Mapping[int, LaneClaimant]
     state_tip: str
+    checkout: Path
     storage: Storage = Storage.GITHUB
 
 
@@ -373,6 +380,7 @@ def build_page(projected: board.Board, sources: BoardSources) -> BoardPage:
     )
     return BoardPage(
         repository=projected.repository,
+        checkout=sources.checkout,
         state_tip=sources.state_tip,
         cards=cards,
         lanes=lanes,
@@ -618,20 +626,27 @@ def _render_measurements_section(page: BoardPage) -> str:
     return f'{heading}<ul class="measurements">{rows}</ul>'
 
 
+_ORIGIN_SEPARATOR = "&middot;"
+
+
+def _origin_line(page: BoardPage) -> str:
+    """Where this page comes from (issue #431), in the one wording both the
+    browser tab and the masthead carry: the repository whose board this is
+    and the checkout it was rendered from. Two boards served side by side
+    used to be indistinguishable -- same title, same loopback address -- so
+    a ruling could reach the other one's server unnoticed."""
+    return f"{html.escape(page.repository)} {_ORIGIN_SEPARATOR} {html.escape(str(page.checkout))}"
+
+
 def render(page: BoardPage, *, served: ServedRuleForm | None = None) -> str:
     """`page` alone renders `board --html`'s static page; passing `served`
     (issue #280) switches every card to its live `POST /rule` forms and, when
     `served.refused` is set, shows that sentence -- never a stack trace --
     from the click that redirected back here. `served=None`'s output is
     byte-identical to the page before #280, checked by the golden test."""
-    facts = "".join(
-        (
-            f"<div><dt>repository</dt><dd><code>{html.escape(page.repository)}</code></dd></div>",
-            (
-                f"<div><dt>state tip</dt><dd>"
-                f"<code>{html.escape(page.state_tip or '-')}</code></dd></div>"
-            ),
-        )
+    origin = _origin_line(page)
+    facts = (
+        f"<div><dt>state tip</dt><dd><code>{html.escape(page.state_tip or '-')}</code></dd></div>"
     )
     notice = (
         f'<p class="refused">{html.escape(served.refused)}</p>'
@@ -639,6 +654,8 @@ def render(page: BoardPage, *, served: ServedRuleForm | None = None) -> str:
         else ""
     )
     return PAGE.format(
+        title=f"{origin} {_ORIGIN_SEPARATOR} Board",
+        origin=origin,
         facts=facts,
         notice=notice,
         card_count=len(page.cards),
@@ -698,7 +715,7 @@ _RULED_HISTORY_CSS = """
 with none stays byte-identical to one built before this class existed."""
 
 
-PAGE = """<title>agent-claim Board</title>
+PAGE = """<title>{title}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
@@ -900,7 +917,7 @@ summary:focus-visible {{
 </style>
 <main class="wrap">
   <header class="mast">
-    <p class="eyebrow">agent-claim &middot; the aco coordination tool</p>
+    <p class="eyebrow">{origin}</p>
     <h1>Board</h1>{notice}
     <dl class="mast-facts">{facts}</dl>
   </header>

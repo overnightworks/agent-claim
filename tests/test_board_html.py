@@ -25,6 +25,7 @@ from agent_coordination import board, board_html, cli, items, metrics
 from agent_coordination.body import ItemKind, Storage
 
 GOLDEN_PATH = Path(__file__).parent / "board_html_golden.html"
+FIXTURE_CHECKOUT = Path("/home/ada/git/agent-claim")
 
 
 def _fixture_page(
@@ -196,6 +197,7 @@ def _fixture_page(
         bodies=bodies,
         claimants={102: board_html.LaneClaimant("Codex Sol", "builder", "codex/issue-102-claims")},
         state_tip="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        checkout=FIXTURE_CHECKOUT,
         storage=storage,
     )
     return board_html.build_page(projected, sources)
@@ -210,6 +212,7 @@ def _empty_measurements() -> board.Measurements:
 def _empty_page() -> board_html.BoardPage:
     return board_html.BoardPage(
         repository="acme/board",
+        checkout=FIXTURE_CHECKOUT,
         state_tip="",
         cards=(),
         lanes=(),
@@ -266,6 +269,20 @@ def test_render_labels_cards_topics_and_lanes_with_state_ref_ids() -> None:
     for number in (50, 60, 100, 101, 102):
         assert f">#{number} " not in rendered
         assert f"#{number})" not in rendered
+
+
+def test_the_page_names_the_repository_and_the_checkout_it_came_from() -> None:
+    """Issue #431: two served boards used to be indistinguishable -- one
+    title for every repository -- so a ruling could reach the other
+    repository's server unnoticed. The browser tab and the masthead now
+    both name this board's repository and the checkout it was rendered
+    from."""
+    page = replace(_empty_page(), repository="acme/board", checkout=Path("/home/ada/git/board"))
+
+    rendered = board_html.render(page)
+
+    assert "<title>acme/board &middot; /home/ada/git/board &middot; Board</title>" in rendered
+    assert '<p class="eyebrow">acme/board &middot; /home/ada/git/board</p>' in rendered
 
 
 def test_an_empty_board_renders_all_four_headings_with_nichts() -> None:
@@ -376,6 +393,7 @@ def test_a_trailer_landed_item_shows_regardless_of_pull_request_capability() -> 
         bodies={9: landed_issue.body},
         claimants={},
         state_tip="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        checkout=FIXTURE_CHECKOUT,
         storage=Storage.STATE_REF,
     )
 
@@ -419,6 +437,7 @@ def test_a_trunk_landed_item_with_no_pull_request_shows_beside_pr_rows() -> None
         bodies={103: pr_landed_issue.body, 105: trunk_landed_issue.body},
         claimants={},
         state_tip="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        checkout=FIXTURE_CHECKOUT,
     )
 
     rendered = board_html.render(board_html.build_page(projected, sources))

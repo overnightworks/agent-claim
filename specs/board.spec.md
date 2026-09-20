@@ -25,6 +25,10 @@ criteria; each item's own `actionable`/`actionable_reason` fields are the
 one pair this file grades, since `next`'s own SKIPPED list
 (`specs/next.spec.md`) reuses that exact reason text. `<n>` is an item
 number, `<label>` an item as `specs/landing-grammar.spec.md` prints it.
+`<token-path>` is the served board's own token file,
+`${XDG_CONFIG_HOME:-~/.config}/aco/boards/<board>/token`: one directory per
+repository, named `<owner>-<repo>` on a forge or after the checkout's own last
+two path parts otherwise, followed by a short digest of that full name.
 
 ## Behavior table
 
@@ -42,6 +46,7 @@ number, `<label>` an item as `specs/landing-grammar.spec.md` prints it.
 | `--html`/`--json`/`--serve` combined | BOARD-16 | BOARD-16 | BOARD-16 |
 | `--html PATH` given, or omitted | — | BOARD-15 | — |
 | open expectation lines, cards | — | BOARD-18, BOARD-19, BOARD-21 | — |
+| the page's own origin | — | BOARD-45 | BOARD-45 |
 | a live claim on an item | — | BOARD-17 | — |
 | an item with a `size`, measured or not | BOARD-26, BOARD-27, BOARD-31 | BOARD-18, BOARD-28 | — |
 | a fresh `--serve` start | — | — | BOARD-22, BOARD-23 |
@@ -103,18 +108,19 @@ does, before either reads a single issue -- cited there, not restated.
 - [ ] [BOARD-36] An already-ruled `[[expectation]]` line never renders as a "Wartet auf dich" card: it moves into its own item's `Themen` entry instead (see E-BOARD-08).
 - [ ] [BOARD-37] That history renders `<li class="ruled"><span>TEXT</span><span class="ruled-state">ruled OUTCOME DATE</span></li>`, the same wording `aco rulings` prints for a ruled line (RUL-02).
 - [ ] [BOARD-38] The history is followed by one sentence naming the ruling's immutability and the way to a new one, `<p class="ruled-hint">` pointing at `aco ask <n> --text`, never a button.
+- [ ] [BOARD-45] The page's `<title>` and its first masthead line both name the repository this board belongs to and the checkout it was rendered from (see E-BOARD-17).
 
 ## `--serve`
 
 - [ ] [BOARD-22] `--serve` prints exactly one line, `http://127.0.0.1:<port>/?t=<token>`, flushed to stdout before the process ever blocks on the request loop (see E-BOARD-07).
 - [ ] [BOARD-23] A Ctrl-C during `--serve` exits `0` with only that one URL line ever printed and nothing on stderr.
-- [ ] [BOARD-32] BOARD-22's own token is read from `${XDG_CONFIG_HOME:-~/.config}/aco/board-token`, minted (0600) only when missing, so two starts on one port print the identical URL (see E-BOARD-09).
+- [ ] [BOARD-32] BOARD-22's own token is read from `<token-path>`, minted (0600) only when missing, so two starts on one port print the identical URL (see E-BOARD-09).
 - [ ] [BOARD-33] `--new-token` mints a fresh token into that same file before printing BOARD-22's URL, replacing the one a prior start minted.
 - [ ] [BOARD-34] A token file whose mode is not `0600` refuses `board token file <path> must be private (mode 0600, found <mode>)`, exit `2` (see E-BOARD-10).
 - [ ] [BOARD-35] A port another process holds refuses `port <port> is already in use by PID <pid>`, else `port <port> is already in use; the owning process could not be identified`, exit `2` (see E-BOARD-11).
 - [ ] [BOARD-39] `--new-token` without `--serve` refuses `--new-token requires --serve`, exit `2`, before any read (see E-BOARD-14).
 - [ ] [BOARD-40] A token file's content that is not one `secrets.token_urlsafe(32)` value refuses `board token at <path> is not a valid token; pass --new-token`, exit `2` (see E-BOARD-13).
-- [ ] [BOARD-41] A symlinked or writable-by-others `${XDG_CONFIG_HOME:-~/.config}/aco` refuses `board token directory <path> must be private and owned by this user (found mode <mode>)`, exit `2` (see E-BOARD-12).
+- [ ] [BOARD-41] A symlinked or writable-by-others directory at any level of `<token-path>` refuses `board token directory <path> must be private and owned by this user (found mode <mode>)`, exit `2` (see E-BOARD-12).
 
 ## Never
 
@@ -124,7 +130,8 @@ does, before either reads a single issue -- cited there, not restated.
 - `--serve` never accepts a `--restart` flag: a stable token (BOARD-32) makes an ordinary `kill` and a fresh start enough, and BOARD-35's own refusal, naming the PID, is the tool an operator needs to do that by hand.
 - BOARD-35's refusal never names a PID it could not verify against `/proc`: unable to identify the occupant, it says so instead of guessing one.
 - A busy port (BOARD-35) never reaches the token file: the socket is bound first, so `--new-token` (BOARD-33) against a busy port mints or replaces nothing on disk.
-- `${XDG_CONFIG_HOME:-~/.config}/aco` (BOARD-41) is never trusted only at creation: a directory a prior run already made is checked the same way a freshly created one is.
+- A directory of `<token-path>` (BOARD-41) is never trusted only at creation: one a prior run already made is checked the same way a freshly created one is.
+- A token minted for one repository never opens another repository's served board: each board keeps its own token file (BOARD-32), and a foreign token is refused exactly like a wrong one.
 - The token BOARD-32 reads or mints is never written to any log line or error message: it appears only in the start URL line BOARD-22 prints, the served page's own rule-form hidden field, and the `POST /rule` redirect back to that page -- issue #234's own contract that every request must carry it -- never in `board --html`'s static page or a `--json` field.
 - A ruled `[[expectation]]` line (BOARD-36) never keeps its three `aco rule`/form outcomes once ruled, and BOARD-38's own sentence is never a button that would open a fresh line on a click.
 
@@ -196,6 +203,21 @@ $ grep -o '<h2 id="[a-z]*"' board.html
 exit 0
 ```
 
+### E-BOARD-17 — the page names the repository and the checkout it came from
+
+Setup: bare-remote, fake `gh`, the checkout at `/home/ada/git/agent-claim`
+
+```console
+$ aco board --html board.html
+exit 0
+$ head -1 board.html
+<title>acme/agent-claim &middot; /home/ada/git/agent-claim &middot; Board</title>
+exit 0
+$ grep -o '<p class="eyebrow">[^<]*</p>' board.html
+<p class="eyebrow">acme/agent-claim &middot; /home/ada/git/agent-claim</p>
+exit 0
+```
+
 ### E-BOARD-06 — `--html` and `--json` refuse together
 
 Setup: bare-remote, fake `gh`
@@ -252,7 +274,7 @@ http://127.0.0.1:<port>/?t=<other-token>
 
 ### E-BOARD-10 — a token file the operator left group/other-readable refuses
 
-Setup: bare-remote, fake `gh`, `${XDG_CONFIG_HOME}/aco/board-token` already minted, then `chmod 0644` by hand
+Setup: bare-remote, fake `gh`, `<token-path>` already minted, then `chmod 0644` by hand
 
 ```console
 $ aco board --serve
@@ -282,7 +304,7 @@ exit 2
 
 ### E-BOARD-13 — a hand-edited token file refuses
 
-Setup: bare-remote, fake `gh`, `${XDG_CONFIG_HOME}/aco/board-token` (mode `0600`) overwritten with `not-a-token`
+Setup: bare-remote, fake `gh`, `<token-path>` (mode `0600`) overwritten with `not-a-token`
 
 ```console
 $ aco board --serve
