@@ -1,0 +1,8 @@
+claim_id = "10eb731e95844476a0107a19e7ec355d"
+agent = "Claude head (coordinator)"
+role = "builder"
+base = "3c6c0658030f1df412f68f2af9a0ebdb4c1a85be"
+branch = "claude/issue-435-check-envelope"
+scope = ["specs/body-block.spec.md", "specs/check.spec.md", "specs/landing-grammar.spec.md", "specs/output.spec.md", "src/agent_coordination/cli.py", "tests/test_cli.py"]
+opened_commit = "8d951ca737d089e7010eeb347d1fb725b9f768e8"
+whole_reason = "ein Exit-Vertrag über check, seine Grammatik-Spec und die body-Spec"
