@@ -75,7 +75,7 @@ matching line.
 
 - [ ] [LAND-01] A merge or squash commit whose own trailer block carries `Work-Item: #10` marks #10 `code-landed` in `aco board`'s STAGE column, whether or not any pull request body also names it.
 - [ ] [LAND-02] A trailer block repeating `Work-Item:` (a squash commit carrying `Work-Item: #11` and `Work-Item: #12`) marks every named item `code-landed`, unlike a pull request body, which allows only one.
-- [ ] [LAND-03] A trailer value with a control byte (`#12\x1f#13`) reads as one literal value, never split at the control byte: the commit classifies as a defect and lands nothing there, the same as a contradictory trunk trailer (LAND-42) -- `aco board` proceeds, exit `0`. `aco check <sha>` on that commit refuses `REFUSED: <sha> <that defect sentence>`, exit `1`, the same shape as LAND-60.
+- [ ] [LAND-03] A control-byte trailer value (`#12\x1f#13`) reads as one literal value: a defect that lands nothing (LAND-42), `aco board` exit `0`; `check <sha>` refuses the defect sentence, exit `1`.
 - [ ] [LAND-48] `aco check <sha>` reads `<sha>`'s own trailer: `Work-Item:` prints `<sha> declares Work-Item: #<n>`, `No-Item:` prints `<sha> declares No-Item: <kind>`, exit `0`.
 - [ ] [LAND-57] A `<sha>` outside the walked first-parent trunk refuses `<sha> is not on the first-parent trunk`, exit `1`.
 - [ ] [LAND-58] A trunk `<sha>` carrying neither trailer refuses `<sha> carries no \`Work-Item:\` or \`No-Item:\` trailer`, exit `1`.
