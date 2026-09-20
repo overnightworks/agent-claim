@@ -369,6 +369,15 @@ def git_failure_detail_from_stderr(result: CapturedResult) -> str:
     return result.stderr.decode().strip() or UNKNOWN_GIT_FAILURE
 
 
+def git_failure_detail_from_bounded(result: BoundedResult) -> str:
+    """A finished `run_bounded` git invocation's merged stdout+stderr,
+    falling back to `UNKNOWN_GIT_FAILURE` when it carried nothing (issue
+    #390 finding 7): the one detail reader for a command run with piped
+    stdin (`hash-object`, `mktree`), whose separate-stream `CapturedResult`
+    siblings above cannot read it since `run_captured` takes no input."""
+    return result.output.decode(errors="replace").strip() or UNKNOWN_GIT_FAILURE
+
+
 def inspect_native_process(pid: int, proc_root: Path = Path("/proc")) -> NativeProcess:
     """Read one Linux process twice-safe identity snapshot without shelling out.
 

@@ -244,7 +244,7 @@ def _run_git_with_input(worktree: Path, arguments: list[str], *, input_data: byt
     except process.ProcessTimedOutError as error:
         raise ClaimError("git timed out while writing to the claim state store") from error
     if result.exit_status != 0:
-        raise ClaimError(result.output.decode(errors="replace").strip() or "git command failed")
+        raise ClaimError(process.git_failure_detail_from_bounded(result))
     return result.output.decode().strip()
 
 
