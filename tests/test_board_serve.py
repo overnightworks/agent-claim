@@ -838,6 +838,67 @@ def test_first_board_token_returns_the_token_even_when_cleanup_fails(
     assert workspace._read_board_token(token_path) == token
 
 
+def test_first_board_token_refuses_when_link_fails_for_a_reason_other_than_exists(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Issue #388: `os.link` failing with anything other than `EEXIST` (a
+    read-only filesystem, a cross-device rename) is a real mint failure, not
+    another writer having already won -- it refuses by name and still
+    discards its own temporary file rather than leaving `.board-token.*`
+    litter behind."""
+    token_path = tmp_path / "board-token"
+
+    def _raise(*_args: object, **_kwargs: object) -> None:
+        raise PermissionError("simulated link failure")
+
+    monkeypatch.setattr(os, "link", _raise)
+
+    with pytest.raises(workspace.WorkspaceError, match="is not a valid token"):
+        workspace._first_board_token(token_path)
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_mint_board_token_refuses_when_replace_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Issue #388: `--new-token`'s own `os.replace` failing (an
+    owner-unwritable directory discovered only at publish time, a full
+    disk) refuses by name instead of raising a raw `OSError`, and still
+    discards the temporary file it could not publish."""
+    token_path = tmp_path / "board-token"
+
+    def _raise(*_args: object, **_kwargs: object) -> None:
+        raise OSError("simulated replace failure")
+
+    monkeypatch.setattr(os, "replace", _raise)
+
+    with pytest.raises(workspace.WorkspaceError, match="is not a valid token"):
+        workspace._mint_board_token(token_path, "a" * 43)
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_read_board_token_refuses_when_fstat_raises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Issue #388: `os.fstat` itself raising (not merely reporting an
+    untrusted owner or mode) is caught by the same named refusal as every
+    other read failure on the open descriptor, rather than a raw
+    `OSError`."""
+    token_path = tmp_path / "board-token"
+    token_path.write_text("a" * 43 + "\n", encoding="utf-8")
+    token_path.chmod(0o600)
+
+    def _raise(*_args: object, **_kwargs: object) -> None:
+        raise OSError("simulated fstat failure")
+
+    monkeypatch.setattr(os, "fstat", _raise)
+
+    with pytest.raises(workspace.WorkspaceError, match="is not a valid token"):
+        workspace._read_board_token(token_path)
+
+
 def test_write_temporary_token_file_removes_its_own_temp_file_on_failure(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
