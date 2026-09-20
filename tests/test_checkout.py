@@ -843,7 +843,7 @@ def test_trunk_landings_read_the_named_remotes_trunk_not_the_work_branch(
 ) -> None:
     observed: list[list[str]] = []
 
-    def git_output(arguments: list[str]) -> str:
+    def git_output(arguments: list[str], **_kwargs: object) -> str:
         observed.append(arguments)
         if arguments[:3] == ["symbolic-ref", "--quiet", "refs/remotes/hub/HEAD"]:
             return "refs/remotes/hub/main"
@@ -875,7 +875,7 @@ def test_trunk_ref_fails_loud_when_no_candidate_branch_resolves(
     resolving must fail loud rather than silently ruling every candidate's age
     as unknown."""
 
-    def git_output(_arguments: list[str]) -> str:
+    def git_output(_arguments: list[str], **_kwargs: object) -> str:
         raise ClaimError("fatal: not a git repository")
 
     monkeypatch.setattr(checkout, "_git_output", git_output)
@@ -890,7 +890,7 @@ def test_trunk_ref_falls_back_to_the_local_branch_name_when_remote_head_was_neve
     the historical `{main, master}` guess (issue #238), generalized to the
     caller's own remote name rather than `origin` alone (issue #304)."""
 
-    def git_output(arguments: list[str]) -> str:
+    def git_output(arguments: list[str], **_kwargs: object) -> str:
         if arguments == ["symbolic-ref", "--quiet", "refs/remotes/hub/HEAD"]:
             raise ClaimError("unknown git failure")
         if arguments == ["rev-parse", "--verify", "refs/remotes/hub/main"]:
@@ -911,7 +911,7 @@ def test_trunk_ref_falls_back_to_the_local_branch_name_when_remote_head_was_neve
 def test_trunk_landings_is_empty_when_trunk_has_no_first_parent_landings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def git_output(arguments: list[str]) -> str:
+    def git_output(arguments: list[str], **_kwargs: object) -> str:
         if arguments[:3] == ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"]:
             return "refs/remotes/origin/main"
         if arguments[0] == "log":
@@ -936,7 +936,7 @@ def test_trunk_landings_fails_loud_on_a_malformed_commit_timestamp(
     would only occur if git itself misbehaved) may silently produce a wrong
     ruling age; both fail loud with the same diagnostic."""
 
-    def git_output(arguments: list[str]) -> str:
+    def git_output(arguments: list[str], **_kwargs: object) -> str:
         if arguments[:3] == ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"]:
             return "refs/remotes/origin/main"
         if arguments[0] == "log":
@@ -956,7 +956,7 @@ def test_trunk_landings_fails_loud_on_a_log_stream_that_is_not_nul_framed_record
     -- here, a caller that fed back plain newline-joined text -- is git (or
     the fake) misbehaving, not a shape this reads silently."""
 
-    def git_output(arguments: list[str]) -> str:
+    def git_output(arguments: list[str], **_kwargs: object) -> str:
         if arguments[:3] == ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"]:
             return "refs/remotes/origin/main"
         if arguments[0] == "log":

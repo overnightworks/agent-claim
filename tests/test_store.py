@@ -577,7 +577,7 @@ def test_fetch_state_canonicalizes_a_stored_unsorted_scope_without_rewriting_the
 ) -> None:
     """A claim file written before issue #331 sorted every scope at
     creation can still carry its paths in typed order on the real ref:
-    `parse_claim_toml` must project it through `protocol._valid_scope` on
+    `parse_claim_toml` must project it through `protocol.valid_scope` on
     read (REVISE finding 1) rather than expose the stored order verbatim.
     `status`/`status --json` (`cli._print_claim_status_lines`,
     `cli._status_json`) print straight from this same `ActiveClaim.scope`,
@@ -628,7 +628,7 @@ def test_fetch_state_canonicalizes_a_stored_unsorted_scope_without_rewriting_the
         role="builder",
         base=protocol.ObjectId(sha),
         branch="claude/issue-42-cut",
-        scope=protocol._valid_scope(["docs/COORDINATION.md", "scripts/issue_claim.py"]),
+        scope=protocol.valid_scope(["docs/COORDINATION.md", "scripts/issue_claim.py"]),
         claim_id=protocol.ClaimId("a1"),
         operation_id="op-replay",
     )
@@ -653,7 +653,7 @@ def test_fetch_state_rejects_a_stored_scope_entry_valid_scope_refuses(
 ) -> None:
     """The other half of `_claim_toml_scope`'s canonicalization (issue #331
     REVISE finding 1): a stored scope only reads as a legacy record when
-    `_valid_scope` itself would still accept it, just unsorted -- content
+    `valid_scope` itself would still accept it, just unsorted -- content
     it would refuse from a fresh request (here an absolute path) fails
     loud on read too, named by the claim key, never silently passed
     through."""

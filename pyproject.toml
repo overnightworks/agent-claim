@@ -57,6 +57,7 @@ containers = ["agent_coordination"]
 exhaustive = true
 layers = [
     "cli",
+    "protect",
     "board_html | board_serve",
     "workspace",
     "terminal",

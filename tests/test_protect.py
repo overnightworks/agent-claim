@@ -23,12 +23,14 @@ from cli_fixtures import (
     _forbid_github_construction,
     _forbid_protect_git_github_and_identity,
     _patch_command,
+    _push_repository_trunk,
     _real_git,
+    _real_repository_with_bare_remote,
     _set_agent_identity_env,
     stub_board_config_tracked,
 )
 
-from agent_coordination import board, checkout, hook_input, protocol, store
+from agent_coordination import board, checkout, hook_input, protect, protocol, store
 from agent_coordination import cli as issue_claim
 from agent_coordination.protocol import ClaimError
 
@@ -897,7 +899,7 @@ def test_protect_bash_allows_a_relative_path_when_the_payload_carries_no_cwd(
     (`specs/protect.spec.md`'s own `## Never`). No claim is set up at all:
     a resolver that fell back to guessing a cwd would deny `claim first`
     here instead of allowing. `_forbid_protect_git_github_and_identity`'s
-    own `_resolved_agent` stub is left in place, unlike the sibling tests
+    own `resolved_agent` stub is left in place, unlike the sibling tests
     below: this path must never resolve identity at all (issue #380 delta,
     review finding: resolving it eagerly, before this allow, used to turn an
     unresolvable identity into a wrongful PROT-08 deny here)."""
@@ -1127,7 +1129,7 @@ def test_protect_path_resolving_to_the_checkout_root_denies_path_required(
     itself resolves to exactly the checkout root: `work/subdir/..` queries
     git from the real descendant `work/subdir`, so the checkout resolves
     fine, while the full path resolves to `work` itself -- a repository-
-    relative scope entry of `"."`, which `protocol._valid_scope` refuses. A
+    relative scope entry of `"."`, which `protocol.valid_scope` refuses. A
     Bash-recognized path runs the identical gate (issue #380)."""
     _isolate_protect_home(monkeypatch, tmp_path)
     work = tmp_path / "work"
@@ -1865,9 +1867,7 @@ def test_protect_denies_a_relative_payload_path_even_from_the_claimed_worktree_c
         _protect_main(monkeypatch, {"toolName": "write", "toolInput": {"path": "src/widget.py"}})
         == 2
     )
-    _assert_protect_decision(
-        capsys, decision="deny", reason=issue_claim.RELATIVE_PAYLOAD_PATH_DENIAL
-    )
+    _assert_protect_decision(capsys, decision="deny", reason=checkout.RELATIVE_PAYLOAD_PATH_DENIAL)
 
 
 def _real_main_checkout_target(tmp_path: Path) -> Path:
@@ -2050,8 +2050,8 @@ def _rescope_args_add_path_in_an_unborn_checkout(tmp_path: Path) -> list[str]:
         ),
         (_rescope_args_add_path_outside_any_repository, "not in a repository"),
         (_rescope_args_add_path_in_an_unborn_checkout, checkout.NO_COMMIT_CHECKOUT_REASON),
-        (_rescope_args_all_relative, issue_claim.RELATIVE_PAYLOAD_PATH_DENIAL),
-        (_rescope_args_mixed_absolute_and_relative, issue_claim.RELATIVE_PAYLOAD_PATH_DENIAL),
+        (_rescope_args_all_relative, checkout.RELATIVE_PAYLOAD_PATH_DENIAL),
+        (_rescope_args_mixed_absolute_and_relative, checkout.RELATIVE_PAYLOAD_PATH_DENIAL),
     ],
     ids=[
         "second-add-path-outside-checkout",
@@ -2087,3 +2087,109 @@ def test_rescope_denies_before_touching_the_store(
 
     assert status == 2
     assert expected_error_fragment in capsys.readouterr().err
+
+
+# `protect.judge`'s own direct proofs (issue #394): a real bare-remote
+# repository with a real linked worktree, driven through `judge` itself --
+# never `main(["protect"])` -- so none of these needs `sys.stdin` or the
+# process cwd stubbed at all; `judge` takes its payload and its one
+# dependency (`canonical_remote_for`) as plain arguments.
+
+
+def _judge_worktree(tmp_path: Path, *, branch: str) -> Path:
+    """A real bare-remote repository (`Setup: bare-remote`,
+    `specs/protect.spec.md`) with one linked, isolated worktree on `branch`
+    -- built entirely from its own explicit repository path, never a
+    process-cwd stub, since `judge`'s own tests must prove the same thing
+    `judge` itself proves: the verdict depends only on the payload's
+    absolute path, never on the process's cwd."""
+    repo, _remote = _real_repository_with_bare_remote(tmp_path)
+    (repo / "README.md").write_text("hello\n")
+    _real_git(repo, "add", "README.md")
+    _real_git(repo, "commit", "-q", "-m", "initial")
+    _push_repository_trunk(repo, "origin")
+    worktree = tmp_path / "repo-worktrees" / branch.replace("/", "-")
+    checkout.create_linked_worktree(worktree, branch=branch, remote="origin", directory=repo)
+    return worktree
+
+
+def _judge_decision_and_reason(verdict: protect.Verdict) -> tuple[protect.Decision, str | None]:
+    return verdict.decision, verdict.reason
+
+
+def _no_canonical_remote_call(_toplevel: Path) -> str:
+    pytest.fail("this denial must fire before the store's own canonical remote is ever read")
+
+
+def test_judge_denies_an_apply_patch_path_outside_the_live_claims_scope(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The Checkout/Default-Branch/Claim-Scope chain, driven directly: a
+    live claim on this branch whose scope misses the patched file denies
+    `<path> outside claim scope` (PROT-20), `apply_patch`'s own distinct
+    text for a path a live claim exists for but does not cover."""
+    branch = "codex/issue-9-widget"
+    worktree = _judge_worktree(tmp_path, branch=branch)
+    _set_agent_identity_env(monkeypatch, {checkout.ACO_AGENT_ENV: "Ada"})
+    claim = _protect_active_claim("Ada", scope=("docs",), branch=branch)
+    monkeypatch.setattr(
+        store, "fetch_state", lambda *, worktree, remote: _protect_state_with_claim(claim)
+    )
+    target = worktree / "README.md"
+    payload = {
+        "toolName": "apply_patch",
+        "toolInput": {
+            "command": _patch_command(f"*** Update File: {target}", "@@", "-hello", "+hi")
+        },
+    }
+
+    verdict = protect.judge(payload, canonical_remote_for=lambda _toplevel: "origin")
+
+    assert _judge_decision_and_reason(verdict) == (
+        protect.Decision.DENY,
+        "README.md outside claim scope",
+    )
+
+
+def test_judge_denies_a_bash_recognized_pattern_path_outside_the_live_claims_scope(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A Bash-recognized write pattern runs the identical chain (issue
+    #380): a live claim whose scope misses the removed path denies naming
+    both the recognized pattern and the path (PROT-33)."""
+    branch = "codex/issue-9-widget"
+    worktree = _judge_worktree(tmp_path, branch=branch)
+    _set_agent_identity_env(monkeypatch, {checkout.ACO_AGENT_ENV: "Ada"})
+    claim = _protect_active_claim("Ada", scope=("docs",), branch=branch)
+    monkeypatch.setattr(
+        store, "fetch_state", lambda *, worktree, remote: _protect_state_with_claim(claim)
+    )
+    payload = {
+        "toolName": "Bash",
+        "toolInput": {"command": f"rm {worktree / 'README.md'}"},
+        "cwd": str(worktree),
+    }
+
+    verdict = protect.judge(payload, canonical_remote_for=lambda _toplevel: "origin")
+
+    assert _judge_decision_and_reason(verdict) == (
+        protect.Decision.DENY,
+        "rm README.md outside claim scope",
+    )
+
+
+def test_judge_denies_a_path_resolving_to_the_checkout_root_before_reading_the_store(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """PROT-14 fires from the checkout gate alone, before the store's own
+    canonical remote is ever resolved (`_no_canonical_remote_call` fails the
+    test if it is): a payload path that resolves to exactly the checkout
+    root denies `path required`, the same reason as no path at all."""
+    branch = "codex/issue-9-widget"
+    worktree = _judge_worktree(tmp_path, branch=branch)
+    _set_agent_identity_env(monkeypatch, {checkout.ACO_AGENT_ENV: "Ada"})
+    payload = {"toolName": "Edit", "toolInput": {"path": str(worktree)}}
+
+    verdict = protect.judge(payload, canonical_remote_for=_no_canonical_remote_call)
+
+    assert _judge_decision_and_reason(verdict) == (protect.Decision.DENY, "path required")

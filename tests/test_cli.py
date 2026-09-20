@@ -7989,7 +7989,7 @@ def test_cli_claim_scope_derivation_against_the_items_own_body(
     """Issue #337 proof 3 (REVISE finding 2): issue-mode `--scope`
     derivation and validation against the item's own body -- omitted takes
     it, refusing by name when the body carries none; an explicit value must
-    name the same canonical set (#331's own `protocol._valid_scope`),
+    name the same canonical set (#331's own `protocol.valid_scope`),
     refusing by name when it differs and accepting the same set typed in a
     different order; a derived scope is exactly as wide, by the same rule,
     as one passed on `--scope` -- refused without `--whole`, accepted with

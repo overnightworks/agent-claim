@@ -675,7 +675,7 @@ def test_render_block_renders_scope_sorted() -> None:
 
 
 def test_render_block_refuses_a_duplicate_scope_entry() -> None:
-    """`_render_scope_array` routes through `protocol._valid_scope` (issue
+    """`_render_scope_array` routes through `protocol.valid_scope` (issue
     #331 REVISE finding 2), the one scope canonicalizer, rather than
     silently deduplicating a second time: a duplicate it is ever handed --
     never a real `cut`/`rule`/`ask` write, which all reuse an
@@ -2615,7 +2615,7 @@ def test_parse_body_refuses_an_invalid_top_level_scope(
     scope_toml: str, expected_message_part: str
 ) -> None:
     """An empty `scope` list is this module's own defect sentence; every
-    other refusal (absolute, `..`, an empty entry) is `protocol._valid_scope`'s
+    other refusal (absolute, `..`, an empty entry) is `protocol.valid_scope`'s
     own sentence, forwarded verbatim -- the one path grammar `claim` already
     owns, never a second one (issue #331)."""
     parsed = board.parse_body(agent_claim_body(f"{MINIMAL_BLOCK_TOML}{scope_toml}"))
@@ -2779,7 +2779,7 @@ def test_parse_body_projects_scope_top_level_and_per_slice_canonically() -> None
     """Both the block's own `scope` and a `[[slice]]` row's `scope` project
     sorted regardless of the order they were written in (issue #331) -- the
     same normalisation `render_block` renders them in. A duplicate entry is
-    never silently dropped here; `protocol._valid_scope` already refuses one
+    never silently dropped here; `protocol.valid_scope` already refuses one
     as a defect before this projection is ever built (proven for `claim` in
     `test_claim_scope_must_be_canonical_repository_relative_paths`), so the
     only reordering left for an already-valid list is the sort."""

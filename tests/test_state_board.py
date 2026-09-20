@@ -1711,7 +1711,7 @@ class TestCliStateRefForge:
         ]
         data = board.locate_agent_claim_block(item_files_after[f"{child_id}.md"].decode()).data
         scope = data.get("scope")
-        return None if scope is None else protocol._valid_scope(scope)
+        return None if scope is None else protocol.valid_scope(scope)
 
     @pytest.mark.parametrize(
         (
@@ -2178,7 +2178,7 @@ class TestCliStateRefForge:
     ) -> None:
         """Issue #337 proof 1: repeated `--scope` flags write the block's
         own top-level `scope = [...]`, canonicalized (sorted, deduplicated)
-        by the same `protocol._valid_scope` a live claim's own scope passes
+        by the same `protocol.valid_scope` a live claim's own scope passes
         through -- never a second grammar."""
         self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, _item_files())
 
@@ -2352,7 +2352,7 @@ class TestCliStateRefForge:
         `item new` refuses -- on an injected minting collision against every
         already-known id after three attempts, on an `--origin` that does
         not match `FORGE#N` (refused before `argparse` even reaches `item
-        new`'s own body), or on a `--scope` value `protocol._valid_scope`
+        new`'s own body), or on a `--scope` value `protocol.valid_scope`
         refuses -- with a diagnostic naming the cause, and nothing reaches
         the remote."""
         self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, _item_files())

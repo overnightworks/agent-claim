@@ -189,7 +189,7 @@ def _forbid_protect_git_github_and_identity(monkeypatch: pytest.MonkeyPatch) -> 
     def unused(*args, **kwargs):
         pytest.fail("this protect path must not use identity, git, GitHub, or the store")
 
-    monkeypatch.setattr(checkout, "_resolved_agent", unused)
+    monkeypatch.setattr(checkout, "resolved_agent", unused)
     monkeypatch.setattr(checkout, "_git_output", unused)
     monkeypatch.setattr(github, "GitHubForge", unused)
     monkeypatch.setattr(github, "discover_repository", unused)
