@@ -1,8 +1,7 @@
 # `aco body`
 
-`aco body --template` / `aco body --check`: the one command that composes a
-fresh skeleton or checks a piped one, without ever reading a live item. This
-file owns its own two mutually exclusive modes and their flag conflicts;
+`aco body --check`: the one command that checks a piped body for defects
+before it reaches the forge, without ever reading a live item.
 `specs/body-block.spec.md` owns every defect and `body ok`/`body incomplete`
 sentence a checked block can carry (BODY-01..BODY-56) and this file cites
 those IDs rather than restating them. `specs/storage-pin.spec.md` owns the
@@ -10,21 +9,13 @@ tracked-pin precondition `--check` reads (PIN-01); `[record]`'s own
 storage-gated validity is `specs/body-block.spec.md`'s own BODY-15/BODY-16.
 `specs/output.spec.md` owns the `--json` envelope itself (OUT-nn: key order,
 `ok`, `message`); this file names only `--check`'s own `reason` vocabulary
-(`valid`, `malformed`, `incomplete`, `invalid_usage`, `unavailable`).
-`--template`'s own two refusals (BDY-01, BDY-02) still print
-`specs/release.spec.md`'s own `{"ok": false, "error": "<sentence>"}` object
-(REL-24), since `--template` names no `--json` output of its own to migrate.
+(`valid`, `malformed`, `incomplete`, `unavailable`).
 
 ## Behavior table
 
-| state \ trigger | `aco body --template[ --kind K][ --parent N]` | `aco body --check` (stdin) | `aco body --check --json` |
+| state \ trigger | `aco body` (no `--check`) | `aco body --check` (stdin) | `aco body --check --json` |
 |---|---|---|---|
-| neither `--template` nor `--check`, or both | BDY-01 | BDY-01 | BDY-01 |
-| `--template` given together with `--json` | BDY-02 | — | — |
-| `--check` given together with `--kind` or `--parent` | — | BDY-03 | BDY-03 |
-| `--template`, no `--kind` (default `task`) | BDY-04 | — | — |
-| `--template --kind container` | BDY-05 | — | — |
-| `--template ... --parent N` | BDY-06 | — | — |
+| `--check` not given | BDY-13 | — | — |
 | stdin is a valid, complete block | — | BDY-07 (BODY-14) | BDY-09 |
 | stdin is malformed or incomplete | — | BDY-08 (BODY-01..56) | BDY-09 |
 | stdin is not valid UTF-8 | — | BDY-10 | BDY-10 |
@@ -33,15 +24,9 @@ storage-gated validity is `specs/body-block.spec.md`'s own BODY-15/BODY-16.
 
 ## Flags and modes
 
-- [ ] [BDY-01] `aco body` with neither `--template` nor `--check`, or with both, is refused by the parser itself before anything runs, exit `2`.
-- [ ] [BDY-02] `aco body --template --json` refuses `--json applies only to --check, not --template`, exit `2`, before any skeleton is composed.
-- [ ] [BDY-03] `--check` combined with `--kind K`/`--parent N` refuses `--kind and --parent apply only to --template, not --check`, `--json` `reason: "invalid_usage"`, exit `2`, before stdin is read.
+- BDY-01, BDY-02, BDY-03 (retired 20.09.2026, issue #420): `--template`'s own mode and its `--kind`/`--parent`/`--json` flag conflicts no longer exist; `--check` is `body`'s only mode (BDY-13).
 
-## `--template`, a pure composition
-
-- [ ] [BDY-04] `aco body --template` (default `--kind task`; also `--kind feature`) prints the four-line unfilled `agent-claim` block, exit `0` (see E-BDY-01).
-- [ ] [BDY-05] `aco body --template --kind container` prepends one `Blocked by: nichts` line and a blank line ahead of BDY-04's own block, exit `0` (see E-BDY-01).
-- [ ] [BDY-06] `--parent N` prepends a `Parent: #N` line and blank line ahead of everything else; combined with `--kind container`, `Parent:` comes first (see E-BDY-01).
+- [ ] [BDY-13] `aco body` without `--check` is refused by the parser itself before anything runs, exit `2`.
 
 ## `--check`, reading stdin only
 
@@ -63,14 +48,13 @@ owns only the CLI-level framing around it.
 | malformed (BODY-01..56's own schema defect) | `malformed` |
 | structurally valid but unfilled | `incomplete` |
 
+- BDY-04, BDY-05, BDY-06 (retired 20.09.2026, issue #420): `--template`'s own skeleton composition no longer exists; `item new` keeps reading its fresh body from stdin (`specs/item.spec.md`), never from a composed skeleton.
+
 ## Never
 
-- `aco body --template` never reads `.agent-claim/board.toml`, resolves a forge or the state ref, or needs a git checkout at all: only `--check` touches this repository in any way (see E-BDY-01).
 - `aco body --check` never resolves a forge, fetches the state ref, or shells out to `gh`: its only input is stdin, and its only repository read is the storage pin BDY-11/BDY-12 name.
 - `aco body --check` never reads a file path, a live issue, or a dependency: a body is always piped in, never named by number (`specs/body-block.spec.md`'s own Never line).
-- `aco body --template`'s printed skeleton never carries a `[record]` table, `scope`, or any other optional key: it is always the same four projection lines, whatever `--kind` or `--parent` add around them.
-- No `--check` outcome exits `1` any more: `valid` is exit `0`; `malformed`, `incomplete`, `invalid_usage`, and `unavailable` are all exit `2`.
-- `aco body --template` never gains a `--json` mode of its own (BDY-02): a composed skeleton is text for a person to paste, not a machine-read payload; only `--check` ever carries `--json`.
+- No `--check` outcome exits `1` any more: `valid` is exit `0`; `malformed`, `incomplete`, and `unavailable` are all exit `2`.
 
 ## Examples
 
@@ -79,33 +63,6 @@ repository with `main` at one commit, a git identity, `origin/HEAD`, a
 tracked `.agent-claim/board.toml` naming no `storage` key, and `ACO_AGENT` set
 to `Ada`. Sessions whose stdin carries a fenced block use a four-backtick
 console fence.
-
-### E-BDY-01 -- `--template` needs no checkout, pin, or forge at all
-
-Setup: none -- a directory outside any git repository
-
-````console
-$ aco body --template
-```agent-claim
-version = 1
-now = ""
-next = ""
-done_when = ""
-```
-exit 0
-$ aco body --template --kind container --parent 79
-Parent: #79
-
-Blocked by: nichts
-
-```agent-claim
-version = 1
-now = ""
-next = ""
-done_when = ""
-```
-exit 0
-````
 
 ### E-BDY-02 -- `--check`, ok and malformed
 
@@ -133,7 +90,7 @@ BODY
 exit 2
 ````
 
-### E-BDY-03 -- `--check --json`, and the mode/flag refusals
+### E-BDY-03 -- `--check --json`, and `--check` missing
 
 Setup: bare-remote
 
@@ -148,18 +105,8 @@ done_when = "It is built."
 BODY
 {"ok": true, "reason": "valid", "defects": []}
 exit 0
-$ aco body --check --kind task <<'BODY'
-```agent-claim
-version = 1
-now = ""
-next = ""
-done_when = ""
-```
-BODY
-2> ERROR: --kind and --parent apply only to --template, not --check
-exit 2
-$ aco body --template --json
-2> ERROR: --json applies only to --check, not --template
+$ aco body
+2> aco body: error: the following arguments are required: --check
 exit 2
 ````
 

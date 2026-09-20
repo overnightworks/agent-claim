@@ -776,7 +776,7 @@ def _rulings_lines(
 
 
 _EXPECTED_BOARD = _projected(_github_fake(), storage=board.Storage.GITHUB)
-EXPECTED_BOARD_TEXT = board.render(_EXPECTED_BOARD)
+EXPECTED_BOARD_PAYLOAD = board.board_payload(_EXPECTED_BOARD)
 EXPECTED_NEXT_ACTION = board.next_action(_EXPECTED_BOARD)
 EXPECTED_RULINGS_LINES = _rulings_lines(
     _github_fake(), _EXPECTED_BOARD, storage=board.Storage.GITHUB
@@ -792,22 +792,21 @@ EXPECTED_RULINGS_LINES_BY_STORAGE = {
         _github_fake(), _EXPECTED_BOARD, storage=board.Storage.STATE_REF
     ),
 }
-# `state-ref` renders the identical scenario, never `_EXPECTED_BOARD` itself
+# `state-ref` projects the identical scenario, never `_EXPECTED_BOARD` itself
 # `replace`d: `item.actionable_reason` (issue #300 residual 2) is now baked
 # in at build time from `config.storage`, exactly like every other field a
 # real `state-ref` pin changes, so reusing the `Storage.GITHUB`-built board
-# under a different `render` call would silently keep its stale `#n`
+# for a different storage's own payload would silently keep its stale `#n`
 # blocker text. A fresh `_projected` call under `Storage.STATE_REF` bakes
-# that text correctly; the two texts otherwise agree byte-for-byte apart
-# from the id-shaped pins, since this scenario carries no merged pull
-# request at all (issue #371 retired the one line that used to differ).
-EXPECTED_STATE_REF_BOARD_TEXT = board.render(
-    _projected(_github_fake(), storage=board.Storage.STATE_REF),
-    storage=board.Storage.STATE_REF,
+# that text correctly; the two payloads otherwise agree apart from the
+# id-shaped pins, since this scenario carries no merged pull request at all
+# (issue #371 retired the one line that used to differ).
+EXPECTED_STATE_REF_BOARD_PAYLOAD = board.board_payload(
+    _projected(_github_fake(), storage=board.Storage.STATE_REF)
 )
-EXPECTED_BOARD_TEXT_BY_STORAGE = {
-    board.Storage.GITHUB: EXPECTED_BOARD_TEXT,
-    board.Storage.STATE_REF: EXPECTED_STATE_REF_BOARD_TEXT,
+EXPECTED_BOARD_PAYLOAD_BY_STORAGE = {
+    board.Storage.GITHUB: EXPECTED_BOARD_PAYLOAD,
+    board.Storage.STATE_REF: EXPECTED_STATE_REF_BOARD_PAYLOAD,
 }
 
 # The same scenario plus `LIVE_CLAIM`, GitHub-side, as the shared expectation
@@ -815,22 +814,21 @@ EXPECTED_BOARD_TEXT_BY_STORAGE = {
 # GitHub reaches `Stage.IN_FLIGHT` via `LIVE_CLAIM_OPEN_PULL_REQUEST`'s
 # matching branch, never via the state-ref-only capability fallback.
 # `state-ref`'s own expectation is a fresh build under `Storage.STATE_REF`
-# (same reasoning as `EXPECTED_STATE_REF_BOARD_TEXT` above), so the only
+# (same reasoning as `EXPECTED_STATE_REF_BOARD_PAYLOAD` above), so the only
 # sanctioned difference stays the id-shaped pins.
 _EXPECTED_BOARD_WITH_LIVE_CLAIM = _projected(
     _github_fake(open_pull_requests=(LIVE_CLAIM_OPEN_PULL_REQUEST,)),
     storage=board.Storage.GITHUB,
     claims=(LIVE_CLAIM,),
 )
-EXPECTED_BOARD_WITH_LIVE_CLAIM_TEXT_BY_STORAGE = {
-    board.Storage.GITHUB: board.render(_EXPECTED_BOARD_WITH_LIVE_CLAIM),
-    board.Storage.STATE_REF: board.render(
+EXPECTED_BOARD_WITH_LIVE_CLAIM_PAYLOAD_BY_STORAGE = {
+    board.Storage.GITHUB: board.board_payload(_EXPECTED_BOARD_WITH_LIVE_CLAIM),
+    board.Storage.STATE_REF: board.board_payload(
         _projected(
             _github_fake(open_pull_requests=(LIVE_CLAIM_OPEN_PULL_REQUEST,)),
             storage=board.Storage.STATE_REF,
             claims=(LIVE_CLAIM,),
-        ),
-        storage=board.Storage.STATE_REF,
+        )
     ),
 }
 
@@ -878,7 +876,7 @@ class TestTwoAdapterParity:
 
         built = _projected(client, storage=storage)
 
-        assert board.render(built, storage=storage) == EXPECTED_BOARD_TEXT_BY_STORAGE[storage]
+        assert board.board_payload(built) == EXPECTED_BOARD_PAYLOAD_BY_STORAGE[storage]
         assert board.next_action(built) == EXPECTED_NEXT_ACTION
         assert (
             _rulings_lines(client, built, storage=storage)
@@ -902,7 +900,7 @@ class TestTwoAdapterParity:
         adapters (issue #248, Grok final gate blocking 2) -- GitHub from
         `LIVE_CLAIM_OPEN_PULL_REQUEST`'s matching branch, `state-ref` from
         the claim alone, since it cannot list pull requests at all. Two
-        different signals, the identical rendered board: the state-ref
+        different signals, the identical projected payload: the state-ref
         fallback never drifts from what a real in-flight lane looks like on
         GitHub.
         """
@@ -915,8 +913,7 @@ class TestTwoAdapterParity:
         built = _projected(client, storage=storage, claims=(LIVE_CLAIM,))
 
         assert (
-            board.render(built, storage=storage)
-            == EXPECTED_BOARD_WITH_LIVE_CLAIM_TEXT_BY_STORAGE[storage]
+            board.board_payload(built) == EXPECTED_BOARD_WITH_LIVE_CLAIM_PAYLOAD_BY_STORAGE[storage]
         )
 
 
@@ -1248,9 +1245,10 @@ def _first_ruling_date(capsys: pytest.CaptureFixture[str]) -> str:
 
 
 def _filled_body(template: str, *, now: str, next_step: str, done_when: str) -> str:
-    """A `body --template` skeleton with its three blank projection keys
-    filled -- the one substitution the README's "fill Now/Next/Done when"
-    step performs before `body --check`/`item edit`."""
+    """A fresh `board.BLOCK_CHILD_SKELETON`/`BLOCK_CONTAINER_SKELETON` body
+    with its three blank projection keys filled -- the one substitution the
+    README's "fill Now/Next/Done when" step performs before
+    `body --check`/`item edit`."""
     return (
         template.replace('now = ""', f'now = "{now}"')
         .replace('next = ""', f'next = "{next_step}"')
@@ -1356,9 +1354,9 @@ class TestCliStateRefForge:
         (issue #300 residual 3), `rulings`' row header, and `status`'s
         claimed-issue line print `aco-xxxxxx` under `storage = "state-ref"`
         -- the same id `board.parse_item_reference` already accepts right
-        back -- never `#n`. `board`'s own plain-text table (`board.render`,
-        owned by `board.py`) prints the same id-shaped pin too (issue #300
-        residual 2): `EXPECTED_STATE_REF_BOARD_TEXT` above proves it against
+        back -- never `#n`. `board --json`'s own payload carries the same
+        id-shaped pin too (issue #300 residual 2):
+        `EXPECTED_STATE_REF_BOARD_PAYLOAD` above proves it against
         this module's own shared scenario, so this test does not repeat that
         proof against a second one."""
         self._live_state_ref_checkout(
@@ -1636,15 +1634,15 @@ class TestCliStateRefForge:
         assert replace(after_record, updated_at=before_record.updated_at) == before_record
         assert after_record.updated_at != before_record.updated_at
 
-        board_status = issue_claim.main(["board"])
+        board_status = issue_claim.main(["board", "--json"])
         assert board_status == 0
-        board_out = capsys.readouterr().out
-        assert "Slice C" in board_out
-        container_label = items.format_item_id(CONTAINER_NUMBER)
-        container_line = next(
-            line for line in board_out.splitlines() if line.startswith(f"{container_label} ")
-        )
-        assert items.format_item_id(child_number) in container_line
+        payload = json.loads(capsys.readouterr().out)
+        board_items = {item["number"]: item for item in payload["items"]}
+        assert board_items[child_number]["title"] == "Slice C"
+        container_children = {
+            child["number"] for child in board_items[CONTAINER_NUMBER]["container"]["open_children"]
+        }
+        assert child_number in container_children
 
     def test_cut_row_selects_the_named_slice_entry_under_state_ref(
         self,
@@ -2024,10 +2022,10 @@ class TestCliStateRefForge:
         monkeypatch.setenv("PATH", _path_without_gh(tmp_path))
         monkeypatch.chdir(worktree)
 
-        status = issue_claim.main(["board"])
+        status = issue_claim.main(["board", "--json"])
 
         assert status == 0
-        assert capsys.readouterr().out.strip().endswith("requests: 0")
+        assert json.loads(capsys.readouterr().out)["requests"] == 0
 
     def test_board_marks_a_state_ref_item_landed_by_a_trailer_carrying_trunk_commit(
         self,
@@ -2067,12 +2065,11 @@ class TestCliStateRefForge:
         worktree: Path,
     ) -> None:
         """Issue #371, Beweis 1: two trailer-carrying trunk commits each land
-        their own item under `storage = state-ref` -- `board`'s text
-        `LANDUNGEN` rows, `board --json`'s `landings` array, and
-        `board --html`'s Landungen section all read `checkout.trunk_landings`
-        directly, one row per item with its own sha and no `pull_request`,
-        independent of any pull-request listing this storage can never
-        perform."""
+        their own item under `storage = state-ref` -- `board --json`'s
+        `landings` array and `board --html`'s Landungen section both read
+        `checkout.trunk_landings` directly, one row per item with its own
+        sha and no `pull_request`, independent of any pull-request listing
+        this storage can never perform."""
         first_id, second_id = "aco-000005", "aco-000006"
         first_number = items.item_number(first_id)
         second_number = items.item_number(second_id)
@@ -2103,12 +2100,6 @@ class TestCliStateRefForge:
         first_date = datetime.fromisoformat(landings[first_number]["committed_at"]).date()
         second_date = datetime.fromisoformat(landings[second_number]["committed_at"]).date()
 
-        assert issue_claim.main(board_command) == 0
-        rendered_text = capsys.readouterr().out
-        assert "LANDUNGEN" in rendered_text
-        assert f"{first_id} {first_date} {first_sha[:7]}" in rendered_text
-        assert f"{second_id} {second_date} {second_sha[:7]}" in rendered_text
-
         assert issue_claim.main([*board_command, "--html"]) == 0
         rendered_html = capsys.readouterr().out
         assert f"<li>{first_id} {first_date} <code>{first_sha[:7]}</code></li>" in rendered_html
@@ -2133,7 +2124,7 @@ class TestCliStateRefForge:
         monkeypatch.setenv("PATH", _path_without_gh(tmp_path))
         monkeypatch.chdir(worktree)
 
-        status = issue_claim.main(["board"])
+        status = issue_claim.main(["board", "--json"])
 
         assert status == 2
         assert capsys.readouterr().err == (
@@ -2172,9 +2163,10 @@ class TestCliStateRefForge:
         assert record.parent is None
         assert record.state is items.RecordState.OPEN
 
-        board_status = issue_claim.main(["board"])
+        board_status = issue_claim.main(["board", "--json"])
         assert board_status == 0
-        assert "Fresh Item" in capsys.readouterr().out
+        titles = {item["title"] for item in json.loads(capsys.readouterr().out)["items"]}
+        assert "Fresh Item" in titles
 
     def test_item_new_scope_writes_the_field_canonically(
         self,
@@ -2309,7 +2301,8 @@ class TestCliStateRefForge:
         worktree: Path,
     ) -> None:
         """Issue #285 proof 2 (parent): `--parent aco-…` sets `record.parent`,
-        and a fresh `aco board` shows the new child under the container."""
+        and a fresh `aco board --json` shows the new child under the
+        container."""
         self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, _item_files())
 
         status = issue_claim.main(
@@ -2326,9 +2319,11 @@ class TestCliStateRefForge:
         record = _decoded_record(stored, printed)
         assert record.parent == CONTAINER_ID
 
-        board_status = issue_claim.main(["board"])
+        board_status = issue_claim.main(["board", "--json"])
         assert board_status == 0
-        assert "Fresh Child" in capsys.readouterr().out
+        payload = json.loads(capsys.readouterr().out)
+        child = next(item for item in payload["items"] if item["title"] == "Fresh Child")
+        assert child["container_parent"] == CONTAINER_NUMBER
 
     def test_item_new_refuses_an_unknown_parent(
         self,
@@ -2895,11 +2890,11 @@ class TestCliStateRefForge:
         assert record.closed_at.startswith(datetime.now(UTC).date().isoformat())
         assert record.updated_at == record.closed_at
 
-        board_status = issue_claim.main(["board"])
+        board_status = issue_claim.main(["board", "--json"])
         assert board_status == 0
-        board_out = capsys.readouterr().out
-        assert "Blocker" not in board_out
-        assert "Target" in board_out
+        payload = json.loads(capsys.readouterr().out)
+        assert CLOSE_BLOCKER_NUMBER not in {item["number"] for item in payload["items"]}
+        assert CLOSE_TARGET_NUMBER in {item["number"] for item in payload["items"]}
 
         next_status = issue_claim.main(["next"])
         assert next_status == 0
@@ -3152,10 +3147,8 @@ class TestCliStateRefForge:
         assert items.ITEM_ID_PATTERN.fullmatch(container_id)
         container_number = items.item_number(container_id)
 
-        container_template = _run_ok(["body", "--template", "--kind", "container"], capsys)
-        assert container_template == board.BLOCK_CONTAINER_SKELETON
         container_body = _filled_body(
-            container_template,
+            board.BLOCK_CONTAINER_SKELETON,
             now="Land every slice.",
             next_step="Cut the first slice.",
             done_when="Both slices are closed.",
@@ -3173,10 +3166,8 @@ class TestCliStateRefForge:
         assert items.ITEM_ID_PATTERN.fullmatch(child_id)
         child_number = items.item_number(child_id)
 
-        child_template = _run_ok(["body", "--template"], capsys)
-        assert child_template == board.BLOCK_CHILD_SKELETON
         child_body = _filled_body(
-            child_template,
+            board.BLOCK_CHILD_SKELETON,
             now="Build slice one.",
             next_step="Ship slice one.",
             done_when="Slice one is merged.",
@@ -3188,7 +3179,8 @@ class TestCliStateRefForge:
         monkeypatch.setattr(sys, "stdin", io.StringIO(child_body))
         assert _run_ok(["item", "edit", child_id], capsys) == f"EDITED {child_id}\n"
 
-        assert "Ship slice one" in _run_ok(["board"], capsys)
+        board_payload = json.loads(_run_ok(["board", "--json"], capsys))
+        assert "Ship slice one" in {item["title"] for item in board_payload["items"]}
 
         next_out = _run_ok(["next"], capsys)
         assert child_id in next_out

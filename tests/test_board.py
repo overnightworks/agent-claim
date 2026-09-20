@@ -992,28 +992,6 @@ def test_frozen_item_leaves_actionable_and_thaws_when_the_marker_is_removed() ->
     assert item.score == thawed_item.score
 
 
-def test_frozen_item_score_stays_visible_on_the_rendered_board() -> None:
-    frozen = board_issue(
-        301, "Highest scored", complete_contract("Claim #301.", frozen_until=FROZEN_UNTIL)
-    )
-    projected = projected_board(
-        (frozen,),
-        (),
-        (),
-        (),
-        board.BoardConfig(),
-        now=datetime(2026, 8, 31, tzinfo=UTC),
-    )
-    item = projected.items[0]
-    rendered = board.render(projected)
-
-    frozen_row = next(line for line in rendered.splitlines() if "#301" in line)
-    assert str(item.score) in frozen_row
-    assert f"frozen: {FROZEN_TRIGGER}" in frozen_row
-    ready_now_section = rendered.split("READY NOW\n", 1)[1].split("\n\nSTALE", 1)[0]
-    assert "#301" not in ready_now_section
-
-
 def test_a_second_agent_claim_fence_inside_a_documentation_fence_is_not_read() -> None:
     """A body may document the block grammar in a fenced example; only one
     fence is ever open at a time, so the inner delimiter never opens a second
@@ -1182,7 +1160,7 @@ def test_board_reports_when_the_last_stale_dependency_closed() -> None:
     assert item["freed_days"] == 2
 
 
-def test_board_text_and_json_show_freed_on_and_freed_days() -> None:
+def test_board_json_shows_freed_on_and_freed_days() -> None:
     freed, freed_dependencies = blocked_issue(
         20,
         "Freed",
@@ -1202,19 +1180,6 @@ def test_board_text_and_json_show_freed_on_and_freed_days() -> None:
         dependencies={**freed_dependencies, **blocked_dependencies},
         now=datetime(2026, 9, 5, tzinfo=UTC),
     )
-
-    rendered = board.render(projected)
-    header, *rows = rendered.splitlines()
-    freed_start = header.index("FREED")
-    claim_start = header.index("CLAIM")
-
-    def freed_cell(title: str) -> str:
-        row = next(line for line in rows if line.endswith(title))
-        return row[freed_start:claim_start].strip()
-
-    assert freed_cell("Freed") == "2026-09-03 (2 d)"
-    assert freed_cell("Blocked") == "-"
-    assert freed_cell("Never blocked") == "-"
 
     items = {item["number"]: item for item in _payload_items(board.board_payload(projected))}
     assert items[20]["freed_on"] == "2026-09-03"
@@ -1446,13 +1411,6 @@ def test_board_shows_container_progress_and_refuses_it_as_actionable() -> None:
         1, 2, (board.ChildItem(121, board.ChildState.OPEN, blocked_by=()),)
     )
 
-    rendered = board.render(projected)
-    header = rendered.splitlines()[0]
-    assert "KIND" in header
-    assert "container 1/2" in rendered
-    assert "CONTAINERS" in rendered
-    assert "#120 1/2 closed; open: #121" in rendered
-
     payload = board.board_payload(projected)
     container_json = next(item for item in _payload_items(payload) if item["number"] == 120)
     child_json = next(item for item in _payload_items(payload) if item["number"] == 121)
@@ -1500,8 +1458,6 @@ def test_board_shows_a_container_child_blocked_by_another_open_issue() -> None:
         children={120: (board.ChildItem(121, board.ChildState.OPEN),)},
     )
 
-    assert "#120 0/1 closed; open: #121 (blocked by #130)" in board.render(projected)
-
     payload = board.board_payload(projected)
     container_json = next(item for item in _payload_items(payload) if item["number"] == 120)
     assert _as_dict(container_json["container"])["open_children"] == [
@@ -1509,68 +1465,22 @@ def test_board_shows_a_container_child_blocked_by_another_open_issue() -> None:
     ]
 
 
-def test_board_names_a_container_childs_blocker_by_the_state_ref_id_under_the_pin() -> None:
-    """The same open-children note (issue #300 residual 2, `_open_child_cell`)
-    prints `item_label`'s own id under `storage = "state-ref"` for both the
-    child and its blocker -- never the bare `#n` the `Storage.GITHUB` case
-    above still shows."""
-    container = board.Issue(
-        120,
-        "Container",
-        (),
-        "",
-        "2026-08-20T00:00:00Z",
-        "2026-08-20T00:00:00Z",
-        kind=board.ItemKind.CONTAINER,
-        children_closed=0,
-        children_total=1,
-    )
-    blocker = board_issue(130, "Blocker", complete_contract("Ship it."))
-    open_child, child_dependencies = blocked_issue(
-        121, "Open child", block_dependency(130), next_step="Ship it."
-    )
-
-    projected = projected_board(
-        (container, blocker, open_child),
-        (),
-        (),
-        (),
-        board.BoardConfig(storage=board.Storage.STATE_REF),
-        dependencies=child_dependencies,
-        now=datetime(2026, 8, 21, tzinfo=UTC),
-        children={120: (board.ChildItem(121, board.ChildState.OPEN),)},
-    )
-    child_id = board.item_label(121, board.Storage.STATE_REF)
-    blocker_id = board.item_label(130, board.Storage.STATE_REF)
-    container_id = board.item_label(120, board.Storage.STATE_REF)
-
-    rendered = board.render(projected, storage=board.Storage.STATE_REF)
-
-    assert f"{container_id} 0/1 closed; open: {child_id} (blocked by {blocker_id})" in rendered
-    assert "#120" not in rendered
-    assert "#121" not in rendered
-    assert "#130" not in rendered
-
-
 @pytest.mark.parametrize(
-    ("storage", "blocker_label", "bare_blocker_number"),
+    ("storage", "blocker_label"),
     [
-        pytest.param(board.Storage.GITHUB, "#9", None, id="github"),
+        pytest.param(board.Storage.GITHUB, "#9", id="github"),
         pytest.param(
-            board.Storage.STATE_REF,
-            board.item_label(9, board.Storage.STATE_REF),
-            "#9",
-            id="state-ref",
+            board.Storage.STATE_REF, board.item_label(9, board.Storage.STATE_REF), id="state-ref"
         ),
     ],
 )
-def test_a_blocked_items_reason_and_blockers_column_print_the_id_under_the_pin(
-    storage: board.Storage, blocker_label: str, bare_blocker_number: str | None
+def test_a_blocked_items_reason_names_the_blocker_by_the_id_under_the_pin(
+    storage: board.Storage, blocker_label: str
 ) -> None:
-    """`item.actionable_reason` (`_claim_or_completeness_reason`) and the row
-    table's `BLOCKERS` column (`board.render`) both name an open blocker by
-    `open_blocker_label`'s own `storage`-gated id (issue #300 residual 2,
-    #292's own rule) -- unchanged `#n` under the default `Storage.GITHUB`."""
+    """`item.actionable_reason` (`_claim_or_completeness_reason`) names an
+    open blocker by `open_blocker_label`'s own `storage`-gated id (issue
+    #300 residual 2, #292's own rule) -- unchanged `#n` under the default
+    `Storage.GITHUB`."""
     blocked, dependencies = blocked_issue(10, "Blocked", block_dependency(9))
     blocker = board_issue(9, "Blocker", complete_contract("Resolve it."))
     projected = projected_board(
@@ -1585,10 +1495,6 @@ def test_a_blocked_items_reason_and_blockers_column_print_the_id_under_the_pin(
     item = next(item for item in projected.items if item.number == 10)
 
     assert item.actionable_reason == f"blocked by {blocker_label}"
-    rendered = board.render(projected, storage=storage)
-    assert blocker_label in rendered
-    if bare_blocker_number is not None:
-        assert bare_blocker_number not in rendered
 
 
 def test_board_json_splits_a_container_childs_foreign_blocker() -> None:
@@ -1642,26 +1548,6 @@ def test_board_json_splits_a_container_childs_foreign_blocker() -> None:
             "foreign_blockers": ["overnightworks/other-repo#9"],
         }
     ]
-
-
-def test_board_kind_cell_shows_a_plain_kind_for_a_non_container_item() -> None:
-    """`_kind_cell` names a real kind (task/bug/feature) plainly, without the
-    container's "closed/total" progress suffix that only a container gets."""
-    task = board.Issue(
-        90,
-        "Fix the thing",
-        (),
-        "",
-        "2026-08-20T00:00:00Z",
-        "2026-08-20T00:00:00Z",
-        kind=board.ItemKind.TASK,
-    )
-
-    projected = projected_board((task,), (), (), (), board.BoardConfig())
-
-    header, row = board.render(projected).splitlines()[:2]
-    kind_start = header.index("KIND")
-    assert row[kind_start:].startswith("task")
 
 
 def test_board_json_carries_a_nonzero_priority_order_for_a_critical_label() -> None:
@@ -1825,7 +1711,7 @@ def test_container_progress_raises_when_no_open_child_contradicts_an_unclosed_su
         projected_board((container,), (), (), (), raised_argument_1, now=raised_argument_2)
 
 
-def test_board_json_and_render_report_an_uncut_slice_entry() -> None:
+def test_board_json_reports_an_uncut_slice_entry() -> None:
     container = board.Issue(
         160,
         "Container",
@@ -1846,7 +1732,6 @@ def test_board_json_and_render_report_an_uncut_slice_entry() -> None:
     assert payload["uncut"] == [
         {"item": 160, "rows": [{"index": 1, "title": "Undispatched slice"}]}
     ]
-    assert "UNCUT\n#160: rows 1 uncut" in board.render(projected)
 
 
 def test_board_json_carries_a_scoped_uncut_slice_row_canonically() -> None:
@@ -1901,38 +1786,7 @@ def test_board_json_carries_a_scoped_uncut_slice_row_canonically() -> None:
     ]
 
 
-def test_render_names_an_uncut_slice_by_the_state_ref_id_under_the_pin() -> None:
-    """`UNCUT` prints `item_label`'s own id under `storage = "state-ref"`
-    (issue #300 residual 2), the same id `_uncut_line` names every other
-    item by -- never the bare `#n` `board.render` still shows under the
-    default `Storage.GITHUB` above."""
-    container = board.Issue(
-        160,
-        "Container",
-        (),
-        complete_contract("Cut it.", slice=slice_entries("Undispatched slice")),
-        "2026-08-20T00:00:00Z",
-        "2026-08-20T00:00:00Z",
-        kind=board.ItemKind.CONTAINER,
-        children_closed=0,
-        children_total=0,
-    )
-    projected = projected_board(
-        (container,),
-        (),
-        (),
-        (),
-        board.BoardConfig(storage=board.Storage.STATE_REF),
-        now=datetime(2026, 8, 21, tzinfo=UTC),
-    )
-
-    rendered = board.render(projected, storage=board.Storage.STATE_REF)
-
-    assert f"UNCUT\n{board.item_label(160, board.Storage.STATE_REF)}: rows 1 uncut" in rendered
-    assert "#160" not in rendered
-
-
-def test_board_json_and_render_name_several_uncut_rows_by_index() -> None:
+def test_board_json_names_several_uncut_rows_by_index() -> None:
     """`#122`'s own shape (06.09.2026): several still-open rows are named
     by index, not by re-deriving it from a name string."""
     container = board.Issue(
@@ -1974,7 +1828,6 @@ def test_board_json_and_render_name_several_uncut_rows_by_index() -> None:
             ],
         }
     ]
-    assert "UNCUT\n#122: rows 5, 6, 7 uncut" in board.render(projected)
 
 
 def test_next_action_skips_a_container_that_still_holds_an_open_child() -> None:
@@ -2117,20 +1970,6 @@ def test_landing_rows_orders_equal_timestamp_rows_by_item_number() -> None:
     rows = board.landing_rows((higher, lower), (), REPOSITORY, board.Storage.GITHUB)
 
     assert tuple(row.item for row in rows) == (81, 82)
-
-
-def test_render_shows_a_trunk_landing_row_with_its_short_sha() -> None:
-    """Issue #371: `board`'s text output prints a `LANDUNGEN` row for a
-    trunk-trailer landing under `<label> <date> <short sha>`, independent of
-    any pull request."""
-    issue = board_issue(80, "Trunk landed", complete_contract("Ship #80."))
-    trunk_item = board.TrunkLandingItem(80, "0123456789abcdef", datetime(2026, 8, 29, tzinfo=UTC))
-
-    projected = projected_board(
-        (issue,), (), (), (), board.BoardConfig(), trunk_landing_items=(trunk_item,)
-    )
-
-    assert "LANDUNGEN\n#80 2026-08-29 0123456" in board.render(projected)
 
 
 def test_an_epic_is_in_flight_while_an_open_slice_touches_it_without_closing_it() -> None:
@@ -2988,25 +2827,6 @@ def test_closable_container_number_decides_by_kind_open_children_and_uncut_rows(
     assert board.closable_container_number(parent, children, board.Storage.GITHUB) == expected
 
 
-def test_render_shows_projection_presence_and_dash_next_for_a_valid_block_skeleton() -> None:
-    skeleton = 'version = 1\nnow = ""\nnext = ""\ndone_when = ""\n'
-    issue = board_issue(220, "Skeleton", agent_claim_body(skeleton))
-    projected = projected_board(
-        (issue,),
-        (),
-        (),
-        (),
-        board.BoardConfig(),
-        now=datetime(2026, 8, 21, tzinfo=UTC),
-    )
-
-    line = next(line for line in board.render(projected).splitlines() if f"#{issue.number}" in line)
-    cells = re.split(r"\s{2,}", line.strip())
-
-    assert cells[5] == "Now, Next, Done when"
-    assert cells[7] == "-"
-
-
 def test_a_complete_block_item_is_body_complete_with_no_dependency_projection() -> None:
     issue = board_issue(230, "Complete block item", agent_claim_body(MINIMAL_BLOCK_TOML))
     projected = projected_board(
@@ -3370,7 +3190,6 @@ def test_ruling_freshness_counts_trunk_landings_after_the_ruled_on_date(
 
     assert item.ruling_landings == expected_landings
     assert item.ruling_old is expected_old
-    assert f"ruled {expected_landings}" in board.render(projected)
 
 
 def test_each_item_carries_its_own_ruling_age() -> None:
@@ -3470,7 +3289,6 @@ def test_board_recovers_an_open_item_a_merged_pull_request_already_landed() -> N
     )
 
     assert [item.number for item in projected.recovery] == [90, 91]
-    assert f"RECOVERY ({board.RECOVERY_STEP})\n#90" in board.render(projected)
 
 
 def test_a_non_ascii_digit_in_a_hash_reference_is_not_an_issue_number() -> None:
@@ -3773,7 +3591,7 @@ def test_build_board_measurements_section_reports_classes_dates_and_unfinished()
     assert entry.last_event_at == datetime(2026, 8, 12, 6, tzinfo=UTC)
 
 
-def test_render_shows_no_measurements_line_when_nothing_is_measured() -> None:
+def test_measurements_lines_shows_no_measurements_line_when_nothing_is_measured() -> None:
     projected = projected_board(
         (_sized_item(205, "M"),),
         (),
@@ -3783,10 +3601,10 @@ def test_render_shows_no_measurements_line_when_nothing_is_measured() -> None:
         now=datetime(2026, 8, 21, tzinfo=UTC),
     )
 
-    rendered = board.render(projected)
+    lines = board.measurements_lines(projected.measurements)
 
-    assert "keine Messungen seit 2026-08-21" in rendered
-    assert "Messungen (Stand" not in rendered
+    assert lines[0] == "keine Messungen seit 2026-08-21"
+    assert not any(line.startswith("Messungen (Stand") for line in lines)
 
 
 def test_board_json_carries_estimate_and_measurements() -> None:
@@ -3863,7 +3681,7 @@ def test_build_board_counts_a_closed_items_own_completed_lane_into_its_size_clas
     )
 
 
-def test_render_shows_the_unparsed_lifecycle_commit_count() -> None:
+def test_measurements_lines_shows_the_unparsed_lifecycle_commit_count() -> None:
     """A claim-shaped `refs/aco/state` commit `store.claim_lifecycle` could
     not read is counted, never silently dropped (issue #357 R1)."""
     projected = projected_board(
@@ -3884,11 +3702,12 @@ def test_render_shows_the_unparsed_lifecycle_commit_count() -> None:
     )
 
     assert projected.measurements.unparsed == 2
-    rendered = board.render(projected)
-    assert "2 Commits ohne lesbaren Item-Trailer" in rendered
+    assert "2 Commits ohne lesbaren Item-Trailer" in board.measurements_lines(
+        projected.measurements
+    )
 
 
-def test_render_shows_the_unparsed_count_even_with_no_measured_class() -> None:
+def test_measurements_lines_shows_the_unparsed_count_even_with_no_measured_class() -> None:
     """`unparsed` never hides behind `classes` being empty (BOARD-30, issue
     #357 R2): a board with no measured lane at all still surfaces every
     unparsed commit, alongside the "keine Messungen" sentence rather than
@@ -3908,9 +3727,6 @@ def test_render_shows_the_unparsed_count_even_with_no_measured_class() -> None:
     lines = board.measurements_lines(projected.measurements)
     assert lines[0] == "keine Messungen seit 2026-08-21"
     assert "3 Commits ohne lesbaren Item-Trailer" in lines
-    rendered = board.render(projected)
-    assert "keine Messungen seit 2026-08-21" in rendered
-    assert "3 Commits ohne lesbaren Item-Trailer" in rendered
 
 
 def test_estimate_changes_only_when_its_own_size_classs_measured_lanes_change() -> None:

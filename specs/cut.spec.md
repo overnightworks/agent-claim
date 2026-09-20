@@ -72,7 +72,7 @@ with `--json` also `specs/release.spec.md`'s own `{"ok": false, "error":
 
 - [ ] [CUT-11] A successful cut prints `CUT #<n>[ row <idx>] -> #<child>`, the `row <idx>` clause present only when a row was linked, exit `0` (see E-CUT-02, E-CUT-04).
 - [ ] [CUT-12] `aco cut ... --json` prints `{"container": <n>, "row": <idx-or-null>, "child": <child>}`, `"adopted": true` appended only when CUT-13 applies (see E-CUT-02).
-- [ ] [CUT-25] The fresh child's body is a `Parent: #<n>` line, a blank line, `body --template`'s unfilled `task` skeleton (BDY-04), plus `scope` from CUT-20/CUT-23 (see E-CUT-02, E-CUT-06).
+- [ ] [CUT-25] The fresh child's body is a `Parent: #<n>` line, a blank line, the same unfilled `task` skeleton `item new` writes (ITEM-01), plus `scope` from CUT-20/CUT-23 (see E-CUT-02, E-CUT-06).
 
 ## Adopting instead of duplicating
 
