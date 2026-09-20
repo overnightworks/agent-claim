@@ -1370,9 +1370,9 @@ class TestCliStateRefForge:
         assert rulings_out.splitlines()[0].startswith(f"{RULABLE_ID} ")
         assert f"#{RULABLE_NUMBER}" not in rulings_out
 
-        monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
+        monkeypatch.setattr(checkout, "_validate_checkout", lambda request, directory=None: None)
         monkeypatch.setattr(checkout, "_scope_directories", lambda paths, **_kwargs: ())
-        monkeypatch.setattr(checkout, "versioned_paths", lambda: ("README",))
+        monkeypatch.setattr(checkout, "versioned_paths", lambda **_kwargs: ("README",))
         claimed = issue_claim.main(
             [
                 "claim",
@@ -1499,9 +1499,9 @@ class TestCliStateRefForge:
         unrelated to this proof and stubbed the same way every other
         `claim` test stubs it."""
         self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, _item_files())
-        monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
+        monkeypatch.setattr(checkout, "_validate_checkout", lambda request, directory=None: None)
         monkeypatch.setattr(checkout, "_scope_directories", lambda paths, **_kwargs: ())
-        monkeypatch.setattr(checkout, "versioned_paths", lambda: ("README",))
+        monkeypatch.setattr(checkout, "versioned_paths", lambda **_kwargs: ("README",))
 
         claimed = issue_claim.main(
             [
@@ -2412,9 +2412,9 @@ class TestCliStateRefForge:
         assert edited == 0
         capsys.readouterr()
 
-        monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
+        monkeypatch.setattr(checkout, "_validate_checkout", lambda request, directory=None: None)
         monkeypatch.setattr(checkout, "_scope_directories", lambda paths, **_kwargs: ())
-        monkeypatch.setattr(checkout, "versioned_paths", lambda: ("README",))
+        monkeypatch.setattr(checkout, "versioned_paths", lambda **_kwargs: ("README",))
         claimed = issue_claim.main(
             [
                 "claim",
@@ -2499,9 +2499,9 @@ class TestCliStateRefForge:
         in this class already exercises."""
         item_files = {**_item_files(), **_rulable_item_files()}
         self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, item_files)
-        monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
+        monkeypatch.setattr(checkout, "_validate_checkout", lambda request, directory=None: None)
         monkeypatch.setattr(checkout, "_scope_directories", lambda paths, **_kwargs: ())
-        monkeypatch.setattr(checkout, "versioned_paths", lambda: ("README",))
+        monkeypatch.setattr(checkout, "versioned_paths", lambda **_kwargs: ("README",))
 
         claimed = issue_claim.main(
             [
@@ -2963,9 +2963,9 @@ class TestCliStateRefForge:
         self._live_state_ref_checkout(
             monkeypatch, tmp_path, bare_remote, worktree, _close_scenario_item_files()
         )
-        monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
+        monkeypatch.setattr(checkout, "_validate_checkout", lambda request, directory=None: None)
         monkeypatch.setattr(checkout, "_scope_directories", lambda paths, **_kwargs: ())
-        monkeypatch.setattr(checkout, "versioned_paths", lambda: ("README",))
+        monkeypatch.setattr(checkout, "versioned_paths", lambda **_kwargs: ("README",))
         claimed = issue_claim.main(
             [
                 "claim",
@@ -3076,9 +3076,9 @@ class TestCliStateRefForge:
         and an expectation ruled -- each step asserted by the exact
         sentence README says it prints."""
         self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, {})
-        monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
+        monkeypatch.setattr(checkout, "_validate_checkout", lambda request, directory=None: None)
         monkeypatch.setattr(checkout, "_scope_directories", lambda paths, **_kwargs: ())
-        monkeypatch.setattr(checkout, "versioned_paths", lambda: ("README",))
+        monkeypatch.setattr(checkout, "versioned_paths", lambda **_kwargs: ("README",))
 
         bootstrap_out = _run_ok(["bootstrap"], capsys).strip()
         assert protocol.COMMIT_PATTERN.fullmatch(bootstrap_out)

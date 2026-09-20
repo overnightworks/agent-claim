@@ -1599,6 +1599,16 @@ def test_github_adapter_fails_loud_on_a_malformed_default_branch() -> None:
         client.default_branch()
 
 
+def test_github_adapter_refuses_a_default_branch_over_the_length_bound() -> None:
+    overlong = "a" * 300
+    client = GitHubForge(
+        github._repository_id(REPOSITORY), run=lambda arguments, input_data=None: overlong
+    )
+
+    with pytest.raises(ClaimError, match="malformed default branch"):
+        client.default_branch()
+
+
 API_REPOSITORY_URL = f"https://api.github.com/repos/{REPOSITORY}"
 
 

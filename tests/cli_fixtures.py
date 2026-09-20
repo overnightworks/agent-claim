@@ -15,8 +15,27 @@ from pathlib import Path
 import pytest
 from board_fixtures import BASE
 
-from agent_coordination import checkout, github, store
+from agent_coordination import checkout, github, process, store
 from agent_coordination.protocol import ClaimError
+
+
+def _stub_one_git_call(
+    monkeypatch: pytest.MonkeyPatch, arguments: list[str], *, exit_status: int, stderr: str
+) -> None:
+    """Force exactly one `checkout._git_run` argv to a chosen failure exit,
+    every other call reaching the real launcher -- shared by
+    `test_checkout.py` and `test_cli.py` (issue #322): a git-level failure
+    (an unreachable remote, a colliding worktree path, an unmerged branch
+    `git branch -d` itself refuses, ...) is cheaper to force this way than
+    to reproduce with real git state."""
+    real_git_run = checkout._git_run
+
+    def fake(call_arguments: list[str], *, directory: Path | None = None) -> process.CapturedResult:
+        if call_arguments == arguments:
+            return process.CapturedResult(exit_status, b"", stderr.encode())
+        return real_git_run(call_arguments, directory=directory)
+
+    monkeypatch.setattr(checkout, "_git_run", fake)
 
 
 def _real_git(repository: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
@@ -217,4 +236,4 @@ def arrange_scope_width(
     )
     monkeypatch.setattr(checkout, "versioned_paths", lambda **_kwargs: versioned or ())
     if validate_checkout:
-        monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
+        monkeypatch.setattr(checkout, "_validate_checkout", lambda request, directory=None: None)

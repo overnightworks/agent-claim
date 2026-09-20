@@ -25,7 +25,8 @@ ISSUELESS_LANE_BRANCH_PREFIXES = ("docs/", "fix/")
 CLAIM_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 RESOURCE_NAME_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9._-]{0,63}")
 COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
-BRANCH_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,254}")
+BRANCH_NAME_MAX_LENGTH = 255
+BRANCH_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*")
 REPOSITORY_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_.-]{1,100}")
 # RFC 3339 UTC, second precision -- the one timestamp shape a forge issue's
 # `created_at`/`updated_at`, a state-ref item's `[record]` fields, and this
@@ -231,11 +232,18 @@ def _identity_summary(identity: ClaimIdentity, branch: str) -> str:
     return f"lane {branch!r}" if isinstance(identity, LaneIdentity) else f"issue #{identity.issue}"
 
 
-def _valid_branch(payload: dict[str, object]) -> str:
-    branch = _required_text(payload, "branch", maximum=255)
+def is_safe_branch_name(branch: str) -> bool:
+    """Whether `branch` is a safe Git ref name: the one rule `_valid_branch`
+    enforces on a stored claim marker, factored out so `start` (issue #322)
+    can hold a freshly built branch name to the identical rule -- including
+    the same `BRANCH_NAME_MAX_LENGTH` bound, not a shape check that merely
+    happened to cap length the same way through an unrelated regex quantifier
+    -- before its first `git worktree add`, never a second, drifted copy of
+    the same shape (review finding: the pre-write check omitted the bound)."""
     segments = branch.split("/")
-    if (
-        BRANCH_PATTERN.fullmatch(branch) is None
+    return not (
+        len(branch) > BRANCH_NAME_MAX_LENGTH
+        or BRANCH_PATTERN.fullmatch(branch) is None
         or branch.startswith("-")
         or branch.endswith(("/", "."))
         or ".." in branch
@@ -245,7 +253,12 @@ def _valid_branch(payload: dict[str, object]) -> str:
             not segment or segment.startswith(".") or segment.endswith((".", ".lock"))
             for segment in segments
         )
-    ):
+    )
+
+
+def _valid_branch(payload: dict[str, object]) -> str:
+    branch = _required_text(payload, "branch", maximum=BRANCH_NAME_MAX_LENGTH)
+    if not is_safe_branch_name(branch):
         raise InvalidClaimMarkerError(f"claim marker branch is not a safe Git ref: {branch!r}")
     return branch
 
