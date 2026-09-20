@@ -13181,7 +13181,7 @@ def test_body_check_accepts_a_valid_size(capsys: pytest.CaptureFixture[str]) -> 
 
 def test_body_check_refuses_an_invalid_size(capsys: pytest.CaptureFixture[str]) -> None:
     """BODY-59 (issue #357): an out-of-grammar `size` is `body malformed`,
-    exit `1`, the same sentence for an invalid string or a non-scalar value."""
+    exit `2`, the same sentence for an invalid string or a non-scalar value."""
     body_file = io.StringIO(agent_claim_body(f'{MINIMAL_BLOCK_TOML}size = "XL"\n'))
     with pytest.MonkeyPatch.context() as monkeypatch:
         monkeypatch.setattr(sys, "stdin", body_file)
