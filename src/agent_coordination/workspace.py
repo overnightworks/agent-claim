@@ -153,29 +153,101 @@ def default_board_token_path(environment: Mapping[str, str], home: Path | None =
 def board_token(path: Path, *, mint_new: bool = False) -> str:
     """`path`'s persistent token: read back when it already exists and a
     fresh one was not requested, minted (`secrets.token_urlsafe`, written
-    0600 and atomically) otherwise -- `mint_new` is `--new-token`'s own
-    request to replace it. An existing file whose mode has drifted from
-    0600 refuses by name rather than being trusted: the token is the one
-    secret this command holds, and it is never logged anywhere but the one
-    printed URL line."""
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if not mint_new and path.exists():
-        return _read_board_token(path)
+    0600) otherwise -- `mint_new` is `--new-token`'s own request to replace
+    it. An existing file whose mode has drifted from 0600, is not a regular
+    file this user owns, or is a symlink refuses by name rather than being
+    trusted: the token is the one secret this command holds, and it is
+    never logged anywhere but the one printed URL line. `path.parent` is
+    checked the same way every call, not only when this call creates it, so
+    an operator-shared `~/.config/aco` left group- or world-writable is
+    never silently trusted either."""
+    _ensure_board_token_directory(path.parent)
+    if mint_new:
+        token = secrets.token_urlsafe(BOARD_TOKEN_BYTES)
+        _atomic_write(path, (token + "\n").encode())
+        return token
+    return _first_board_token(path)
+
+
+def _first_board_token(path: Path) -> str:
+    """The token at `path`, minting it first when nothing is there yet.
+    `O_CREAT | O_EXCL` makes that mint atomic across processes: the loser of
+    two concurrent first starts hits `FileExistsError` and reads the
+    winner's file back instead of writing a second, diverging token."""
     token = secrets.token_urlsafe(BOARD_TOKEN_BYTES)
-    _atomic_write(path, (token + "\n").encode())
+    try:
+        descriptor = os.open(
+            path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, _PRIVATE_FILE_MODE
+        )
+    except FileExistsError:
+        return _read_board_token(path)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(token + "\n")
     return token
 
 
 _PRIVATE_FILE_MODE = 0o600
+_BOARD_TOKEN_CONTENT_PATTERN = re.compile(r"[A-Za-z0-9_-]{43}\n?")
+"""Exactly one `secrets.token_urlsafe(32)` value (43 url-safe characters),
+with or without the trailing newline `board_token` itself always writes --
+`_first_board_token`'s own atomic mint above, or a hand-edited file, are the
+only ways this file's content can differ, and either is refused rather than
+trusted into an authorization comparison."""
+
+
+def _invalid_board_token_message(path: Path) -> str:
+    return f"board token at {path} is not a valid token; pass --new-token"
 
 
 def _read_board_token(path: Path) -> str:
-    mode = stat.S_IMODE(path.lstat().st_mode)
-    if mode != _PRIVATE_FILE_MODE:
+    """`path`'s token, opened `O_NOFOLLOW` and validated on the open
+    descriptor's own `fstat` -- a regular file, owned by this user, mode
+    0600 -- rather than on a separate `lstat`/`read_text` pair a concurrent
+    replace or a symlink swap could race between."""
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as error:
+        raise WorkspaceError(_invalid_board_token_message(path)) from error
+    with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+        metadata = os.fstat(handle.fileno())
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
+            raise WorkspaceError(_invalid_board_token_message(path))
+        mode = stat.S_IMODE(metadata.st_mode)
+        if mode != _PRIVATE_FILE_MODE:
+            raise WorkspaceError(
+                f"board token file {path} must be private (mode 0600, found {mode:04o})"
+            )
+        contents = handle.read()
+    if not _BOARD_TOKEN_CONTENT_PATTERN.fullmatch(contents):
+        raise WorkspaceError(_invalid_board_token_message(path))
+    return contents.rstrip("\n")
+
+
+def _ensure_board_token_directory(path: Path) -> None:
+    """`board_token`'s own parent-directory guard (issue #388): the same
+    symlink/owner/mode shape `_ensure_private_directory` enforces for the
+    login launcher below, but naming the path and the actual mode in its
+    refusal -- the token is the one secret this directory holds, so an
+    existing, wrongly-shared `~/.config/aco` is checked exactly like a
+    freshly created one; `Path.mkdir(exist_ok=True)` never revisits an
+    existing directory's mode on its own."""
+    try:
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+        metadata = path.lstat()
+    except OSError as error:
+        raise WorkspaceError(f"cannot create board token directory {path}") from error
+    mode = stat.S_IMODE(metadata.st_mode)
+    unsafe = (
+        path.is_symlink()
+        or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or mode & 0o077
+    )
+    if unsafe:
         raise WorkspaceError(
-            f"board token file {path} must be private (mode 0600, found {mode:04o})"
+            f"board token directory {path} must be private and owned by this user "
+            f"(found mode {mode:04o})"
         )
-    return path.read_text(encoding="utf-8").strip()
 
 
 def login_desktop_path(environment: Mapping[str, str], home: Path | None = None) -> Path:

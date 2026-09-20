@@ -1,9 +1,10 @@
 """The loopback HTTP transport for `aco board --serve` (issue #280).
 
-This module owns bytes on the wire only: binding `127.0.0.1` to a
-caller-supplied persistent token (issue #388: `workspace.board_token` mints
-or reads it, `cli.py`'s `_board_server` is the one caller that resolves it),
-routing exactly the two paths the ruled form names, and turning a
+This module owns bytes on the wire only: binding `127.0.0.1`, then resolving
+a caller-supplied persistent token (issue #388: `workspace.board_token`
+mints or reads it, `cli.py`'s `_board_server` is the one caller that
+resolves it -- only after the bind, so a busy port never touches the token
+file), routing exactly the two paths the ruled form names, and turning a
 caller-supplied page renderer and rule writer into HTTP responses. It never
 reads or writes board state itself -- `cli.py` stays the one owner of
 "state -> page" (`board_html.render`) and "click -> ruled line"
@@ -220,22 +221,33 @@ class BoardServer:
     token: str
 
 
-def start(*, port: int, token: str, render_page: RenderPage, rule_item: RuleItem) -> BoardServer:
+ResolveToken = Callable[[], str]
+"""`start`'s own token source (issue #388): called only after the socket is
+already bound, so a busy port refuses before `cli._board_server`'s
+`workspace.board_token` ever reads or mints the persistent token file --
+`--new-token` against a busy port therefore changes nothing on disk."""
+
+
+def start(
+    *, port: int, resolve_token: ResolveToken, render_page: RenderPage, rule_item: RuleItem
+) -> BoardServer:
     """Bind `127.0.0.1:port` (`port=0` picks an ephemeral one) and return the
     running server, already listening, authenticating every request against
-    `token` -- the caller's persistent one (issue #388: `cli._board_server`
-    resolves it through `workspace.board_token` before this is ever called),
-    no longer minted here per start. A port already held by another process
-    refuses by name, naming its PID when `/proc` can identify it, instead of
-    a raw `OSError` -- `--restart` was considered and dropped in favor of
-    this refusal plus an ordinary `kill`, since the token no longer changes
-    on a fresh start anyway."""
+    `resolve_token`'s result. A port already held by another process refuses
+    by name, naming its PID when `/proc` can identify it, instead of a raw
+    `OSError` -- `--restart` was considered and dropped in favor of this
+    refusal plus an ordinary `kill`, since the token no longer changes on a
+    fresh start anyway. Binding first, before `resolve_token` ever runs,
+    means that refusal happens before any token file read or mint: a busy
+    port is left exactly as it was."""
     try:
-        httpd = _BoardHTTPServer((LOOPBACK_HOST, port), token, render_page, rule_item)
+        httpd = _BoardHTTPServer((LOOPBACK_HOST, port), "", render_page, rule_item)
     except OSError as error:
         if error.errno != EADDRINUSE:
             raise
         raise protocol.ClaimError(_busy_port_refusal(port)) from error
+    token = resolve_token()
+    httpd.token = token
     bound_port = httpd.server_address[1]
     url = f"http://{LOOPBACK_HOST}:{bound_port}{_ROOT_PATH}?{TOKEN_FIELD}={token}"
     return BoardServer(httpd=httpd, url=url, token=token)
@@ -259,14 +271,25 @@ def _pid_holding_loopback_port(port: int) -> int | None:
     return None if inode is None else _pid_owning_socket_inode(inode)
 
 
+_PROC_NET_TCP_LOCAL_ADDRESS_FIELD = 1
+_PROC_NET_TCP_STATE_FIELD = 3
 _PROC_NET_TCP_INODE_FIELD = 9
 """`/proc/net/tcp`'s own column layout: `sl local_address rem_address st
 tx_queue:rx_queue tr:tm->when retrnsmt uid timeout inode`, 0-indexed after
 `str.split()` -- the inode is the tenth column."""
+_LOOPBACK_ADDRESS_HEX = "0100007F"
+"""`/proc/net/tcp`'s own little-endian hex encoding of `127.0.0.1` --
+`board --serve` only ever binds that address, so a row naming a different
+local address, however matching the port, is never this process's own
+listener."""
+_TCP_LISTEN_STATE = "0A"
+"""`/proc/net/tcp`'s own `st` code for `TCP_LISTEN` -- the state a bound,
+listening server always carries; any other state on a matching port/address
+is a stale or unrelated row, not the process actually holding the bind."""
 
 
 def _loopback_socket_inode(port: int) -> str | None:
-    hex_port = format(port, "04X")
+    local_address = f"{_LOOPBACK_ADDRESS_HEX}:{format(port, '04X')}"
     try:
         rows = Path("/proc/net/tcp").read_text(encoding="utf-8").splitlines()[1:]
     except OSError:
@@ -275,7 +298,8 @@ def _loopback_socket_inode(port: int) -> str | None:
         fields = row.split()
         if (
             len(fields) > _PROC_NET_TCP_INODE_FIELD
-            and fields[1].rsplit(":", maxsplit=1)[-1] == hex_port
+            and fields[_PROC_NET_TCP_LOCAL_ADDRESS_FIELD] == local_address
+            and fields[_PROC_NET_TCP_STATE_FIELD] == _TCP_LISTEN_STATE
         ):
             return fields[_PROC_NET_TCP_INODE_FIELD]
     return None

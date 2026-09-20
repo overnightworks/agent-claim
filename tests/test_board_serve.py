@@ -495,6 +495,107 @@ def test_a_board_token_file_with_a_permissive_mode_refuses(
     assert "must be private (mode 0600, found 0644)" in capsys.readouterr().err
 
 
+def test_a_board_token_file_with_invalid_content_refuses(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #388: a token file whose content is not one 43-character
+    `secrets.token_urlsafe(32)` value refuses by name -- a hand-edited or
+    truncated file is never trusted into an authorization comparison."""
+    _served_board_environment(monkeypatch, tmp_path)
+    monkeypatch.setattr(board_serve._BoardHTTPServer, "serve_forever", lambda self: None)
+    _mint_and_capture_url(capsys, _free_loopback_port())
+    token_path = workspace.default_board_token_path(os.environ)
+    token_path.write_text("not-a-token\n", encoding="utf-8")
+    token_path.chmod(0o600)
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "board", "--serve", "--port", str(_free_loopback_port())]
+    )
+
+    assert exit_code == 2
+    assert (
+        f"board token at {token_path} is not a valid token; pass --new-token"
+        in capsys.readouterr().err
+    )
+
+
+def test_a_symlinked_board_token_file_refuses(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #388: a token path that is a symlink refuses -- opening it
+    `O_NOFOLLOW` means a symlink swap can never win a race with a read."""
+    _served_board_environment(monkeypatch, tmp_path)
+    monkeypatch.setattr(board_serve._BoardHTTPServer, "serve_forever", lambda self: None)
+    _mint_and_capture_url(capsys, _free_loopback_port())
+    token_path = workspace.default_board_token_path(os.environ)
+    real_token = tmp_path / "real-token"
+    real_token.write_text(token_path.read_text(encoding="utf-8"), encoding="utf-8")
+    real_token.chmod(0o600)
+    token_path.unlink()
+    token_path.symlink_to(real_token)
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "board", "--serve", "--port", str(_free_loopback_port())]
+    )
+
+    assert exit_code == 2
+    assert (
+        f"board token at {token_path} is not a valid token; pass --new-token"
+        in capsys.readouterr().err
+    )
+
+
+def test_a_group_writable_board_token_directory_refuses(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #388: `~/.config/aco` left group-writable by hand refuses,
+    naming the path and the actual mode, before the socket is ever bound --
+    an existing directory is checked exactly like a freshly created one."""
+    _served_board_environment(monkeypatch, tmp_path)
+    token_directory = workspace.default_board_token_path(os.environ).parent
+    token_directory.mkdir(parents=True, exist_ok=True)
+    token_directory.chmod(0o770)
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "board", "--serve", "--port", str(_free_loopback_port())]
+    )
+
+    assert exit_code == 2
+    assert (
+        f"board token directory {token_directory} must be private and owned by this user "
+        "(found mode 0770)" in capsys.readouterr().err
+    )
+
+
+def test_a_symlinked_board_token_directory_refuses(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #388: `~/.config/aco` itself being a symlink refuses, the same
+    as a symlinked token file -- neither is ever followed."""
+    _served_board_environment(monkeypatch, tmp_path)
+    config_home = Path(os.environ["XDG_CONFIG_HOME"])
+    config_home.mkdir(parents=True, exist_ok=True)
+    real_directory = tmp_path / "real-aco"
+    real_directory.mkdir(mode=0o700)
+    (config_home / "aco").symlink_to(real_directory)
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "board", "--serve", "--port", str(_free_loopback_port())]
+    )
+
+    assert exit_code == 2
+    assert "must be private and owned by this user" in capsys.readouterr().err
+
+
+def test_new_token_without_serve_refuses(capsys: pytest.CaptureFixture[str]) -> None:
+    """Issue #388: `--new-token` outside `--serve` refuses instead of
+    silently doing nothing -- there is no writer session to mint through."""
+    exit_code = issue_claim.main(["--repo", "example/agent-claim", "board", "--new-token"])
+
+    assert exit_code == 2
+    assert "--new-token requires --serve" in capsys.readouterr().err
+
+
 def _noop_render_page(_refused: str | None) -> str:
     return ""
 
@@ -516,7 +617,29 @@ def test_start_refuses_a_busy_port_naming_the_pid() -> None:
         with pytest.raises(protocol.ClaimError, match=expected_refusal):
             board_serve.start(
                 port=busy_port,
-                token="probe-token",
+                resolve_token=lambda: "probe-token",
+                render_page=_noop_render_page,
+                rule_item=_noop_rule_item,
+            )
+
+
+def test_start_refuses_a_busy_port_before_resolving_the_token() -> None:
+    """Issue #388 decision: `start` binds before it ever calls
+    `resolve_token`, so a busy port refuses without touching the persistent
+    token file -- `--new-token` against a busy port changes nothing."""
+
+    def _fail_to_resolve() -> str:
+        raise AssertionError("resolve_token must not run when the port is busy")
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as blocker:
+        blocker.bind(("127.0.0.1", 0))
+        blocker.listen(1)
+        busy_port = blocker.getsockname()[1]
+
+        with pytest.raises(protocol.ClaimError):
+            board_serve.start(
+                port=busy_port,
+                resolve_token=_fail_to_resolve,
                 render_page=_noop_render_page,
                 rule_item=_noop_rule_item,
             )
@@ -535,18 +658,46 @@ def test_start_reraises_an_os_error_that_is_not_address_in_use(
 
     with pytest.raises(OSError, match="denied"):
         board_serve.start(
-            port=0, token="probe-token", render_page=_noop_render_page, rule_item=_noop_rule_item
+            port=0,
+            resolve_token=lambda: "probe-token",
+            render_page=_noop_render_page,
+            rule_item=_noop_rule_item,
         )
 
 
-def test_busy_port_refusal_names_no_pid_when_no_proc_row_matches() -> None:
-    """BOARD-35's fallback sentence: a port this process never actually
-    bound has no `/proc/net/tcp` row of its own, so the refusal names no
-    PID rather than guessing one."""
-    free_port = _free_loopback_port()
+def test_busy_port_refusal_names_no_pid_when_proc_is_unreadable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """BOARD-35's fallback sentence, driven through the CLI end to end: a
+    real second process holds the port, but an unreadable `/proc/net/tcp`
+    (simulated by monkeypatching the path this module reads, never by
+    calling a private helper directly) means the occupant's PID cannot be
+    found, so the refusal names none rather than guessing one."""
+    _served_board_environment(monkeypatch, tmp_path)
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as blocker:
+        blocker.bind(("127.0.0.1", 0))
+        blocker.listen(1)
+        busy_port = blocker.getsockname()[1]
 
-    assert board_serve._busy_port_refusal(free_port) == (
-        f"port {free_port} is already in use; the owning process could not be identified"
+        def _raise(*_args: object, **_kwargs: object) -> str:
+            raise OSError("no /proc")
+
+        monkeypatch.setattr(Path, "read_text", _raise)
+
+        exit_code = issue_claim.main(
+            [
+                "--repo",
+                "example/agent-claim",
+                "board",
+                "--serve",
+                "--port",
+                str(busy_port),
+            ]
+        )
+
+    assert exit_code == 2
+    assert capsys.readouterr().err.strip() == (
+        f"ERROR: port {busy_port} is already in use; the owning process could not be identified"
     )
 
 

@@ -45,6 +45,8 @@ number, `<label>` an item as `specs/landing-grammar.spec.md` prints it.
 | `--serve`'s persistent loopback token, minted or read | — | — | — | BOARD-32, BOARD-33, BOARD-34 |
 | `--serve` naming a port another process already holds | — | — | — | BOARD-35 |
 | an already-ruled `[[expectation]]` line | — | — | BOARD-36, BOARD-37, BOARD-38 | BOARD-36, BOARD-37, BOARD-38 |
+| `--new-token` given without `--serve` | BOARD-39 | BOARD-39 | BOARD-39 | — |
+| the token file's own content, or its directory's mode | — | — | — | BOARD-40, BOARD-41 |
 
 ## The shared forge precondition
 
@@ -110,8 +112,11 @@ does, before either reads a single issue -- cited there, not restated.
 - [ ] [BOARD-23] A Ctrl-C during `--serve` exits `0` with only that one URL line ever printed and nothing on stderr.
 - [ ] [BOARD-32] BOARD-22's own token is read from `${XDG_CONFIG_HOME:-~/.config}/aco/board-token`, minted (0600) only when missing, so two starts on one port print the identical URL (see E-BOARD-09).
 - [ ] [BOARD-33] `--new-token` mints a fresh token into that same file before printing BOARD-22's URL, replacing the one a prior start minted.
-- [ ] [BOARD-34] A token file whose mode is not `0600` refuses `board token file <path> must be private (mode 0600, found <mode>)`, exit `2`, before the socket is bound (see E-BOARD-10).
-- [ ] [BOARD-35] A port another process holds refuses `port <port> is already in use by PID <pid>`, or `... could not be identified` when `/proc` cannot name it, exit `2` (see E-BOARD-11).
+- [ ] [BOARD-34] A token file whose mode is not `0600` refuses `board token file <path> must be private (mode 0600, found <mode>)`, exit `2` (see E-BOARD-10).
+- [ ] [BOARD-35] A port another process holds refuses `port <port> is already in use by PID <pid>`, else `port <port> is already in use; the owning process could not be identified`, exit `2` (see E-BOARD-11).
+- [ ] [BOARD-39] `--new-token` without `--serve` refuses `--new-token requires --serve`, exit `2`, before any read (see E-BOARD-14).
+- [ ] [BOARD-40] A token file's content that is not one `secrets.token_urlsafe(32)` value refuses `board token at <path> is not a valid token; pass --new-token`, exit `2` (see E-BOARD-13).
+- [ ] [BOARD-41] A symlinked or writable-by-others `${XDG_CONFIG_HOME:-~/.config}/aco` refuses `board token directory <path> must be private and owned by this user (found mode <mode>)`, exit `2` (see E-BOARD-12).
 
 ## Never
 
@@ -120,7 +125,9 @@ does, before either reads a single issue -- cited there, not restated.
 - `board`'s `--json` never carries a `read_state` key on any item, and never a bare `null` in place of an absent `foreign_blockers`/`uncut` `scope` entry.
 - `--serve` never accepts a `--restart` flag: a stable token (BOARD-32) makes an ordinary `kill` and a fresh start enough, and BOARD-35's own refusal, naming the PID, is the tool an operator needs to do that by hand.
 - BOARD-35's refusal never names a PID it could not verify against `/proc`: unable to identify the occupant, it says so instead of guessing one.
-- The token BOARD-32 reads or mints is never written anywhere but its own file and the one URL line BOARD-22 prints: never a log line, a `--json` field, or a rendered page.
+- A busy port (BOARD-35) never reaches the token file: the socket is bound first, so `--new-token` (BOARD-33) against a busy port mints or replaces nothing on disk.
+- `${XDG_CONFIG_HOME:-~/.config}/aco` (BOARD-41) is never trusted only at creation: a directory a prior run already made is checked the same way a freshly created one is.
+- The token BOARD-32 reads or mints is never written to any log line or error message: it appears only in the start URL line BOARD-22 prints, the served page's own rule-form hidden field, and the `POST /rule` redirect back to that page -- issue #234's own contract that every request must carry it -- never in `board --html`'s static page or a `--json` field.
 - A ruled `[[expectation]]` line (BOARD-36) never keeps its three `aco rule`/form outcomes once ruled, and BOARD-38's own sentence is never a button that would open a fresh line on a click.
 
 ## Examples
@@ -289,5 +296,35 @@ Setup: bare-remote, fake `gh`, a second process already bound and listening on l
 ```console
 $ aco board --serve --port <port>
 2> ERROR: port <port> is already in use by PID <pid>
+exit 2
+```
+
+### E-BOARD-12 — a group-writable token directory refuses, naming the mode
+
+Setup: bare-remote, fake `gh`, `${XDG_CONFIG_HOME}/aco` already created, then `chmod 0770` by hand
+
+```console
+$ aco board --serve
+2> ERROR: board token directory <path> must be private and owned by this user (found mode 0770)
+exit 2
+```
+
+### E-BOARD-13 — a hand-edited token file refuses
+
+Setup: bare-remote, fake `gh`, `${XDG_CONFIG_HOME}/aco/board-token` (mode `0600`) overwritten with `not-a-token`
+
+```console
+$ aco board --serve
+2> ERROR: board token at <path> is not a valid token; pass --new-token
+exit 2
+```
+
+### E-BOARD-14 — `--new-token` without `--serve` refuses
+
+Setup: bare-remote, fake `gh`
+
+```console
+$ aco board --new-token
+2> ERROR: --new-token requires --serve
 exit 2
 ```
