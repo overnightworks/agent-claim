@@ -12731,12 +12731,17 @@ def _land_preflight_client(
     readiness: forge.LandingReadiness,
     body: str = f"Work-Item: #{WORK_ITEM_ISSUE}\n\nCloses #{WORK_ITEM_ISSUE}",
     item_closed: bool = False,
+    claimed: bool = True,
 ) -> FakeForge:
     """A session `aco land 12` can preflight-refuse against, with no real
     git at all (issue #405): every scenario here fails before the checkout
-    is ever consulted, unlike `_land_scenario`'s real-git happy path."""
-    standing = request(
-        "landing", "Ada", issue=WORK_ITEM_ISSUE, branch=LANDING_BRANCH, scope=("src",)
+    is ever consulted, unlike `_land_scenario`'s real-git happy path.
+    `claimed=False` leaves the item with no live claim at all -- the other
+    half of LANDCMD-08's own ordering proof, alongside `item_closed`."""
+    standing = (
+        (request("landing", "Ada", issue=WORK_ITEM_ISSUE, branch=LANDING_BRANCH, scope=("src",)),)
+        if claimed
+        else ()
     )
     client = FakeForge()
     client.landings[12] = landing_pull_request(
@@ -12745,7 +12750,7 @@ def _land_preflight_client(
     client.readiness_by_number[12] = readiness
     if item_closed:
         client.closed_issues.add(WORK_ITEM_ISSUE)
-    _patch_release_session(monkeypatch, client, standing, branch=LANDING_BRANCH)
+    _patch_release_session(monkeypatch, client, *standing, branch=LANDING_BRANCH)
     return client
 
 
@@ -12878,6 +12883,26 @@ def test_land_refuses_a_closed_work_item(
     verify the item's live state."""
     monkeypatch.setattr(issue_claim, "_fetch_issue_reference", _LIVE_FETCH_ISSUE_REFERENCE)
     client = _land_preflight_client(monkeypatch, readiness=_land_readiness(), item_closed=True)
+
+    assert issue_claim.main(["--repo", REPOSITORY, "land", "12"]) == 2
+
+    assert capsys.readouterr().err == (
+        f"ERROR: work item #{WORK_ITEM_ISSUE} is not open; it cannot be landed\n"
+    )
+    assert client.merge_calls == []
+
+
+def test_land_refuses_a_closed_work_item_before_its_own_missing_claim(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #405 review/gate finding: LANDCMD-08 (item not open) is checked
+    before claim validation -- a closed item with no live claim at all
+    refuses by its own closed state, never the claim it also lacks, and
+    never reads the store's claims to find out."""
+    monkeypatch.setattr(issue_claim, "_fetch_issue_reference", _LIVE_FETCH_ISSUE_REFERENCE)
+    client = _land_preflight_client(
+        monkeypatch, readiness=_land_readiness(), item_closed=True, claimed=False
+    )
 
     assert issue_claim.main(["--repo", REPOSITORY, "land", "12"]) == 2
 

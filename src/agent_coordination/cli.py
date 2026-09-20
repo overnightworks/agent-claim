@@ -2468,11 +2468,16 @@ def _work_item_defect(
     return _closing_defect(detail, context.repository, item, requirement)
 
 
-def _checked_classification(
-    context: _LandingCheckContext,
-    claims: tuple[protocol.ActiveClaim, ...],
-    detail: forge.Landing,
+def _structural_classification(
+    context: _LandingCheckContext, detail: forge.Landing
 ) -> board.Classification | board.ClassificationDefect:
+    """The classification `check <pr>` and `land` both start from (issue
+    #405): whether this pull request's own shape -- its source repository,
+    its `Work-Item:`/`No-Item:` line, its target branch -- names one item at
+    all. Never touches a claim, a parent, or a closing reference: `land`'s
+    own preflight checks the named item's live open state between this and
+    `_classification_defect` (LANDCMD-08 before claim validation, issue #405
+    review/gate finding)."""
     if detail.source_repository.path != context.repository:
         return board.ClassificationDefect(
             f"proposes a branch of {detail.source_repository}; cross-repository pull "
@@ -2486,11 +2491,34 @@ def _checked_classification(
         return board.ClassificationDefect(
             f"targets {detail.target_branch!r}, not the default branch {default_branch!r}"
         )
-    defect = (
-        _no_item_defect(claims, context.repository, detail)
-        if isinstance(classification, board.NoItemClassification)
-        else _work_item_defect(context, claims, detail, classification.item)
-    )
+    return classification
+
+
+def _classification_defect(
+    context: _LandingCheckContext,
+    claims: tuple[protocol.ActiveClaim, ...],
+    detail: forge.Landing,
+    classification: board.Classification,
+) -> board.ClassificationDefect | None:
+    """Whether `classification`'s own claim, parent, and closing rules hold
+    (issue #405): the second half of `_checked_classification`, split out so
+    a caller needing a live-store read only for this half (`land`'s own
+    preflight, which fetches store state no earlier than this) never pays
+    for one just to read the pull request's own shape."""
+    if isinstance(classification, board.NoItemClassification):
+        return _no_item_defect(claims, context.repository, detail)
+    return _work_item_defect(context, claims, detail, classification.item)
+
+
+def _checked_classification(
+    context: _LandingCheckContext,
+    claims: tuple[protocol.ActiveClaim, ...],
+    detail: forge.Landing,
+) -> board.Classification | board.ClassificationDefect:
+    classification = _structural_classification(context, detail)
+    if isinstance(classification, board.ClassificationDefect):
+        return classification
+    defect = _classification_defect(context, claims, detail, classification)
     return classification if defect is None else defect
 
 
@@ -5093,7 +5121,7 @@ def _refuse_land_readiness(readiness: forge.LandingReadiness) -> None:
 
 def _land_preflight(
     client: github.GitHubForge,
-    claims: tuple[protocol.ActiveClaim, ...],
+    claims_provider: Callable[[], tuple[protocol.ActiveClaim, ...]],
     repository: str,
     storage: board.Storage,
     number: int,
@@ -5101,22 +5129,33 @@ def _land_preflight(
     """Every read-only precondition `aco land` proves before its first write
     (issue #405): a green, open, mergeable pull request classifying exactly
     one open item, or declaring itself issue-less -- reusing `check <pr>`'s
-    own classification/claim/parent/closing rules (`_checked_classification`)
-    rather than a second copy of them."""
+    own classification/claim/parent/closing rules (`_structural_classification`/
+    `_classification_defect`) rather than a second copy of them.
+
+    In order: readiness (no local git read at all), the pull request's own
+    shape, then the named item's live open state -- LANDCMD-08 before claim
+    validation (issue #405 review/gate finding) -- and only then
+    `claims_provider`, the one step that reads `refs/aco/state` locally, so
+    a pull request this preflight would refuse on GitHub's own answers
+    alone never pays for that read at all.
+    """
     readiness = client.landing_readiness(number)
     _refuse_land_readiness(readiness)
     detail = client.landing(number)
     context = _LandingCheckContext(client, repository, storage)
-    classification = _checked_classification(context, claims, detail)
-    if isinstance(classification, board.ClassificationDefect):
-        raise protocol.ClaimUnavailableError(f"pull request #{number} {classification.message}")
-    if isinstance(classification, board.WorkItemClassification):
-        reference = _fetch_issue_reference(client, classification.item.number)
+    structural = _structural_classification(context, detail)
+    if isinstance(structural, board.ClassificationDefect):
+        raise protocol.ClaimUnavailableError(f"pull request #{number} {structural.message}")
+    if isinstance(structural, board.WorkItemClassification):
+        reference = _fetch_issue_reference(client, structural.item.number)
         if reference.state is not forge.ItemState.OPEN:
             raise protocol.ClaimUnavailableError(
-                f"work item #{classification.item.number} is not open; it cannot be landed"
+                f"work item #{structural.item.number} is not open; it cannot be landed"
             )
-    return detail, classification, readiness
+    defect = _classification_defect(context, claims_provider(), detail, structural)
+    if defect is not None:
+        raise protocol.ClaimUnavailableError(f"pull request #{number} {defect.message}")
+    return detail, structural, readiness
 
 
 def _land_trunk_trailer(classification: board.Classification) -> str:
@@ -5260,11 +5299,14 @@ def _cmd_land(parsed: argparse.Namespace, session: _WriteSession) -> None:
         merge_sha = detail.merge_commit
         default_branch = checkout.refuse_unclean_default_branch_checkout()
     else:
-        _worktree, _canonical_remote, observed = _store_observation()
-        _require_state_ref(observed)
-        claims = tuple(observed.claims.values())
+
+        def claims_provider() -> tuple[protocol.ActiveClaim, ...]:
+            _worktree, _canonical_remote, observed = _store_observation()
+            _require_state_ref(observed)
+            return tuple(observed.claims.values())
+
         detail, classification, readiness = _land_preflight(
-            client, claims, repository, config.storage, number
+            client, claims_provider, repository, config.storage, number
         )
         default_branch = checkout.refuse_unclean_default_branch_checkout()
         merge_sha = _land_merge(client, detail, readiness, classification)
