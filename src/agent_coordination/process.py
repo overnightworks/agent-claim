@@ -347,6 +347,29 @@ def run_git(arguments: list[str], *, directory: Path | None = None) -> CapturedR
     return run_captured(git_command(arguments, directory=directory))
 
 
+def _git_failure_detail(stderr: bytes, stdout: bytes, *, errors: str = "strict") -> str:
+    """The bytes-level core every git failure-detail reader below shares
+    (issue #392 review round 2): decode-and-strip `stderr`, falling back to
+    the same treatment of `stdout`, falling back to `UNKNOWN_GIT_FAILURE`
+    when neither carried anything. Each public reader below is a thin
+    adapter feeding this the two streams its own result shape actually
+    carries -- never a second copy of this decode/strip/fallback logic.
+
+    `errors` defaults to strict, matching `git_failure_detail`'s and
+    `git_failure_detail_from_stderr`'s long-standing contract: invalid UTF-8
+    in git's own stderr raises `UnicodeDecodeError` rather than silently
+    replacing it, since `store._delete_export_ref` (issue #298) relies on
+    that raise reaching its own `(ClaimError, OSError, ValueError)` catch
+    and carrying the decode failure itself into the leftover description it
+    returns. `git_failure_detail_from_bounded` opts into `errors="replace"`
+    instead, preserving its own pre-existing lenient behaviour."""
+    return (
+        stderr.decode(errors=errors).strip()
+        or stdout.decode(errors=errors).strip()
+        or UNKNOWN_GIT_FAILURE
+    )
+
+
 def git_failure_detail(result: CapturedResult) -> str:
     """A finished `git` invocation's stderr, falling back to stdout, falling
     back to `UNKNOWN_GIT_FAILURE` when neither stream carried anything.
@@ -358,7 +381,7 @@ def git_failure_detail(result: CapturedResult) -> str:
     carries the result -- `fetch`, `update-ref`, and the like -- where
     falling back to it would report unrelated stdout content, not the
     failure (issue #372 R1)."""
-    return result.stderr.decode().strip() or result.stdout.decode().strip() or UNKNOWN_GIT_FAILURE
+    return _git_failure_detail(result.stderr, result.stdout)
 
 
 def git_failure_detail_from_stderr(result: CapturedResult) -> str:
@@ -366,7 +389,7 @@ def git_failure_detail_from_stderr(result: CapturedResult) -> str:
     `UNKNOWN_GIT_FAILURE` when it carried nothing -- stdout is never read,
     unlike `git_failure_detail` (issue #372 R1); see that function's
     docstring for which of the two modes a caller wants."""
-    return result.stderr.decode().strip() or UNKNOWN_GIT_FAILURE
+    return _git_failure_detail(result.stderr, b"")
 
 
 def git_failure_detail_from_bounded(result: BoundedResult) -> str:
@@ -375,7 +398,7 @@ def git_failure_detail_from_bounded(result: BoundedResult) -> str:
     #390 finding 7): the one detail reader for a command run with piped
     stdin (`hash-object`, `mktree`), whose separate-stream `CapturedResult`
     siblings above cannot read it since `run_captured` takes no input."""
-    return result.output.decode(errors="replace").strip() or UNKNOWN_GIT_FAILURE
+    return _git_failure_detail(b"", result.output, errors="replace")
 
 
 def inspect_native_process(pid: int, proc_root: Path = Path("/proc")) -> NativeProcess:
