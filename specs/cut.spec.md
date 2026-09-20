@@ -16,8 +16,9 @@ raced state-ref write meets (CAS-20). This file cites those IDs rather than
 restating them. `<n>` is the container's own number, `<child>` the fresh or
 adopted child's, `<idx>` a `[[slice]]` row's `index`. A refusal reaching the
 shared collection point prints `ERROR: <sentence>` on stderr, exit `2`, and
-with `--json` also `specs/release.spec.md`'s own `{"ok": false, "error":
-"<sentence>"}` object (REL-24).
+with `--json` also `specs/output.spec.md`'s envelope, `reason`
+`precondition_failed` -- except CUT-17/CUT-18's own partial write, whose
+`reason` is `partial_write` instead (CUT-28).
 
 ## Behavior table
 
@@ -38,8 +39,8 @@ with `--json` also `specs/release.spec.md`'s own `{"ok": false, "error":
 | a closed child matches, none open | CUT-14 | — | — | CUT-14 |
 | two or more open matches | CUT-15 | — | — | CUT-15 |
 | an orphan shares the title, wrong shape | CUT-16 | — | — | — |
-| GitHub's own relation write fails | CUT-17 | — | — | — |
-| the row-removal write fails, either storage | CUT-18 | — | — | — |
+| GitHub's own relation write fails | CUT-17 | — | — | CUT-28 |
+| the row-removal write fails, either storage | CUT-18 | — | — | CUT-28 |
 | an identical re-run after either failure | CUT-19 | — | — | CUT-19 |
 | a linked row's own `scope` is empty | — | — | CUT-20, CUT-22 | — |
 | a linked row already names a `scope` | — | — | CUT-21 | — |
@@ -71,12 +72,12 @@ with `--json` also `specs/release.spec.md`'s own `{"ok": false, "error":
 ## Creating the child
 
 - [ ] [CUT-11] A successful cut prints `CUT #<n>[ row <idx>] -> #<child>`, the `row <idx>` clause present only when a row was linked, exit `0` (see E-CUT-02, E-CUT-04).
-- [ ] [CUT-12] `aco cut ... --json` prints `{"container": <n>, "row": <idx-or-null>, "child": <child>}`, `"adopted": true` appended only when CUT-13 applies (see E-CUT-02).
+- [ ] [CUT-12] `aco cut ... --json` prints `specs/output.spec.md`'s envelope, `reason` `cut` or `adopted` (CUT-13), then `container`, `row`, `child` (see E-CUT-02).
 - [ ] [CUT-25] The fresh child's body is a `Parent: #<n>` line, a blank line, the same unfilled `task` skeleton `item new` writes (ITEM-01), plus `scope` from CUT-20/CUT-23 (see E-CUT-02, E-CUT-06).
 
 ## Adopting instead of duplicating
 
-- [ ] [CUT-13] An open issue titled exactly `--title` -- linked already, or a recovery orphan (CUT-16) -- is adopted: `ADOPTED` replaces `CUT`, `"adopted": true` in `--json` (see E-CUT-05).
+- [ ] [CUT-13] An open issue titled exactly `--title` -- linked already, or a recovery orphan (CUT-16) -- is adopted: `ADOPTED` replaces `CUT`, `reason: "adopted"` in `--json` (see E-CUT-05).
 - [ ] [CUT-14] A closed child already titled `--title`, with no open match, refuses `#<n> already has a closed child #<child> titled '<title>'; reopen it or remove the row by hand`, exit `2`.
 - [ ] [CUT-15] Two or more open matches refuses `#<n>'s row '<title>' matches more than one open issue (#a, #b); adopt the right one by hand and remove the row`, exit `2`, naming every match.
 - [ ] [CUT-16] An open issue sharing `--title` is adopted only in CUT-13's recovery shape -- never the container itself, idea-labelled, non-`task`, or naming a different `Parent:` (see E-CUT-05).
@@ -86,6 +87,7 @@ with `--json` also `specs/release.spec.md`'s own `{"ok": false, "error":
 - [ ] [CUT-17] GitHub's own failed sub-issue relation write refuses `created #<child> but failed to record #<child> as a sub-issue of #<n>: <cause>; re-run the same cut`, exit `2`.
 - [ ] [CUT-18] A failed row-removal write, either storage, refuses `created #<child> but failed to remove row <idx> from #<n>'s agent-claim block: <cause>; re-run the same cut`, exit `2`.
 - [ ] [CUT-19] An identical re-run after CUT-17 or CUT-18 prints `ADOPTED` (CUT-13) instead of minting a second child, then finishes the row removal when a row was linked (see E-CUT-06).
+- [ ] [CUT-28] CUT-17/CUT-18's partial write reports `reason: "partial_write"`, `written` (`<child>`) and `failed` (the step) as siblings, exit `2` (see E-CUT-08).
 
 ## `--scope` (issue #337)
 
@@ -145,7 +147,7 @@ $ aco cut 90 --title "Slice A"
 CUT #90 row 1 -> #<child-a>
 exit 0
 $ aco cut 90 --title "Slice B" --row 2 --json
-{"container": 90, "row": 2, "child": <child-b>}
+{"ok": true, "reason": "cut", "container": 90, "row": 2, "child": <child-b>}
 exit 0
 ```
 
@@ -254,3 +256,16 @@ updated_at = "<updated_at>"
 ```
 exit 0
 ````
+
+### E-CUT-08 -- `--json` on a partial write
+
+Setup: bare-remote, `storage = "github"`, fake `gh`, container `#90` with one
+`[[slice]]` row `index = 1` titled `Slice A`, the freshly created child's own
+sub-issue relation write fails
+
+```console
+$ aco cut 90 --title "Slice A" --json
+{"ok": false, "reason": "partial_write", "written": <child>, "failed": "record #<child> as a sub-issue of #90", "message": "created #<child> but failed to record #<child> as a sub-issue of #90: <cause>; re-run the same cut -- it adopts the child"}
+2> ERROR: created #<child> but failed to record #<child> as a sub-issue of #90: <cause>; re-run the same cut -- it adopts the child
+exit 2
+```

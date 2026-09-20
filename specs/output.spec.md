@@ -4,11 +4,14 @@ Every migrated command's `--json` object is built and printed through one
 shared, nameless envelope (issue #396). This file owns the envelope's own
 shape -- key order, when `ok` is `true`, and what `reason` and `message`
 may and may not carry -- and applies to every command whose own spec cites
-`OUT-nn`; `ask`, `rule`, and `brief` are its first three
-(`specs/ask.spec.md`, `specs/rule.spec.md`, `specs/brief.spec.md`), each
-naming its own `reason` vocabulary with examples. A command whose own spec
-does not cite this file still prints `specs/release.spec.md`'s REL-24
-shape until its own migration lands.
+`OUT-nn`; `ask`, `rule`, and `brief` were its first three
+(`specs/ask.spec.md`, `specs/rule.spec.md`, `specs/brief.spec.md`), and
+`release`, `cut`, and `item` are its last (issue #425,
+`specs/release.spec.md`, `specs/cut.spec.md`, `specs/item.spec.md`), each
+naming its own `reason` vocabulary with examples. Every `--json` command's
+own spec now cites this file (issue #425 finished the migration ask/rule/
+brief started); `main`'s own generic `ClaimError` sink prints only the
+plain `ERROR:` sentence, never a second `--json` object.
 
 ## Behavior table
 
@@ -16,21 +19,20 @@ shape until its own migration lands.
 |---|---|
 | a migrated command's own success | OUT-01, OUT-02 |
 | a migrated command's own refusal | OUT-01, OUT-03 |
-| a command whose spec does not cite this file | OUT-04 |
 
 ## The envelope
 
 - [ ] [OUT-01] Every migrated command's `--json` object prints `ok` first and `reason` second, in that order, before any of the command's own payload keys.
 - [ ] [OUT-02] `ok` is `true` only for that command's own success outcome; `reason` is always one stable token from that command's own enum, documented by its own spec, never a free sentence.
 - [ ] [OUT-03] A refusal's `reason` names its enum member, never an `error` object; an optional `message` -- the sentence stderr's `ERROR:` line already printed -- is always the envelope's last key, when given.
-- [ ] [OUT-04] A command whose own spec does not cite `OUT-nn` keeps `specs/release.spec.md`'s REL-24 `{"ok": false, "error": "<sentence>"}` shape until its own migration cites this file instead.
 
 ## Never
 
 - This file never lists a command's own vocabulary: `ask`, `rule`, and `brief` each document their own `reason` members, with examples, in their own spec.
 - `ok`/`reason` never reorder around a command's payload: `reason` is always the second key, never last, never interleaved with structured detail keys.
 - `message` never carries structured data: every structured detail (`item`, `index`, `claim`, `checks`, and the like) is its own sibling key, never packed into the prose.
-- `protect` never joins this envelope, migrated or not: its hook protocol (`{"decision": …}`, exit `0`/`2`) is a permanent exception (`specs/protect.spec.md`), unlike OUT-04's not-yet-migrated commands.
+- `main`'s own generic `ClaimError` sink never prints a `--json` object (issue #425): every `--json` command reports through this envelope, inside its own handler, before an unhandled error could ever reach that sink.
+- `protect` never joins this envelope, migrated or not: its hook protocol (`{"decision": …}`, exit `0`/`2`) is a permanent exception (`specs/protect.spec.md`).
 - `board --serve` never prints this file's own `--json` envelope either: its own request/response wire contract is permanently `specs/board.spec.md`'s own, not this file's.
 - `bootstrap`, `reset`, `start`, `register`, `run`, and `login` never gain a `--json` mode of their own (each command's own product decision, not a pending migration): each names it in its own `## Never` (`specs/bootstrap.spec.md`, `specs/reset.spec.md`, `specs/start.spec.md`, `specs/workspace.spec.md`).
 

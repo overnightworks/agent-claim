@@ -47,7 +47,7 @@ never storage-aware. A refusal reaching the shared collection point prints
 | `storage = "state-ref"` trunk verification | — | REL-17 (LAND-47, LAND-52, LAND-56, LAND-59) | — |
 | released item's own body contract | REL-23 | REL-23 | REL-23 |
 | successful release, text output | REL-18 | REL-18 | REL-18 |
-| successful release, `--json` | REL-19 | REL-19, REL-35 | REL-19 |
+| successful release, `--json` | REL-19, REL-36 | REL-19, REL-35, REL-36 | REL-19, REL-36 |
 | landing board read resolves | — | REL-20 | — |
 | landing board read hits an unreachable forge | — | REL-22 | — |
 | no landing to report | — | — | REL-21 |
@@ -94,12 +94,13 @@ spec would cite REL-03 rather than restate it.
 this file owns only when they appear at all.
 
 - [ ] [REL-18] Without `--json`, a successful release always prints `RELEASED <subject>: <claim-id>` first; `--abandoned`, that line is the whole output (see E-REL-01).
-- [ ] [REL-19] `--json` on a successful release prints one object: `issue`, `lane`, `branch`, `claim_id`, `agent`, `role`, `reason` (`"merged #<n>"` or `"abandoned: <explanation>"`) (see E-REL-05).
+- [ ] [REL-19] `--json` on a success prints `specs/output.spec.md`'s envelope, `reason` `merged`/`abandoned`, then `outcome`, `issue`, `lane`, `branch`, `claim_id`, `agent`, `role` (see E-REL-05).
+- [ ] [REL-36] `outcome` is this release's own prose: `"merged #<n>"`, `"abandoned: <explanation>"`, or `"landed <sha>"` (`storage = "state-ref"`) -- `reason` still reads `merged` for that last one too.
 - [ ] [REL-35] A `--merged` release's `--json` object also carries `worktree`, the identical text its printed `worktree:` line shows (REL-25..REL-34), present only for `--merged` (see E-REL-17).
 - [ ] [REL-20] A resolved `--merged` landing adds LAND-49's `freed:`/`next:` lines after `RELEASED` in text, or its keys to `--json`, present only then (see E-REL-02).
 - [ ] [REL-21] `--abandoned` never resolves the forge, reads the board, or prints `freed`/`next`/`hint` (LAND-39); its `--json` object carries neither key.
 - [ ] [REL-22] A `--merged` release whose post-commit board read fails prints LAND-38's `hint:` line, on stdout in text or stderr with `--json`; `freed`/`next` omitted (LAND-50) (see E-REL-06).
-- [ ] [REL-24] A release refusal past the parser (every ID but REL-01) with `--json` also prints `{"ok": false, "error": "<sentence>"}`, exit `2` (see E-REL-07).
+- [ ] [REL-24] A release refusal past the parser (every ID but REL-01) prints `specs/output.spec.md`'s envelope, `reason` `precondition_failed`, exit `2` (see E-REL-07).
 
 ## `--merged`'s own worktree/branch cleanup
 
@@ -203,7 +204,7 @@ Setup: bare-remote, bootstrapped, a live claim on issue `#42`, claim id
 
 ```console
 $ aco release 42 --claim-id mine --abandoned "stopped for the day" --json
-{"issue": 42, "lane": null, "branch": "ada/issue-42", "claim_id": "mine", "agent": "Ada", "role": "builder", "reason": "abandoned: stopped for the day"}
+{"ok": true, "reason": "abandoned", "outcome": "abandoned: stopped for the day", "issue": 42, "lane": null, "branch": "ada/issue-42", "claim_id": "mine", "agent": "Ada", "role": "builder"}
 exit 0
 ```
 
@@ -229,7 +230,7 @@ live claim on issue `#42`
 
 ```console
 $ aco release 42 --abandoned stopped --json
-{"ok": false, "error": "issue #42 has no active build claim"}
+{"ok": false, "reason": "precondition_failed", "message": "issue #42 has no active build claim"}
 2> ERROR: issue #42 has no active build claim
 exit 2
 ```
@@ -382,6 +383,6 @@ claimed
 
 ```console
 $ aco release 42 --merged 57 --json
-{"issue": 42, "lane": null, "branch": "ada/issue-42", "claim_id": "<claim-id>", "agent": "Ada", "role": "builder", "reason": "merged #42", "freed": [], "next": null, "parent_closable": false, "worktree": "removed"}
+{"ok": true, "reason": "merged", "outcome": "merged #42", "issue": 42, "lane": null, "branch": "ada/issue-42", "claim_id": "<claim-id>", "agent": "Ada", "role": "builder", "freed": [], "next": null, "parent_closable": null, "worktree": "removed"}
 exit 0
 ```
