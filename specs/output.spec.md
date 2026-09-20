@@ -1,10 +1,10 @@
 # The `--json` envelope
 
-`_emit_json(ok, reason, **payload)` (cli.py, issue #396) is the one place a
-migrated command's `--json` object is built and printed. This file owns the
-envelope's own shape -- key order, when `ok` is `true`, and what `reason`
-and `message` may and may not carry -- and applies to every command whose
-own spec cites `OUT-nn`; `ask`, `rule`, and `brief` are its first three
+Every migrated command's `--json` object is built and printed through one
+shared, nameless envelope (issue #396). This file owns the envelope's own
+shape -- key order, when `ok` is `true`, and what `reason` and `message`
+may and may not carry -- and applies to every command whose own spec cites
+`OUT-nn`; `ask`, `rule`, and `brief` are its first three
 (`specs/ask.spec.md`, `specs/rule.spec.md`, `specs/brief.spec.md`), each
 naming its own `reason` vocabulary with examples. A command whose own spec
 does not cite this file still prints `specs/release.spec.md`'s REL-24
