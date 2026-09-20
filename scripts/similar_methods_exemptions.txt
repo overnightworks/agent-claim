@@ -2,3 +2,4 @@
 # side of an accepted pair (issue #319). Empty today: no pair in src/ or tests/ has been
 # reviewed and deliberately accepted as a duplicate shape. Written by hand when one is.
 tests/test_checkout.py:_bare_remote_repository_with_one_commit — a bare-remote-plus-one-commit scaffold this shares with test_cli.py's _landing_repository/_check_trunk_repository (issue #322); those own unrelated sibling lanes' trunk/landing fixtures, outside this lane's claimed scope to fold together
+tests/test_checkout.py:test_validate_slug_refuses_a_value_the_derived_rule_would_never_produce — a parametrized "refuses a malformed value" shape shared with test_board.py's GitHub-timestamp check and test_protocol.py's positive-integer-identity check (issue #322); the three domains (slug shape, GitHub timestamp shape, issue identity) are unrelated, so unifying them would trade domain clarity for a few shared lines
