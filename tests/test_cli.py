@@ -5158,7 +5158,7 @@ def test_next_names_a_container_with_no_slice_row_by_its_own_next_line(
 def test_next_json_names_a_container_with_no_slice_row_by_its_own_next_line(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
-    """The JSON form of the same #208 case: `action` stays `close_container`
+    """The JSON form of the same #208 case: `reason` stays `close_container`
     (there is still nothing to cut) but `next_step` carries the container's
     own sentence instead of `null`, and no `command` or `cut_title` is
     invented from it -- text and JSON agree on there being no command to
