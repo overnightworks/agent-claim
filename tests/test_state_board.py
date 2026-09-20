@@ -2621,6 +2621,36 @@ class TestCliStateRefForge:
         after_record = _decoded_record(after_body, CHILD_A_ID)
         assert replace(after_record, updated_at=before_record.updated_at) == before_record
 
+    def test_item_edit_whole_writes_only_the_top_level_field(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+    ) -> None:
+        """Issue #399: `item edit --whole REASON` writes only the block's
+        own top-level `whole = "REASON"`, no stdin read, every other byte
+        (including `[record]`) untouched, mirroring
+        `test_item_edit_size_writes_only_the_top_level_field`."""
+        self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, _item_files())
+        reason = "the four adapters share one lock"
+        shown = issue_claim.main(["item", "show", str(CHILD_A_NUMBER), "--json"])
+        assert shown == 0
+        before_body = json.loads(capsys.readouterr().out)["body"]
+
+        edited = issue_claim.main(["item", "edit", str(CHILD_A_NUMBER), "--whole", reason])
+
+        assert edited == 0
+        assert capsys.readouterr().out.strip() == f"EDITED #{CHILD_A_NUMBER} whole={reason}"
+        fresh = issue_claim.main(["item", "show", str(CHILD_A_NUMBER), "--json"])
+        assert fresh == 0
+        after_body = json.loads(capsys.readouterr().out)["body"]
+        assert board.locate_agent_claim_block(after_body).data["whole"] == reason
+        before_record = _decoded_record(before_body, CHILD_A_ID)
+        after_record = _decoded_record(after_body, CHILD_A_ID)
+        assert replace(after_record, updated_at=before_record.updated_at) == before_record
+
     def test_item_edit_json_prints_the_item_number_and_fresh_oid(
         self,
         monkeypatch: pytest.MonkeyPatch,
