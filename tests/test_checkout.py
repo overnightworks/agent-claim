@@ -1484,6 +1484,33 @@ def test_worktree_on_branch_surfaces_a_git_failure_resolving_a_registered_worktr
         checkout.worktree_on_branch((worktree,), "codex/issue-1-widget")
 
 
+def test_resolve_path_checkout_fails_loud_on_a_malformed_rev_parse_reply(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #322 review/gate finding: a successful `git rev-parse` exit
+    whose combined toplevel/git-dir/git-common-dir reply does not split into
+    exactly three lines is a real git misbehavior -- `worktree_on_branch`'s
+    own callers must see it as a refusal, never as a silently swallowed
+    `None`."""
+    repository = _scratch_git_repository(tmp_path)
+    monkeypatch.chdir(repository)
+    _stub_one_git_call(
+        monkeypatch,
+        [
+            "rev-parse",
+            "--path-format=absolute",
+            "--show-toplevel",
+            "--git-dir",
+            "--git-common-dir",
+        ],
+        exit_status=0,
+        stderr="",
+    )
+
+    with pytest.raises(ClaimError, match="git returned a malformed checkout description"):
+        checkout.worktree_on_branch((repository,), "main")
+
+
 def test_remove_linked_worktree_deletes_the_directory_and_the_branch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
