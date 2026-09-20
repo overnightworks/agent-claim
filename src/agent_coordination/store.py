@@ -685,9 +685,11 @@ def _fetch_into_anchor(worktree: Path, remote: str) -> ObjectId:
     anchor (`_FETCH_ANCHOR_REF`) and read the tip back from that name --
     `_FETCH_ANCHOR_REF`'s own docstring owns why this is the one production
     writer of that ref, and why the destination refspec replaces a separate
-    anchoring step.
+    anchoring step. `--no-tags` keeps a reachable tag on `STATE_REF`'s own
+    history from auto-following into the shared local `refs/tags/*`
+    namespace, which aco never wants as a side effect of this fetch.
     """
-    result = _run_git(worktree, ["fetch", remote, f"+{STATE_REF}:{_FETCH_ANCHOR_REF}"])
+    result = _run_git(worktree, ["fetch", "--no-tags", remote, f"+{STATE_REF}:{_FETCH_ANCHOR_REF}"])
     if result.exit_status != 0:
         detail = process.git_failure_detail_from_stderr(result)
         raise ClaimError(f"cannot fetch {remote} {STATE_REF}: {detail}")
@@ -703,11 +705,15 @@ def _fetch_ref_objects(worktree: Path, remote: str) -> None:
     without creating any local ref for it -- production never creates the
     shared `refs/aco/state` locally. `peek_state`, this function's only
     caller, already knows the tip from `_ls_remote_state`'s own answer, so
-    no destination ref is needed here: the tip lands as an unread
-    `FETCH_HEAD` byproduct that `peek_state` never looks at, exactly the
+    no destination ref is needed here. `--no-write-fetch-head` keeps this
+    from even landing the tip in `FETCH_HEAD` (`peek_state` never reads it
+    either way, but a dry run, live-claim refusal, or failed export must
+    write nothing at all, not merely nothing this worktree reads back);
+    `--no-tags` keeps a reachable tag on `STATE_REF`'s own history from
+    auto-following into the shared local `refs/tags/*` namespace -- the
     write-nothing contract issue #298 finding 2 requires of it.
     """
-    result = _run_git(worktree, ["fetch", remote, STATE_REF])
+    result = _run_git(worktree, ["fetch", "--no-tags", "--no-write-fetch-head", remote, STATE_REF])
     if result.exit_status != 0:
         detail = process.git_failure_detail_from_stderr(result)
         raise ClaimError(f"cannot fetch {remote} {STATE_REF}: {detail}")
@@ -1021,10 +1027,13 @@ def peek_state(*, worktree: Path, remote: str = DEFAULT_CANONICAL_REMOTE) -> Cla
     The tip is `_ls_remote_state`'s own answer (issue #310 finding 48): the
     fetch that follows (`_fetch_ref_objects`) only brings the objects into
     this worktree's local store so `_parse_state_tree` can read them -- it
-    writes no destination ref, so a concurrent `git fetch` anywhere else in
-    this same worktree can overwrite the shared `FETCH_HEAD` file all it
-    wants; this read never looks at it, unlike `fetch_state`'s own read,
-    which is anchored instead.
+    writes no destination ref, and `--no-write-fetch-head` keeps it from
+    even landing the tip in `FETCH_HEAD`, so a concurrent `git fetch`
+    anywhere else in this same worktree can race it however it likes: this
+    read never looks at `FETCH_HEAD`, unlike `fetch_state`'s own read, which
+    is anchored instead. `--no-tags` keeps a reachable tag on `STATE_REF`'s
+    own history from auto-following into the shared local `refs/tags/*`
+    namespace during this read.
 
     `reset` uses this to recover from exactly what `_check_lineage` refuses
     -- a rewritten or deleted ref this worktree's own stamp disagrees with --
@@ -1035,10 +1044,10 @@ def peek_state(*, worktree: Path, remote: str = DEFAULT_CANONICAL_REMOTE) -> Cla
     itself never happens. Both callers share the same requirement -- a dry
     run, a live-claim refusal, a failed export, or a refused merge must
     change nothing durable -- so this performs no per-worktree write at all:
-    no anchor write, no `_write_lineage_stamp`. `fetch_state` stays
-    the write-capable read every live transition (`claim`, `release`, ...)
-    still needs, since those callers go on to write and must keep this
-    worktree's own lineage current.
+    no anchor write, no `_write_lineage_stamp`, no local tag, no
+    `FETCH_HEAD`. `fetch_state` stays the write-capable read every live
+    transition (`claim`, `release`, ...) still needs, since those callers go
+    on to write and must keep this worktree's own lineage current.
     """
     probed = _ls_remote_state(worktree, remote)
     if probed is None:

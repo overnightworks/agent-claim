@@ -496,7 +496,7 @@ def test_peek_state_ignores_a_foreign_fetch_that_wins_the_fetch_head_race(
         command: list[str],
     ) -> process.CapturedResult:
         result = real_run_captured(command)
-        if command[3:5] == ["fetch", str(bare_remote)]:
+        if command[3] == "fetch" and str(bare_remote) in command:
             _git("fetch", str(bare_remote), "refs/heads/foreign", cwd=reader)
         return result
 
