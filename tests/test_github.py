@@ -889,6 +889,7 @@ def test_github_adapter_deleting_an_already_absent_branch_is_idempotent(decoded:
     """Issue #405 review finding 5: `gh api`'s real error text puts the
     message before the code (`gh: Reference does not exist (HTTP 422)`);
     the reversed order is covered alongside it so neither order regresses."""
+
     def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
         raise forge.ForgeNotFoundError(decoded) if "404" in decoded else forge.ForgeError(decoded)
 
