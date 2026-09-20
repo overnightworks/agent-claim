@@ -6248,7 +6248,7 @@ def _board_token_location(repository: forge.RepositoryId) -> workspace.BoardToke
     """`board --serve`'s token file for the repository this command already
     resolved (issue #431) -- one board, one token, so the URL an operator
     opens can only ever reach this repository's own served board."""
-    return workspace.default_board_token_location(repository.path, os.environ)
+    return workspace.default_board_token_location(repository.host, repository.path, os.environ)
 
 
 def _board_server(parsed: argparse.Namespace, session: _WriteSession) -> board_serve.BoardServer:

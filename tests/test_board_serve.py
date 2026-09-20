@@ -43,11 +43,13 @@ SERVED_ITEM = 10
 ANOTHER_REPOSITORY = "example/other-board"
 
 
-def _token_location(repository: str = REPOSITORY) -> workspace.BoardTokenLocation:
+def _token_location(
+    repository: str = REPOSITORY, host: str = github.GITHUB_HOST
+) -> workspace.BoardTokenLocation:
     """Where a repository's served board keeps its token (issue #431): one
     directory per repository under the configuration root this module
-    points at `tmp_path`."""
-    return workspace.default_board_token_location(repository, os.environ)
+    points at `tmp_path`, named like the `FakeForge` these tests serve."""
+    return workspace.default_board_token_location(host, repository, os.environ)
 
 
 def _existing_token_directory() -> Path:

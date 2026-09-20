@@ -144,21 +144,30 @@ loopback token (issue #388) -- matches the per-start token's prior entropy
 
 
 _BOARD_DIRECTORY_NAME_COMPONENTS = 2
-_BOARD_DIRECTORY_HASH_CHARACTERS = 8
+_BOARD_DIRECTORY_HASH_CHARACTERS = 16
+_BOARD_IDENTITY_SEPARATOR = "\0"
+"""Between the fields of a board identity: a host name and a repository path
+can both carry any other printable character, and a digest over `host` and
+`path` simply concatenated would read `host-a` + `/acme/repo` as `host-a/`
++ `acme/repo`. A NUL occurs in neither field, so one joined string names
+exactly one identity."""
+
 _UNREADABLE_IN_A_BOARD_DIRECTORY = re.compile(r"[^A-Za-z0-9_-]+")
 
 
-def _board_directory_name(repository: str) -> str:
+def _board_directory_name(host: str, repository: str) -> str:
     """One directory name per board identity: the last two components of
     `repository` -- `owner/repo` on a forge, the checkout's own parent and
     directory where the canonical remote is a local path -- made readable,
-    plus a short digest of the whole identity. The digest is what keeps two
-    identities apart (issue #431): the readable part alone collides
-    whenever a name carries a separator character, and a shared directory
-    is exactly the bug this path exists to remove."""
+    plus a digest of the whole identity, `host` included. The digest is
+    what keeps two identities apart (issue #431): the readable part alone
+    collides whenever a name carries a separator character, and two forges
+    carrying the same `owner/repo` are two boards, not one -- a shared
+    directory is exactly the bug this path exists to remove."""
     tail = repository.strip("/").split("/")[-_BOARD_DIRECTORY_NAME_COMPONENTS:]
     readable = _UNREADABLE_IN_A_BOARD_DIRECTORY.sub("-", "-".join(tail))
-    digest = hashlib.sha256(repository.encode("utf-8")).hexdigest()
+    identity = _BOARD_IDENTITY_SEPARATOR.join((host, repository))
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
     return f"{readable}-{digest[:_BOARD_DIRECTORY_HASH_CHARACTERS]}"
 
 
@@ -176,18 +185,18 @@ class BoardTokenLocation:
 
 
 def default_board_token_location(
-    repository: str, environment: Mapping[str, str], home: Path | None = None
+    host: str, repository: str, environment: Mapping[str, str], home: Path | None = None
 ) -> BoardTokenLocation:
     """`board --serve`'s persistent token file for one repository (issues
     #388, #431): the same `~/.config/aco/` root `default_config_path`
     already owns, never a second configuration source, but one directory
-    per board identity under it -- `repository` names whose board this is,
-    so a token minted for one repository never opens another repository's
-    served board, and the printed URL still stays stable across restarts
-    and reinstalls."""
+    per board identity under it -- `host` and `repository` together name
+    whose board this is, so a token minted for one repository on one forge
+    never opens another repository's served board, and the printed URL
+    still stays stable across restarts and reinstalls."""
     root = _config_root(environment, home)
     boards = root / "boards"
-    board = boards / _board_directory_name(repository)
+    board = boards / _board_directory_name(host, repository)
     return BoardTokenLocation(file=board / "token", directories=(root, boards, board))
 
 

@@ -16,6 +16,7 @@ import pytest
 from agent_coordination import providers, terminal, workspace
 
 SESSION_ID = "123e4567-e89b-12d3-a456-426614174000"
+BOARD_HOST = "forge.example"
 
 
 def _completed_login_record() -> dict[str, object]:
@@ -863,7 +864,7 @@ def test_the_board_token_location_names_one_repository_under_the_boards_root(
     environment = {"XDG_CONFIG_HOME": str(tmp_path / "config")}
     boards_root = tmp_path / "config" / "aco" / "boards"
 
-    location = workspace.default_board_token_location(repository, environment)
+    location = workspace.default_board_token_location(BOARD_HOST, repository, environment)
 
     assert location.file.parent.parent == boards_root
     assert location.file.parent.name.startswith(f"{readable}-")
@@ -876,16 +877,39 @@ def test_two_repositories_never_share_one_board_token(tmp_path: Path) -> None:
     printed for one repository's board opened whichever board was served
     last, so a ruling reached the wrong repository."""
     environment = {"XDG_CONFIG_HOME": str(tmp_path / "config")}
-    ours = workspace.default_board_token_location("acme/board", environment)
-    theirs = workspace.default_board_token_location("acme/other-board", environment)
+    ours = workspace.default_board_token_location(BOARD_HOST, "acme/board", environment)
+    theirs = workspace.default_board_token_location(BOARD_HOST, "acme/other-board", environment)
 
     assert ours != theirs
     assert workspace.board_token(ours) != workspace.board_token(theirs)
 
 
+@pytest.mark.parametrize(
+    ("ours", "theirs"),
+    [
+        (("forge-a.example", "acme/repo"), ("forge-b.example", "acme/repo")),
+        (("forge.example", "acme/repo"), ("forge.example/acme", "repo")),
+    ],
+    ids=["one name on two forges", "a name shifted across the host boundary"],
+)
+def test_one_repository_name_on_two_hosts_never_shares_one_board_token(
+    tmp_path: Path, ours: tuple[str, str], theirs: tuple[str, str]
+) -> None:
+    """Issue #431: a board is a repository on a host, so `acme/repo` served
+    from one forge and `acme/repo` served from another are two boards --
+    and no pair of identities may fall together into one directory just
+    because their parts spell the same string when joined."""
+    environment = {"XDG_CONFIG_HOME": str(tmp_path / "config")}
+    our_location = workspace.default_board_token_location(*ours, environment)
+    their_location = workspace.default_board_token_location(*theirs, environment)
+
+    assert our_location.file != their_location.file
+    assert workspace.board_token(our_location) != workspace.board_token(their_location)
+
+
 def test_a_board_token_is_minted_once_privately_and_read_back(tmp_path: Path) -> None:
     location = workspace.default_board_token_location(
-        "acme/board", {"XDG_CONFIG_HOME": str(tmp_path / "config")}
+        BOARD_HOST, "acme/board", {"XDG_CONFIG_HOME": str(tmp_path / "config")}
     )
 
     minted = workspace.board_token(location)

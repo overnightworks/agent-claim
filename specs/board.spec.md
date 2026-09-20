@@ -28,7 +28,8 @@ number, `<label>` an item as `specs/landing-grammar.spec.md` prints it.
 `<token-path>` is the served board's own token file,
 `${XDG_CONFIG_HOME:-~/.config}/aco/boards/<board>/token`: one directory per
 repository, named `<owner>-<repo>` on a forge or after the checkout's own last
-two path parts otherwise, followed by a short digest of that full name.
+two path parts otherwise, followed by a digest of the whole identity, its host
+included.
 
 ## Behavior table
 
