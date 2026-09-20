@@ -378,6 +378,11 @@ def test_hook_patch_paths_returns_empty_for_unrecognized_text(text: str) -> None
             id="a-quoted-operator-is-data-not-a-redirect",
         ),
         pytest.param(
+            "echo '>>' >> f",
+            ((hook_input.PATTERN_REDIRECT_APPEND, "f"),),
+            id="a-quoted-append-operator-is-data-not-a-redirect",
+        ),
+        pytest.param(
             'git commit -m "fix > 2"',
             (),
             id="a-quoted-operator-inside-a-commit-message-names-no-redirect",
