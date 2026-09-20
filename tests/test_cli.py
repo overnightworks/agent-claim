@@ -11008,6 +11008,42 @@ def test_check_refuses_a_named_sentence_outside_a_checkout(
     )
 
 
+def test_check_json_reports_unavailable_outside_a_checkout(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The same refusal as `test_check_refuses_a_named_sentence_outside_a_checkout`,
+    now read through `--json`'s own envelope (issue #404): `reason:
+    "unavailable"`, the generic bucket every other pre-dispatch
+    forge-resolution failure reports through."""
+
+    def outside_a_checkout(arguments: list[str], **_kwargs: object) -> str:
+        raise ClaimError("fatal: not a git repository (or any of the parent directories): .git")
+
+    monkeypatch.setattr(checkout, "_git_output", outside_a_checkout)
+
+    status = issue_claim.main(["--repo", REPOSITORY, "check", "12", "--json"])
+
+    captured = capsys.readouterr()
+    assert status == 2
+    _assert_json_refusal_object(captured.err, captured.out, reason="unavailable")
+
+
+def test_check_reports_invalid_usage_when_repo_is_given_under_state_ref(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """`check`'s forge resolution draws the same `invalid_usage`/`unavailable`
+    split `rule`/`brief` already do (issue #404): `--repo` is the wrong
+    flag under `storage = state-ref`."""
+    _write_state_ref_pin(tmp_path)
+
+    status = issue_claim.main(["--repo", "acme/items", "check", "258", "--json"])
+
+    captured = capsys.readouterr()
+    assert status == 2
+    assert captured.err == "ERROR: --repo is meaningless under storage = state-ref\n"
+    _assert_json_refusal_object(captured.err, captured.out, reason="invalid_usage")
+
+
 def test_check_accepts_an_issueless_documentation_pull_request(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -11061,7 +11097,7 @@ def test_check_refuses_an_issueless_pull_request_without_its_lane_claim(
         standing=standing,
     )
 
-    assert run_check() == 1
+    assert run_check() == 2
     assert capsys.readouterr().err == f"REFUSED: pull request #12 {reason}\n"
 
 
@@ -11077,7 +11113,7 @@ def test_check_refuses_an_issueless_pull_request_that_closes_an_item(
         standing=(documentation_lane_claim(),),
     )
 
-    assert run_check() == 1
+    assert run_check() == 2
     assert capsys.readouterr().err == (
         f"REFUSED: pull request #12 declares no work item but closes "
         f"{REPOSITORY}#{WORK_ITEM_ISSUE}; name it as the work item\n"
@@ -11095,7 +11131,7 @@ def test_check_refuses_a_pull_request_proposing_another_repositorys_branch(
         ),
     )
 
-    assert run_check() == 1
+    assert run_check() == 2
     assert capsys.readouterr().err == (
         "REFUSED: pull request #12 proposes a branch of fork/agent-claim; "
         "cross-repository pull requests are not classified\n"
@@ -11156,7 +11192,7 @@ def test_check_refuses_a_pull_request_body_with_one_line(
 ) -> None:
     check_client(monkeypatch, landing_pull_request(body=body))
 
-    assert run_check() == 1
+    assert run_check() == 2
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == f"REFUSED: pull request #12 {reason}\n"
@@ -11171,7 +11207,7 @@ def test_check_refuses_a_work_item_without_a_claim_on_the_head_branch(
         standing=(request("elsewhere", issue=72, branch="codex/other-lane", scope=("src",)),),
     )
 
-    assert run_check() == 1
+    assert run_check() == 2
     assert capsys.readouterr().err == (
         f"REFUSED: pull request #12 has no active claim for #72 on branch {LANDING_BRANCH!r}\n"
     )
@@ -11186,7 +11222,7 @@ def test_check_refuses_a_pull_request_that_does_not_target_the_default_branch(
     )
     client.default_branch_name = "trunk"
 
-    assert run_check() == 1
+    assert run_check() == 2
     assert capsys.readouterr().err == (
         "REFUSED: pull request #12 targets 'release', not the default branch 'trunk'\n"
     )
@@ -11200,7 +11236,7 @@ def test_check_reads_a_fenced_classification_line_as_documentation(
         landing_pull_request(body="Documents the convention:\n\n```\nWork-Item: #72\n```\n"),
     )
 
-    assert run_check() == 1
+    assert run_check() == 2
     assert capsys.readouterr().err == (
         "REFUSED: pull request #12 carries no `Work-Item:` or `No-Item:` line\n"
     )
@@ -12395,7 +12431,7 @@ def test_check_requires_the_parent_to_close_with_its_last_open_child(
         open_children=(board.IssueReference(REPOSITORY, WORK_ITEM_ISSUE),),
     )
 
-    assert run_check() == 1
+    assert run_check() == 2
     assert capsys.readouterr().err == (
         f"REFUSED: pull request #12 closes the last open child of parent "
         f"{REPOSITORY}#{PARENT_ISSUE}; close the parent too\n"
@@ -12457,7 +12493,7 @@ def test_check_refuses_a_blockless_parent_before_the_next_check(
         open_children=(board.IssueReference(REPOSITORY, WORK_ITEM_ISSUE),),
     )
 
-    assert run_check() == 1
+    assert run_check() == 2
     assert capsys.readouterr().err == (
         f"REFUSED: pull request #12 has parent {REPOSITORY}#{PARENT_ISSUE} with a body "
         "malformed: agent-claim: no agent-claim block\n"
@@ -12479,7 +12515,7 @@ def test_check_refuses_a_malformed_parent_before_the_next_check(
         open_children=(board.IssueReference(REPOSITORY, WORK_ITEM_ISSUE),),
     )
 
-    assert run_check() == 1
+    assert run_check() == 2
     assert capsys.readouterr().err == (
         f"REFUSED: pull request #12 has parent {REPOSITORY}#{PARENT_ISSUE} "
         "with a body malformed: version: version must be exactly 1\n"
@@ -12510,7 +12546,7 @@ def test_check_refuses_a_parent_that_is_not_a_container(
         parent_kind=board.ItemKind.TASK,
     )
 
-    assert run_check() == 1
+    assert run_check() == 2
     assert capsys.readouterr().err == (
         f"REFUSED: pull request #12 has parent {REPOSITORY}#{PARENT_ISSUE} of kind task, "
         "which is not a container; only a container holds children\n"
@@ -12546,7 +12582,7 @@ def test_check_requires_a_next_line_on_a_parent_that_keeps_other_children(
         ),
     )
 
-    assert run_check() == 1
+    assert run_check() == 2
     assert capsys.readouterr().err == (
         f"REFUSED: pull request #12 leaves parent {REPOSITORY}#{PARENT_ISSUE} open with "
         "1 other open child, whose body carries no Next line\n"
@@ -12585,7 +12621,7 @@ def test_check_refuses_to_close_a_parent_that_keeps_other_children(
         ),
     )
 
-    assert run_check() == 1
+    assert run_check() == 2
     assert capsys.readouterr().err == (
         f"REFUSED: pull request #12 closes {REPOSITORY}#{PARENT_ISSUE} besides its work "
         f"item {REPOSITORY}#{WORK_ITEM_ISSUE}; a pull request lands one item\n"
@@ -12603,7 +12639,7 @@ def test_check_refuses_a_parent_recorded_in_another_repository(
         parent_repository="other/repo",
     )
 
-    assert run_check() == 1
+    assert run_check() == 2
     assert capsys.readouterr().err == (
         f"REFUSED: pull request #12 has parent other/repo#{PARENT_ISSUE} in another "
         "repository, whose children this check cannot read\n"
@@ -12797,7 +12833,7 @@ def test_check_names_a_number_that_exists_in_neither_number_space(
     number was never proven to be either -- the refusal names no kind word."""
     client = issue_check_client(monkeypatch, tmp_path, body="", state=forge.ItemState.MISSING)
 
-    assert run_check(CHECKED_ISSUE) == 1
+    assert run_check(CHECKED_ISSUE) == 2
     assert capsys.readouterr().err == (
         f"REFUSED: #{CHECKED_ISSUE} does not exist in {REPOSITORY}\n"
     )
@@ -12811,12 +12847,13 @@ def test_check_json_names_a_missing_number_as_its_own_kind(
 
     exit_code = issue_claim.main(["--repo", REPOSITORY, "check", str(CHECKED_ISSUE), "--json"])
 
-    assert exit_code == 1
+    assert exit_code == 2
     assert json.loads(capsys.readouterr().out) == {
         "ok": False,
+        "reason": "missing",
         "kind": "missing",
         "number": CHECKED_ISSUE,
-        "refused": f"does not exist in {REPOSITORY}",
+        "message": f"does not exist in {REPOSITORY}",
     }
 
 
@@ -12831,7 +12868,7 @@ def test_check_names_a_body_with_no_recognized_block_as_malformed(
         body="## Now\nReady.\n\n## Next\nLand it.\n\n## Done when\nMerged.",
     )
 
-    assert run_check(CHECKED_ISSUE) == 1
+    assert run_check(CHECKED_ISSUE) == 2
     assert capsys.readouterr().err == (
         f"ISSUE #{CHECKED_ISSUE} body malformed: agent-claim: no agent-claim block\n"
     )
@@ -12866,7 +12903,7 @@ def test_check_names_a_malformed_block_by_its_first_defect(
 ) -> None:
     issue_check_client(monkeypatch, tmp_path, body=body)
 
-    assert run_check(CHECKED_ISSUE) == 1
+    assert run_check(CHECKED_ISSUE) == 2
     assert capsys.readouterr().err == f"ISSUE #{CHECKED_ISSUE} body malformed: {reason}\n"
 
 
@@ -12894,7 +12931,7 @@ def test_check_names_the_sections_an_incomplete_body_leaves_empty(
 ) -> None:
     issue_check_client(monkeypatch, tmp_path, body=agent_claim_body(toml_text))
 
-    assert run_check(CHECKED_ISSUE) == 1
+    assert run_check(CHECKED_ISSUE) == 2
     assert capsys.readouterr().err == f"ISSUE #{CHECKED_ISSUE} body incomplete: {missing}\n"
 
 
@@ -12908,7 +12945,7 @@ def test_check_reads_blockers_from_the_forge_and_qualifies_foreign_ones(
         dependencies=(open_dependency(7), open_dependency(9, "other/repo")),
     )
 
-    assert run_check(CHECKED_ISSUE) == 1
+    assert run_check(CHECKED_ISSUE) == 3
     assert capsys.readouterr().err == f"ISSUE #{CHECKED_ISSUE} blocked by #7, other/repo#9\n"
     assert client.requests == 2
 
@@ -12950,12 +12987,14 @@ def test_check_reads_a_pull_request_in_one_dispatch_landing_and_classification_r
     assert client.requests == 4
 
 
-def test_check_json_prints_the_stdout_error_object_on_a_real_forge_failure(
+def test_check_json_reports_unavailable_on_a_real_forge_failure(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """A real `GitHubForge` (issue #199), not `FakeForge`: its own `_run`
-    chokepoint raises the forge failure, proving that cause -- not just a
-    conflict or a missing state ref -- reaches `main`'s general sink too."""
+    chokepoint raises the forge failure once dispatch itself reads the
+    reference, proving that cause reaches the shared envelope as `reason:
+    "unavailable"` (issue #404) rather than escaping to `main`'s legacy
+    generic `{"ok": false, "error": ...}` sink."""
 
     def failing_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
         raise forge.ForgeTransientError("gh: simulated network failure")
@@ -12967,24 +13006,27 @@ def test_check_json_prints_the_stdout_error_object_on_a_real_forge_failure(
 
     captured = capsys.readouterr()
     assert status == 2
-    _assert_json_error_object_mirrors_stderr(captured.err, captured.out)
+    _assert_json_refusal_object(captured.err, captured.out, reason="unavailable")
 
 
 @pytest.mark.parametrize(
-    ("body", "expected"),
+    ("body", "exit_code", "expected"),
     [
         pytest.param(
             f"Work-Item: #{WORK_ITEM_ISSUE}\n\nCloses #{WORK_ITEM_ISSUE}",
-            {"ok": True, "kind": "pull_request", "number": 12},
+            0,
+            {"ok": True, "reason": "valid", "kind": "pull_request", "number": 12},
             id="declared-pull-request",
         ),
         pytest.param(
             "Tidy the README.",
+            2,
             {
                 "ok": False,
+                "reason": "invalid_classification",
                 "kind": "pull_request",
                 "number": 12,
-                "refused": "carries no `Work-Item:` or `No-Item:` line",
+                "message": "carries no `Work-Item:` or `No-Item:` line",
             },
             id="unclassified-pull-request",
         ),
@@ -12994,31 +13036,57 @@ def test_check_json_discriminates_a_pull_request(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     body: str,
+    exit_code: int,
     expected: dict[str, object],
 ) -> None:
     check_client(monkeypatch, landing_pull_request(body=body))
 
-    exit_code = issue_claim.main(["--repo", REPOSITORY, "check", "12", "--json"])
+    status = issue_claim.main(["--repo", REPOSITORY, "check", "12", "--json"])
 
-    assert exit_code == (0 if expected["ok"] else 1)
+    assert status == exit_code
     assert json.loads(capsys.readouterr().out) == expected
 
 
+def test_check_json_pins_the_raw_envelope_text_for_a_valid_pull_request(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The raw bytes `check` prints on success (OUT-01's own key order,
+    `ok`/`reason`/`kind`/`number`, and its trailing newline), not just the
+    parsed dict `test_check_json_discriminates_a_pull_request` already
+    covers."""
+    check_client(
+        monkeypatch,
+        landing_pull_request(body=f"Work-Item: #{WORK_ITEM_ISSUE}\n\nCloses #{WORK_ITEM_ISSUE}"),
+    )
+
+    status = issue_claim.main(["--repo", REPOSITORY, "check", "12", "--json"])
+
+    assert status == 0
+    assert (
+        capsys.readouterr().out
+        == '{"ok": true, "reason": "valid", "kind": "pull_request", "number": 12}\n'
+    )
+
+
 @pytest.mark.parametrize(
-    ("dependencies", "expected"),
+    ("dependencies", "exit_code", "expected"),
     [
         pytest.param(
             (),
-            {"ok": True, "kind": "issue", "number": CHECKED_ISSUE},
+            0,
+            {"ok": True, "reason": "valid", "kind": "issue", "number": CHECKED_ISSUE},
             id="sound-issue",
         ),
         pytest.param(
             (open_dependency(62),),
+            3,
             {
                 "ok": False,
+                "reason": "blocked",
                 "kind": "issue",
                 "number": CHECKED_ISSUE,
-                "refused": "blocked by #62",
+                "blocked_by": ["#62"],
+                "message": "blocked by #62",
             },
             id="blocked-issue",
         ),
@@ -13029,6 +13097,7 @@ def test_check_json_discriminates_an_issue(
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
     dependencies: tuple[board.IssueDependency, ...],
+    exit_code: int,
     expected: dict[str, object],
 ) -> None:
     issue_check_client(
@@ -13038,9 +13107,9 @@ def test_check_json_discriminates_an_issue(
         dependencies=dependencies,
     )
 
-    exit_code = issue_claim.main(["--repo", REPOSITORY, "check", str(CHECKED_ISSUE), "--json"])
+    status = issue_claim.main(["--repo", REPOSITORY, "check", str(CHECKED_ISSUE), "--json"])
 
-    assert exit_code == (0 if expected["ok"] else 1)
+    assert status == exit_code
     assert json.loads(capsys.readouterr().out) == expected
 
 
@@ -13087,7 +13156,7 @@ def test_body_template_round_trips_through_body_check_for_every_kind(
     printed = capsys.readouterr().out
 
     monkeypatch.setattr(sys, "stdin", io.StringIO(printed))
-    assert body_check_main() == 1
+    assert body_check_main() == 2
     assert capsys.readouterr().err == "body incomplete: Now, Next, Done when\n"
 
 
@@ -13112,11 +13181,11 @@ def test_body_check_accepts_a_valid_size(capsys: pytest.CaptureFixture[str]) -> 
 
 def test_body_check_refuses_an_invalid_size(capsys: pytest.CaptureFixture[str]) -> None:
     """BODY-59 (issue #357): an out-of-grammar `size` is `body malformed`,
-    exit `1`, the same sentence for an invalid string or a non-scalar value."""
+    exit `2`, the same sentence for an invalid string or a non-scalar value."""
     body_file = io.StringIO(agent_claim_body(f'{MINIMAL_BLOCK_TOML}size = "XL"\n'))
     with pytest.MonkeyPatch.context() as monkeypatch:
         monkeypatch.setattr(sys, "stdin", body_file)
-        assert body_check_main() == 1
+        assert body_check_main() == 2
     assert capsys.readouterr().err == "body malformed: size: size must be S, M, or L\n"
 
 
@@ -13135,7 +13204,7 @@ def test_body_check_reads_the_storage_pin_for_the_record_key(
     body = agent_claim_body(MINIMAL_BLOCK_TOML + _RECORD_TOML)
 
     monkeypatch.setattr(sys, "stdin", io.StringIO(body))
-    assert body_check_main() == 1
+    assert body_check_main() == 2
     assert "unknown top-level key record" in capsys.readouterr().err
 
     _write_state_ref_pin(tmp_path)
@@ -13148,7 +13217,7 @@ def test_body_check_names_a_body_with_no_recognized_block_as_malformed(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setattr(sys, "stdin", io.StringIO("no block\n"))
-    assert body_check_main() == 1
+    assert body_check_main() == 2
     assert capsys.readouterr().err == "body malformed: agent-claim: no agent-claim block\n"
 
 
@@ -13180,7 +13249,7 @@ def test_body_check_names_defects_with_checks_own_sentences(
     reason: str,
 ) -> None:
     monkeypatch.setattr(sys, "stdin", io.StringIO(agent_claim_body(toml_text)))
-    assert body_check_main() == 1
+    assert body_check_main() == 2
     assert capsys.readouterr().err == f"body malformed: {reason}\n"
 
 
@@ -13195,15 +13264,16 @@ def test_body_check_prints_every_simultaneous_defect_not_just_the_first(
     toml_text = 'version = 1\nnext = "X"\n'  # missing both now and done_when
 
     monkeypatch.setattr(sys, "stdin", io.StringIO(agent_claim_body(toml_text)))
-    assert body_check_main() == 1
+    assert body_check_main() == 2
     assert capsys.readouterr().err == (
         "body malformed: now: now is required\nbody malformed: done_when: done_when is required\n"
     )
 
     monkeypatch.setattr(sys, "stdin", io.StringIO(agent_claim_body(toml_text)))
-    assert body_check_main(extra=("--json",)) == 1
+    assert body_check_main(extra=("--json",)) == 2
     assert json.loads(capsys.readouterr().out) == {
         "ok": False,
+        "reason": "malformed",
         "defects": [
             "body malformed: now: now is required",
             "body malformed: done_when: done_when is required",
@@ -13215,11 +13285,11 @@ def test_body_check_json_carries_the_defect_list(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setattr(sys, "stdin", io.StringIO("no block\n"))
-    assert body_check_main(extra=("--json",)) == 1
-    assert json.loads(capsys.readouterr().out) == {
-        "ok": False,
-        "defects": ["body malformed: agent-claim: no agent-claim block"],
-    }
+    assert body_check_main(extra=("--json",)) == 2
+    assert capsys.readouterr().out == (
+        '{"ok": false, "reason": "malformed", '
+        '"defects": ["body malformed: agent-claim: no agent-claim block"]}\n'
+    )
 
 
 def test_body_check_json_reports_ok_with_an_empty_defect_list(
@@ -13227,7 +13297,7 @@ def test_body_check_json_reports_ok_with_an_empty_defect_list(
 ) -> None:
     monkeypatch.setattr(sys, "stdin", io.StringIO(agent_claim_body(MINIMAL_BLOCK_TOML)))
     assert body_check_main(extra=("--json",)) == 0
-    assert json.loads(capsys.readouterr().out) == {"ok": True, "defects": []}
+    assert capsys.readouterr().out == '{"ok": true, "reason": "valid", "defects": []}\n'
 
 
 class _NotUtf8Stdin:

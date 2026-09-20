@@ -2111,6 +2111,48 @@ def missing_or_empty_sections(contract: Contract) -> tuple[str, ...]:
     return tuple(name for name, value in _contract_fields(contract) if not value)
 
 
+class BodyShapeVerdict(StrEnum):
+    """Whether a body's own shape is one a builder can start from (issue
+    #404): the third state beyond `BodyReadState.VALID`/`MALFORMED` -- a
+    schema-valid block that still leaves a required section unfilled.
+    `check <item>` and `body --check` both need to tell `malformed` from
+    `incomplete` apart for their own `--json` `reason`, never by sniffing a
+    defect sentence's own prefix."""
+
+    VALID = BodyReadState.VALID.value
+    MALFORMED = BodyReadState.MALFORMED.value
+    INCOMPLETE = "incomplete"
+
+
+@dataclass(frozen=True)
+class BodyShapeCheck:
+    """One body's own shape verdict and defect sentences (issue #404): the
+    single read `check <item>` and `body --check` both share, so neither
+    writes a second rendering of `body_defect_text`'s or the incomplete
+    sentence's own text."""
+
+    verdict: BodyShapeVerdict
+    defects: tuple[str, ...]
+
+
+def body_shape_check(body: str, *, storage: Storage = Storage.GITHUB) -> BodyShapeCheck:
+    """Every finding a body's own shape can carry without asking a forge
+    anything -- malformed (one sentence per schema defect) or incomplete
+    (one joined sentence) -- paired with the verdict a caller's `--json`
+    `reason` reads. `storage` gates the one storage-specific extension,
+    `[record]` (issue #248)."""
+    parsed = parse_body(body, storage=storage)
+    if parsed.read_state is BodyReadState.MALFORMED:
+        defects = tuple(body_defect_text(defect) for defect in parsed.contract.defects)
+        return BodyShapeCheck(BodyShapeVerdict.MALFORMED, defects)
+    missing = missing_or_empty_sections(parsed.contract)
+    if missing:
+        return BodyShapeCheck(
+            BodyShapeVerdict.INCOMPLETE, (f"body incomplete: {', '.join(missing)}",)
+        )
+    return BodyShapeCheck(BodyShapeVerdict.VALID, ())
+
+
 @dataclass(frozen=True)
 class UncutSlices:
     """One item's still-undispatched slices, as `board` reports them."""
