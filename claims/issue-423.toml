@@ -1,0 +1,7 @@
+claim_id = "0fe5b9ba2faa48a586c9987577c1dbac"
+agent = "Claude head (coordinator)"
+role = "builder"
+base = "e5d0cf2965a048f29aa2de639295ae3c95b3eecc"
+branch = "claude/issue-423-closing-reference"
+scope = [".agent-claim/brief.toml", "README.md"]
+opened_commit = "1994264dc413658871419d188d59c3c50a6a5b1f"
