@@ -24,6 +24,7 @@ rules = [
   "Report at the end the pull request URL, the tip SHA, the files touched, each proof with its command and result, and anything left out and why.",
 ]
 checks = [
+  "uv lock --check",
   "uv run --locked ruff check .",
   "uv run --locked ruff format --check .",
   "uv run --locked pyright src tests scripts",
