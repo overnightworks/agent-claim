@@ -1881,15 +1881,18 @@ class ExpectationLine:
     see it: `index` is its 1-based position in block order -- what `rule
     --line` accepts and what `rulings` prints -- `text` its full prose, and
     `ruling`/`ruled_on` present only once a `rule` call has replaced its
-    `default`. `question`/`example`/`picture` (issue #295) are the card's
-    optional operator-language heading, illustration sentence, and inline
-    SVG -- `None` when `aco ask` was not given them, in which case a card
-    falls back to `text`."""
+    `default`. `default` is the line's own default (`str | None`, `None`
+    once ruled) -- `board_html`'s open-line cards read it from here rather
+    than re-parsing the block. `question`/`example`/`picture` (issue #295)
+    are the card's optional operator-language heading, illustration
+    sentence, and inline SVG -- `None` when `aco ask` was not given them,
+    in which case a card falls back to `text`."""
 
     index: int
     text: str
     ruling: str | None
     ruled_on: date | None
+    default: str | None = None
     question: str | None = None
     example: str | None = None
     picture: str | None = None
@@ -1914,6 +1917,7 @@ def expectation_lines(
             text=cast(str, entry["text"]),
             ruling=cast(str | None, entry.get("ruling")),
             ruled_on=cast("date | None", entry.get("ruled_on")),
+            default=cast(str | None, entry.get("default")),
             question=cast(str | None, entry.get("question")),
             example=cast(str | None, entry.get("example")),
             picture=cast(str | None, entry.get("picture")),
