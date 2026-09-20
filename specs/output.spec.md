@@ -12,7 +12,8 @@ naming its own `reason` vocabulary with examples. Every `--json` command's
 own spec now cites this file (issue #425 finished the migration ask/rule/
 brief started), including the refusals that fire before the
 named command starts (OUT-05) and the ones the argument parser itself
-raises before a command is even chosen (OUT-06, issue #432).
+raises on the way into a command that declares `--json` (OUT-06,
+issue #432).
 
 ## Behavior table
 
