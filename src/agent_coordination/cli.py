@@ -3579,12 +3579,13 @@ def _brief_live_claim(worktree: Path, state: protocol.ClaimState, item: int) -> 
 
 def _lane_tip(branch: str) -> str | None:
     """`branch`'s current commit -- local first, then `origin/` -- or `None`
-    when neither ref resolves (a deleted or not-yet-pushed lane branch)."""
+    when neither ref resolves (a deleted or not-yet-pushed lane branch). A
+    git failure that keeps either read from answering (issue #390 finding
+    9b) raises instead of being read the same way as an absent ref."""
     for ref in (branch, f"origin/{branch}"):
-        try:
-            return checkout._git_output(["rev-parse", "--verify", ref])
-        except protocol.ClaimError:
-            continue
+        commit = checkout.resolved_commit(ref)
+        if commit is not None:
+            return commit
     return None
 
 
@@ -3759,9 +3760,9 @@ def _cmd_brief(parsed: argparse.Namespace, session: _ReadSession) -> int:
     the forge, its live claim from the store, the claim branch's current tip,
     and the files the lane touches against its base. Never a new data
     source, and never a write. Every refusal this function itself can name
-    (BRIEF-07, BRIEF-09's PIN-04/PIN-05, BRIEF-15) reports through
-    `_refuse`; anything else -- an unspecified forge read failure -- still
-    reaches `main`'s own generic handler untouched."""
+    (BRIEF-07, BRIEF-09's PIN-04/PIN-05, BRIEF-15, BRIEF-18's lane-tip read)
+    reports through `_refuse`; anything else -- an unspecified forge read
+    failure -- still reaches `main`'s own generic handler untouched."""
     json_mode = parsed.json
     try:
         step_rules = _brief_step_rules_or_refusal(parsed.step)
@@ -3781,7 +3782,10 @@ def _cmd_brief(parsed: argparse.Namespace, session: _ReadSession) -> int:
         tip: str | None = None
         touched: tuple[str, ...] = ()
     else:
-        tip = _lane_tip(live.claim.branch)
+        try:
+            tip = _lane_tip(live.claim.branch)
+        except protocol.ClaimError as error:
+            return _refuse(BriefReason.UNAVAILABLE, error, json_mode=json_mode)
         touched = _touched_files(live.claim.base, tip) if tip is not None else ()
     observed_at = datetime.now(UTC)
     composition = _BriefComposition(body, live, observed_at, tip, touched, step_rules)

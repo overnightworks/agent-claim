@@ -78,6 +78,29 @@ def _git_output(arguments: list[str], *, directory: Path | None = None) -> str:
     return result.stdout.decode().rstrip("\n")
 
 
+# `git rev-parse --verify --quiet <ref>` (git(1)): exit 1 is the one
+# documented "does not resolve to a single object" outcome under `--quiet`
+# -- the same single-defined-exit contract `path_is_tracked` already reads
+# from `ls-files --error-unmatch` above. Any other nonzero exit (128 for a
+# broken checkout, a corrupted ref, ...) is a real git failure, not an
+# absent ref, and must fail loud with its own detail instead of being read
+# the same way `_lane_tip` used to (issue #390 finding 9b).
+_REV_PARSE_VERIFY_EXIT_UNRESOLVED = 1
+
+
+def resolved_commit(ref: str) -> str | None:
+    """`ref`'s current commit, or `None` when it does not resolve to a
+    single object. A git failure that keeps the read from answering either
+    way -- a missing executable, a timeout, or any exit but the documented
+    "unresolved" one -- raises `ClaimError` with git's own detail instead."""
+    result = _git_run(["rev-parse", "--verify", "--quiet", ref])
+    if result.exit_status == _REV_PARSE_VERIFY_EXIT_UNRESOLVED:
+        return None
+    if result.exit_status != 0:
+        raise ClaimError(process.git_failure_detail(result))
+    return result.stdout.decode().rstrip("\n")
+
+
 def remote_url(remote: str) -> str:
     """One named remote's URL.
 
