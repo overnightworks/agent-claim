@@ -3226,6 +3226,10 @@ class HookToolEffect(StrEnum):
     MUTATING = "mutating"
 
 
+APPLY_PATCH_TOOL_NAME = "apply_patch"
+NOTEBOOK_EDIT_TOOL_NAME = "NotebookEdit"
+
+
 HOOK_TOOL_EFFECTS: Mapping[str, HookToolEffect] = {
     # Read-only: cannot mutate a file, so no claim check is needed.
     # `shell` and the snake_case terminal names below are here too -- the
@@ -3262,8 +3266,8 @@ HOOK_TOOL_EFFECTS: Mapping[str, HookToolEffect] = {
     "Write": HookToolEffect.MUTATING,
     "search_replace": HookToolEffect.MUTATING,
     "write": HookToolEffect.MUTATING,
-    "NotebookEdit": HookToolEffect.MUTATING,
-    "apply_patch": HookToolEffect.MUTATING,
+    NOTEBOOK_EDIT_TOOL_NAME: HookToolEffect.MUTATING,
+    APPLY_PATCH_TOOL_NAME: HookToolEffect.MUTATING,
     "create_file": HookToolEffect.MUTATING,
     "str_replace_editor": HookToolEffect.MUTATING,
 }
@@ -3330,10 +3334,6 @@ def _relative_scope_entry(absolute_path: str, *, toplevel: Path) -> str | None:
 
 
 PATH_REQUIRED = "path required"
-
-
-APPLY_PATCH_TOOL_NAME = "apply_patch"
-NOTEBOOK_EDIT_TOOL_NAME = "NotebookEdit"
 
 
 class _HookPathSource(StrEnum):
