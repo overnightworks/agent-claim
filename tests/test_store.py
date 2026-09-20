@@ -1451,6 +1451,79 @@ def _committed_claim(bare_remote: Path, worktree: Path, *, issue: int) -> protoc
     )
 
 
+def _raw_commit_message(remote: Path, commit: str) -> str:
+    """`commit`'s own stored message, exactly as committed -- `git cat-file
+    -p` read past its header block, never `git log --format=%B`, which
+    prints one extra trailing blank line of its own that a byte-for-byte
+    pin would otherwise mistake for part of the commit."""
+    _headers, message = _git("cat-file", "-p", commit, cwd=remote).stdout.split("\n\n", 1)
+    return message
+
+
+def test_commit_transition_writes_the_exact_trailer_block_for_a_claim_and_a_landing(
+    bare_remote: Path, worktree: Path
+) -> None:
+    """Issue #390 finding 4: `_transition_message`'s trailer block is the
+    one machine-readable shape `claim_lifecycle` and `_find_operation_id`
+    read back key by key, in order -- pin every `key: value` line of a
+    claim transition's and a landing transition's own commit, read back
+    from the real pushed commit through `commit_transition`'s public write
+    path, never `_transition_message` called directly (which could drift
+    from what a real commit actually carries)."""
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+
+    claim_state = store.commit_transition(
+        worktree=worktree,
+        remote=str(bare_remote),
+        subject=store.ClaimTransitionSubject("claim issue 42", item="42"),
+        intent=_issue_claim_intent(42, claim_id="claim-42", operation_id="op-claim-42"),
+    )
+    assert claim_state.tip is not None
+    claim_message = _raw_commit_message(bare_remote, str(claim_state.tip))
+    assert claim_message == (
+        "claim issue 42\n\noperation_id: op-claim-42\nclaim_id: claim-42\nitem: 42\nintent: claim\n"
+    )
+
+    item_id = "aco-000001"
+    open_oid = protocol.ObjectId(_blob(worktree, b"open\n"))
+    store.commit_transition(
+        worktree=worktree,
+        remote=str(bare_remote),
+        subject=store.TransitionSubject("create item aco-000001"),
+        intent=protocol.ItemWriteIntent(
+            item_id=item_id, expected=None, new_oid=open_oid, operation_id="op-item-create"
+        ),
+    )
+    closed_oid = protocol.ObjectId(_blob(worktree, b"closed\n"))
+
+    landing_state = store.commit_transition(
+        worktree=worktree,
+        remote=str(bare_remote),
+        subject=store.ClaimTransitionSubject("release issue 42", item="42"),
+        intent=protocol.LandingIntent(
+            item_id=item_id,
+            item_expected=open_oid,
+            item_new_oid=closed_oid,
+            claim_id=protocol.ClaimId("claim-42"),
+            agent="Ada",
+            role="builder",
+            outcome=protocol.LandedRelease(commit=protocol.ObjectId("d" * 40)),
+            operation_id="op-land-42",
+        ),
+    )
+    assert landing_state.tip is not None
+    landing_message = _raw_commit_message(bare_remote, str(landing_state.tip))
+    assert landing_message == (
+        "release issue 42\n"
+        "\n"
+        "operation_id: op-land-42\n"
+        "item_id: aco-000001\n"
+        "claim_id: claim-42\n"
+        "item: 42\n"
+        "intent: landing\n"
+    )
+
+
 def test_claim_ages_reads_the_committer_date_of_each_claim_from_one_log_walk(
     bare_remote: Path, worktree: Path, git_call_spy: Counter[str]
 ) -> None:
