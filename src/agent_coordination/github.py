@@ -573,24 +573,57 @@ class GitHubForge:
             raise forge.ForgeMalformedResponseError("GitHub returned a malformed check run")
         return forge.CheckRun(name, conclusion)
 
-    def _check_runs(self, sha: str) -> tuple[forge.CheckRun, ...]:
+    def _check_run_page(self, sha: str, page: int) -> tuple[object, ...]:
         raw = self._run(
             [
                 "api",
-                f"repos/{self.repository}/commits/{sha}/check-runs?per_page={ISSUES_PER_PAGE}",
+                f"repos/{self.repository}/commits/{sha}/check-runs"
+                f"?per_page={ISSUES_PER_PAGE}&page={page}",
                 "--jq",
                 '.check_runs[] | {name,conclusion:(if .status == "completed" '
                 "then .conclusion else null end)}",
             ]
         )
-        return tuple(self._check_run(value) for value in self._json_lines(raw, "check run"))
+        return self._json_lines(raw, "check run")
+
+    def _check_runs(self, sha: str) -> tuple[forge.CheckRun, ...]:
+        """Every check run against `sha`, not merely its first page (issue
+        #405 review finding): GitHub's own `check-runs` listing paginates
+        like every other collection this adapter reads, so a run reported
+        only on a later page must count toward readiness exactly as one on
+        the first page does."""
+        values = self._fetch_pages(
+            lambda page: self._check_run_page(sha, page), per_page=ISSUES_PER_PAGE
+        )
+        return tuple(self._check_run(value) for value in values)
+
+    def _combined_status_checks(self, sha: str) -> tuple[forge.CheckRun, ...]:
+        """`sha`'s combined commit status contexts (issue #405 review
+        finding): the external checks GitHub's own check-runs listing never
+        carries -- a SonarCloud quality gate, say -- posted through the
+        separate legacy status API. Reuses `_check_run`'s own value contract
+        (`name`/`conclusion`) rather than a second shape: a `pending`
+        context has no conclusion yet, any other state is its own
+        conclusion string, exactly as a completed check run's is."""
+        raw = self._run(
+            [
+                "api",
+                f"repos/{self.repository}/commits/{sha}/status",
+                "--jq",
+                '.statuses[] | {name:.context,conclusion:(if .state == "pending" '
+                "then null else .state end)}",
+            ]
+        )
+        return tuple(self._check_run(value) for value in self._json_lines(raw, "commit status"))
 
     def landing_readiness(self, number: int) -> forge.LandingReadiness:
         """Whether pull request `number` is safe to merge with its own
         pinned head sha (`aco land`'s preflight, issue #405): read from the
-        pull request itself (open state, head sha, mergeable state) and the
-        checks endpoint against that same head sha -- two round trips, since
-        GitHub answers them from separate resources."""
+        pull request itself (open state, head sha, mergeable state), every
+        page of the check-runs endpoint, and the combined commit status
+        (external contexts such as SonarCloud) against that same head sha --
+        GitHub answers all three from separate resources, and a merge is
+        safe only once every one of them agrees."""
         raw = self._run(
             [
                 "api",
@@ -614,9 +647,8 @@ class GitHubForge:
             or not mergeable_state
         ):
             raise forge.ForgeMalformedResponseError(MALFORMED_PULL_REQUEST)
-        return forge.LandingReadiness(
-            number, state == "open", head_sha, mergeable_state, self._check_runs(head_sha)
-        )
+        checks = self._check_runs(head_sha) + self._combined_status_checks(head_sha)
+        return forge.LandingReadiness(number, state == "open", head_sha, mergeable_state, checks)
 
     def merge_landing(self, number: int, *, head_sha: str, title: str, body: str) -> str:
         """Merge pull request `number` with GitHub's real-merge-commit
