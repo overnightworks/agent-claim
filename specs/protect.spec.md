@@ -19,32 +19,42 @@ canonical remote name.
 
 ## Behavior table
 
-| state \ trigger | generic mutating tool | `NotebookEdit` | `apply_patch` | a read-effect tool |
-|---|---|---|---|---|
-| malformed or non-object payload | PROT-03 | PROT-03 | PROT-03 | PROT-03 |
-| no string tool name under either key | PROT-04 | PROT-04 | PROT-04 | PROT-04 |
-| tool name in neither table | — | — | — | PROT-06 (unknown) |
-| tool name is read-only | — | — | — | PROT-05 |
-| no resolvable path in the payload | PROT-07 | PROT-07 | PROT-07 | — |
-| agent identity cannot be resolved | PROT-08 | PROT-08 | PROT-08 | — |
-| payload path not absolute | PROT-09 | PROT-09 | PROT-09 (each path) | — |
-| path's directory outside every repository | PROT-10 | PROT-10 | PROT-10 | — |
-| checkout has no commit yet | PROT-11 | PROT-11 | PROT-11 | — |
-| shared main checkout, or on the default branch | PROT-12 | PROT-12 | PROT-12 | — |
-| default branch cannot be resolved | PROT-13 | PROT-13 | PROT-13 | — |
-| path resolves to exactly the checkout root | PROT-14 | PROT-14 | PROT-14 | — |
-| board-configuration precondition fails | PROT-29 | PROT-29 | PROT-29 | — |
-| a store fetch failure | PROT-15 | PROT-15 | PROT-15 | — |
-| `refs/aco/state` missing | PROT-16 | PROT-16 | PROT-16 | — |
-| an unexpected crash | PROT-17 | PROT-17 | PROT-17 | — |
-| no live claim on this branch at all | PROT-18 | PROT-18 | PROT-18 | — |
-| a live claim whose scope misses the path | PROT-19 | PROT-19 | PROT-20 | — |
-| a live claim covering the path | PROT-21 | PROT-21 | PROT-23 | — |
-| a lane (issueless) claim covering the path | PROT-22 | PROT-22 | PROT-22 | — |
-| several paths, first one outside scope | — | — | PROT-24 | — |
-| paths across two linked worktrees | — | — | PROT-25 | — |
-| a decoy path key the tool never sends | — | PROT-27 | — | — |
-| `--repo`, or a non-GitHub canonical remote | PROT-28 | PROT-28 | PROT-28 | PROT-28 |
+| state \ trigger | generic mutating tool | `NotebookEdit` | `apply_patch` | `Bash` | a read-effect tool |
+|---|---|---|---|---|---|
+| malformed or non-object payload | PROT-03 | PROT-03 | PROT-03 | PROT-03 | PROT-03 |
+| no string tool name under either key | PROT-04 | PROT-04 | PROT-04 | PROT-04 | PROT-04 |
+| tool name in neither table | — | — | — | — | PROT-06 (unknown) |
+| tool name is read-only | — | — | — | — | PROT-05 |
+| no resolvable path in the payload | PROT-07 | PROT-07 | PROT-07 | PROT-30 (no pattern) | — |
+| agent identity cannot be resolved | PROT-08 | PROT-08 | PROT-08 | PROT-08 (last, see below) | — |
+| payload path not absolute | PROT-09 | PROT-09 | PROT-09 (each path) | PROT-31 (allow) | — |
+| path's directory outside every repository | PROT-10 | PROT-10 | PROT-10 | PROT-32 (allow) | — |
+| checkout has no commit yet | PROT-11 | PROT-11 | PROT-11 | PROT-11 | — |
+| shared main checkout, or on the default branch | PROT-12 | PROT-12 | PROT-12 | PROT-12 | — |
+| default branch cannot be resolved | PROT-13 | PROT-13 | PROT-13 | PROT-13 | — |
+| path resolves to exactly the checkout root | PROT-14 | PROT-14 | PROT-14 | PROT-14 | — |
+| board-configuration precondition fails | PROT-29 | PROT-29 | PROT-29 | PROT-29 | — |
+| a store fetch failure | PROT-15 | PROT-15 | PROT-15 | PROT-15 | — |
+| `refs/aco/state` missing | PROT-16 | PROT-16 | PROT-16 | PROT-16 | — |
+| an unexpected crash | PROT-17 | PROT-17 | PROT-17 | PROT-17 | — |
+| no live claim on this branch at all | PROT-18 | PROT-18 | PROT-18 | PROT-33 (names pattern) | — |
+| a live claim whose scope misses the path | PROT-19 | PROT-19 | PROT-20 | PROT-33 (names pattern) | — |
+| a live claim covering the path | PROT-21 | PROT-21 | PROT-23 | PROT-21 | — |
+| a lane (issueless) claim covering the path | PROT-22 | PROT-22 | PROT-22 | PROT-22 | — |
+| several paths, first one outside scope | — | — | PROT-24 | PROT-33 (each pair) | — |
+| paths across two linked worktrees | — | — | PROT-25 | PROT-33 (own checkout each) | — |
+| a `cd` changes the resolution directory | — | — | — | PROT-34 | — |
+| a `cd` target cannot be resolved | — | — | — | PROT-35 (allow) | — |
+| a decoy path key the tool never sends | — | PROT-27 | — | — | — |
+| `--repo`, or a non-GitHub canonical remote | PROT-28 | PROT-28 | PROT-28 | PROT-28 | PROT-28 |
+
+`Bash`'s own precedence differs from every other column's: PROT-30's allow
+(no recognized pattern) and PROT-31's allow (a still-relative path) both
+fire before agent identity is ever resolved, unlike PROT-08's own position
+before every per-path gate for a generic mutating tool -- Bash resolves
+identity last, only once a checkout, its live state, and a repository-
+relative path are already in hand, since a pattern that never gets that far
+never needed an identity at all.
 
 ## The JSON envelope
 
@@ -103,27 +113,39 @@ fail-closed rather than guessing which paths it touches.
 ## `Bash`'s own command-text payload
 
 `Bash` carries no path key at all: its `command` text is scanned for a
-short, fixed list of write patterns -- a `>`/`>>` redirection (a heredoc
-target such as `cat > path <<EOF` included), `tee`, `sed -i`, `mv`, `cp`,
-`rm`, `git checkout --`, and `git restore` -- each occurrence naming a
-`(pattern, path)` pair, in the order the command names them (issue #380).
-`git checkout <branch>` and a plain `sed` without `-i` name no path at all,
-since neither writes a file. Unlike every other tool's own already-absolute
-payload path, a Bash pattern's own path is relative to the shell's own
-working directory: it resolves against the payload's own `cwd` field
-rather than the hook process's cwd, and PROT-09 does not apply to it at
-all. Every resolved path then runs the same Checkout, Default-Branch, and
-Claim-Scope gates a mutating tool's own path runs (PROT-11 no commit yet,
-PROT-12/PROT-13 not main, PROT-14 the checkout root, the store's own
-PROT-29/PROT-15/PROT-16/PROT-17, PROT-21/PROT-22 a covering claim), except
-a path outside every repository allows instead of PROT-10's deny, and a
-scope miss denies naming both the recognized pattern and the path rather
-than a bare `claim first`.
+short, fixed list of write patterns -- a real, unquoted `>`/`>>` redirection
+(a heredoc target such as `cat > path <<EOF` included), `tee`'s own file
+operands, `sed -i`, `mv` (every operand -- a source vanishes exactly like
+its destination is written), `cp` (its last operand, the only one it
+actually writes), `rm`, `git checkout --`, and `git restore` (skipping its
+own options and their arguments, e.g. `--source HEAD`, `--staged`, `--`) --
+each occurrence naming a `(pattern, path)` pair, in the order the command
+names them (issue #380). A quoted or backslash-escaped occurrence of the
+same characters (`echo '>' > f`) is data, never the operator or command
+name it merely reads like. `git checkout <branch>` and a plain `sed`
+without `-i` name no path at all, since neither writes a file; neither does
+a redirect whose own target is exactly `/dev/null`, or a
+file-descriptor-duplication form (`2>&1`, `>&2`) -- its own "target" is
+another operator, never a real file. Unlike every other tool's own
+already-absolute payload path, a Bash pattern's own path is relative to the
+shell's own working directory: it resolves against the payload's own `cwd`
+field, updated by every literal `cd <path> &&` the command names first
+(PROT-34), rather than the hook process's cwd, and PROT-09 does not apply to
+it at all. Every resolved path then runs the same Checkout, Default-Branch,
+and Claim-Scope gates a mutating tool's own path runs (PROT-11 no commit
+yet, PROT-12/PROT-13 not main, PROT-14 the checkout root, the store's own
+PROT-29/PROT-15/PROT-16/PROT-17, PROT-21/PROT-22 a covering claim), except a
+path outside every repository allows instead of PROT-10's deny, agent
+identity resolves only once a checkout and its live state are already in
+hand rather than before any path runs, and a scope miss denies naming both
+the recognized pattern and the path rather than a bare `claim first`.
 
 - [ ] [PROT-30] A `command` naming none of these patterns -- or no string `command` at all -- allows without resolving identity, git, or the store.
-- [ ] [PROT-31] A recognized pattern's own relative path resolves against the payload's own `cwd`; with no `cwd` at all, that path allows outright.
+- [ ] [PROT-31] A recognized pattern's relative path resolves against the payload's own `cwd`, as PROT-34 updates it; with no known directory, that path allows outright, before identity resolves.
 - [ ] [PROT-32] A recognized pattern's own path outside every git repository allows, unlike PROT-10's deny for every other mutating tool.
 - [ ] [PROT-33] A recognized pattern's own path outside the live claim's scope denies `<pattern> <path> outside claim scope`, naming both (see E-PROT-08).
+- [ ] [PROT-34] A literal, resolvable `cd <path> &&` changes the directory every later path resolves against, even into a linked worktree, judged there like an absolute path would be.
+- [ ] [PROT-35] An unresolvable `cd` target -- expandable, `-`, or no operand -- ends recognition for the rest of the command outright, allowing it (see E-PROT-10).
 
 ## Forge-free
 
@@ -140,6 +162,8 @@ than a bare `claim first`.
 - `protect` never binds the resolved checkout's `HEAD` to a claim's own `base`: it judges the live claim's branch and scope alone.
 - `shell` and their other-provider equivalents never deny for a missing path: the hook payload carries no file path for those, so `protect` cannot gate what it cannot see (README, "PreToolUse write gate"). `Bash` (issue #380) is the one named exception: it judges its own `command` text, but only the fixed pattern list PROT-30 owns -- a `python -c ...` one-liner or an opaque script invocation stays invisible on purpose, so recognizing a pattern is a best-effort aid against forgetting the claim, never a security boundary.
 - `protect` never guesses a Bash-recognized relative path's `cwd` from the hook process's own cwd: a payload naming no `cwd` at all allows that one path outright (PROT-31) rather than risk denying legitimate work on a guess `protect` has no way to confirm -- the same "never guess a relative path" principle PROT-09 enforces for every other tool, applied here as an allow instead of a deny since Bash's own path is expected to be relative in the first place.
+- A Bash pattern never judges what only running the shell could resolve: an operand containing an unquoted (or, inside double quotes, still-substituting) `$name`, `` `command` ``, `~`, `*`, `?`, or `[` is never judged and never denied, the same allow as naming no pattern at all -- `protect` cannot know what a variable, a glob, or a substitution actually expands to without executing the command.
+- Everything between an unquoted `<<WORD`/`<<-WORD`/`<<'WORD'` and its own terminator line is heredoc body, never scanned for a write pattern of its own: only the command line naming the heredoc is judged, so a body that merely reads like `rm docs/file` names nothing.
 
 ## Examples
 
@@ -239,6 +263,19 @@ $ echo '{"toolName": "Bash", "toolInput": {"command": "rm /tmp/scratch.txt"}}' |
 {"decision": "allow"}
 exit 0
 $ echo '{"toolName": "Bash", "toolInput": {"command": "git diff"}}' | aco protect
+{"decision": "allow"}
+exit 0
+```
+
+### E-PROT-10 -- `cd` tracks the directory, an unresolvable one allows
+
+Setup: bare-remote, bootstrapped, a linked worktree on `ada/issue-42`, already `aco claim 42 --scope src`, cwd is `<worktree>`
+
+```console
+$ echo '{"toolName": "Bash", "toolInput": {"command": "cd docs && rm widget.md"}, "cwd": "<worktree>"}' | aco protect
+{"decision": "deny", "reason": "rm docs/widget.md outside claim scope"}
+exit 2
+$ echo '{"toolName": "Bash", "toolInput": {"command": "cd $SCRATCH && rm widget.md"}, "cwd": "<worktree>"}' | aco protect
 {"decision": "allow"}
 exit 0
 ```
