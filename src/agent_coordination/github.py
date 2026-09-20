@@ -62,6 +62,12 @@ MALFORMED_PULL_REQUEST = "GitHub returned a malformed pull request"
 # code but never its class, so any 5xx is matched by digit rather than by an
 # enumerated list of codes that would need to grow with the API.
 _HTTP_SERVER_ERROR_PATTERN = re.compile(r"HTTP 5\d\d")
+# `merge_landing`'s own conflict signal (issue #405): GitHub answers a
+# pinned merge whose `sha` no longer names the pull request's real head with
+# HTTP 405 (closed/not mergeable) or 409 (head moved) -- neither is a 4xx
+# `_nonzero_exit_failure` above already classifies, so `merge_landing`
+# matches this pattern itself and raises `ForgeMergeConflictError`.
+_MERGE_CONFLICT_PATTERN = re.compile(r"HTTP 40[59]")
 GITHUB_HOST = "github.com"
 # Accepts both pinned remote forms, the SCP one included.
 GITHUB_REMOTE_PATTERN = re.compile(r"github\.com[:/]([^/\s]+)/([^/\s]+?)(?:\.git)?$")
@@ -553,6 +559,126 @@ class GitHubForge:
         if landing.number != number:
             raise ClaimError(f"GitHub answered for pull request #{landing.number}, not #{number}")
         return landing
+
+    def _check_run(self, value: object) -> forge.CheckRun:
+        if not isinstance(value, dict):
+            raise forge.ForgeMalformedResponseError("GitHub returned a malformed check run")
+        name = value.get("name")
+        conclusion = value.get("conclusion")
+        if (
+            not isinstance(name, str)
+            or not name
+            or (conclusion is not None and (not isinstance(conclusion, str) or not conclusion))
+        ):
+            raise forge.ForgeMalformedResponseError("GitHub returned a malformed check run")
+        return forge.CheckRun(name, conclusion)
+
+    def _check_runs(self, sha: str) -> tuple[forge.CheckRun, ...]:
+        raw = self._run(
+            [
+                "api",
+                f"repos/{self.repository}/commits/{sha}/check-runs?per_page={ISSUES_PER_PAGE}",
+                "--jq",
+                '.check_runs[] | {name,conclusion:(if .status == "completed" '
+                "then .conclusion else null end)}",
+            ]
+        )
+        return tuple(self._check_run(value) for value in self._json_lines(raw, "check run"))
+
+    def landing_readiness(self, number: int) -> forge.LandingReadiness:
+        """Whether pull request `number` is safe to merge with its own
+        pinned head sha (`aco land`'s preflight, issue #405): read from the
+        pull request itself (open state, head sha, mergeable state) and the
+        checks endpoint against that same head sha -- two round trips, since
+        GitHub answers them from separate resources."""
+        raw = self._run(
+            [
+                "api",
+                f"repos/{self.repository}/pulls/{number}",
+                "--jq",
+                "{state,headSha:.head.sha,mergeableState:.mergeable_state}",
+            ]
+        )
+        values = self._json_lines(raw, "pull request readiness")
+        if len(values) != 1 or not isinstance(values[0], dict):
+            raise forge.ForgeMalformedResponseError(MALFORMED_PULL_REQUEST)
+        value = values[0]
+        state = value.get("state")
+        head_sha = value.get("headSha")
+        mergeable_state = value.get("mergeableState")
+        if (
+            state not in {"open", "closed"}
+            or not isinstance(head_sha, str)
+            or protocol.COMMIT_PATTERN.fullmatch(head_sha) is None
+            or not isinstance(mergeable_state, str)
+            or not mergeable_state
+        ):
+            raise forge.ForgeMalformedResponseError(MALFORMED_PULL_REQUEST)
+        return forge.LandingReadiness(
+            number, state == "open", head_sha, mergeable_state, self._check_runs(head_sha)
+        )
+
+    def merge_landing(self, number: int, *, head_sha: str, title: str, body: str) -> str:
+        """Merge pull request `number` with GitHub's real-merge-commit
+        strategy, pinned to `head_sha` (issue #405): never `gh pr merge`,
+        which re-reads the pull request's current head itself rather than
+        merging the exact commit `landing_readiness` already proved green.
+        A 405 or 409 means the pull request changed since that read --
+        translated to `ForgeMergeConflictError` so `aco land` can name the
+        one recovery that ever applies: re-run.
+        """
+        try:
+            raw = self._run(
+                [
+                    "api",
+                    "--method",
+                    "PUT",
+                    f"repos/{self.repository}/pulls/{number}/merge",
+                    "--input",
+                    "-",
+                ],
+                input_data=json.dumps(
+                    {
+                        "sha": head_sha,
+                        "merge_method": "merge",
+                        "commit_title": title,
+                        "commit_message": body,
+                    }
+                ).encode("utf-8"),
+            )
+        except forge.ForgeError as error:
+            if _MERGE_CONFLICT_PATTERN.search(str(error)) is not None:
+                raise forge.ForgeMergeConflictError(str(error)) from error
+            raise
+        values = self._json_lines(raw, "merge result")
+        if len(values) != 1 or not isinstance(values[0], dict):
+            raise forge.ForgeMalformedResponseError("GitHub returned a malformed merge result")
+        merged = values[0].get("merged")
+        sha = values[0].get("sha")
+        if (
+            merged is not True
+            or not isinstance(sha, str)
+            or protocol.COMMIT_PATTERN.fullmatch(sha) is None
+        ):
+            raise forge.ForgeMalformedResponseError("GitHub returned a malformed merge result")
+        return sha
+
+    def delete_branch(self, branch: str) -> None:
+        """Delete `branch` from this repository once its pull request has
+        merged (`aco land`, issue #405): idempotent -- GitHub answering that
+        the ref already does not exist (branch protection auto-deleted it,
+        or a previous `land` run already deleted it before a later step
+        failed) is success, not a failure to surface."""
+        try:
+            self._run(
+                ["api", "--method", "DELETE", f"repos/{self.repository}/git/refs/heads/{branch}"]
+            )
+        except forge.ForgeNotFoundError:
+            return
+        except forge.ForgeError as error:
+            if "HTTP 422" in str(error):
+                return
+            raise
 
     def _issue_reference(self, value: object, description: str) -> board.IssueReference:
         if not isinstance(value, dict):
