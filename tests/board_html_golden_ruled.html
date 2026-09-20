@@ -179,7 +179,10 @@ summary:focus-visible {
   font: 600 0.74rem var(--mono); letter-spacing: 0.03em; color: var(--muted); white-space: nowrap;
 }
 .ruled-hint { margin: 0 0 16px; color: var(--muted); font-size: 0.86rem; }
-
+.part-ruled { grid-column: 1 / -1; margin-top: 6px; font-size: 0.84rem; }
+.part-ruled summary { color: var(--accent); font-weight: 500; cursor: pointer; }
+.part-ruled .ruled-history { margin: 6px 0 0; }
+.part-ruled .ruled-hint { margin: 6px 0 0; }
 .lanes { display: grid; gap: 12px; }
 .lane {
   background: var(--surface); border: 1px solid var(--rule); border-radius: 12px;
@@ -288,7 +291,7 @@ summary:focus-visible {
               <span class="t-count">1/2</span>
             </span>
           </summary>
-          <ul class="parts"><li class="you"><span class="dot" aria-hidden="true"></span><span>#101 Zugang klären (blocked by #50)</span><span class="p-state">wartet auf dich</span></li></ul>
+          <ul class="parts"><li class="you"><span class="dot" aria-hidden="true"></span><span>#101 Zugang klären (blocked by #50)</span><span class="p-state">wartet auf dich</span><details class="part-ruled"><summary>Verlauf</summary><ul class="ruled-history"><li class="ruled"><span>Ist das Onboarding-Ticket schon offen? Anmerkung: Ja, erledigt.</span><span class="ruled-state">ruled yes 2026-08-28</span></li></ul><p class="ruled-hint">Eine gerulte Zeile ist unveränderlich. Für eine neue Entscheidung: <code>aco ask 101 --text "…"</code>, dann rulen.</p></details></li></ul>
         </details>
       </li>
       <li>

@@ -31,6 +31,7 @@ def _fixture_page(
     storage: board.Storage = board.Storage.GITHUB,
     lane_blocked: bool = False,
     ruled_claimed_item_line: bool = False,
+    ruled_child_line: bool = False,
 ) -> board_html.BoardPage:
     """A container (#100) with two children -- one closed, one open and
     blocked (#101, blocked by #50) -- one open `[[expectation]]` line on
@@ -47,7 +48,14 @@ def _fixture_page(
     reason: it adds one already-ruled `[[expectation]]` line to #102's own
     contract, moving its confirmation into #102's Topic history instead of
     a "Wartet auf dich" card -- only the ruled golden page below turns it
-    on. The
+    on. `ruled_child_line` (issue #388, review finding on
+    board_html.py:313) defaults to `False` for the same reason: it adds a
+    second, already-ruled `[[expectation]]` line to container child #101's
+    own contract, alongside its existing open one, moving its confirmation
+    into #101's own `TopicPart` history nested inside container #100's
+    topic -- a container child is never a `Topic` of its own, so this is
+    the one other place a ruled line can render instead of disappearing.
+    The
     container (#100) also carries a top-level `size = "M"` (issue #357),
     measured into a real (non-weak) estimate by its own one completed lane
     plus two more completed `M` lanes on items this fixture never lists at
@@ -96,6 +104,11 @@ def _fixture_page(
         ),
     )
     child_dependency = block_dependency(50)
+    open_child_expectation = [proposed_expectation("Brauchen wir Admin-Rechte?", default="yes")]
+    if ruled_child_line:
+        open_child_expectation.append(
+            ruled_expectation("Ist das Onboarding-Ticket schon offen? Anmerkung: Ja, erledigt.")
+        )
     open_child = board_issue(
         101,
         "Zugang klären",
@@ -103,7 +116,7 @@ def _fixture_page(
             "Zugang beantragen.",
             now="Warten auf Rueckmeldung.",
             done_when="Zugang erteilt.",
-            expectation=[proposed_expectation("Brauchen wir Admin-Rechte?", default="yes")],
+            expectation=open_child_expectation,
         ),
         blocked_by_count=1,
     )
@@ -217,8 +230,11 @@ def test_render_matches_the_golden_ruled_page_byte_for_byte() -> None:
     """Issue #388 proof 2: an already-ruled `[[expectation]]` line moves out
     of "Wartet auf dich" into its own item's Topic history -- ruling, date,
     text, and the `aco ask` hint, never a form or a button -- and every
-    other section of the page stays exactly as `GOLDEN_PATH` renders it."""
-    rendered = board_html.render(_fixture_page(ruled_claimed_item_line=True))
+    other section of the page stays exactly as `GOLDEN_PATH` renders it.
+    Review finding on board_html.py:313: the same is true one level down,
+    for a container *child*'s own ruled line (`ruled_child_line`) -- its
+    history nests inside container #100's own topic instead of vanishing."""
+    rendered = board_html.render(_fixture_page(ruled_claimed_item_line=True, ruled_child_line=True))
     assert rendered == RULED_GOLDEN_PATH.read_text(encoding="utf-8")
 
 

@@ -123,6 +123,11 @@ class TopicPart:
     title: str | None
     state: TopicPartState
     blocked_by: str | None
+    # A container child's own already-ruled `[[expectation]]` lines (issue
+    # #388): a child is never its own `Topic` (only its container's `parts`
+    # line names it), so this is the one place its history can render --
+    # empty, unlike `Topic.ruled`, for a child whose lines are all still open.
+    ruled: tuple[RuledExpectation, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -266,6 +271,7 @@ def _item_part_state(item: board.BoardItem) -> TopicPartState:
 def _topic_part(
     child: board.ChildItem,
     items_by_number: Mapping[int, board.BoardItem],
+    bodies: Mapping[int, str],
     *,
     repository: str,
     storage: board.Storage,
@@ -274,13 +280,17 @@ def _topic_part(
     filters `ContainerProgress.open_children` to `ChildState.OPEN` before
     this module ever sees it, and never exposes a closed child's number at
     all -- only the aggregate `closed`/`total` counts `_topics` reads
-    straight off `item.container`."""
+    straight off `item.container`. `ruled` reads the child's own body
+    (issue #388): a container child is never a `Topic` of its own, so this
+    `TopicPart` is the one place its already-ruled lines can render their
+    collapsible history instead of disappearing."""
     item = items_by_number.get(child.number)
     state = TopicPartState.OPEN if item is None else _item_part_state(item)
     blocked_by = ", ".join(
         board.open_blocker_label(reference, repository, storage) for reference in child.blocked_by
     )
-    return TopicPart(child.number, item.title if item else None, state, blocked_by or None)
+    ruled = _ruled_expectations(bodies.get(child.number, ""), storage=storage)
+    return TopicPart(child.number, item.title if item else None, state, blocked_by or None, ruled)
 
 
 def _standalone_topic(
@@ -311,16 +321,15 @@ def _topics(
     that order rather than re-deriving it. Each topic also carries its own
     item's already-ruled `[[expectation]]` lines (issue #388) -- a
     container's own history, or a standalone item's; a container *child*'s
-    ruled lines have no topic of their own to move into (only a `TopicPart`
-    line inside its container's), so this lane leaves that case as it was,
-    named here rather than silently dropped."""
+    own already-ruled lines render through its own `TopicPart.ruled`
+    instead (`_topic_part`), since a child is never a `Topic` of its own."""
     items_by_number = {item.number: item for item in projected.items}
     topics: list[Topic] = []
     for item in projected.items:
         if item.container is not None:
             parts = tuple(
                 _topic_part(
-                    child, items_by_number, repository=projected.repository, storage=storage
+                    child, items_by_number, bodies, repository=projected.repository, storage=storage
                 )
                 for child in item.container.open_children
             )
@@ -520,10 +529,11 @@ def _part_label(part: TopicPart, *, storage: board.Storage) -> str:
 
 
 def _render_part(part: TopicPart, *, storage: board.Storage) -> str:
+    history = _render_part_ruled_history(part)
     return (
         f'<li class="{part.state.value}"><span class="dot" aria-hidden="true"></span>'
         f"<span>{_part_label(part, storage=storage)}</span>"
-        f'<span class="p-state">{_PART_STATE_LABEL[part.state]}</span></li>'
+        f'<span class="p-state">{_PART_STATE_LABEL[part.state]}</span>{history}</li>'
     )
 
 
@@ -534,33 +544,46 @@ def _render_ruled_entry(entry: RuledExpectation) -> str:
     )
 
 
-def _render_ruled_history(topic: Topic) -> str:
+def _render_ruled_history(ruled: tuple[RuledExpectation, ...], *, item: int) -> str:
     """A ruled card's own confirmation (issue #388): once a click leaves
-    "Wartet auf dich", its line moves here, inside the very `<details>` the
-    topic already renders -- collapsible, and read fresh from
+    "Wartet auf dich", its line moves here -- read fresh from
     `RuledExpectation` (never server memory), so a page rendered long after
     the click shows exactly what one rendered right after it would. A line
     stays unchangeable (`aco rule` refuses an already-ruled one by name);
     the one sentence here names the way to a new decision instead of a
-    button that would silently open one. Empty for a topic with no ruled
-    line of its own, keeping it byte-identical to a page built before this
-    field existed."""
-    if not topic.ruled:
+    button that would silently open one. Empty for no ruled line of its
+    own, keeping the page byte-identical to one built before this field
+    existed. Shared by `_render_topic` (a container's or standalone item's
+    own history, already inside the topic's own `<details>`) and
+    `_render_part_ruled_history` (a container child's, wrapped in its own
+    nested one below) -- one rendering, two collapsible homes."""
+    if not ruled:
         return ""
-    rows = "".join(_render_ruled_entry(entry) for entry in topic.ruled)
+    rows = "".join(_render_ruled_entry(entry) for entry in ruled)
     hint = (
         '<p class="ruled-hint">Eine gerulte Zeile ist unveränderlich. '
-        f'Für eine neue Entscheidung: <code>aco ask {topic.item} --text "…"</code>, '
+        f'Für eine neue Entscheidung: <code>aco ask {item} --text "…"</code>, '
         "dann rulen.</p>"
     )
     return f'<ul class="ruled-history">{rows}</ul>{hint}'
+
+
+def _render_part_ruled_history(part: TopicPart) -> str:
+    """A container child's own ruled lines (issue #388): a child is never a
+    `Topic`, so its history needs its own collapsible home rather than the
+    topic's shared one -- nested `<details>` inside its `<li>`, empty for a
+    child with no ruled line, same as `_render_ruled_history` alone."""
+    if not part.ruled:
+        return ""
+    body = _render_ruled_history(part.ruled, item=part.number)
+    return f'<details class="part-ruled"><summary>Verlauf</summary>{body}</details>'
 
 
 def _render_topic(topic: Topic, *, storage: board.Storage) -> str:
     share = 0 if topic.total == 0 else round(100 * topic.closed / topic.total)
     parts = "".join(_render_part(part, storage=storage) for part in topic.parts)
     label = board.item_label(topic.item, storage)
-    ruled_history = _render_ruled_history(topic)
+    ruled_history = _render_ruled_history(topic.ruled, item=topic.item)
     return f"""
       <li>
         <details>
@@ -652,14 +675,47 @@ def render(page: BoardPage, *, served: ServedRuleForm | None = None) -> str:
             "".join(_render_topic(topic, storage=page.storage) for topic in page.topics)
             or _EMPTY_TOPICS
         ),
+        ruled_css=_RULED_HISTORY_CSS if _page_has_ruled_lines(page) else "",
         landed_count=len(page.landed),
         landed=_render_landed_section(page),
         measurements=_render_measurements_section(page),
     )
 
 
+def _page_has_ruled_lines(page: BoardPage) -> bool:
+    """Whether `page` renders any `.ruled-history`/`.part-ruled` markup at
+    all (issue #388 gate finding): a page with none stays byte-identical to
+    one built before ruled lines existed -- the CSS those classes need is
+    emitted only when at least one topic or container-child part carries a
+    ruled line, never unconditionally."""
+    return any(topic.ruled for topic in page.topics) or any(
+        part.ruled for topic in page.topics for part in topic.parts
+    )
+
+
 _EMPTY_PARAGRAPH = '<p class="empty">nichts</p>'
 _EMPTY_TOPICS = '<li class="empty">nichts</li>'
+
+_RULED_HISTORY_CSS = """
+.ruled-history {
+  list-style: none; margin: 0 0 8px; padding: 12px 16px; display: grid; gap: 7px;
+  background: var(--sunk); border-radius: 10px;
+}
+.ruled-history li {
+  display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between;
+  gap: 8px; font-size: 0.92rem;
+}
+.ruled-state {
+  font: 600 0.74rem var(--mono); letter-spacing: 0.03em; color: var(--muted); white-space: nowrap;
+}
+.ruled-hint { margin: 0 0 16px; color: var(--muted); font-size: 0.86rem; }
+.part-ruled { grid-column: 1 / -1; margin-top: 6px; font-size: 0.84rem; }
+.part-ruled summary { color: var(--accent); font-weight: 500; cursor: pointer; }
+.part-ruled .ruled-history { margin: 6px 0 0; }
+.part-ruled .ruled-hint { margin: 6px 0 0; }"""
+"""BOARD-36..38's own CSS (issue #388), emitted by `render` only when
+`_page_has_ruled_lines` finds at least one ruled line on the page -- a page
+with none stays byte-identical to one built before this class existed."""
 
 
 PAGE = """<title>agent-claim Board</title>
@@ -830,20 +886,7 @@ summary:focus-visible {{
 }}
 .parts .running .p-state {{ color: var(--work); }}
 .parts .you .p-state {{ color: var(--you); }}
-
-.ruled-history {{
-  list-style: none; margin: 0 0 8px; padding: 12px 16px; display: grid; gap: 7px;
-  background: var(--sunk); border-radius: 10px;
-}}
-.ruled-history li {{
-  display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between;
-  gap: 8px; font-size: 0.92rem;
-}}
-.ruled-state {{
-  font: 600 0.74rem var(--mono); letter-spacing: 0.03em; color: var(--muted); white-space: nowrap;
-}}
-.ruled-hint {{ margin: 0 0 16px; color: var(--muted); font-size: 0.86rem; }}
-
+{ruled_css}
 .lanes {{ display: grid; gap: 12px; }}
 .lane {{
   background: var(--surface); border: 1px solid var(--rule); border-radius: 12px;
