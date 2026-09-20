@@ -6,6 +6,7 @@ tests that build a `GitHubForge` only to hand it to `issue_claim._board`/
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import subprocess
 import sys
@@ -15,7 +16,7 @@ from pathlib import Path
 
 import pytest
 from board_fixtures import REPOSITORY
-from github_fixtures import LANDING_BRANCH
+from github_fixtures import LANDING_BRANCH, MERGE_COMMIT_SHA
 
 from agent_coordination import board, forge, github, process
 from agent_coordination.protocol import ClaimError
@@ -433,10 +434,14 @@ def test_github_adapter_updates_an_item_body() -> None:
     ]
 
 
+_LANDING_COMMENTS_PATH = f"repos/{REPOSITORY}/issues/79/comments"
+
+
 def test_github_adapter_closes_a_landed_item_with_a_comment_first() -> None:
-    """Issue #359 Card 1/CI: `close_landed_item`'s own two `_run` calls --
-    the comment lands first, the close second, exactly the order its own
-    docstring promises."""
+    """Issue #359 Card 1/CI, extended by issue #397: `close_landed_item`
+    reads its own past comments first (a repeat-safety check that finds
+    none here), then posts the comment, then closes -- exactly the order
+    its own docstring promises."""
     observed: list[tuple[list[str], bytes | None]] = []
 
     def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
@@ -448,8 +453,9 @@ def test_github_adapter_closes_a_landed_item_with_a_comment_first() -> None:
     client.close_landed_item(79, pull_request=101)
 
     assert observed == [
+        (["api", _LANDING_COMMENTS_PATH, "--jq", ".[] | {body}"], None),
         (
-            ["api", f"repos/{REPOSITORY}/issues/79/comments", "--input", "-"],
+            ["api", _LANDING_COMMENTS_PATH, "--input", "-"],
             json.dumps({"body": github.landing_comment(101)}).encode("utf-8"),
         ),
         (
@@ -468,6 +474,8 @@ def test_github_adapter_closing_a_landed_item_never_reaches_close_when_the_comme
 
     def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
         calls.append(arguments)
+        if input_data is None:
+            return ""
         raise forge.ForgeError("HTTP 500 comment failed")
 
     client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
@@ -475,7 +483,41 @@ def test_github_adapter_closing_a_landed_item_never_reaches_close_when_the_comme
     with pytest.raises(forge.ForgeError, match="comment failed"):
         client.close_landed_item(79, pull_request=101)
 
-    assert calls == [["api", f"repos/{REPOSITORY}/issues/79/comments", "--input", "-"]]
+    assert calls == [
+        ["api", _LANDING_COMMENTS_PATH, "--jq", ".[] | {body}"],
+        ["api", _LANDING_COMMENTS_PATH, "--input", "-"],
+    ]
+
+
+def test_github_adapter_closing_a_landed_item_skips_a_repeated_comment() -> None:
+    """Issue #397: a rerun that finds its own `landed by PR #<n>` comment
+    already posted -- the comment landed but a prior run crashed before the
+    close -- skips straight to the close instead of posting it twice."""
+    calls: list[list[str]] = []
+    already_posted = json.dumps({"body": github.landing_comment(101)})
+
+    def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
+        calls.append(arguments)
+        return already_posted if input_data is None else ""
+
+    client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
+
+    client.close_landed_item(79, pull_request=101)
+
+    assert calls == [
+        ["api", _LANDING_COMMENTS_PATH, "--jq", ".[] | {body}"],
+        ["api", "--method", "PATCH", f"repos/{REPOSITORY}/issues/79", "--input", "-"],
+    ]
+
+
+def test_github_adapter_fails_loud_on_a_malformed_issue_comment() -> None:
+    client = GitHubForge(
+        github._repository_id(REPOSITORY),
+        run=lambda arguments, input_data=None: json.dumps({"body": 5}),
+    )
+
+    with pytest.raises(ClaimError, match="malformed issue comment"):
+        client.close_landed_item(79, pull_request=101)
 
 
 def test_recent_merged_pull_requests_refuses_a_window_that_ends_before_it_starts() -> None:
@@ -1472,6 +1514,7 @@ def api_pull_request(**overrides: object) -> dict[str, object]:
         "headRepositoryOwner": {"login": owner},
         "author": {"login": "ada"},
         "mergedAt": "2026-09-05T10:00:00Z",
+        "mergeCommit": {"oid": MERGE_COMMIT_SHA},
     }
     return payload | overrides
 
@@ -1484,9 +1527,17 @@ def test_github_adapter_reads_a_pull_request_and_the_default_branch() -> None:
 
     client = GitHubForge(github._repository_id(REPOSITORY), run=run)
 
-    assert client.landing(12) == forge.Landing(
-        12, "ada", "Work-Item: #72", github._repository_id(REPOSITORY), LANDING_BRANCH, "main", True
+    expected = forge.Landing(
+        12,
+        "ada",
+        "Work-Item: #72",
+        github._repository_id(REPOSITORY),
+        LANDING_BRANCH,
+        "main",
+        True,
+        MERGE_COMMIT_SHA,
     )
+    assert dataclasses.astuple(client.landing(12)) == dataclasses.astuple(expected)
     assert client.default_branch() == "main"
 
 
@@ -1538,6 +1589,14 @@ def test_github_adapter_fails_loud_when_github_answers_for_another_pull_request(
                 headRepository={"name": "repo/extra"}, headRepositoryOwner={"login": "owner"}
             ),
             id="head-repository-invalid-shape",
+        ),
+        pytest.param(api_pull_request(mergeCommit=None), id="merged-with-no-merge-commit"),
+        pytest.param(
+            api_pull_request(mergeCommit={"oid": "not-a-sha"}), id="malformed-merge-commit-oid"
+        ),
+        pytest.param(
+            api_pull_request(mergedAt=None, mergeCommit={"oid": MERGE_COMMIT_SHA}),
+            id="unmerged-with-a-merge-commit",
         ),
     ],
 )

@@ -52,7 +52,7 @@ from cli_fixtures import (
     arrange_scope_width,
     stub_board_config_tracked,
 )
-from github_fixtures import LANDING_BRANCH, WORK_ITEM_ISSUE
+from github_fixtures import LANDING_BRANCH, MERGE_COMMIT_SHA, WORK_ITEM_ISSUE
 
 from agent_coordination import (
     __version__,
@@ -1972,15 +1972,28 @@ def test_start_mints_a_fresh_id_after_a_merged_release_reopens_the_item(
     (worktree / "feature.txt").write_text("feature\n")
     _real_git(worktree, "add", "feature.txt")
     _real_git(worktree, "commit", "-q", "-m", "feature work")
-    _real_git(repo, "merge", "-q", "--no-ff", "-m", "Merge feature", _CLEANUP_BRANCH)
+    _real_git(
+        repo,
+        "merge",
+        "-q",
+        "--no-ff",
+        "-m",
+        "Merge feature",
+        "-m",
+        f"Work-Item: #{WORK_ITEM_ISSUE}",
+        _CLEANUP_BRANCH,
+    )
+    merge_commit = _real_git(repo, "rev-parse", "HEAD").stdout.strip()
     _push_repository_trunk(repo, "origin")
     client.landings[12] = landing_pull_request(
         body=f"Work-Item: #{WORK_ITEM_ISSUE}\n\nCloses #{WORK_ITEM_ISSUE}",
         merged=True,
         head_ref_name=_CLEANUP_BRANCH,
+        merge_commit=merge_commit,
     )
     client.closed_issues.add(WORK_ITEM_ISSUE)
     monkeypatch.setattr(issue_claim, "_fetch_issue_reference", _LIVE_FETCH_ISSUE_REFERENCE)
+    monkeypatch.setattr(checkout, "trunk_landings", _LIVE_TRUNK_LANDINGS)
 
     assert issue_claim.main(["--repo", REPOSITORY, "release", "72", "--merged", "12"]) == 0
     assert not worktree.exists()
@@ -10602,7 +10615,12 @@ def landing_pull_request(
     head_repository: str = REPOSITORY,
     author: str = "ada",
     merged: bool = False,
+    merge_commit: str | None = None,
 ) -> forge.Landing:
+    """`merge_commit` defaults to a shared, well-formed sha once `merged` is
+    true (a real merged pull request always carries one) and to `None`
+    otherwise; a test proving the merge commit's own authority
+    (issue #397) passes its own sha instead."""
     return forge.Landing(
         number,
         author,
@@ -10611,6 +10629,7 @@ def landing_pull_request(
         head_ref_name,
         base_ref_name,
         merged,
+        merge_commit if merge_commit is not None else (MERGE_COMMIT_SHA if merged else None),
     )
 
 
@@ -10905,15 +10924,31 @@ def test_check_reads_a_fenced_classification_line_as_documentation(
 LANE_BRANCH = "docs/tidy-readme"
 
 
+_MERGE_COMMIT_COMMITTED_AT = datetime(2026, 9, 1, tzinfo=UTC)
+
+
+def _trunk_landing(
+    sha: str, classification: board.TrunkClassification | board.ClassificationDefect | None
+) -> checkout.TrunkLanding:
+    """One walked trunk commit (issue #397): the shape
+    `merged_release_client`'s own `checkout.trunk_landings` stub returns,
+    and every test proving a merge-commit defect builds its own variant
+    from -- the same reader and grammar `storage = state-ref` already
+    trusts (`_trunk_landing_defect`)."""
+    return checkout.TrunkLanding(sha, _MERGE_COMMIT_COMMITTED_AT, classification)
+
+
 @dataclass(frozen=True)
 class ReleaseMergeScenario:
-    """The pull request body and merge facts `merged_release_client` builds a
-    landing from -- one parametrized case's worth, typed instead of a loose
-    `dict[str, object]` so each keyword forwards to it honestly."""
+    """The pull request body, merge facts, and walked trunk
+    `merged_release_client` builds a landing from -- one parametrized case's
+    worth, typed instead of a loose `dict[str, object]` so each keyword
+    forwards to it honestly."""
 
     body: str
     merged: bool = True
     base_ref_name: str = "main"
+    landings: tuple[checkout.TrunkLanding, ...] | None = None
 
 
 def merged_release_client(
@@ -10923,8 +10958,18 @@ def merged_release_client(
     merged: bool = True,
     base_ref_name: str = "main",
     lane: bool = False,
+    merge_commit: str = MERGE_COMMIT_SHA,
+    landings: tuple[checkout.TrunkLanding, ...] | None = None,
 ) -> FakeForge:
-    """A session whose one claim can be released against pull request #12."""
+    """A session whose one claim can be released against pull request #12.
+
+    `landings` stubs the walked first-parent trunk an issue release now
+    verifies its merge commit against (issue #397, Befund 41): `None` --
+    the default -- seeds the one trunk commit that authorizes closing
+    `WORK_ITEM_ISSUE` at `merge_commit`, matching this fixture's own happy
+    path; a lane release never reads it, and a test of a merge-commit
+    defect passes its own tuple instead.
+    """
     branch = LANE_BRANCH if lane else LANDING_BRANCH
     standing = request(
         "landing",
@@ -10935,9 +10980,22 @@ def merged_release_client(
     )
     client = FakeForge()
     client.landings[12] = landing_pull_request(
-        body=body, merged=merged, base_ref_name=base_ref_name, head_ref_name=branch
+        body=body,
+        merged=merged,
+        base_ref_name=base_ref_name,
+        head_ref_name=branch,
+        merge_commit=merge_commit if merged else None,
     )
     _patch_release_session(monkeypatch, client, standing, branch=branch)
+    if not lane:
+        resolved = (
+            landings
+            if landings is not None
+            else (
+                _trunk_landing(merge_commit, board.TrunkWorkItemClassification((WORK_ITEM_ISSUE,))),
+            )
+        )
+        monkeypatch.setattr(checkout, "trunk_landings", lambda *_args, **_kwargs: resolved)
     return client
 
 
@@ -11240,19 +11298,39 @@ def test_release_merged_accepts_an_issueless_lane_that_landed_without_an_item(
             id="wrong-base",
         ),
         pytest.param(
-            ReleaseMergeScenario(body="Work-Item: #99\n\nCloses #99"),
-            f"pull request #12 names Work-Item: {REPOSITORY}#99, not work item #72",
+            ReleaseMergeScenario(body="Work-Item: #72\n\nCloses #72", landings=()),
+            f"merge commit {MERGE_COMMIT_SHA} of pull request #12 is not on the first-parent trunk",
+            id="off-trunk",
+        ),
+        pytest.param(
+            ReleaseMergeScenario(
+                body="Work-Item: #72\n\nCloses #72",
+                landings=(_trunk_landing(MERGE_COMMIT_SHA, None),),
+            ),
+            f"merge commit {MERGE_COMMIT_SHA} of pull request #12 carries no `Work-Item:` trailer",
+            id="no-trailer",
+        ),
+        pytest.param(
+            ReleaseMergeScenario(
+                body="Work-Item: #72\n\nCloses #72",
+                landings=(
+                    _trunk_landing(MERGE_COMMIT_SHA, board.TrunkWorkItemClassification((99,))),
+                ),
+            ),
+            f"merge commit {MERGE_COMMIT_SHA} of pull request #12 does not name work item #72",
             id="another-item",
         ),
         pytest.param(
-            ReleaseMergeScenario(body="No-Item: docs"),
-            "pull request #12 names No-Item: docs, not work item #72",
-            id="no-item-for-an-issue-claim",
-        ),
-        pytest.param(
-            ReleaseMergeScenario(body="Advances #72"),
-            "pull request #12 carries no `Work-Item:` or `No-Item:` line",
-            id="unclassified",
+            ReleaseMergeScenario(
+                body="Work-Item: #72\n\nCloses #72",
+                landings=(
+                    _trunk_landing(
+                        MERGE_COMMIT_SHA, board.NoItemClassification(board.NoItemKind.DOCS)
+                    ),
+                ),
+            ),
+            f"merge commit {MERGE_COMMIT_SHA} of pull request #12 does not name work item #72",
+            id="trunk-declares-no-item",
         ),
     ],
 )
@@ -11262,11 +11340,16 @@ def test_release_merged_refuses_a_landing_it_cannot_verify(
     scenario: ReleaseMergeScenario,
     reason: str,
 ) -> None:
+    """Issue #397, Befund 41 (Beweis 1): a merge commit that is off-trunk,
+    carries no `Work-Item:` trailer, or names a different item refuses
+    before close/release, regardless of what the pull request's own --
+    mutable -- body still says."""
     merged_release_client(
         monkeypatch,
         body=scenario.body,
         merged=scenario.merged,
         base_ref_name=scenario.base_ref_name,
+        landings=scenario.landings,
     )
     _stub_issue_reference(monkeypatch, {WORK_ITEM_ISSUE: (forge.ItemState.CLOSED, "", "")})
 
@@ -11299,6 +11382,21 @@ def test_release_merged_refuses_a_lane_whose_pull_request_names_an_item(
     assert issue_claim.main(["--repo", REPOSITORY, "release", "--merged", "12"]) == 2
     assert capsys.readouterr().err == (
         f"ERROR: pull request #12 names {REPOSITORY}#72; an issue-less lane needs a No-Item line\n"
+    )
+
+
+def test_release_merged_refuses_an_unclassified_lane_pull_request(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An issue-less lane still reads the pull request's own body to
+    identify what it declares (issue #397): a body carrying neither
+    `Work-Item:` nor `No-Item:` refuses the same as `check` would, since a
+    lane closes no item a trunk trailer could authorize instead."""
+    merged_release_client(monkeypatch, body="Advances #72", lane=True)
+
+    assert issue_claim.main(["--repo", REPOSITORY, "release", "--merged", "12"]) == 2
+    assert capsys.readouterr().err == (
+        "ERROR: pull request #12 carries no `Work-Item:` or `No-Item:` line\n"
     )
 
 
@@ -11588,10 +11686,22 @@ def _release_cleanup_scenario(
         body=f"Work-Item: #{WORK_ITEM_ISSUE}\n\nCloses #{WORK_ITEM_ISSUE}",
         merged=True,
         head_ref_name=_CLEANUP_BRANCH,
+        merge_commit=MERGE_COMMIT_SHA,
     )
     client.closed_issues.add(WORK_ITEM_ISSUE)
     monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
     monkeypatch.setattr(issue_claim, "_fetch_issue_reference", _LIVE_FETCH_ISSUE_REFERENCE)
+    # This module's own worktree/branch cleanup mechanics (issue #322), not
+    # the merge-commit trailer authority (issue #397): every scenario below
+    # -- including one that never actually merges `_CLEANUP_BRANCH` into
+    # `main` -- stubs the walked trunk to authorize closing #72 regardless.
+    monkeypatch.setattr(
+        checkout,
+        "trunk_landings",
+        lambda *_args, **_kwargs: (
+            _trunk_landing(MERGE_COMMIT_SHA, board.TrunkWorkItemClassification((WORK_ITEM_ISSUE,))),
+        ),
+    )
     _patch_store_write(monkeypatch, _store_claim_from_request(standing))
     _set_agent_identity_env(monkeypatch, {checkout.ACO_AGENT_ENV: "Ada"})
     _redirect_toplevel(monkeypatch, repo)
@@ -11704,10 +11814,18 @@ def _checked_out_elsewhere_scenario(monkeypatch: pytest.MonkeyPatch, tmp_path: P
         body=f"Work-Item: #{WORK_ITEM_ISSUE}\n\nCloses #{WORK_ITEM_ISSUE}",
         merged=True,
         head_ref_name=_CLEANUP_BRANCH,
+        merge_commit=MERGE_COMMIT_SHA,
     )
     client.closed_issues.add(WORK_ITEM_ISSUE)
     monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
     monkeypatch.setattr(issue_claim, "_fetch_issue_reference", _LIVE_FETCH_ISSUE_REFERENCE)
+    monkeypatch.setattr(
+        checkout,
+        "trunk_landings",
+        lambda *_args, **_kwargs: (
+            _trunk_landing(MERGE_COMMIT_SHA, board.TrunkWorkItemClassification((WORK_ITEM_ISSUE,))),
+        ),
+    )
     _patch_store_write(monkeypatch, _store_claim_from_request(standing))
     _set_agent_identity_env(monkeypatch, {checkout.ACO_AGENT_ENV: "Ada"})
     _redirect_toplevel(monkeypatch, bystander)
