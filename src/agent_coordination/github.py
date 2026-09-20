@@ -75,15 +75,20 @@ _HTTP_SERVER_ERROR_PATTERN = re.compile(r"HTTP 5\d\d")
 # `_nonzero_exit_failure` above already classifies, so `merge_landing`
 # matches this pattern itself and raises `ForgeMergeConflictError`.
 _MERGE_CONFLICT_PATTERN = re.compile(r"HTTP 40[59]")
-# `delete_branch`'s own idempotent-absence signal (issue #405 review
-# finding): `gh api`'s own error text puts the message before the code --
-# "Reference does not exist (HTTP 422)" -- so the two lookaheads match
-# either order rather than pinning the one this adapter never actually
-# receives; any other 422 (a protected branch, a malformed ref name) is a
-# real failure this adapter must still surface.
-_BRANCH_ALREADY_ABSENT_PATTERN = re.compile(
-    r"(?=.*\breference does not exist\b)(?=.*\bHTTP 422\b)", re.IGNORECASE | re.DOTALL
-)
+
+
+def _branch_already_absent(error_text: str) -> bool:
+    """`delete_branch`'s own idempotent-absence signal (issue #405 review
+    finding; S8786): `gh api`'s own error text puts the message before the
+    code -- "Reference does not exist (HTTP 422)" -- so this checks both
+    substrings independent of order, rather than the two-lookahead regex
+    that made an order-agnostic match super-linear to backtrack; any other
+    422 (a protected branch, a malformed ref name) is a real failure this
+    adapter must still surface."""
+    lowered = error_text.casefold()
+    return "reference does not exist" in lowered and "http 422" in lowered
+
+
 GITHUB_HOST = "github.com"
 # Accepts both pinned remote forms, the SCP one included.
 GITHUB_REMOTE_PATTERN = re.compile(r"github\.com[:/]([^/\s]+)/([^/\s]+?)(?:\.git)?$")
@@ -796,7 +801,7 @@ class GitHubForge:
         except forge.ForgeNotFoundError:
             return
         except forge.ForgeError as error:
-            if _BRANCH_ALREADY_ABSENT_PATTERN.search(str(error)) is not None:
+            if _branch_already_absent(str(error)):
                 return
             raise
 
