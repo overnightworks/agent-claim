@@ -1,7 +1,10 @@
-"""Behavioral tests for the pure `agent-claim` block write path `board.py`
-owns (#240): `rule_expectation`, `append_expectation`, and the
-`expectation_lines` projection `rule --line`, `ask`, and `rulings` all
-share. CLI wiring for `rule`/`ask`/`rulings` is covered in `tests/test_cli.py`."""
+"""Behavioral tests for the pure `agent-claim` block write path `body.py`
+owns (#240, moved from `board.py` by #419): `rule_expectation`,
+`append_expectation`, and the `expectation_lines` projection `rule --line`,
+`ask`, and `rulings` all share. Reached here through `board.<name>`, the
+codec's own re-export while `cli.py`'s own migration (#405) is still
+pending. CLI wiring for `rule`/`ask`/`rulings` is covered in
+`tests/test_cli.py`."""
 
 from __future__ import annotations
 
@@ -34,6 +37,7 @@ from board_fixtures import (
 )
 
 from agent_coordination import board, metrics, protocol
+from agent_coordination.body import EXPECTATION_LINE_TEXT_MAXIMUM, _expectation_picture_defect
 from agent_coordination.protocol import ClaimError, ClaimRequest
 
 # A real expectation sentence from this repository's own issue #230 (#240's
@@ -400,7 +404,7 @@ def test_expectation_picture_allows_an_internal_anchor_href_with_surrounding_spa
     whitespace and misread it as an external value's first character (issue
     #300 residual 5, #234's own rule)."""
     picture = '<svg><a href = "#x"><circle cx="5" cy="5" r="4"/></a></svg>'
-    assert board._expectation_picture_defect(picture) is None
+    assert _expectation_picture_defect(picture) is None
 
     body = agent_claim_body(MINIMAL_BLOCK_TOML)
     updated = board.append_expectation(
@@ -419,7 +423,7 @@ def test_expectation_picture_allows_an_unrelated_animation_to_an_external_url() 
         '<svg><animate attributeName="href" to="#ok"/>'
         '<animate attributeName="x" to="http://evil.example"/></svg>'
     )
-    assert board._expectation_picture_defect(picture) is None
+    assert _expectation_picture_defect(picture) is None
 
 
 def test_expectation_picture_allows_an_animated_href_with_every_values_segment_internal() -> None:
@@ -427,7 +431,7 @@ def test_expectation_picture_allows_an_animated_href_with_every_values_segment_i
     two internal anchors are as harmless as one, so a picture must not be
     refused just because `values` contains a semicolon."""
     picture = '<svg><animate attributeName="href" values="#a;#b"/></svg>'
-    assert board._expectation_picture_defect(picture) is None
+    assert _expectation_picture_defect(picture) is None
 
 
 def test_append_expectation_refuses_an_overlong_question() -> None:
@@ -597,7 +601,7 @@ def test_expectation_line_summary_truncates_long_text() -> None:
 
     summary = board.expectation_line_summary(line)
 
-    assert len(summary) == board.EXPECTATION_LINE_TEXT_MAXIMUM
+    assert len(summary) == EXPECTATION_LINE_TEXT_MAXIMUM
     assert summary.endswith("…")
 
 

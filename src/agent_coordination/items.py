@@ -1,19 +1,20 @@
 """Pure codec for one state-ref item file's `[record]` table (issue #248).
 
 An item file (`items/<id>.md` in the tree of `refs/aco/state`) is a
-work-item body in the same `agent-claim`-block grammar `board.py` already
+work-item body in the same `agent-claim`-block grammar `body.py` already
 reads and writes, extended with a nested `[record]` table that exists only
 under `storage = "state-ref"`: the identity and relations a GitHub issue
 would otherwise carry through its native type, sub-issue, and blocked-by
-relations. `board.py`'s schema (`parse_body`/`_block_record_defects`)
+relations. `body.py`'s schema (`parse_body`/`_block_record_defects`)
 already validates that table's shape before this module ever sees it; this
 module turns the validated raw values into `ItemRecord`, and turns an item
 file's own name into its id and number.
 
-This module sits below `board.py` in the Layers contract (`items` under
-`board`): it must never import it. `state_board.py`, the adapter that
-assembles `board.Issue`/`IssueDependency`/`ChildItem`/`ParentIssue` from
-several `ItemRecord`s at once, sits above both.
+This module sits below `board.py` and `body.py` in the Layers contract
+(`items` may import `body`, never `board`, and never the reverse of either).
+`state_board.py`, the adapter that assembles `board.Issue`/`IssueDependency`/
+`ChildItem`/`ParentIssue` from several `ItemRecord`s at once, sits above all
+three.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TypeAlias, cast
 
+from .body import ORIGIN_GRAMMAR_HINT, ORIGIN_PATTERN
 from .protocol import (
     RFC3339_TIMESTAMP_FORMAT,
     ClaimUnavailableError,
@@ -38,39 +40,20 @@ from .protocol import (
 # key, so a rename of the file is the only way its id ever changes.
 ITEM_ID_PATTERN = re.compile(r"aco-[0-9a-f]{6}")
 ITEM_FILENAME_SUFFIX = ".md"
-# The one origin grammar (issue #316, parent #230): a forge name or
-# host/owner/repo path -- one or more letter/digit/hyphen segments joined by
-# `.` or `/` -- then `#` and the number that forge itself uses for the
-# issue. Case-insensitive on the host/owner/repo part (issue #316 delta): a
-# hand-written v2 ref may carry the forge's own capitalization, e.g.
-# `github.com/OvernightWorks/x#1`. `--origin`'s argparse `type=`
-# (`parse_origin`) and the persisted `[record].origin` field
-# (`board._record_relation_defects`) both validate against this one pattern,
-# so a stored malformed origin is exactly as rejected as a malformed
-# `--origin` flag. This is also the one owner `aco pull <forge>#<n>` (#230
-# slice 5) will later split `record.origin` back out through.
-ORIGIN_PATTERN = re.compile(
-    r"[a-z][a-z0-9-]*(?:[./][a-z][a-z0-9-]*)*#[1-9]\d*", re.ASCII | re.IGNORECASE
-)
-# The one hint text for a malformed origin, shared by `parse_origin`'s
-# argparse refusal and `board._record_relation_defects`' record defect, so a
-# bad `--origin` flag and a bad stored `record.origin` read the same
-# sentence rather than two independently worded rules for one grammar.
-ORIGIN_GRAMMAR_HINT = "forge#n or host/owner/repo#n, e.g. gitlab#514"
 # Refuse rather than silently widen (issue #283, ruling 16.09.2026): an id
 # never grows a seventh hex character just because the id space (16.7
 # million values per repository) is filling up. Three tries against real
 # randomness is already astronomically unlikely to collide even once; a
 # fourth would only mask a broken randomness source.
 _MAX_MINT_ATTEMPTS = 3
-# `cast`'s type argument for every `ItemRecord` field `board.py`'s schema
+# `cast`'s type argument for every `ItemRecord` field `body.py`'s schema
 # leaves optional: named once as a real type, not a repeated string literal,
 # so the four call sites below share one owner.
 _OptionalStr: TypeAlias = str | None
 
 
 class RecordState(StrEnum):
-    """An item's own `[record].state` (issue #248): `board.py`'s schema
+    """An item's own `[record].state` (issue #248): `body.py`'s schema
     already restricts the raw value to these two; this is the typed read of
     it, distinct from `board.BlockerState`/`board.ChildState`, which name a
     *relation's target* state, not an item's own."""
@@ -152,7 +135,7 @@ def parse_origin(value: str) -> str:
 
 
 def parse_item_record(item_id: str, record: Mapping[str, object]) -> ItemRecord:
-    """`record` (already validated by `board.py`'s schema: `parse_body`
+    """`record` (already validated by `body.py`'s schema: `parse_body`
     returned `BodyReadState.VALID` and this is its `.record`) turned into a
     typed `ItemRecord`. Trusts every field's shape -- it never re-validates
     what the caller already checked."""
@@ -206,7 +189,7 @@ def format_record_timestamp(moment: datetime) -> str:
 
 def record_table(record: ItemRecord) -> dict[str, object]:
     """`record`, turned back into the `[record]` table's TOML-ready dict
-    shape `board.render_block`/`board._render_record` expect: the write-side
+    shape `body.render_block` (its internal `_render_record`) expects: the write-side
     mirror of `parse_item_record`, so the two directions share one field
     list and one owner for what an optional field's absence means (omitted
     entirely, never written empty)."""
