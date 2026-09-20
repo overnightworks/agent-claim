@@ -109,8 +109,9 @@ committed, so a cleanup problem never turns a released claim back into a live on
 branch stays the forge merge's own business: only the local worktree and the local branch move
 here, never anything on `remote`. Every outcome is loud: exactly one `worktree: <outcome>` line
 follows the report in text, and the same text becomes `--json`'s own `worktree` value -- `removed`
-when both are gone, `kept -- <reason>` otherwise, one owner for both shapes so they can never
-drift apart.
+when both are gone, `kept -- <reason>` when neither moves, or `removed; branch kept -- <reason>`
+when the worktree is gone but the branch delete itself failed (REL-34) -- one owner for all three
+shapes so they can never drift apart.
 
 - [ ] [REL-25] A clean linked worktree whose branch is already merged into the canonical remote's own trunk is removed together with that local branch: `worktree: removed` (see E-REL-08).
 - [ ] [REL-26] `--keep-worktree` skips that removal outright: `worktree: kept -- --keep-worktree was given`, worktree and branch both left exactly as found (see E-REL-09).
