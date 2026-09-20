@@ -1296,6 +1296,20 @@ def test_refuse_unsafe_start_branch_accepts_a_safe_branch() -> None:
     checkout.refuse_unsafe_start_branch("codex/issue-1-widget", prefix="codex")
 
 
+def test_refuse_unsafe_start_branch_refuses_an_overlong_identity_prefix() -> None:
+    """Issue #322 review/gate finding 1: a syntactically safe but overlong
+    `ACO_AGENT` first word must still be refused before any git write,
+    exactly as the claim machinery's own `BRANCH_NAME_MAX_LENGTH` bound on a
+    stored claim marker refuses it -- one predicate, not a shape check that
+    happens to cap length only by coincidence of an unrelated regex
+    quantifier."""
+    prefix = "a" * 300
+    branch = f"{prefix}/issue-1-widget"
+
+    with pytest.raises(ClaimError, match=f"agent identity {prefix!r} is not usable"):
+        checkout.refuse_unsafe_start_branch(branch, prefix=prefix)
+
+
 def test_branch_exists_reads_real_local_refs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
