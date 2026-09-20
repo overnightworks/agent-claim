@@ -504,8 +504,23 @@ def test_hook_patch_paths_returns_empty_for_unrecognized_text(text: str) -> None
         ),
         pytest.param(
             "sed --in-place=.bak f",
-            (),
-            id="sed-long-in-place-with-a-script-but-no-path-names-nothing",
+            ((hook_input.PATTERN_SED_IN_PLACE, "f"),),
+            id="sed-long-in-place-with-a-suffix-and-one-operand-judges-it-as-the-file",
+        ),
+        pytest.param(
+            "sed -i -l 80 -e p /tmp/file",
+            ((hook_input.PATTERN_SED_IN_PLACE, "/tmp/file"),),
+            id="sed-in-place-skips-its-own-line-length-value",
+        ),
+        pytest.param(
+            "cp --target-directory=/tmp README.md",
+            ((hook_input.PATTERN_COPY, "/tmp"),),
+            id="cp-target-directory-long-form-is-the-destination",
+        ),
+        pytest.param(
+            "cp -t/tmp README.md",
+            ((hook_input.PATTERN_COPY, "/tmp"),),
+            id="cp-target-directory-short-form-attached-is-the-destination",
         ),
         pytest.param(
             "git restore -s HEAD f",
@@ -576,6 +591,56 @@ def test_hook_patch_paths_returns_empty_for_unrecognized_text(text: str) -> None
             "r\\m README.md",
             ((hook_input.PATTERN_REMOVE, "README.md"),),
             id="a-backslash-escaped-command-name-still-executes-and-is-recognized",
+        ),
+        pytest.param(
+            'rm "a\\\nb"',
+            ((hook_input.PATTERN_REMOVE, "ab"),),
+            id="a-double-quoted-backslash-newline-is-removed-like-bash-removes-it",
+        ),
+        pytest.param(
+            '"r\\\nm" -rf README.md',
+            ((hook_input.PATTERN_REMOVE, "README.md"),),
+            id="a-double-quoted-backslash-newline-inside-a-command-name-still-joins",
+        ),
+        pytest.param(
+            "rm 'a\\\nb'",
+            ((hook_input.PATTERN_REMOVE, "a\\\nb"),),
+            id="a-single-quoted-backslash-newline-stays-literal-never-joined",
+        ),
+        pytest.param(
+            'echo "# not a comment" > f',
+            ((hook_input.PATTERN_REDIRECT_OVERWRITE, "f"),),
+            id="a-quoted-hash-is-data-never-a-comment",
+        ),
+        pytest.param(
+            "rm f #trailing",
+            ((hook_input.PATTERN_REMOVE, "f"),),
+            id="a-trailing-comment-does-not-hide-the-word-before-it",
+        ),
+        pytest.param(
+            "cat <<EOF > f",
+            ((hook_input.PATTERN_REDIRECT_OVERWRITE, "f"),),
+            id="a-redirect-after-a-heredoc-operator-is-still-recognized",
+        ),
+        pytest.param(
+            "sed -i -e 's/a/b/' -- f",
+            ((hook_input.PATTERN_SED_IN_PLACE, "f"),),
+            id="sed-in-place-honors-a-literal-end-of-options-marker-too",
+        ),
+        pytest.param(
+            "git checkout -- .",
+            ((hook_input.PATTERN_GIT_CHECKOUT, "."),),
+            id="git-checkout-double-dash-judges-the-current-directory",
+        ),
+        pytest.param(
+            "mv -- a b",
+            ((hook_input.PATTERN_MOVE, "a"), (hook_input.PATTERN_MOVE, "b")),
+            id="mv-honors-a-literal-end-of-options-marker",
+        ),
+        pytest.param(
+            "tee -- f",
+            ((hook_input.PATTERN_TEE, "f"),),
+            id="tee-honors-a-literal-end-of-options-marker",
         ),
     ],
 )
@@ -654,3 +719,15 @@ def test_hook_command_paths_tracks_cd_across_the_statement_list(
     command: str, cwd: str | None, pairs: tuple[tuple[str, str], ...]
 ) -> None:
     assert hook_input.hook_command_paths(command, cwd=cwd) == pairs
+
+
+@pytest.mark.parametrize("command", [1, None], ids=["int", "none"])
+def test_hook_command_paths_raises_for_a_non_string_command(command: object) -> None:
+    """`hook_command_paths` is typed `str`, not `str | None`: a non-string
+    caller error is a defect, not a value this pure boundary quietly
+    tolerates -- `cli._protect_bash` is the one caller, and it already
+    guards this before ever calling in (head ruling, issue #380 round 4:
+    the `TypeError` is correct here; the CLI boundary is the one that must
+    never crash, and it is tested separately in `tests/test_protect.py`)."""
+    with pytest.raises(TypeError):
+        hook_input.hook_command_paths(command)  # type: ignore[arg-type]

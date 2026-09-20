@@ -250,7 +250,11 @@ _HEREDOC_TAB_STRIP_OPERATOR = "<<-"
 _UNQUOTED_EXPANSION_TRIGGERS = frozenset("$`~*?[")
 _COMMENT_START = "#"
 _DOUBLE_QUOTED_EXPANSION_TRIGGERS = frozenset("$`")
-_DOUBLE_QUOTE_ESCAPABLE = frozenset('$`"\\')
+# Bash removes a backslash before one of these -- including a newline, its
+# own line-continuation form inside double quotes too, not only unquoted
+# (issue #380 delta, gate finding: `rm "a\<newline>b"` must judge `ab`, and
+# `"r\<newline>m" -rf <root>` must still be recognized as `rm`).
+_DOUBLE_QUOTE_ESCAPABLE = frozenset('$`"\\' + _NEWLINE)
 
 
 class _CommandScanner:
@@ -281,20 +285,38 @@ class _CommandScanner:
                 continue
             character = self._command[self._position]
             if character == _NEWLINE:
-                self._position += 1
-                if pending_heredocs:
-                    self._skip_heredoc_bodies(pending_heredocs)
-                    pending_heredocs = []
-                words.append(_Word(_NEWLINE, is_operator=True, is_expandable=False))
+                self._consume_newline(words, pending_heredocs)
                 continue
             if character in _OPERATOR_START_CHARS:
-                operator = self._read_operator()
-                words.append(_Word(operator, is_operator=True, is_expandable=False))
-                if operator in _HEREDOC_OPERATORS:
-                    self._register_heredoc(operator, pending_heredocs)
+                self._consume_operator(words, pending_heredocs)
                 continue
             words.append(self._read_word())
         return tuple(words)
+
+    def _consume_newline(
+        self, words: list[_Word], pending_heredocs: list[tuple[str, bool]]
+    ) -> None:
+        """A real newline operator: every heredoc body registered on this
+        physical line is skipped first -- it sits right after this newline,
+        never before it -- then the newline word itself is appended (split
+        out of `scan` to keep its own nesting off that method's cognitive
+        complexity)."""
+        self._position += 1
+        if pending_heredocs:
+            self._skip_heredoc_bodies(pending_heredocs)
+            pending_heredocs.clear()
+        words.append(_Word(_NEWLINE, is_operator=True, is_expandable=False))
+
+    def _consume_operator(
+        self, words: list[_Word], pending_heredocs: list[tuple[str, bool]]
+    ) -> None:
+        """A real operator token, registering the heredoc body it opens when
+        it is one of `<<`/`<<-` (split out of `scan` for the same reason as
+        `_consume_newline`)."""
+        operator = self._read_operator()
+        words.append(_Word(operator, is_operator=True, is_expandable=False))
+        if operator in _HEREDOC_OPERATORS:
+            self._register_heredoc(operator, pending_heredocs)
 
     def _skip_horizontal_whitespace(self) -> None:
         while (
@@ -395,18 +417,29 @@ class _CommandScanner:
                 if character in (_SINGLE_QUOTE, _DOUBLE_QUOTE):
                     quote = character
                 continue
-            if character == quote:
-                quote = None
-                self._position += 1
-                continue
-            if quote == _SINGLE_QUOTE:
-                characters.append(character)
-                self._position += 1
-                continue
-            expandable = self._read_double_quoted_character(characters) or expandable
+            quote, became_expandable = self._read_quoted_character(character, quote, characters)
+            expandable = expandable or became_expandable
         if quote is not None:
             raise _UnbalancedQuotingError
         return _Word("".join(characters), is_operator=False, is_expandable=expandable)
+
+    def _read_quoted_character(
+        self, character: str, quote: str, characters: list[str]
+    ) -> tuple[str | None, bool]:
+        """One character while `quote` is still open: `(None, False)` once
+        `character` is the matching closing quote mark, the literal
+        character appended verbatim inside a single quote, or Bash's own
+        double-quote escaping/expansion rules otherwise -- split out of
+        `_read_word` to keep this branch's own nesting off that method's
+        cognitive complexity."""
+        if character == quote:
+            self._position += 1
+            return None, False
+        if quote == _SINGLE_QUOTE:
+            characters.append(character)
+            self._position += 1
+            return quote, False
+        return quote, self._read_double_quoted_character(characters)
 
     def _read_unquoted_word_character(self, character: str, characters: list[str]) -> bool | None:
         """One unquoted character while reading a word: `None` when
@@ -443,8 +476,12 @@ class _CommandScanner:
             and self._position + 1 < self._length
             and self._command[self._position + 1] in _DOUBLE_QUOTE_ESCAPABLE
         ):
-            characters.append(self._command[self._position + 1])
+            escaped = self._command[self._position + 1]
             self._position += 2
+            # A backslash-newline is removed whole -- unlike `$`/`` ` ``/`"`/`\`,
+            # Bash never keeps the newline itself either (line continuation).
+            if escaped != _NEWLINE:
+                characters.append(escaped)
             return False
         self._position += 1
         expandable = character in _DOUBLE_QUOTED_EXPANSION_TRIGGERS
@@ -476,9 +513,19 @@ _CD_PREVIOUS_DIRECTORY = "-"
 _DEV_NULL = "/dev/null"
 _GIT_RESTORE_VALUE_OPTIONS = frozenset({"--source", "-s", "--conflict", "--pathspec-from-file"})
 _SED_IN_PLACE_PREFIXES = ("-i", "--in-place")
+_SED_IN_PLACE_BARE_FLAGS = frozenset({"-i", "--in-place"})
 _SED_SCRIPT_VALUE_OPTIONS = frozenset({"-e", "--expression", "-f", "--file"})
+# `-l`/`--line-length` takes a required numeric value of its own (GNU sed's
+# wrap width) that names no path at all -- without skipping it as a value
+# option too, its separate-argument form (`-l 80`) left the width itself
+# behind as if it were one of sed's own file operands (issue #380 delta,
+# gate finding: `sed -i -l 80 -e p /tmp/file` must judge `/tmp/file` alone,
+# never the fictitious path `80`).
+_SED_LINE_LENGTH_OPTIONS = frozenset({"-l", "--line-length"})
 _SED_SCRIPT_VALUE_PREFIXES = ("-e", "--expression", "-f", "--file")
 _CP_TARGET_DIRECTORY_OPTIONS = frozenset({"-t", "--target-directory"})
+_CP_TARGET_DIRECTORY_SHORT_FLAG = "-t"
+_CP_TARGET_DIRECTORY_LONG_PREFIX = "--target-directory="
 _GIT_CHECKOUT_SKIPPED_FLAGS = frozenset({"-f", "--ours", "--theirs"})
 
 
@@ -612,13 +659,24 @@ def _match_move(words: tuple[_Word, ...]) -> tuple[str, tuple[_Word, ...]] | Non
 
 
 def _cp_target_directory(arguments: tuple[_Word, ...]) -> _Word | None:
-    """The value right after a `-t`/`--target-directory` flag -- `cp`'s own
-    destination even though it comes before its sources on the command line
-    (issue #380 delta, gate finding: `cp -t /tmp README.md` must judge
-    `/tmp`, never the untouched `README.md`)."""
+    """The value right after a `-t`/`--target-directory` flag, or the value
+    GNU `cp` accepts attached to the flag itself with no separating space
+    (`-t/tmp`, `--target-directory=/tmp`) -- `cp`'s own destination even
+    though it comes before its sources on the command line (issue #380
+    delta, gate finding: `cp -t /tmp README.md`, `cp -t/tmp README.md`, and
+    `cp --target-directory=/tmp README.md` must all judge `/tmp`, never the
+    untouched `README.md`)."""
     for index, word in enumerate(arguments):
         if word.text in _CP_TARGET_DIRECTORY_OPTIONS and index + 1 < len(arguments):
             return arguments[index + 1]
+        if word.text.startswith(_CP_TARGET_DIRECTORY_LONG_PREFIX):
+            value = word.text[len(_CP_TARGET_DIRECTORY_LONG_PREFIX) :]
+            return _Word(value, is_operator=False, is_expandable=word.is_expandable)
+        if word.text.startswith(_CP_TARGET_DIRECTORY_SHORT_FLAG) and len(word.text) > len(
+            _CP_TARGET_DIRECTORY_SHORT_FLAG
+        ):
+            value = word.text[len(_CP_TARGET_DIRECTORY_SHORT_FLAG) :]
+            return _Word(value, is_operator=False, is_expandable=word.is_expandable)
     return None
 
 
@@ -651,28 +709,40 @@ def _match_sed_in_place(words: tuple[_Word, ...]) -> tuple[str, tuple[_Word, ...
     (issue #380 delta, gate finding: `sed -i -e p -e d /tmp/file` must judge
     `/tmp/file` alone, never `d`, its own second `-e` value). Without one,
     the first non-flag argument is `sed`'s own inline script, never a path,
-    so only the ones after it are files. `sed` without `-i`/`--in-place`
-    reads and writes nothing (it prints to stdout), so it names no pattern
-    at all."""
+    so only the ones after it are files -- unless the `-i`/`--in-place` flag
+    itself carries an explicit backup suffix (`-i.bak`, `--in-place=.bak`)
+    and exactly one operand remains: a bare `-i` with one operand and no
+    file left over (`sed -i 's/a/b/'`) is a no-op sed would reject outright,
+    but a spelled-out backup suffix is a strong enough signal of an intended
+    file edit that the sole remaining operand is judged as that file instead
+    (issue #380 delta, gate finding: `sed --in-place=.bak f` must judge `f`)
+    -- catching a possible write here is safer than silently allowing one.
+    `sed` without `-i`/`--in-place` reads and writes nothing (it prints to
+    stdout), so it names no pattern at all."""
     if words[0].text != "sed":
         return None
     arguments = words[1:]
-    is_in_place_flag = any(
-        _is_flag(word) and word.text.startswith(_SED_IN_PLACE_PREFIXES) for word in arguments
+    in_place_flag = next(
+        (
+            word
+            for word in arguments
+            if _is_flag(word) and word.text.startswith(_SED_IN_PLACE_PREFIXES)
+        ),
+        None,
     )
-    if not is_in_place_flag:
+    if in_place_flag is None:
         return None
-    operands = _skip_option_values(arguments, value_options=_SED_SCRIPT_VALUE_OPTIONS)
+    operands = _skip_option_values(
+        arguments, value_options=_SED_SCRIPT_VALUE_OPTIONS | _SED_LINE_LENGTH_OPTIONS
+    )
     has_explicit_script = any(
         _is_flag(word) and word.text.startswith(_SED_SCRIPT_VALUE_PREFIXES) for word in arguments
     )
-    # With an explicit `-e`/`-f` script, every remaining operand is a path.
-    # Without one, the first is `sed`'s own inline script, consumed the same
-    # way whether `-i` is spelled `-i`, `-i.bak`, `--in-place`, or
-    # `--in-place=.bak` -- `sed --in-place=.bak 's/a/b/'` names no path at
-    # all, exactly like `sed -i 's/a/b/'`, since neither leaves an operand
-    # behind to be one.
-    paths = operands if has_explicit_script else operands[1:]
+    has_in_place_suffix = in_place_flag.text not in _SED_IN_PLACE_BARE_FLAGS
+    if has_explicit_script or (has_in_place_suffix and len(operands) == 1):
+        paths = operands
+    else:
+        paths = operands[1:]
     return (PATTERN_SED_IN_PLACE, paths) if paths else None
 
 
