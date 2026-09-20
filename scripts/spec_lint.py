@@ -21,17 +21,26 @@ Checks (one finding per hit, each named ``file:line``):
 * ``id_sequence``: a file's own criterion IDs share one prefix; the numeric suffixes used by
   live criteria, together with any suffix a ``- <ID> (retired ...)``/``(removed ...)`` note
   names, cover every integer from the lowest to the highest used with no gap and no duplicate.
-* ``unresolved_reference``: a ``(see ...)`` parenthetical, or a behaviour-table data cell (its
-  row-label column is prose, not a citation, and is never scanned), names an ``E-<PREFIX>-nn``
-  that no ``###`` heading defines, or a plain ``ID-nn`` that no ``- [ ] [ID-nn]`` bullet
-  anywhere in ``specs/`` defines -- criteria and examples cite across files routinely, so both
-  namespaces are read tree-wide, not per file.
+* ``unresolved_reference``: every ``see ...`` reference list anywhere in a line -- not only
+  right after ``(`` -- or a behaviour-table data cell (its row-label column is prose, not a
+  citation, and is never scanned), names an ``E-<PREFIX>-nn`` that no ``###`` heading defines,
+  or a plain ``ID-nn`` that no ``- [ ] [ID-nn]`` bullet anywhere in ``specs/`` defines --
+  criteria and examples cite across files routinely, so both namespaces are read tree-wide, not
+  per file. A ``see`` list may comma-join several ids (``see A-01, A-02``), shorthand a further
+  number under the same prefix with ``/`` (``A-01/99`` means ``A-01`` and ``A-99``), or name an
+  inclusive run with ``..`` (``A-01..A-99``/``A-01..99``); each id the shorthand expands to is
+  checked on its own.
 * ``missing_section``: the file has no ``## Behavior table``, no ``## Never``, or no
   ``## Examples`` heading.
 * ``implementation_name``: a criterion's text, with every backtick-quoted span removed first,
-  still names a Python-shaped identifier outside any literal -- ``an_identifier_like_this`` or
-  ``a_call(...)``. A shell only ever observes a command, flag, path, or printed literal, and
-  aco's house style already backticks every one of those; the calibration pass over all 23
+  still names a Python-shaped identifier outside any literal: a snake_case identifier with a
+  lowercase letter on both sides of an underscore (``_git_run``, ``claim_lifecycle``), a
+  Python file name (``checkout.py``), a call (``hook_command_paths()``), or a dotted attribute
+  whose final segment is not a contract file extension (``store.claim_lifecycle``,
+  ``HookToolEffect.COMMAND_TEXT``, but not ``board.toml`` or ``next.spec.md``). A shell only
+  ever observes a command, flag, path, or printed literal, and aco's house style already
+  backticks every one of those, an UPPER_SNAKE environment name (``XDG_CONFIG_HOME``), a
+  trailer key (``Work-Item:``), and an id (``CLAIM-15``); the calibration pass over all 23
   files found this pattern firing exactly zero times on real criteria, so a hit here is new
   debt, not a house convention this gate has never seen.
 * ``missing_setup``: a ``### E-<PREFIX>-nn`` example has no ``Setup:`` line before its first
@@ -43,7 +52,8 @@ Exemptions
 ``scripts/spec_lint_exemptions.txt``, next to this script, is the one ledger of accepted
 findings: one ``file:line:rule — reason`` line, written by hand only when a finding is
 deliberately accepted. Empty when there is nothing to exempt -- the calibration pass leaves
-none needed today.
+none needed today. A line missing its `` — reason`` tail cannot be parsed into a key at all,
+so it surfaces as its own ``malformed_exemption`` finding and always fails ``--ci``.
 
 Usage:
     uv run scripts/spec_lint.py             # human-readable report
@@ -75,15 +85,39 @@ EXAMPLE_HEADING_PATTERN = re.compile(r"^### (E-[A-Za-z0-9]+-\d+)\b")
 RETIRED_NOTE_PATTERN = re.compile(
     r"^-\s*([A-Z]+-\d+(?:\s*,\s*[A-Z]+-\d+)*)\s*\((?:retired|removed)\b", re.IGNORECASE
 )
-SEE_REFERENCE_PATTERN = re.compile(r"\(see ([^)]+)\)")
+# A reference id is a compound example id (``E-<PREFIX>-nn``) or a plain criterion id
+# (``<PREFIX>-nn``); both shapes can follow ``see`` or a shorthand separator below.
+_REFERENCE_ID = r"(?:E-[A-Za-z0-9]+-\d+|[A-Za-z]+-\d+)"
+# One ``see`` reference expression: a plain id, a ``..`` range (``A-01..A-99``/``A-01..99``),
+# or a ``/`` shorthand (``A-01/99``) naming further numbers under the same prefix.
+_REFERENCE_EXPRESSION = rf"{_REFERENCE_ID}(?:\.\.(?:{_REFERENCE_ID}|\d+)|(?:/\d+)+)?"
 EXAMPLE_TOKEN_PATTERN = re.compile(r"\bE-[A-Za-z0-9]+-\d+\b")
 ID_TOKEN_PATTERN = re.compile(r"\b[A-Z]+-\d+\b")
 BACKTICK_LITERAL_PATTERN = re.compile(r"`[^`]*`")
-# SPEC-6, adapted: a shell never observes a bare Python identifier or call; command names,
-# flags, paths and printed literals are always backticked in aco's house style, so anything
-# matching this shape outside a backtick literal is an implementation name that leaked in.
+# ``see`` opens a reference list anywhere in a line, not only right after ``(``: a leading
+# clause (``(#310; see E-NEXT-06)``) introduces one just as a bare ``(see ...)`` does.
+SEE_KEYWORD_PATTERN = re.compile(r"\bsee\b\s+")
+REFERENCE_LIST_PATTERN = re.compile(rf"{_REFERENCE_EXPRESSION}(?:\s*,\s*{_REFERENCE_EXPRESSION})*")
+# SPEC-6, adapted: a shell never observes a bare Python identifier, file, call, or attribute
+# access; command names, flags, paths and printed literals are always backticked in aco's
+# house style, so anything matching one of the shapes below outside a backtick literal is an
+# implementation name that leaked in.
 IMPLEMENTATION_CALL_PATTERN = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\([^)]*\)")
-IMPLEMENTATION_UNDERSCORE_PATTERN = re.compile(r"\b[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]*\b")
+# A Python module file, e.g. ``checkout.py`` -- always implementation, never a contract file
+# (those use ``.toml``/``.json``/``.lock``/``.md``, excluded below).
+PYTHON_FILENAME_PATTERN = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\.py\b")
+# A snake_case identifier: some underscore in it has a lowercase letter on both sides
+# (``_git_run``, ``claim_lifecycle``). An UPPER_SNAKE environment name (``XDG_CONFIG_HOME``)
+# has no such underscore -- both its neighbours are uppercase -- so it never matches here.
+_IDENTIFIER_PATTERN = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
+_LOWERCASE_SNAKE_UNDERSCORE_PATTERN = re.compile(r"[a-z]_[a-z]")
+# A dotted attribute access, e.g. ``store.claim_lifecycle`` or ``HookToolEffect.COMMAND_TEXT``.
+# Each segment must be at least two characters: a real module, class, or attribute name always
+# is, while a one-letter segment is prose shorthand (``e.g.``, ``i.e.``), not an identifier.
+# Excluded below when its final segment is a contract file extension: those dotted chains
+# (``board.toml``, ``next.spec.md``) name a file, not a Python attribute.
+DOTTED_ATTRIBUTE_PATTERN = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]+(?:\.[A-Za-z_][A-Za-z0-9_]+)+\b")
+CONTRACT_FILE_EXTENSIONS = frozenset({"toml", "json", "lock", "md"})
 BEHAVIOR_TABLE_HEADING_PATTERN = re.compile(r"^## Behavior table\b")
 NEVER_HEADING_PATTERN = re.compile(r"^## Never\b")
 EXAMPLES_HEADING_PATTERN = re.compile(r"^## Examples\b")
@@ -104,6 +138,7 @@ class Rule(Enum):
     MISSING_SECTION = "missing_section"
     IMPLEMENTATION_NAME = "implementation_name"
     MISSING_SETUP = "missing_setup"
+    MALFORMED_EXEMPTION = "malformed_exemption"
 
 
 @dataclass(frozen=True)
@@ -242,11 +277,38 @@ def check_id_sequence(spec_file: SpecFile) -> list[Finding]:
     return findings
 
 
-def _reference_tokens(content: str) -> tuple[list[str], list[str]]:
-    """``(example ids, plain criterion ids)`` named by one ``(see ...)`` parenthetical."""
-    example_tokens = EXAMPLE_TOKEN_PATTERN.findall(content)
-    remainder = EXAMPLE_TOKEN_PATTERN.sub(" ", content)
-    return example_tokens, ID_TOKEN_PATTERN.findall(remainder)
+def _split_reference_id(reference_id: str) -> tuple[str, str]:
+    prefix, _, number = reference_id.rpartition("-")
+    return prefix, number
+
+
+def _expand_range(expression: str) -> list[str]:
+    """``A-01..A-99``/``A-01..99`` -- every id from the start to the end number, inclusive."""
+    start, _, end = expression.partition("..")
+    prefix, start_number = _split_reference_id(start)
+    end_number = _split_reference_id(end)[1] if "-" in end else end
+    width = len(start_number)
+    return [
+        f"{prefix}-{number:0{width}d}" for number in range(int(start_number), int(end_number) + 1)
+    ]
+
+
+def _expand_slash(expression: str) -> list[str]:
+    """``A-01/99`` -- the given id plus one further id per ``/``-separated number, same prefix."""
+    first, *further_numbers = expression.split("/")
+    prefix, first_number = _split_reference_id(first)
+    width = len(first_number)
+    return [first] + [f"{prefix}-{int(number):0{width}d}" for number in further_numbers]
+
+
+def _expand_reference_expression(expression: str) -> list[str]:
+    """One comma-separated ``see`` expression -- a plain id, a ``..`` range, or a ``/``
+    shorthand -- expanded to every id it names."""
+    if ".." in expression:
+        return _expand_range(expression)
+    if "/" in expression:
+        return _expand_slash(expression)
+    return [expression]
 
 
 def _check_see_references(
@@ -254,26 +316,23 @@ def _check_see_references(
 ) -> list[Finding]:
     findings: list[Finding] = []
     for lineno, line in enumerate(spec_file.lines, 1):
-        for match in SEE_REFERENCE_PATTERN.finditer(line):
-            examples, criteria = _reference_tokens(match.group(1))
-            for token in examples:
-                if token not in example_ids:
+        for keyword in SEE_KEYWORD_PATTERN.finditer(line):
+            reference_list = REFERENCE_LIST_PATTERN.match(line, keyword.end())
+            if reference_list is None:
+                continue
+            for expression in reference_list.group(0).split(","):
+                for token in _expand_reference_expression(expression.strip()):
+                    is_example = EXAMPLE_TOKEN_PATTERN.fullmatch(token) is not None
+                    known_ids = example_ids if is_example else criterion_ids
+                    if token in known_ids:
+                        continue
+                    owner = f"`### {token}` heading" if is_example else f"`[{token}]` criterion"
                     findings.append(
                         Finding(
                             Rule.UNRESOLVED_REFERENCE,
                             spec_file.name,
                             lineno,
-                            f"(see {token}) names no `### {token}` heading anywhere in specs/",
-                        )
-                    )
-            for token in criteria:
-                if token not in criterion_ids:
-                    findings.append(
-                        Finding(
-                            Rule.UNRESOLVED_REFERENCE,
-                            spec_file.name,
-                            lineno,
-                            f"(see {token}) names no `[{token}]` criterion anywhere in specs/",
+                            f"see {token} names no {owner} anywhere in specs/",
                         )
                     )
     return findings
@@ -341,13 +400,38 @@ def check_required_sections(spec_file: SpecFile) -> list[Finding]:
     ]
 
 
+def _find_lowercase_snake_identifier(text: str) -> re.Match[str] | None:
+    return next(
+        (
+            match
+            for match in _IDENTIFIER_PATTERN.finditer(text)
+            if _LOWERCASE_SNAKE_UNDERSCORE_PATTERN.search(match.group(0))
+        ),
+        None,
+    )
+
+
+def _find_dotted_attribute(text: str) -> re.Match[str] | None:
+    return next(
+        (
+            match
+            for match in DOTTED_ATTRIBUTE_PATTERN.finditer(text)
+            if match.group(0).rpartition(".")[2] not in CONTRACT_FILE_EXTENSIONS
+        ),
+        None,
+    )
+
+
 def check_implementation_names(spec_file: SpecFile) -> list[Finding]:
     findings: list[Finding] = []
     for criterion in spec_file.criteria:
         stripped = BACKTICK_LITERAL_PATTERN.sub(" ", criterion.text)
-        match = IMPLEMENTATION_CALL_PATTERN.search(
-            stripped
-        ) or IMPLEMENTATION_UNDERSCORE_PATTERN.search(stripped)
+        match = (
+            PYTHON_FILENAME_PATTERN.search(stripped)
+            or IMPLEMENTATION_CALL_PATTERN.search(stripped)
+            or _find_lowercase_snake_identifier(stripped)
+            or _find_dotted_attribute(stripped)
+        )
         if match is not None:
             findings.append(
                 Finding(
@@ -386,6 +470,10 @@ def check_example_setup(spec_file: SpecFile) -> list[Finding]:
     return findings
 
 
+def _finding_sort_key(finding: Finding) -> tuple[str, int, str]:
+    return (finding.file, finding.line, finding.rule.value)
+
+
 def analyze(spec_files: list[SpecFile]) -> list[Finding]:
     criterion_ids = frozenset(c.spec_id for f in spec_files for c in f.criteria)
     example_ids = frozenset(eid for f in spec_files for eid in f.example_ids)
@@ -397,22 +485,37 @@ def analyze(spec_files: list[SpecFile]) -> list[Finding]:
         findings.extend(check_required_sections(spec_file))
         findings.extend(check_implementation_names(spec_file))
         findings.extend(check_example_setup(spec_file))
-    findings.sort(key=lambda f: (f.file, f.line, f.rule.value))
+    findings.sort(key=_finding_sort_key)
     return findings
 
 
-def load_exemptions(path: Path = EXEMPTIONS_FILE) -> dict[str, str]:
-    """``{"file:line:rule": reason}`` from *path* (one per line, ``key — reason``)."""
+def load_exemptions(path: Path = EXEMPTIONS_FILE) -> tuple[dict[str, str], list[Finding]]:
+    """``({"file:line:rule": reason}, malformed-line findings)`` from *path* (one line per
+    exemption, ``key — reason``). A line missing the ` — reason`` tail cannot be parsed into a
+    key at all, so it is reported as its own ``malformed_exemption`` finding instead of being
+    silently dropped or silently accepted -- there is no ledger for the ledger, so it always
+    fails ``--ci``."""
     if not path.exists():
-        return {}
+        return {}, []
     exemptions: dict[str, str] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
+    malformed: list[Finding] = []
+    for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
-        key, _, reason = stripped.partition(" — ")
+        key, separator, reason = stripped.partition(" — ")
+        if not separator or not reason.strip():
+            malformed.append(
+                Finding(
+                    Rule.MALFORMED_EXEMPTION,
+                    path.name,
+                    lineno,
+                    f"{stripped!r} has no ` — <reason>` after its key",
+                )
+            )
+            continue
         exemptions[key.strip()] = reason.strip()
-    return exemptions
+    return exemptions, malformed
 
 
 def unexempted(findings: list[Finding], exemptions: dict[str, str]) -> list[Finding]:
@@ -456,8 +559,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ci", action="store_true", help="exit non-zero on an unexempted finding")
     args = parser.parse_args(argv)
 
-    findings = analyze(load_spec_dir(SPEC_DIR))
-    exemptions = load_exemptions(EXEMPTIONS_FILE)
+    exemptions, malformed_exemptions = load_exemptions(EXEMPTIONS_FILE)
+    all_findings = analyze(load_spec_dir(SPEC_DIR)) + malformed_exemptions
+    findings = sorted(all_findings, key=_finding_sort_key)
     failing = unexempted(findings, exemptions)
 
     if args.json:
