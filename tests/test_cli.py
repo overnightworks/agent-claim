@@ -14287,7 +14287,9 @@ def _check_trunk_repository(tmp_path: Path) -> Path:
     `check <sha>`: an initial commit with no trailer, a commit trailer-
     naming `#20`, and one trailer-classified `No-Item: docs` -- the three
     classifications `check <sha>` reads from a commit's own trailer block,
-    the same grammar `check <pr>` reads from a pull request body with."""
+    the same grammar `check <pr>` reads from a pull request body with. A
+    fourth commit sits on the `side` branch, classified as soundly as the
+    trunk ones: it exists in this repository, but never on its trunk."""
     repo, _remote = _real_repository_with_bare_remote(tmp_path)
     (repo / "base.txt").write_text("base\n")
     _real_git(repo, "add", "base.txt")
@@ -14299,6 +14301,11 @@ def _check_trunk_repository(tmp_path: Path) -> Path:
     _real_git(repo, "add", "docs.txt")
     _real_git(repo, "commit", "-q", "-m", "docs change", "-m", "No-Item: docs")
     _push_repository_trunk(repo, "origin")
+    _real_git(repo, "checkout", "-q", "-b", "side")
+    (repo / "side.txt").write_text("side\n")
+    _real_git(repo, "add", "side.txt")
+    _real_git(repo, "commit", "-q", "-m", "side change", "-m", "Work-Item: #21")
+    _real_git(repo, "checkout", "-q", "main")
     return repo
 
 
@@ -14327,12 +14334,20 @@ _TRUNK_CHECK_CASES = (
         id="no-trailer",
     ),
     pytest.param(
-        None,
+        "side",
         "REFUSED: {sha} is not on the first-parent trunk",
         "not_on_trunk",
         "is not on the first-parent trunk",
         2,
         id="off-trunk",
+    ),
+    pytest.param(
+        None,
+        "REFUSED: {sha} is not on the first-parent trunk",
+        "not_on_trunk",
+        "is not on the first-parent trunk",
+        2,
+        id="unknown-sha",
     ),
 )
 
@@ -14369,7 +14384,12 @@ def test_check_sha_answers_in_text_and_json(
     answer in both forms -- the human line on stdout when the commit
     classifies and on stderr when it does not, the `--json` object the one
     shared envelope carrying `check`'s own `reason` -- and one exit for both:
-    `0` for a classified commit, `2` for every defect, never `1`."""
+    `0` for a classified commit, `2` for every defect, never `1`. The
+    `side` commit exists here and carries a sound trailer, so only the walk
+    can refuse it; the unknown sha is in no repository at all, and answers
+    `not_on_trunk` too -- `check <sha>` never claims a commit is missing,
+    because a walk that does not hold it proves nothing about its
+    existence."""
     _repo, sha_of = _check_sha(monkeypatch, tmp_path)
     sha = _UNWALKED_SHA if landing_ref is None else sha_of(landing_ref)
 
