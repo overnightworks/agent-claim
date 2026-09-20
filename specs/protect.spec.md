@@ -78,6 +78,7 @@ never needed an identity at all.
 - [ ] [PROT-12] The shared main checkout, or a linked worktree on the repository's own resolved default branch, denies `not main` (see E-PROT-03).
 - [ ] [PROT-13] A checkout whose default branch cannot be resolved at all denies `default branch unknown`, never falling back to a `main`/`master` guess.
 - [ ] [PROT-14] A payload path that resolves to exactly the checkout root denies `path required`, the same reason as no path at all.
+- [ ] [PROT-36] A payload path naming a nested checkout's own root is judged by that checkout, never by an outer one its parent directory sits inside, before PROT-14 denies it.
 
 ## The live claim state
 
@@ -116,10 +117,13 @@ fail-closed rather than guessing which paths it touches.
 short, fixed list of write patterns -- a real, unquoted `>`/`>>` redirection
 (a heredoc target such as `cat > path <<EOF` included), `tee`'s own file
 operands, `sed -i` (or `-i<suffix>`/`--in-place[=suffix]`, skipping
-`-e`/`--expression`/`-f`/`--file` and their own values), `mv` (every
+`-e`/`--expression`/`-f`/`--file`, `-l`/`--line-length`, and their own
+values -- a lone remaining operand after a spelled-out suffix is judged as
+the file it edits, since sed cannot otherwise write anywhere), `mv` (every
 operand -- a source vanishes exactly like its destination is written), `cp`
-(a `-t`/`--target-directory` value when given, otherwise its last operand --
-either way, the only one it actually writes), `rm`, `git checkout`
+(a `-t`/`--target-directory` value when given, attached or separate, e.g.
+`-t/tmp`/`--target-directory=/tmp`, otherwise its last operand -- either
+way, the only one it actually writes), `rm`, `git checkout`
 (`-f`/`--ours`/`--theirs` before a literal `--`, then its path operands),
 and `git restore` (skipping `-s`/`--source`, `--conflict`, and
 `--pathspec-from-file` and their own values, and a literal `--`) -- each
@@ -133,8 +137,9 @@ never the operator it merely reads like -- but a quoted or backslash-escaped
 and is recognized like the plain spelling. An unquoted `#` at the start of a
 word is a comment to the end of its own physical line, never scanned for a
 pattern of its own, exactly like Bash itself never runs what follows it on
-that line; an unquoted, trailing backslash-newline joins the next physical
-line first, so a command split that way is judged exactly like the one line
+that line; an unquoted or double-quoted, trailing backslash-newline joins
+the next physical line first -- never inside single quotes, which keep it
+literal -- so a command split that way is judged exactly like the one line
 it forms. `git checkout <branch>` (no `--`) and a plain `sed` without
 `-i`/`--in-place` name no path at all, since neither writes a file; neither
 does a redirect whose own target is exactly `/dev/null`, or a
@@ -162,7 +167,7 @@ the recognized pattern and the path rather than a bare `claim first`.
 
 - [ ] [PROT-30] A `command` naming none of these patterns -- or no string `command` at all -- allows without resolving identity, git, or the store.
 - [ ] [PROT-31] A recognized pattern's relative path resolves against the payload's own `cwd`, as PROT-34 updates it; with no known directory, that path allows outright, before identity resolves.
-- [ ] [PROT-32] A recognized pattern's own path outside every git repository allows, unlike PROT-10's deny for every other mutating tool -- except a checkout's own root directory, which PROT-14 still denies.
+- [ ] [PROT-32] A recognized pattern's path outside every repository allows, unlike PROT-10's deny for other tools -- except a checkout's own root, which PROT-14 still denies.
 - [ ] [PROT-33] A recognized pattern's own path outside the live claim's scope denies `<pattern> <path> outside claim scope`, naming both (see E-PROT-08).
 - [ ] [PROT-34] A literal, resolvable `cd` changes the directory every later path in its own `;`/`&&`/`||`/newline list resolves against -- never across a `|`, and only inside its own group.
 - [ ] [PROT-35] An unresolvable `cd` target -- expandable, `-`, or no operand -- ends recognition for the rest of the command outright, allowing it (see E-PROT-10).
@@ -180,10 +185,15 @@ the recognized pattern and the path rather than a bare `claim first`.
 - `protect` never writes a file: every denial and every allow leaves `$HOME` and the checkout untouched.
 - `protect` never reads working-tree dirtiness: a dirty checkout still allows a covered write, unlike `claim`'s own precondition.
 - `protect` never binds the resolved checkout's `HEAD` to a claim's own `base`: it judges the live claim's branch and scope alone.
-- `shell` and their other-provider equivalents never deny for a missing path: the hook payload carries no file path for those, so `protect` cannot gate what it cannot see (README, "PreToolUse write gate"). `Bash` (issue #380) is the one named exception: it judges its own `command` text, but only the fixed pattern list PROT-30 owns -- a `python -c ...` one-liner or an opaque script invocation stays invisible on purpose, so recognizing a pattern is a best-effort aid against forgetting the claim, never a security boundary.
-- `protect` never guesses a Bash-recognized relative path's `cwd` from the hook process's own cwd: a payload naming no `cwd` at all allows that one path outright (PROT-31) rather than risk denying legitimate work on a guess `protect` has no way to confirm -- the same "never guess a relative path" principle PROT-09 enforces for every other tool, applied here as an allow instead of a deny since Bash's own path is expected to be relative in the first place.
-- A Bash pattern never judges what only running the shell could resolve: an operand containing an unquoted (or, inside double quotes, still-substituting) `$name`, `` `command` ``, `~`, `*`, `?`, or `[` is never judged and never denied, the same allow as naming no pattern at all -- `protect` cannot know what a variable, a glob, or a substitution actually expands to without executing the command.
-- Everything between an unquoted `<<WORD`/`<<-WORD`/`<<'WORD'` and its own terminator line is heredoc body, never scanned for a write pattern of its own: only the command line naming the heredoc is judged, so a body that merely reads like `rm docs/file` names nothing.
+- `shell` and other providers' equivalents never deny a missing path: the hook payload names no file path for those, so `protect` cannot gate what it cannot see (README, "PreToolUse write gate").
+- `Bash` (issue #380) is the one exception, judging only the fixed pattern list PROT-30 owns.
+- A `python -c ...` one-liner or an opaque script invocation stays invisible on purpose: recognizing a pattern is a best-effort aid against forgetting the claim, never a security boundary.
+- `protect` never guesses a Bash-recognized relative path's `cwd` from the hook process's own cwd: a payload naming no `cwd` allows that path outright (PROT-31).
+- This is PROT-09's own "never guess a relative path" principle, applied as an allow instead of a deny since Bash's own path is expected to be relative.
+- A Bash pattern never judges what only the shell could resolve: an operand with an unquoted (or double-quoted, still-substituting) `$name`, `` `command` ``, `~`, `*`, `?`, or `[` is never judged.
+- Such an operand allows the same as naming no pattern at all: `protect` cannot know what a variable, glob, or substitution expands to without executing the command.
+- Everything between an unquoted `<<WORD`/`<<-WORD`/`<<'WORD'` and its terminator line is heredoc body, never scanned for a write pattern of its own.
+- Only the command line naming the heredoc is judged, so a body that merely reads like `rm docs/file` names nothing.
 
 ## Examples
 
