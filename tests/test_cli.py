@@ -2414,7 +2414,8 @@ def test_claim_refuses_a_malformed_block_before_mutation(
     )
 
     payload = json.loads(capsys.readouterr().out)
-    assert payload["refused"] is True
+    assert payload["ok"] is False
+    assert payload["reason"] == "precondition_failed"
     assert payload["checks"] == [
         {
             "level": "error",
@@ -2889,7 +2890,8 @@ def test_claim_json_refusal_reports_out_of_order_without_mutating(
 
     assert exit_code == 2
     payload = json.loads(capsys.readouterr().out)
-    assert payload["refused"] is True
+    assert payload["ok"] is False
+    assert payload["reason"] == "precondition_failed"
     assert payload["issue"] == 10
     checks = payload["checks"]
     assert len(checks) == 1
@@ -3964,6 +3966,49 @@ def test_rule_reports_invalid_usage_when_repo_is_given_under_state_ref(
     _assert_json_refusal_object(captured.err, captured.out, reason="invalid_usage")
 
 
+def test_cli_claim_reports_invalid_usage_when_repo_is_given_under_state_ref(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """A wide `--scope` with no `--whole` reads the item's own body for one
+    (issue #399), resolving the forge before `_cmd_claim`'s own typed-
+    refusal handlers ever see it (issue #406): under `storage = state-ref`,
+    `--repo` is the wrong flag for this run, reported as `invalid_usage`
+    rather than the generic `unavailable` bucket -- the same distinction
+    `ask`/`rule`/`brief` already draw."""
+    _write_state_ref_pin(tmp_path)
+    client = FakeForge()
+    arrange_scope_width(monkeypatch, client, versioned=("a.py", "b.py", "c.py", "d.py"))
+
+    status = issue_claim.main(
+        [
+            "--repo",
+            "acme/items",
+            "claim",
+            "72",
+            "--agent",
+            "Ada",
+            "--base",
+            BASE,
+            "--branch",
+            "codex/issue-72",
+            "--scope",
+            "a.py",
+            "--scope",
+            "b.py",
+            "--scope",
+            "c.py",
+            "--scope",
+            "d.py",
+            "--json",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert status == 2
+    assert captured.err == "ERROR: --repo is meaningless under storage = state-ref\n"
+    _assert_json_refusal_object(captured.err, captured.out, reason="invalid_usage")
+
+
 def test_rule_refuses_a_missing_item_before_any_write(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
@@ -4467,7 +4512,8 @@ def test_claim_json_refusal_carries_refused_issue_and_checks(
     assert exit_code == 2
     payload = json.loads(capsys.readouterr().out)
     assert payload == {
-        "refused": True,
+        "ok": False,
+        "reason": "precondition_failed",
         "issue": 72,
         "checks": [
             {
@@ -7532,6 +7578,29 @@ def test_cli_status_before_bootstrap_prints_unclaimed_repository(
     assert capsys.readouterr().out == "UNCLAIMED repository\n"
 
 
+def test_cli_status_reports_unavailable_for_a_rewritten_state_ref(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`status` (issue #406) reports every `protocol.ClaimError` `fetch_state`
+    itself can raise -- here a rewritten `refs/aco/state` (CLAIM-50) -- through
+    the shared emitter as `reason: unavailable`, never `main`'s legacy
+    `{"ok": false, "error": ...}` shape."""
+    monkeypatch.setattr(checkout, "remote_url", lambda remote: f"git@github.com:{REPOSITORY}.git")
+
+    def raising_fetch_state(*, worktree: Path, remote: str) -> protocol.ClaimState:
+        raise protocol.StateLineageError("<oid> is not an ancestor of <tip>")
+
+    monkeypatch.setattr(store, "fetch_state", raising_fetch_state)
+
+    status = issue_claim.main(["--repo", "example/agent-claim", "status", "--json"])
+
+    captured = capsys.readouterr()
+    assert status == 2
+    assert captured.err == "ERROR: <oid> is not an ancestor of <tip>\n"
+    _assert_json_refusal_object(captured.err, captured.out, reason="unavailable")
+
+
 def test_cli_status_json_before_bootstrap_reports_a_null_tip(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -7798,7 +7867,8 @@ def test_cli_status_json_empty_store_prints_unclaimed_object(
     assert issue_claim.main(["--repo", "example/agent-claim", "status", "--json"]) == 0
     assert (
         capsys.readouterr().out
-        == json.dumps({"issue": None, "state": "UNCLAIMED", "tip": BASE, "claims": []}) + "\n"
+        == json.dumps({"ok": True, "reason": "unclaimed", "issue": None, "tip": BASE, "claims": []})
+        + "\n"
     )
 
 
@@ -7811,7 +7881,8 @@ def test_cli_status_json_issue_with_no_claim_prints_unclaimed_object(
     assert issue_claim.main(["--repo", "example/agent-claim", "status", "72", "--json"]) == 0
     assert (
         capsys.readouterr().out
-        == json.dumps({"issue": 72, "state": "UNCLAIMED", "tip": BASE, "claims": []}) + "\n"
+        == json.dumps({"ok": True, "reason": "unclaimed", "issue": 72, "tip": BASE, "claims": []})
+        + "\n"
     )
 
 
@@ -7830,18 +7901,19 @@ def test_cli_status_json_shows_a_live_store_claim(
         capsys.readouterr().out
         == json.dumps(
             {
+                "ok": True,
+                "reason": "claimed",
                 "issue": 72,
-                "state": "CLAIMED",
                 "tip": BASE,
                 "claims": [
                     {
                         "issue": 72,
                         "lane": None,
+                        "claim_id": "cli-claim",
                         "agent": "Codex Sol",
                         "role": "builder",
                         "base": BASE,
                         "branch": "codex/issue-72",
-                        "claim_id": "cli-claim",
                         "scope": ["src"],
                         "resource": None,
                         "resource_value": None,
@@ -7877,18 +7949,19 @@ def test_cli_status_json_overlapping_store_claims_print_claimed_object(
         capsys.readouterr().out
         == json.dumps(
             {
+                "ok": True,
+                "reason": "claimed",
                 "issue": None,
-                "state": "CLAIMED",
                 "tip": BASE,
                 "claims": [
                     {
                         "issue": 72,
                         "lane": None,
+                        "claim_id": "claim-a",
                         "agent": "Codex Sol",
                         "role": "builder",
                         "base": BASE,
                         "branch": "codex/issue-72-claims",
-                        "claim_id": "claim-a",
                         "scope": ["shared"],
                         "resource": None,
                         "resource_value": None,
@@ -7907,11 +7980,11 @@ def test_cli_status_json_overlapping_store_claims_print_claimed_object(
                     {
                         "issue": 73,
                         "lane": None,
+                        "claim_id": "claim-b",
                         "agent": "Grok 4.6",
                         "role": "builder",
                         "base": BASE,
                         "branch": "codex/issue-73-claims",
-                        "claim_id": "claim-b",
                         "scope": ["shared/file.py"],
                         "resource": None,
                         "resource_value": None,
@@ -7954,18 +8027,19 @@ def test_cli_status_json_issue_on_overlap_prints_related_claimed_object(
         capsys.readouterr().out
         == json.dumps(
             {
+                "ok": True,
+                "reason": "claimed",
                 "issue": 72,
-                "state": "CLAIMED",
                 "tip": BASE,
                 "claims": [
                     {
                         "issue": 72,
                         "lane": None,
+                        "claim_id": "claim-a",
                         "agent": "Codex Sol",
                         "role": "builder",
                         "base": BASE,
                         "branch": "codex/issue-72-claims",
-                        "claim_id": "claim-a",
                         "scope": ["shared"],
                         "resource": None,
                         "resource_value": None,
@@ -7984,11 +8058,11 @@ def test_cli_status_json_issue_on_overlap_prints_related_claimed_object(
                     {
                         "issue": 73,
                         "lane": None,
+                        "claim_id": "claim-b",
                         "agent": "Grok 4.6",
                         "role": "builder",
                         "base": BASE,
                         "branch": "codex/issue-73-claims",
-                        "claim_id": "claim-b",
                         "scope": ["shared/file.py"],
                         "resource": None,
                         "resource_value": None,
@@ -8256,6 +8330,43 @@ def test_cli_claim_scope_derivation_against_the_items_own_body(
         return
     assert capsys.readouterr().err == f"ERROR: {expected_scope_or_error}\n"
     assert store.fetch_state(worktree=Path("."), remote="origin").claims == {}
+
+
+def test_cli_claim_without_scope_names_a_malformed_body_before_no_scope(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #310 finding 43: a target whose `agent-claim` block is
+    malformed refuses by naming that defect -- reusing the same block-
+    defect reader `body --check` uses -- before scope derivation ever gets
+    to name the less specific "item names no scope"."""
+    client = _arranged_claim_client(monkeypatch)
+    client.board_issues = (
+        board_issue(72, "Work", agent_claim_body(f'{MINIMAL_BLOCK_TOML}owner = "someone"\n')),
+    )
+
+    status = issue_claim.main(_claim_argv("--json"))
+
+    assert status == 2
+    captured = capsys.readouterr()
+    assert captured.err == "ERROR: #72 body malformed: owner: unknown top-level key owner\n"
+    _assert_json_refusal_object(captured.err, captured.out, reason="body_invalid")
+
+
+def test_cli_claim_without_scope_refuses_a_missing_target_by_name(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A target unreachable through the open-board listing (issue #406):
+    scope derivation itself refuses `target_invalid`, before any slice-rule
+    check ever runs against it."""
+    client = _arranged_claim_client(monkeypatch)
+    client.issue_references[72] = forge.ItemReference(forge.ItemState.MISSING, "", "")
+
+    status = issue_claim.main(_claim_argv("--json"))
+
+    assert status == 2
+    captured = capsys.readouterr()
+    assert captured.err == "ERROR: #72 does not exist\n"
+    _assert_json_refusal_object(captured.err, captured.out, reason="target_invalid")
 
 
 def test_cli_claim_derives_whole_from_the_items_own_body_when_wide(
@@ -9097,6 +9208,8 @@ def test_cli_rescope_json_prints_updated_scope_and_same_claim_id(
         capsys.readouterr().out
         == json.dumps(
             {
+                "ok": True,
+                "reason": "rescoped",
                 "issue": 72,
                 "lane": None,
                 "claim_id": "cli-claim",
@@ -9135,6 +9248,33 @@ def test_cli_rescope_refuses_a_different_agent_than_the_claimant(
         "ERROR: only the original claimant may rescope "
         "(holder='Ada (builder)', this session='Grok 4.6 (builder)')\n"
     )
+
+
+def test_cli_rescope_json_refuses_no_active_claim_with_precondition_failed(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """RESC-14 (issue #406): no live claim on the target identity/branch at
+    all reports `precondition_failed`, not the generic `unavailable`
+    bucket every checkout- or store-level refusal falls to."""
+    client = FakeForge()
+    _patch_store_write(monkeypatch)
+    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
+    git_values = _git_checkout()
+    monkeypatch.setattr(
+        checkout, "_git_output", lambda arguments, **_kwargs: git_values[tuple(arguments)]
+    )
+    monkeypatch.setattr(checkout, "_scope_directories", lambda paths, **_kwargs: ())
+    _set_agent_identity_env(monkeypatch, {checkout.ACO_AGENT_ENV: "Ada"})
+
+    status = issue_claim.main(
+        ["--repo", "example/agent-claim", "rescope", "72", "--add", "/repo/src/new.py", "--json"]
+    )
+
+    captured = capsys.readouterr()
+    assert status == 2
+    assert captured.err == "ERROR: issue #72 has no active build claim\n"
+    _assert_json_refusal_object(captured.err, captured.out, reason="precondition_failed")
 
 
 def test_cli_rescope_without_add_or_drop_is_an_error(
@@ -9692,13 +9832,15 @@ def test_cli_status_path_json_prints_holder_or_unclaimed(
     unclaimed = json.loads(capsys.readouterr().out)
 
     assert descendant == 0
-    assert claimed["state"] == "CLAIMED"
+    assert claimed["ok"] is True
+    assert claimed["reason"] == "claimed"
     assert claimed["path"] == "docs/decisions/one.md"
     assert claimed["claims"][0]["claim_id"] == "mine"
     assert free == 0
     assert unclaimed == {
+        "ok": True,
+        "reason": "unclaimed",
         "path": "src/widget.py",
-        "state": "UNCLAIMED",
         "claims": [],
     }
 
@@ -10130,6 +10272,8 @@ def test_cli_claim_json_prints_acquired_claim_object(
         capsys.readouterr().out
         == json.dumps(
             {
+                "ok": True,
+                "reason": "claimed",
                 **identity_fields,
                 "claim_id": "cli-claim",
                 "agent": "Codex Sol",
@@ -10295,42 +10439,34 @@ def _assert_json_refusal_object(err: str, out: str, *, reason: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "arguments",
+    ("arguments", "assert_refusal"),
     [
-        [
-            "claim",
-            "72",
-            "--agent",
-            "Ada",
-            "--scope",
-            "src",
-            "--claim-id",
-            "cli-claim",
-            "--json",
-        ],
-        [
-            "release",
-            "72",
-            "--agent",
-            "Ada",
-            "--claim-id",
-            "mine",
-            "--abandoned",
-            "stopped",
-            "--json",
-        ],
+        pytest.param(
+            ["claim", "72", "--agent", "Ada", "--scope", "src", "--claim-id", "cli-claim"],
+            lambda err, out: _assert_json_refusal_object(err, out, reason="unavailable"),
+            id="claim-envelope-refusal",
+        ),
+        pytest.param(
+            ["release", "72", "--agent", "Ada", "--claim-id", "mine", "--abandoned", "stopped"],
+            _assert_json_error_object_mirrors_stderr,
+            id="release-still-legacy-error-object",
+        ),
     ],
 )
-def test_cli_claim_and_release_json_errors_print_the_stdout_error_object(
+def test_cli_claim_and_release_json_errors_choose_their_own_shape(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     arguments: list[str],
+    assert_refusal: Callable[[str, str], None],
 ) -> None:
+    """`claim`'s own dirty-tree checkout precondition (issue #406) reports
+    through the shared emitter, `reason: unavailable`; `release` still
+    prints its own unmigrated `{"ok": false, "error": ...}` shape."""
     _patch_status_cli(monkeypatch, FakeForge())
 
-    assert issue_claim.main(["--repo", "example/agent-claim", *arguments]) == 2
+    assert issue_claim.main(["--repo", "example/agent-claim", *arguments, "--json"]) == 2
     captured = capsys.readouterr()
-    _assert_json_error_object_mirrors_stderr(captured.err, captured.out)
+    assert_refusal(captured.err, captured.out)
 
 
 def test_cli_claim_json_conflict_prints_the_stdout_error_object_not_a_success_shape(
@@ -10368,7 +10504,7 @@ def test_cli_claim_json_conflict_prints_the_stdout_error_object_not_a_success_sh
     captured = capsys.readouterr()
 
     assert claimed == 2
-    _assert_json_error_object_mirrors_stderr(captured.err, captured.out)
+    _assert_json_refusal_object(captured.err, captured.out, reason="claim_conflict")
 
 
 def test_cli_module_entry_point_exits_with_mains_return_code(
@@ -10878,7 +11014,8 @@ def test_identity_conflict_still_marks_status_json_conflict(
 
     assert _status_json((first, second), None, ages, None) == 2
     payload = json.loads(capsys.readouterr().out)
-    assert payload["state"] == "CONFLICT"
+    assert payload["ok"] is False
+    assert payload["reason"] == "conflict"
 
 
 def test_no_path_class_list_is_read_or_written() -> None:
@@ -13391,8 +13528,9 @@ def test_cli_claim_refuses_a_missing_state_ref(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], json_flag: bool
 ) -> None:
     """A missing `refs/aco/state` (issue #199): with `--json`, the stdout
-    error object mirrors the unchanged stderr sentence; without it, stdout
-    stays exactly as empty as it always has."""
+    envelope names the unchanged stderr sentence under `reason: unavailable`
+    (issue #406); without it, stdout stays exactly as empty as it always
+    has."""
     client = FakeForge()
     monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
     monkeypatch.setattr(checkout, "_validate_checkout", lambda request, directory=None: None)
@@ -13428,7 +13566,7 @@ def test_cli_claim_refuses_a_missing_state_ref(
     assert status == 2
     assert protocol.MISSING_STATE_REF in captured.err
     if json_flag:
-        _assert_json_error_object_mirrors_stderr(captured.err, captured.out)
+        _assert_json_refusal_object(captured.err, captured.out, reason="unavailable")
     else:
         assert captured.out == ""
 
