@@ -43,7 +43,7 @@ never storage-aware. A refusal reaching the shared collection point prints
 | `--coordinator-override --role coordinator` | REL-13 (CLAIM-40) | REL-13 | REL-13 |
 | `--role` omitted | REL-14 | REL-14 | REL-14 |
 | `refs/aco/state` not yet bootstrapped | REL-15 (CAS-03) | REL-15 | REL-15 |
-| pull request verification | — | LAND-29..39, 49, 50, 55 | — |
+| pull request verification | — | LAND-29..39, 49, 50, 55, 62/63 | — |
 | `storage = "state-ref"` trunk verification | — | REL-17 (LAND-47, LAND-52, LAND-56, LAND-59) | — |
 | released item's own body contract | REL-23 | REL-23 | REL-23 |
 | successful release, text output | REL-18 | REL-18 | REL-18 |
@@ -161,9 +161,10 @@ exit 0
 ### E-REL-02 — a merged issue release, closed and unblocking nothing else
 
 Setup: bare-remote, fake `gh`, a linked worktree on `ada/issue-42`, pull
-request `#57` merged into `main`, body `Work-Item: #42\n\nCloses #42`, issue
-`#42` claimed and closed on the forge, no other open board items, run from
-inside that same worktree
+request `#57` merged into `main`, body `Work-Item: #42\n\nCloses #42`, its
+own merge commit's trailer also naming `Work-Item: #42`, issue `#42` claimed
+and closed on the forge, no other open board items, run from inside that
+same worktree
 
 ```console
 $ aco release 42 --merged 57
@@ -208,10 +209,10 @@ exit 0
 
 ### E-REL-06 — a merged release whose landing board read cannot reach the forge
 
-Setup: bare-remote, a fake `gh` that returns the merged pull request but
-fails the landing-board read that follows it, a linked worktree on
-`ada/issue-42`, already merged into `main`, run from the main checkout,
-issue `#42` claimed
+Setup: bare-remote, a fake `gh` that returns the merged pull request, its
+own merge commit's trailer naming `Work-Item: #42`, but fails the
+landing-board read that follows it, a linked worktree on `ada/issue-42`,
+already merged into `main`, run from the main checkout, issue `#42` claimed
 
 ```console
 $ aco release 42 --merged 57
@@ -235,8 +236,9 @@ exit 2
 
 ### E-REL-08 — a merged release removes its own clean, merged lane worktree
 
-Setup: bare-remote, fake `gh`, a linked worktree `/work/agent-claim-worktrees/issue-42-widget`
-on `ada/issue-42`, already merged into `main`, run from the main checkout, issue `#42` claimed
+Setup: bare-remote, fake `gh`, its merge commit's trailer naming `Work-Item: #42`, a linked
+worktree `/work/agent-claim-worktrees/issue-42-widget` on `ada/issue-42`, already merged into
+`main`, run from the main checkout, issue `#42` claimed
 
 ```console
 $ aco release 42 --merged 57
@@ -251,8 +253,9 @@ exit 0
 
 ### E-REL-09 — `--keep-worktree` skips cleanup outright
 
-Setup: bare-remote, fake `gh`, a linked worktree `/work/agent-claim-worktrees/issue-42-widget`
-on `ada/issue-42`, already merged into `main`, run from the main checkout, issue `#42` claimed
+Setup: bare-remote, fake `gh`, its merge commit's trailer naming `Work-Item: #42`, a linked
+worktree `/work/agent-claim-worktrees/issue-42-widget` on `ada/issue-42`, already merged into
+`main`, run from the main checkout, issue `#42` claimed
 
 ```console
 $ aco release 42 --merged 57 --keep-worktree
@@ -267,8 +270,9 @@ exit 0
 
 ### E-REL-10 — running from inside the lane worktree keeps it, one line and all
 
-Setup: bare-remote, fake `gh`, a linked worktree on `ada/issue-42`, already merged into `main`,
-issue `#42` claimed, run from inside that same worktree
+Setup: bare-remote, fake `gh`, its merge commit's trailer naming `Work-Item: #42`, a linked
+worktree on `ada/issue-42`, already merged into `main`, issue `#42` claimed, run from inside that
+same worktree
 
 ```console
 $ aco release 42 --merged 57
@@ -281,8 +285,9 @@ exit 0
 
 ### E-REL-11 — a dirty worktree keeps it
 
-Setup: bare-remote, fake `gh`, a linked worktree on `ada/issue-42`, already merged into `main`,
-run from the main checkout, an uncommitted file sitting in that worktree, issue `#42` claimed
+Setup: bare-remote, fake `gh`, its merge commit's trailer naming `Work-Item: #42`, a linked
+worktree on `ada/issue-42`, already merged into `main`, run from the main checkout, an
+uncommitted file sitting in that worktree, issue `#42` claimed
 
 ```console
 $ aco release 42 --merged 57
@@ -295,9 +300,9 @@ exit 0
 
 ### E-REL-12 — a branch not yet locally merged keeps it
 
-Setup: bare-remote, fake `gh` reporting pull request `#57` merged, a linked worktree on
-`ada/issue-42` whose branch this checkout has not itself merged into `main` yet, run from the
-main checkout, issue `#42` claimed
+Setup: bare-remote, fake `gh` reporting pull request `#57` merged, its merge commit's trailer
+naming `Work-Item: #42`, a linked worktree on `ada/issue-42` whose branch this checkout has not
+itself merged into `main` yet, run from the main checkout, issue `#42` claimed
 
 ```console
 $ aco release 42 --merged 57
@@ -310,8 +315,9 @@ exit 0
 
 ### E-REL-13 — no linked worktree ever built for the branch
 
-Setup: bare-remote, fake `gh`, branch `ada/issue-42` merged into `main` with no linked worktree
-of its own (the claim came from a plain checkout), issue `#42` claimed
+Setup: bare-remote, fake `gh`, its merge commit's trailer naming `Work-Item: #42`, branch
+`ada/issue-42` merged into `main` with no linked worktree of its own (the claim came from a
+plain checkout), issue `#42` claimed
 
 ```console
 $ aco release 42 --merged 57
@@ -324,8 +330,9 @@ exit 0
 
 ### E-REL-14 — the branch sits on this repository's own main checkout, not a linked worktree
 
-Setup: bare-remote, fake `gh`, branch `ada/issue-42` checked out on this repository's own main
-checkout rather than a linked worktree, run from an unrelated linked worktree, issue `#42` claimed
+Setup: bare-remote, fake `gh`, its merge commit's trailer naming `Work-Item: #42`, branch
+`ada/issue-42` checked out on this repository's own main checkout rather than a linked
+worktree, run from an unrelated linked worktree, issue `#42` claimed
 
 ```console
 $ aco release 42 --merged 57
@@ -338,9 +345,10 @@ exit 0
 
 ### E-REL-15 — a git failure resolving the lane's own worktree keeps both
 
-Setup: bare-remote, fake `gh`, a linked worktree on `ada/issue-42`, already merged into `main`,
-run from the main checkout, issue `#42` claimed, a git failure while resolving which of the
-repository's worktrees sits on `ada/issue-42`
+Setup: bare-remote, fake `gh`, its merge commit's trailer naming `Work-Item: #42`, a linked
+worktree on `ada/issue-42`, already merged into `main`, run from the main checkout, issue `#42`
+claimed, a git failure while resolving which of the repository's worktrees sits on
+`ada/issue-42`
 
 ```console
 $ aco release 42 --merged 57
@@ -353,9 +361,9 @@ exit 0
 
 ### E-REL-16 — a branch-deletion failure after the worktree is already gone names both halves
 
-Setup: bare-remote, fake `gh`, a linked worktree on `ada/issue-42`, already merged into `main`,
-run from the main checkout, issue `#42` claimed, deleting the local branch fails once the
-worktree itself is already removed
+Setup: bare-remote, fake `gh`, its merge commit's trailer naming `Work-Item: #42`, a linked
+worktree on `ada/issue-42`, already merged into `main`, run from the main checkout, issue `#42`
+claimed, deleting the local branch fails once the worktree itself is already removed
 
 ```console
 $ aco release 42 --merged 57
@@ -368,8 +376,9 @@ exit 0
 
 ### E-REL-17 — `--json` on a merged release carries the same `worktree` text
 
-Setup: bare-remote, fake `gh`, a linked worktree on `ada/issue-42`, already merged into `main`,
-run from the main checkout, issue `#42` claimed
+Setup: bare-remote, fake `gh`, its merge commit's trailer naming `Work-Item: #42`, a linked
+worktree on `ada/issue-42`, already merged into `main`, run from the main checkout, issue `#42`
+claimed
 
 ```console
 $ aco release 42 --merged 57 --json

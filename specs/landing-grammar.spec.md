@@ -64,7 +64,7 @@ matching line.
 | malformed/wrong-kind/foreign parent | — | LAND-26, LAND-27, LAND-28 | — | — |
 | pull request not merged | — | — | LAND-30 | — |
 | PR names a different item / kind mismatch | — | — | LAND-35, LAND-62 | — |
-| work item still open | — | — | LAND-55 | — |
+| work item still open | — | — | LAND-55, LAND-63 | — |
 | forge unreachable right after the release commits | — | — | LAND-38, LAND-50 | — |
 | `--abandoned` outcome | — | — | LAND-39 | — |
 | issue-less lane, `storage = "state-ref"` | — | — | LAND-56 | — |
