@@ -1429,4 +1429,3 @@ def body_shape_check(body: str, *, storage: Storage = Storage.GITHUB) -> BodySha
             BodyShapeVerdict.INCOMPLETE, (f"body incomplete: {', '.join(missing)}",)
         )
     return BodyShapeCheck(BodyShapeVerdict.VALID, ())
-

@@ -5,8 +5,14 @@ from datetime import UTC, datetime
 
 import pytest
 
-from agent_coordination import board, items, protocol
-from agent_coordination.body import render_block
+from agent_coordination import items, protocol
+from agent_coordination.body import (
+    BodyReadState,
+    ContractDefect,
+    Storage,
+    parse_body,
+    render_block,
+)
 from agent_coordination.protocol import ClaimUnavailableError, MalformedStateTreeError
 
 ITEM_ID = "aco-8f3a2c"
@@ -40,7 +46,7 @@ def _item_body(record: Mapping[str, object]) -> str:
     return f"Item body.\n\n```agent-claim\n{render_block(data)}```\n"
 
 
-def _defect_message(defects: tuple[board.ContractDefect, ...], field: str) -> str:
+def _defect_message(defects: tuple[ContractDefect, ...], field: str) -> str:
     return next(defect.message for defect in defects if defect.field == field)
 
 
@@ -49,9 +55,9 @@ class TestRecordRoundTrip:
         record = _record(closed_at=None)
         body = _item_body(record)
 
-        parsed = board.parse_body(body, storage=board.Storage.STATE_REF)
+        parsed = parse_body(body, storage=Storage.STATE_REF)
 
-        assert parsed.read_state is board.BodyReadState.VALID
+        assert parsed.read_state is BodyReadState.VALID
         assert parsed.record is not None
         decoded = items.parse_item_record(ITEM_ID, parsed.record)
         assert decoded == items.ItemRecord(
@@ -77,7 +83,7 @@ class TestRecordRoundTrip:
         }
         body = _item_body(minimal)
 
-        parsed = board.parse_body(body, storage=board.Storage.STATE_REF)
+        parsed = parse_body(body, storage=Storage.STATE_REF)
 
         assert parsed.record is not None
         decoded = items.parse_item_record(ITEM_ID, parsed.record)
@@ -94,7 +100,7 @@ class TestRecordRoundTrip:
         record = _record(state="closed", closed_at="2026-09-16T12:00:00Z")
         body = _item_body(record)
 
-        parsed = board.parse_body(body, storage=board.Storage.STATE_REF)
+        parsed = parse_body(body, storage=Storage.STATE_REF)
 
         assert parsed.record is not None
         decoded = items.parse_item_record(ITEM_ID, parsed.record)
@@ -106,9 +112,9 @@ class TestRecordRefusedUnderGithub:
     def test_record_is_an_unknown_top_level_key_under_github_storage(self) -> None:
         body = _item_body(_record())
 
-        parsed = board.parse_body(body)  # default storage is github
+        parsed = parse_body(body)  # default storage is github
 
-        assert parsed.read_state is board.BodyReadState.MALFORMED
+        assert parsed.read_state is BodyReadState.MALFORMED
         assert _defect_message(parsed.contract.defects, "record") == "unknown top-level key record"
 
     def test_record_is_never_populated_under_github_storage(self) -> None:
@@ -116,7 +122,7 @@ class TestRecordRefusedUnderGithub:
         # GitHub-stored item already parses as; `.record` must stay `None`.
         body = '```agent-claim\nversion = 1\nnow = "N"\nnext = "X"\ndone_when = "D"\n```\n'
 
-        parsed = board.parse_body(body)
+        parsed = parse_body(body)
 
         assert parsed.record is None
 
@@ -226,9 +232,9 @@ class TestMalformedRecordDefects:
     ) -> None:
         body = _item_body_with_record_toml(overrides)
 
-        parsed = board.parse_body(body, storage=board.Storage.STATE_REF)
+        parsed = parse_body(body, storage=Storage.STATE_REF)
 
-        assert parsed.read_state is board.BodyReadState.MALFORMED
+        assert parsed.read_state is BodyReadState.MALFORMED
         assert _defect_message(parsed.contract.defects, field) == message
 
     def test_a_non_table_record_fails_loud(self) -> None:
@@ -239,9 +245,9 @@ class TestMalformedRecordDefects:
             'done_when = "D"\nrecord = 1\n```\n'
         )
 
-        parsed = board.parse_body(body, storage=board.Storage.STATE_REF)
+        parsed = parse_body(body, storage=Storage.STATE_REF)
 
-        assert parsed.read_state is board.BodyReadState.MALFORMED
+        assert parsed.read_state is BodyReadState.MALFORMED
         assert _defect_message(parsed.contract.defects, "record") == "record must be a table"
 
 
@@ -331,12 +337,12 @@ class TestRecordTable:
         self, overrides: dict[str, object]
     ) -> None:
         body = _item_body(_record(**overrides))
-        parsed = board.parse_body(body, storage=board.Storage.STATE_REF)
+        parsed = parse_body(body, storage=Storage.STATE_REF)
         assert parsed.record is not None
         original = items.parse_item_record(ITEM_ID, parsed.record)
 
         rendered = _item_body(items.record_table(original))
-        reparsed = board.parse_body(rendered, storage=board.Storage.STATE_REF)
+        reparsed = parse_body(rendered, storage=Storage.STATE_REF)
 
         assert reparsed.record is not None
         assert items.parse_item_record(ITEM_ID, reparsed.record) == original

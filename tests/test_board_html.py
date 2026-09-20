@@ -22,13 +22,14 @@ from board_fixtures import (
 )
 
 from agent_coordination import board, board_html, cli, items, metrics
+from agent_coordination.body import ItemKind, Storage
 
 GOLDEN_PATH = Path(__file__).parent / "board_html_golden.html"
 
 
 def _fixture_page(
     *,
-    storage: board.Storage = board.Storage.GITHUB,
+    storage: Storage = Storage.GITHUB,
     lane_blocked: bool = False,
     ruled_claimed_item_line: bool = False,
     ruled_child_line: bool = False,
@@ -122,7 +123,7 @@ def _fixture_page(
     )
     container_issue = replace(
         board_issue(100, "Sammelitem", complete_contract("Kinder abarbeiten.", size="M")),
-        kind=board.ItemKind.CONTAINER,
+        kind=ItemKind.CONTAINER,
         children_closed=1,
         children_total=2,
     )
@@ -248,7 +249,7 @@ def test_render_labels_cards_topics_and_lanes_with_state_ref_ids() -> None:
     too, not just the topic parts around it); the `github` golden page
     above stays byte-identical, so only this storage's own rendering
     differs."""
-    rendered = board_html.render(_fixture_page(storage=board.Storage.STATE_REF, lane_blocked=True))
+    rendered = board_html.render(_fixture_page(storage=Storage.STATE_REF, lane_blocked=True))
     open_child_id = items.format_item_id(101)  # the card's topic part
     container_id = items.format_item_id(100)  # the container topic
     claimed_item_id = items.format_item_id(102)  # the lane
@@ -363,7 +364,7 @@ def test_a_trailer_landed_item_shows_regardless_of_pull_request_capability() -> 
             open_pull_requests=(),
             recent_merged_pull_requests=(),
             claims=(),
-            config=board.BoardConfig(storage=board.Storage.STATE_REF),
+            config=board.BoardConfig(storage=Storage.STATE_REF),
             repository="example/agent-claim",
             now=datetime(2026, 8, 30, tzinfo=UTC),
             trunk_landing_items=(
@@ -375,7 +376,7 @@ def test_a_trailer_landed_item_shows_regardless_of_pull_request_capability() -> 
         bodies={9: landed_issue.body},
         claimants={},
         state_tip="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-        storage=board.Storage.STATE_REF,
+        storage=Storage.STATE_REF,
     )
 
     rendered = board_html.render(board_html.build_page(projected, sources))

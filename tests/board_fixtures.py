@@ -12,7 +12,7 @@ from datetime import UTC, date, datetime
 from types import MappingProxyType
 
 from agent_coordination import board, metrics, protocol
-from agent_coordination.body import render_block
+from agent_coordination.body import ItemKind, render_block
 from agent_coordination.protocol import ClaimRequest
 
 BASE = "a" * 40
@@ -167,7 +167,7 @@ def board_issue(
     *,
     labels: tuple[str, ...] = (),
     blocked_by_count: int = 0,
-    kind: board.ItemKind | None = None,
+    kind: ItemKind | None = None,
 ) -> board.Issue:
     return board.Issue(
         number,

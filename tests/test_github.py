@@ -19,7 +19,7 @@ from board_fixtures import REPOSITORY
 from github_fixtures import LANDING_BRANCH, MERGE_COMMIT_SHA
 
 from agent_coordination import board, forge, github, process
-from agent_coordination.body import BLOCK_CHILD_SKELETON
+from agent_coordination.body import BLOCK_CHILD_SKELETON, ItemKind
 from agent_coordination.protocol import ClaimError
 
 GitHubForge = github.GitHubForge
@@ -85,7 +85,7 @@ def test_github_adapter_reads_the_native_issue_type_and_sub_issue_counts() -> No
 
     issues = client.list_open_board_issues()
 
-    assert issues[0].kind is board.ItemKind.CONTAINER
+    assert issues[0].kind is ItemKind.CONTAINER
     assert issues[0].children_closed == 1
     assert issues[0].children_total == 2
 
@@ -295,7 +295,7 @@ def test_github_adapter_creates_a_child_and_links_it_as_a_sub_issue() -> None:
     client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
 
     child = client.create_child(
-        parent=79, title="Scheibe 4", body=BLOCK_CHILD_SKELETON, kind=board.ItemKind.TASK
+        parent=79, title="Scheibe 4", body=BLOCK_CHILD_SKELETON, kind=ItemKind.TASK
     )
 
     assert child == 101
@@ -327,7 +327,7 @@ def test_github_adapter_fails_loud_on_a_malformed_created_child(payload: str) ->
     client = GitHubForge(github._repository_id(REPOSITORY), run=lambda *_a, **_k: payload)
 
     with pytest.raises(ClaimError, match=r"created.issue"):
-        client.create_child(parent=79, title="Scheibe 4", body="", kind=board.ItemKind.TASK)
+        client.create_child(parent=79, title="Scheibe 4", body="", kind=ItemKind.TASK)
 
 
 def test_github_adapter_names_the_created_child_when_the_relation_post_fails() -> None:
@@ -343,7 +343,7 @@ def test_github_adapter_names_the_created_child_when_the_relation_post_fails() -
     client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
 
     with pytest.raises(forge.ForgePartialChildCreationError) as excinfo:
-        client.create_child(parent=79, title="Scheibe 4", body="", kind=board.ItemKind.TASK)
+        client.create_child(parent=79, title="Scheibe 4", body="", kind=ItemKind.TASK)
 
     assert excinfo.value.child == 101
     assert excinfo.value.parent == 79
@@ -363,9 +363,7 @@ def test_github_adapter_creates_an_issue_without_linking_it_as_a_child() -> None
 
     client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
 
-    number = client._create_issue(
-        title="Scheibe 4", body=BLOCK_CHILD_SKELETON, kind=board.ItemKind.TASK
-    )
+    number = client._create_issue(title="Scheibe 4", body=BLOCK_CHILD_SKELETON, kind=ItemKind.TASK)
 
     assert number == 101
     assert observed == [
@@ -2380,7 +2378,7 @@ def test_github_adapter_reads_the_parents_native_kind() -> None:
     client = GitHubForge(github._repository_id(REPOSITORY), run=run)
 
     assert client.parent_issue(72) == board.ParentIssue(
-        board.IssueReference(REPOSITORY, 79), "## Next\nCut.", board.ItemKind.CONTAINER
+        board.IssueReference(REPOSITORY, 79), "## Next\nCut.", ItemKind.CONTAINER
     )
 
 

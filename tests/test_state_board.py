@@ -33,8 +33,11 @@ from agent_coordination.body import (
     BLOCK_CHILD_SKELETON,
     BLOCK_CONTAINER_SKELETON,
     ExpectationLine,
+    ItemKind,
+    Storage,
     expectation_lines,
     locate_agent_claim_block,
+    parse_body,
     render_block,
 )
 from agent_coordination.protocol import ClaimUnavailableError, MalformedStateTreeError
@@ -180,7 +183,7 @@ CONTAINER_ISSUE = board.Issue(
     CONTAINER_BODY,
     "2026-09-10T00:00:00Z",
     "2026-09-15T00:00:00Z",
-    board.ItemKind.CONTAINER,
+    ItemKind.CONTAINER,
     children_closed=0,
     children_total=2,
     blocked_by_count=0,
@@ -192,7 +195,7 @@ CHILD_A_ISSUE = board.Issue(
     CHILD_A_BODY,
     "2026-09-10T00:00:00Z",
     "2026-09-15T00:00:00Z",
-    board.ItemKind.TASK,
+    ItemKind.TASK,
     blocked_by_count=0,
 )
 CHILD_B_ISSUE = board.Issue(
@@ -202,7 +205,7 @@ CHILD_B_ISSUE = board.Issue(
     CHILD_B_BODY,
     "2026-09-10T00:00:00Z",
     "2026-09-15T00:00:00Z",
-    board.ItemKind.TASK,
+    ItemKind.TASK,
     blocked_by_count=1,
 )
 GITHUB_ISSUES = (CONTAINER_ISSUE, CHILD_A_ISSUE, CHILD_B_ISSUE)
@@ -391,7 +394,7 @@ def _decoded_record(body: str, item_id: str) -> items.ItemRecord:
     """`body`'s `[record]` table, decoded -- the same read `StateRefBoard`
     itself performs, used here to check a write's persisted result straight
     from the state ref, independent of any one adapter instance's view."""
-    parsed = board.parse_body(body, storage=board.Storage.STATE_REF)
+    parsed = parse_body(body, storage=Storage.STATE_REF)
     assert parsed.record is not None
     return items.parse_item_record(item_id, parsed.record)
 
@@ -683,7 +686,7 @@ class TestStateRefBoardAgainstARealStateTree:
         parent = state_ref_board.parent_issue(CHILD_A_NUMBER)
         assert parent is not None
         assert parent.reference == board.IssueReference(REPOSITORY_PATH, CONTAINER_NUMBER)
-        assert parent.kind is board.ItemKind.CONTAINER
+        assert parent.kind is ItemKind.CONTAINER
 
     def test_a_missing_number_is_missing(self, state_ref_board: StateRefBoard) -> None:
         assert state_ref_board.item_reference(999999).state is forge.ItemState.MISSING
@@ -738,7 +741,7 @@ LIVE_CLAIM_OPEN_PULL_REQUEST = board.PullRequest(
 def _projected(
     client: forge.BoardSource,
     *,
-    storage: board.Storage,
+    storage: Storage,
     claims: tuple[protocol.ScopedClaim, ...] = (),
 ) -> board.Board:
     """`projected_board` fed entirely from `client`'s own read methods --
@@ -751,7 +754,7 @@ def _projected(
     children = {
         issue.number: client.list_children(issue.number)
         for issue in issues
-        if issue.kind is board.ItemKind.CONTAINER
+        if issue.kind is ItemKind.CONTAINER
     }
     dependencies = {
         issue.number: client.list_board_dependencies(issue.number)
@@ -776,29 +779,25 @@ def _projected(
 
 
 def _rulings_lines(
-    client: forge.BoardSource, built: board.Board, *, storage: board.Storage
+    client: forge.BoardSource, built: board.Board, *, storage: Storage
 ) -> tuple[str, ...]:
     bodies = {issue.number: issue.body for issue in client.list_open_board_issues()}
     rows = issue_claim._rulings_rows(built, bodies, storage=storage)
     return tuple(issue_claim._rulings_row_text(row, storage) for row in rows)
 
 
-_EXPECTED_BOARD = _projected(_github_fake(), storage=board.Storage.GITHUB)
+_EXPECTED_BOARD = _projected(_github_fake(), storage=Storage.GITHUB)
 EXPECTED_BOARD_PAYLOAD = board.board_payload(_EXPECTED_BOARD)
 EXPECTED_NEXT_ACTION = board.next_action(_EXPECTED_BOARD)
-EXPECTED_RULINGS_LINES = _rulings_lines(
-    _github_fake(), _EXPECTED_BOARD, storage=board.Storage.GITHUB
-)
+EXPECTED_RULINGS_LINES = _rulings_lines(_github_fake(), _EXPECTED_BOARD, storage=Storage.GITHUB)
 # `rulings`' own header line names the item under the pin (issue #292):
 # `aco-xxxxxx` under state-ref, `#n` unchanged under github -- the same
 # shared scenario re-rendered under each storage, so the only sanctioned
 # difference is that one id-shaped prefix, never a second hand-built
 # expectation.
 EXPECTED_RULINGS_LINES_BY_STORAGE = {
-    board.Storage.GITHUB: EXPECTED_RULINGS_LINES,
-    board.Storage.STATE_REF: _rulings_lines(
-        _github_fake(), _EXPECTED_BOARD, storage=board.Storage.STATE_REF
-    ),
+    Storage.GITHUB: EXPECTED_RULINGS_LINES,
+    Storage.STATE_REF: _rulings_lines(_github_fake(), _EXPECTED_BOARD, storage=Storage.STATE_REF),
 }
 # `state-ref` projects the identical scenario, never `_EXPECTED_BOARD` itself
 # `replace`d: `item.actionable_reason` (issue #300 residual 2) is now baked
@@ -810,11 +809,11 @@ EXPECTED_RULINGS_LINES_BY_STORAGE = {
 # id-shaped pins, since this scenario carries no merged pull request at all
 # (issue #371 retired the one line that used to differ).
 EXPECTED_STATE_REF_BOARD_PAYLOAD = board.board_payload(
-    _projected(_github_fake(), storage=board.Storage.STATE_REF)
+    _projected(_github_fake(), storage=Storage.STATE_REF)
 )
 EXPECTED_BOARD_PAYLOAD_BY_STORAGE = {
-    board.Storage.GITHUB: EXPECTED_BOARD_PAYLOAD,
-    board.Storage.STATE_REF: EXPECTED_STATE_REF_BOARD_PAYLOAD,
+    Storage.GITHUB: EXPECTED_BOARD_PAYLOAD,
+    Storage.STATE_REF: EXPECTED_STATE_REF_BOARD_PAYLOAD,
 }
 
 # The same scenario plus `LIVE_CLAIM`, GitHub-side, as the shared expectation
@@ -826,15 +825,15 @@ EXPECTED_BOARD_PAYLOAD_BY_STORAGE = {
 # sanctioned difference stays the id-shaped pins.
 _EXPECTED_BOARD_WITH_LIVE_CLAIM = _projected(
     _github_fake(open_pull_requests=(LIVE_CLAIM_OPEN_PULL_REQUEST,)),
-    storage=board.Storage.GITHUB,
+    storage=Storage.GITHUB,
     claims=(LIVE_CLAIM,),
 )
 EXPECTED_BOARD_WITH_LIVE_CLAIM_PAYLOAD_BY_STORAGE = {
-    board.Storage.GITHUB: board.board_payload(_EXPECTED_BOARD_WITH_LIVE_CLAIM),
-    board.Storage.STATE_REF: board.board_payload(
+    Storage.GITHUB: board.board_payload(_EXPECTED_BOARD_WITH_LIVE_CLAIM),
+    Storage.STATE_REF: board.board_payload(
         _projected(
             _github_fake(open_pull_requests=(LIVE_CLAIM_OPEN_PULL_REQUEST,)),
-            storage=board.Storage.STATE_REF,
+            storage=Storage.STATE_REF,
             claims=(LIVE_CLAIM,),
         )
     ),
@@ -849,7 +848,7 @@ class TestStateRefInFlightWithoutPullRequests:
         blocking 2): its own honest in-flight signal for a live claim is the
         claim itself, never a PR-head match `open_branches` can never carry
         under this storage backend."""
-        built = _projected(state_ref_board, storage=board.Storage.STATE_REF, claims=(LIVE_CLAIM,))
+        built = _projected(state_ref_board, storage=Storage.STATE_REF, claims=(LIVE_CLAIM,))
 
         item = next(item for item in built.items if item.number == CHILD_A_NUMBER)
         assert item.stage is board.Stage.IN_FLIGHT
@@ -866,15 +865,15 @@ class TestTwoAdapterParity:
     @pytest.mark.parametrize(
         ("client_kind", "storage"),
         [
-            pytest.param("github", board.Storage.GITHUB, id="github"),
-            pytest.param("state-ref", board.Storage.STATE_REF, id="state-ref"),
+            pytest.param("github", Storage.GITHUB, id="github"),
+            pytest.param("state-ref", Storage.STATE_REF, id="state-ref"),
         ],
     )
     def test_board_next_and_rulings_match_the_shared_expectation(
         self,
         request: pytest.FixtureRequest,
         client_kind: str,
-        storage: board.Storage,
+        storage: Storage,
     ) -> None:
         client: forge.BoardSource = (
             _github_fake()
@@ -894,15 +893,15 @@ class TestTwoAdapterParity:
     @pytest.mark.parametrize(
         ("client_kind", "storage"),
         [
-            pytest.param("github", board.Storage.GITHUB, id="github"),
-            pytest.param("state-ref", board.Storage.STATE_REF, id="state-ref"),
+            pytest.param("github", Storage.GITHUB, id="github"),
+            pytest.param("state-ref", Storage.STATE_REF, id="state-ref"),
         ],
     )
     def test_a_live_claim_is_in_flight_identically_on_both_adapters(
         self,
         request: pytest.FixtureRequest,
         client_kind: str,
-        storage: board.Storage,
+        storage: Storage,
     ) -> None:
         """`LIVE_CLAIM` on Slice A reaches `Stage.IN_FLIGHT` on both
         adapters (issue #248, Grok final gate blocking 2) -- GitHub from
@@ -1150,7 +1149,7 @@ class TestStateRefBoardWrites:
         body = f"Parent: #{CONTAINER_NUMBER}\n\n{BLOCK_CHILD_SKELETON}"
 
         child_number = adapter.create_child(
-            parent=CONTAINER_NUMBER, title="Slice C", body=body, kind=board.ItemKind.TASK
+            parent=CONTAINER_NUMBER, title="Slice C", body=body, kind=ItemKind.TASK
         )
 
         reference = adapter.item_reference(child_number)
@@ -1487,7 +1486,7 @@ class TestCliStateRefForge:
         state = store.fetch_state(worktree=worktree, remote=remote_url)
         assert state.tip is not None
         stored = store.read_item_files(worktree, state.tip)[f"{CHILD_A_ID}.md"].decode()
-        lines = expectation_lines(stored, storage=board.Storage.STATE_REF)
+        lines = expectation_lines(stored, storage=Storage.STATE_REF)
         assert lines[1] == ExpectationLine(
             2,
             asked_text,

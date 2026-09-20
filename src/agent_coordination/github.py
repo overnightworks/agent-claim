@@ -14,6 +14,7 @@ from types import MappingProxyType
 from typing import TypeVar
 
 from . import board, forge, process, protocol
+from .body import ItemKind
 from .protocol import REPOSITORY_PATTERN, ClaimError
 
 _Page = TypeVar("_Page")
@@ -41,16 +42,16 @@ API_ISSUE_STATES: dict[str, board.BlockerState] = {
 # unrecognized type name maps to no kind at all -- never guessed from a
 # label -- so a repository whose org renames a type loses that item's
 # container/bug rules rather than silently misreading them.
-_ISSUE_TYPE_KINDS: dict[str, board.ItemKind] = {
-    "container": board.ItemKind.CONTAINER,
-    "bug": board.ItemKind.BUG,
-    "task": board.ItemKind.TASK,
-    "feature": board.ItemKind.FEATURE,
+_ISSUE_TYPE_KINDS: dict[str, ItemKind] = {
+    "container": ItemKind.CONTAINER,
+    "bug": ItemKind.BUG,
+    "task": ItemKind.TASK,
+    "feature": ItemKind.FEATURE,
 }
 # The write-side names GitHub's issue-type API expects (`cut`'s
 # `create_child`) -- derived from the one read-side mapping above so the
 # type name has a single owner, capitalized the way GitHub itself names them.
-_ITEM_KIND_TYPE_NAMES: dict[board.ItemKind, str] = {
+_ITEM_KIND_TYPE_NAMES: dict[ItemKind, str] = {
     kind: name.capitalize() for name, kind in _ISSUE_TYPE_KINDS.items()
 }
 # GitHub's issues-list pagination fills every page but the last, so a result
@@ -409,7 +410,7 @@ class GitHubForge:
                 return tuple(pages)
             start += PARALLEL_FETCH_CONCURRENCY
 
-    def _issue_kind(self, value: object) -> board.ItemKind | None:
+    def _issue_kind(self, value: object) -> ItemKind | None:
         return _ISSUE_TYPE_KINDS.get(value.casefold()) if isinstance(value, str) else None
 
     def _valid_children_progress(self, closed: object, total: object) -> bool:
@@ -1071,7 +1072,7 @@ class GitHubForge:
                 recent.append(pull_request)
         return tuple(recent)
 
-    def _create_issue(self, *, title: str, body: str, kind: board.ItemKind) -> int:
+    def _create_issue(self, *, title: str, body: str, kind: ItemKind) -> int:
         """Create a fresh issue of `kind`, linked to no parent.
 
         Private: `create_child` is the only caller (#260) -- nothing else
@@ -1143,7 +1144,7 @@ class GitHubForge:
             input_data=json.dumps({"sub_issue_id": identifier}).encode("utf-8"),
         )
 
-    def create_child(self, *, parent: int, title: str, body: str, kind: board.ItemKind) -> int:
+    def create_child(self, *, parent: int, title: str, body: str, kind: ItemKind) -> int:
         """Create a fresh issue of `kind` and record it as `parent`'s sub-issue.
 
         Composed from `_create_issue` and `link_child` (#260): not atomic,
