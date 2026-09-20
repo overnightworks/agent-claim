@@ -62,14 +62,15 @@ exit `2`, exactly as `specs/claim-record.spec.md` already documents.
 
 ## Fetch anchor and lineage stamp, one per worktree
 
-- [ ] [CAS-07] A fetch of a present ref never creates the shared local `refs/aco/state`; the tip lands only in `FETCH_HEAD`, then `refs/worktree/aco/state`, git's own per-worktree namespace (see E-CAS-02).
-- [ ] [CAS-08] An anchor write that itself fails refuses `cannot anchor fetched tip <sha>: <detail>`.
+- [ ] [CAS-07] A fetch of a present ref never creates the shared local `refs/aco/state`; the tip lands only in `refs/worktree/aco/state`, never read back from `FETCH_HEAD` (see E-CAS-02).
+- CAS-08 (retired 20.09.2026, issue #426): the anchor write it named is no longer a step of its own; the fetch that lands the tip in `refs/worktree/aco/state` (CAS-07) fails as one `cannot fetch` refusal.
+- [ ] [CAS-50] A fetch that lands the tip but cannot read it back from `refs/worktree/aco/state` refuses `cannot read the fetched tip at refs/worktree/aco/state: <detail>`.
 - [ ] [CAS-09] This worktree's own last-observed tip is stamped at `<git-dir>/aco/last-oid` -- private to it, never shared with another linked worktree of the same checkout.
 - [ ] [CAS-10] A worktree with no stamp yet at `<git-dir>/aco/last-oid` accepts any tip its first fetch reads, never refusing `... the ref may have been rewritten` (CAS-11).
 - [ ] [CAS-11] A fetched tip that is not a descendant of this worktree's own stamp refuses `refs/aco/state moved from <old> to <new> without <old> as an ancestor of the new tip; the ref may have been rewritten`.
 - [ ] [CAS-48] A lineage check that cannot run refuses `cannot check whether <old> is an ancestor of <new>: <detail>`, never "the ref may have been rewritten" (see E-CAS-07).
 - [ ] [CAS-12] A worktree that observed the ref, then fetches again after it was deleted, refuses `refs/aco/state was previously observed at <old> but is now absent; the ref may have been deleted`.
-- [ ] [CAS-49] A `land` claim observation, or `reset`, reads the remote's tip via `FETCH_HEAD` alone without touching this worktree's own anchor or lineage stamp; only a fetch that advances local state moves them.
+- [ ] [CAS-49] A `land` claim observation, or `reset`, reads the remote's current tip directly, without touching this worktree's own anchor or lineage stamp; only a fetch that advances local state moves them.
 
 ## The compare-and-swap transition and its retries
 
@@ -88,7 +89,7 @@ transition), and which of the three causes applies.
 
 ### Work budget
 
-- [ ] [CAS-18] `status`'s two store reads (a fetch, then every claim's age) make exactly one `ls-remote`, `fetch`, `update-ref`, `ls-tree`, `archive`, and `log` call, ten live claims or three hundred alike.
+- [ ] [CAS-18] `status`'s two store reads (a fetch, then every claim's age) make one `ls-remote`, `fetch`, `ls-tree`, `archive`, `log` call and four `rev-parse` calls, ten live claims or three hundred alike.
 
 ## An item write's own compare-and-swap
 
@@ -155,6 +156,8 @@ export, no silent data loss, and a live claim always refuses it outright,
 - A push against `refs/aco/state` is never `--force`/`--force-with-lease` outside the documented reset/recovery path (CAS-43): every ordinary transition is a plain fast-forward.
 - A worktree's own lineage stamp and fetch anchor are never shared with another linked worktree of the same checkout: each has its own git-dir.
 - A malformed fetched tree is never partially trusted: the whole read fails loud (CAS-22..38), never a single quarantined claim, resource, or item.
+- No state-store fetch ever lands a tag or `FETCH_HEAD`: each carries `--no-tags --no-write-fetch-head`, so it writes only objects and the ref its own refspec names (issue #298 finding 2).
+- A read that does not advance local state (CAS-49) never writes this worktree's fetch anchor or lineage stamp; only an anchoring fetch (CAS-07) moves `refs/worktree/aco/state` and that stamp.
 
 ## Examples
 
