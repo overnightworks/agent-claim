@@ -11358,6 +11358,29 @@ def test_release_merged_refuses_a_landing_it_cannot_verify(
     assert store.fetch_state(worktree=Path("."), remote="origin").claims
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param("", id="empty-body"),
+        pytest.param("Advances #72", id="no-work-item-line"),
+        pytest.param("Work-Item: #99\n\nCloses #99", id="wrong-numbered-work-item"),
+    ],
+)
+def test_release_merged_ignores_the_pull_requests_own_body_for_an_issue(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], body: str
+) -> None:
+    """Issue #397, Befund 41: the merge commit's own `Work-Item: #72`
+    trailer is the authority for an issue release, not the pull request's
+    mutable `body` -- an edited, missing, or wrong-numbered body still
+    lands the release the trailer already authorizes."""
+    client = merged_release_client(monkeypatch, body=body)
+
+    assert issue_claim.main(["--repo", REPOSITORY, "release", "72", "--merged", "12"]) == 0
+
+    assert client.closed_issues == {WORK_ITEM_ISSUE}
+    assert store.fetch_state(worktree=Path("."), remote="origin").claims == {}
+
+
 def test_release_merged_closes_the_still_open_work_item(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
