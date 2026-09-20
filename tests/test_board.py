@@ -34,7 +34,7 @@ from board_fixtures import (
     slice_entries,
 )
 
-from agent_coordination import board, metrics, protocol
+from agent_coordination import board, checkout, metrics, protocol
 from agent_coordination.body import (
     BLOCK_CHILD_SKELETON,
     EXPECTATION_LINE_TEXT_MAXIMUM,
@@ -3368,9 +3368,42 @@ def test_trunk_commit_classification_is_none_without_a_recognized_trailer(
     assert board.trunk_commit_classification(work_item_values, no_item_values) is None
 
 
-def test_trunk_commit_classification_fails_loud_on_a_malformed_work_item_value() -> None:
-    with pytest.raises(protocol.ClaimUnavailableError, match="is not an item reference"):
-        board.trunk_commit_classification(("not-an-item",), ())
+@pytest.mark.parametrize(
+    "work_item_values",
+    [("fix/x",), ("#10", "fix/x"), ("fix/x", "#10")],
+)
+def test_trunk_commit_classification_reports_a_malformed_work_item_as_a_defect(
+    work_item_values: tuple[str, ...],
+) -> None:
+    assert board.trunk_commit_classification(work_item_values, ()) == board.ClassificationDefect(
+        "carries `Work-Item: fix/x`; a trunk trailer names #n, aco-xxxxxx, or the bare number n"
+    )
+
+
+@pytest.mark.parametrize("malformed_first", [True, False])
+def test_trunk_log_classifies_valid_neighbors_of_a_malformed_work_item(
+    monkeypatch: pytest.MonkeyPatch, malformed_first: bool
+) -> None:
+    malformed_record = "bad-sha\x002026-09-20T10:00:00+00:00\x00fix/x\x00\x00"
+    valid_record = "good-sha\x002026-09-20T11:00:00+00:00\x00#10\naco-00000b\x00\x00"
+    records = (
+        (malformed_record, valid_record) if malformed_first else (valid_record, malformed_record)
+    )
+
+    def git_output(arguments: list[str], **_kwargs: object) -> str:
+        if arguments[0] == "symbolic-ref":
+            return "refs/remotes/origin/main"
+        assert arguments[0] == "log"
+        return "".join(records)
+
+    monkeypatch.setattr(checkout, "_git_output", git_output)
+
+    landings = {
+        landing.sha: landing.classification for landing in checkout.trunk_landings("origin", 2)
+    }
+
+    assert isinstance(landings["bad-sha"], board.ClassificationDefect)
+    assert landings["good-sha"] == board.TrunkWorkItemClassification((10, 11))
 
 
 @pytest.mark.parametrize(

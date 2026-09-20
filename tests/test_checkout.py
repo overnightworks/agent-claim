@@ -26,7 +26,7 @@ from cli_fixtures import (
     _stub_one_git_call,
 )
 
-from agent_coordination import board, checkout, process, protocol
+from agent_coordination import board, checkout, process
 from agent_coordination.protocol import ClaimError, ClaimRequest
 
 _LIVE_VERSIONED_PATHS = checkout.versioned_paths
@@ -1033,7 +1033,7 @@ def _push_to_hub(repo: Path) -> None:
     ["\x1f", "\x1e", "\x01"],
     ids=["unit-separator", "record-separator", "start-of-heading"],
 )
-def test_trunk_landings_reads_a_control_byte_inside_a_trailer_value_as_one_literal_item(
+def test_trunk_landings_classifies_a_control_byte_inside_a_trailer_value_as_one_literal_defect(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, byte: str
 ) -> None:
     """Issue #304 review, finding B1: git never escapes `\\x1f`, `\\x1e`, or
@@ -1041,8 +1041,10 @@ def test_trunk_landings_reads_a_control_byte_inside_a_trailer_value_as_one_liter
     `\\x1f`-separated framing used to split repeated trailer values -- so a
     value that happens to contain one of them must read back as the one
     literal value git actually recorded, never as two fabricated work items.
-    The NUL/newline framing reads it as data: `parse_item_reference` then
-    refuses that single literal value by name."""
+    The NUL/newline framing reads it as data: `trunk_commit_classification`
+    then reports that single literal value as a `ClassificationDefect`
+    (LAND-03) rather than raising and aborting the whole read -- the commit
+    lands neither #12 nor #13."""
     repo = _minimal_pushed_repository(tmp_path)
     (repo / "f.txt").write_text("content\n")
     _real_git(repo, "add", "f.txt")
@@ -1051,10 +1053,11 @@ def test_trunk_landings_reads_a_control_byte_inside_a_trailer_value_as_one_liter
     _push_to_hub(repo)
     monkeypatch.chdir(repo)
 
-    with pytest.raises(
-        protocol.ClaimUnavailableError, match=re.escape(f"{value!r} is not an item reference")
-    ):
-        checkout.trunk_landings("hub", 20)
+    [landing] = checkout.trunk_landings("hub", 20)
+
+    assert landing.classification == board.ClassificationDefect(
+        f"carries `Work-Item: {value}`; a trunk trailer names #n, aco-xxxxxx, or the bare number n"
+    )
 
 
 def _trunk_history_repository(tmp_path: Path) -> Path:

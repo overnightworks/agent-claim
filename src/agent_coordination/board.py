@@ -301,7 +301,9 @@ def trunk_commit_classification(
     already refuses the equivalent shape in a pull request body
     (`_single_classification_match`) -- so it refuses with a typed
     `ClassificationDefect` instead of letting `Work-Item:` win by ordering
-    (issue #304 review, finding B2)."""
+    (issue #304 review, finding B2). A malformed `Work-Item:` value also
+    returns a defect: that commit lands no items, while the rest of the
+    trunk history remains readable."""
     if work_item_values and no_item_values:
         return ClassificationDefect(
             "carries both `Work-Item:` and `No-Item:` trailers; a landed commit is one or the other"
@@ -309,9 +311,16 @@ def trunk_commit_classification(
     if len(no_item_values) > 1:
         return ClassificationDefect("carries more than one `No-Item:` trailer")
     if work_item_values:
-        return TrunkWorkItemClassification(
-            tuple(parse_item_reference(value) for value in work_item_values)
-        )
+        numbers: list[int] = []
+        for value in work_item_values:
+            try:
+                numbers.append(parse_item_reference(value))
+            except protocol.ClaimUnavailableError:
+                return ClassificationDefect(
+                    f"carries `Work-Item: {value}`; "
+                    "a trunk trailer names #n, aco-xxxxxx, or the bare number n"
+                )
+        return TrunkWorkItemClassification(tuple(numbers))
     if len(no_item_values) == 1 and no_item_values[0].lower() in {
         kind.value for kind in NoItemKind
     }:
