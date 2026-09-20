@@ -775,6 +775,48 @@ def test_github_adapter_reads_a_failing_combined_status_aggregate() -> None:
     assert readiness.checks == (forge.CheckRun("sonarcloud", "failure"),)
 
 
+def test_github_adapter_reads_an_error_combined_status_aggregate() -> None:
+    """Issue #405 round-4 finding 2: an `error` aggregate from the
+    combined-status endpoint blocks exactly as `failure` does -- both are
+    non-`success` verdicts this adapter reads verbatim as the check's own
+    conclusion."""
+
+    def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
+        path = arguments[1]
+        if path == _READINESS_PULL_REQUEST_PATH:
+            return json.dumps(
+                {"state": "open", "headSha": MERGE_COMMIT_SHA, "mergeableState": "clean"}
+            )
+        if path.startswith(_READINESS_CHECK_RUNS_PATH):
+            return ""
+        if path == _READINESS_STATUS_PATH:
+            return json.dumps({"state": "error", "total": 1})
+        assert path.startswith(_READINESS_STATUS_PATH)
+        return json.dumps({"name": "sonarcloud"})
+
+    client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
+
+    readiness = client.landing_readiness(57)
+
+    assert readiness.checks == (forge.CheckRun("sonarcloud", "error"),)
+
+
+def test_github_adapter_reads_a_successful_combined_status_aggregate_as_a_named_check() -> None:
+    """Issue #405 round-4 finding 2: a `success` aggregate with statuses
+    present is itself a named, successful check -- a pull request whose
+    only CI is a combined status (no check runs at all) must still expose
+    it, or `aco land`'s preflight misreads a green pull request as exposing
+    no CI checks and refuses it."""
+    client, _calls = _readiness_client(
+        check_run_pages={},
+        statuses=[{"name": "sonarcloud", "conclusion": "success"}],
+    )
+
+    readiness = client.landing_readiness(57)
+
+    assert readiness.checks == (forge.CheckRun("sonarcloud", "success"),)
+
+
 def test_github_adapter_accepts_a_mergeable_state_it_has_never_seen_before() -> None:
     """Issue #405: `mergeable_state` is GitHub's own open vocabulary --
     read verbatim, never a closed set this adapter could refuse a genuine,

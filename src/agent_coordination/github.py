@@ -663,10 +663,11 @@ class GitHubForge:
 
     def _combined_status_names(self, sha: str) -> tuple[str, ...]:
         """Every combined-status context's own name, paginated (issue #405
-        gate finding): named only to fill in a refusal sentence once
-        `_combined_status_summary` has already decided the verdict is not
-        passing -- the happy path (`success`, or no statuses at all) never
-        pays for this pagination at all."""
+        gate finding, round-4 finding 2): named to report each context as a
+        successful check once `_combined_status_summary` reads `success`, or
+        to fill in a refusal sentence once it reads anything else -- only
+        `total_count` zero (no statuses at all) never pays for this
+        pagination at all."""
         values = self._fetch_pages(
             lambda page: self._combined_status_name_page(sha, page), per_page=ISSUES_PER_PAGE
         )
@@ -680,17 +681,21 @@ class GitHubForge:
 
     def _combined_status_checks(self, sha: str) -> tuple[forge.CheckRun, ...]:
         """`sha`'s combined commit status, read as one verdict (issue #405
-        review/gate finding): the external checks GitHub's own check-runs
-        listing never carries -- a SonarCloud quality gate, say -- posted
-        through the separate legacy status API. The endpoint's own
-        aggregate `state` decides pending/failure/error/success, GitHub's
-        own semantics this tool never recomputes from individual contexts;
-        `total_count` zero passes regardless of that `state` (GitHub's own
-        default state for no statuses at all is `pending`, which would
-        otherwise misread a pull request with no external checks as
-        blocked)."""
+        review/gate finding, round-4 finding 2): the external checks
+        GitHub's own check-runs listing never carries -- a SonarCloud
+        quality gate, say -- posted through the separate legacy status API.
+        The endpoint's own aggregate `state` decides pending/failure/
+        error/success, GitHub's own semantics this tool never recomputes
+        from individual contexts; `total_count` zero passes regardless of
+        that `state` (GitHub's own default state for no statuses at all is
+        `pending`, which would otherwise misread a pull request with no
+        external checks as blocked). A `success` verdict with statuses
+        present is itself a named, successful check, not nothing: a pull
+        request whose only checks are combined statuses must still expose
+        them, or `landing_readiness` reads it as exposing no CI checks at
+        all and refuses a green pull request."""
         state, total = self._combined_status_summary(sha)
-        if total == 0 or state == forge.CHECK_CONCLUSION_SUCCESS:
+        if total == 0:
             return ()
         names = self._combined_status_names(sha) or (EXTERNAL_STATUS_FALLBACK_NAME,)
         conclusion = None if state == "pending" else state
