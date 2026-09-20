@@ -14,7 +14,7 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, date, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, NoReturn, cast
+from typing import Any, Literal, NoReturn, cast
 
 from . import (
     __version__,
@@ -2618,11 +2618,34 @@ class CheckKind(StrEnum):
     MISSING = "missing"
     TRUNK_COMMIT = "trunk_commit"
 
-    @property
-    def subject_key(self) -> str:
-        """The `--json` key naming this kind's own subject: a trunk commit
-        answers about a `sha`, every number-space kind about a `number`."""
-        return "sha" if self is CheckKind.TRUNK_COMMIT else "number"
+
+@dataclass(frozen=True)
+class NumberSubject:
+    """One run's subject in the forge's number space, printed under
+    `number`. Its `kind` cannot be `TRUNK_COMMIT`: the key travels with the
+    value that determines it, so no answer can name a sha under `number`
+    (issue #435)."""
+
+    kind: Literal[CheckKind.PULL_REQUEST, CheckKind.ISSUE, CheckKind.MISSING]
+    number: int
+
+    def payload(self) -> dict[str, object]:
+        return {"kind": self.kind.value, "number": self.number}
+
+
+@dataclass(frozen=True)
+class TrunkSubject:
+    """One run's subject in local trunk history, printed under `sha`. It
+    carries no `kind` field, because a commit is never anything but
+    `TRUNK_COMMIT` (issue #435)."""
+
+    sha: str
+
+    def payload(self) -> dict[str, object]:
+        return {"kind": CheckKind.TRUNK_COMMIT.value, "sha": self.sha}
+
+
+CheckSubject = NumberSubject | TrunkSubject
 
 
 class CheckReason(StrEnum):
@@ -2650,14 +2673,13 @@ class CheckReason(StrEnum):
 @dataclass(frozen=True)
 class CheckOutcome:
     """One `check` answer: the line a human reads, and the `--json` `reason`
-    a caller acts on. `subject` is the number or the trunk `sha` the run was
-    asked about, printed under the key its own kind names; `message` mirrors
+    a caller acts on. `subject` is the number or the trunk commit the run
+    was asked about, printing itself under its own key; `message` mirrors
     the line's own finding without its `ISSUE #<n> `/`REFUSED: #<n> `/
     `REFUSED: <sha> ` prefix; `blocked_by` is only ever set together with
     `CheckReason.BLOCKED` (issue #404)."""
 
-    kind: CheckKind
-    subject: int | str
+    subject: CheckSubject
     line: str
     reason: CheckReason
     message: str | None = None
@@ -2672,10 +2694,7 @@ class CheckOutcome:
 
     def report(self, *, as_json: bool) -> int:
         if as_json:
-            payload: dict[str, object] = {
-                "kind": self.kind.value,
-                self.kind.subject_key: self.subject,
-            }
+            payload = self.subject.payload()
             if self.blocked_by:
                 payload["blocked_by"] = list(self.blocked_by)
             if self.message is not None:
@@ -2698,15 +2717,13 @@ def _pull_request_check(
     checked = _checked_classification(context, claims, detail)
     if isinstance(checked, board.ClassificationDefect):
         return CheckOutcome(
-            CheckKind.PULL_REQUEST,
-            detail.number,
+            NumberSubject(CheckKind.PULL_REQUEST, detail.number),
             f"REFUSED: pull request #{detail.number} {checked.message}",
             CheckReason.INVALID_CLASSIFICATION,
             checked.message,
         )
     return CheckOutcome(
-        CheckKind.PULL_REQUEST,
-        detail.number,
+        NumberSubject(CheckKind.PULL_REQUEST, detail.number),
         f"PR #{detail.number} by {detail.author} declares {checked}",
         CheckReason.VALID,
     )
@@ -2717,7 +2734,10 @@ def _missing_number(repository: str, number: int) -> CheckOutcome:
     two it would have been."""
     finding = f"does not exist in {repository}"
     return CheckOutcome(
-        CheckKind.MISSING, number, f"REFUSED: #{number} {finding}", CheckReason.MISSING, finding
+        NumberSubject(CheckKind.MISSING, number),
+        f"REFUSED: #{number} {finding}",
+        CheckReason.MISSING,
+        finding,
     )
 
 
@@ -2730,7 +2750,11 @@ def _refused_issue(
     number: int, finding: str, reason: CheckReason, *, blocked_by: tuple[str, ...] = ()
 ) -> CheckOutcome:
     return CheckOutcome(
-        CheckKind.ISSUE, number, _issue_line(number, finding), reason, finding, blocked_by
+        NumberSubject(CheckKind.ISSUE, number),
+        _issue_line(number, finding),
+        reason,
+        finding,
+        blocked_by,
     )
 
 
@@ -2766,7 +2790,9 @@ def _issue_check(
         return _refused_issue(
             number, f"blocked by {', '.join(labels)}", CheckReason.BLOCKED, blocked_by=labels
         )
-    return CheckOutcome(CheckKind.ISSUE, number, _issue_line(number, "body ok"), CheckReason.VALID)
+    return CheckOutcome(
+        NumberSubject(CheckKind.ISSUE, number), _issue_line(number, "body ok"), CheckReason.VALID
+    )
 
 
 BODY_TEMPLATE_KINDS = ("task", "feature", "container")
@@ -3848,7 +3874,7 @@ def _trunk_classification_text(classification: board.TrunkClassification) -> str
 
 
 def _refused_trunk_commit(sha: str, finding: str, reason: CheckReason) -> CheckOutcome:
-    return CheckOutcome(CheckKind.TRUNK_COMMIT, sha, f"REFUSED: {sha} {finding}", reason, finding)
+    return CheckOutcome(TrunkSubject(sha), f"REFUSED: {sha} {finding}", reason, finding)
 
 
 def _trunk_commit_outcome(sha: str, landing: checkout.TrunkLanding | None) -> CheckOutcome:
@@ -3871,8 +3897,7 @@ def _trunk_commit_outcome(sha: str, landing: checkout.TrunkLanding | None) -> Ch
             sha, classification.message, CheckReason.INVALID_CLASSIFICATION
         )
     return CheckOutcome(
-        CheckKind.TRUNK_COMMIT,
-        sha,
+        TrunkSubject(sha),
         f"{sha} declares {_trunk_classification_text(classification)}",
         CheckReason.VALID,
     )
