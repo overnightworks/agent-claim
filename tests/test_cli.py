@@ -3915,6 +3915,28 @@ def test_rule_refuses_when_the_forge_cannot_update_item_body(
     _assert_json_refusal_object(captured.err, captured.out, reason="unavailable")
 
 
+def test_rule_refuses_a_non_github_canonical_remote_by_host(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`rule` resolves its forge (`session.forge.writer()`) before its own
+    typed-refusal handlers (issue #396 review finding): a resolution
+    failure -- here a canonical remote on a host no adapter serves -- must
+    still reach `rule`'s own `_refuse`, not `main`'s legacy `error` object."""
+    monkeypatch.setattr(checkout, "remote_url", lambda remote: "file:///srv/git/agent-claim.git")
+
+    def unused(*_args: object, **_kwargs: object) -> forge.RepositoryId:
+        pytest.fail("rule must refuse the host before ever calling discover_repository")
+
+    monkeypatch.setattr(github, "discover_repository", unused)
+
+    status = issue_claim.main(["rule", "258", "--line", "1", "--yes", "--json"])
+
+    captured = capsys.readouterr()
+    assert status == 2
+    assert captured.err == "ERROR: no forge adapter for host file\n"
+    _assert_json_refusal_object(captured.err, captured.out, reason="unavailable")
+
+
 def test_rule_refuses_a_missing_item_before_any_write(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
@@ -4063,6 +4085,28 @@ def test_ask_refuses_when_the_forge_cannot_update_item_body(
     captured = capsys.readouterr()
     assert client.item_bodies == {}
     assert "ERROR: this forge cannot update_item_body; ask by hand" in captured.err
+    _assert_json_refusal_object(captured.err, captured.out, reason="unavailable")
+
+
+def test_ask_refuses_a_non_github_canonical_remote_by_host(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`ask` resolves its forge (`session.forge.writer()`) before its own
+    typed-refusal handlers (issue #396 review finding): a resolution
+    failure -- here a canonical remote on a host no adapter serves -- must
+    still reach `ask`'s own `_refuse`, not `main`'s legacy `error` object."""
+    monkeypatch.setattr(checkout, "remote_url", lambda remote: "file:///srv/git/agent-claim.git")
+
+    def unused(*_args: object, **_kwargs: object) -> forge.RepositoryId:
+        pytest.fail("ask must refuse the host before ever calling discover_repository")
+
+    monkeypatch.setattr(github, "discover_repository", unused)
+
+    status = issue_claim.main(["ask", "258", "--text", "New question?", "--json"])
+
+    captured = capsys.readouterr()
+    assert status == 2
+    assert captured.err == "ERROR: no forge adapter for host file\n"
     _assert_json_refusal_object(captured.err, captured.out, reason="unavailable")
 
 

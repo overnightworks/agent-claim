@@ -5102,7 +5102,10 @@ def rule_item(
 
 def _cmd_rule(parsed: argparse.Namespace, session: _WriteSession) -> int:
     json_mode = parsed.json
-    client = session.forge.writer()
+    try:
+        client = session.forge.writer()
+    except protocol.ClaimError as error:
+        return _refuse(RuleReason.UNAVAILABLE, error, json_mode=json_mode)
     number = int(parsed.item)
     try:
         ruled_line, open_remaining = rule_item(
@@ -5242,7 +5245,10 @@ def _cmd_ask(parsed: argparse.Namespace, session: _WriteSession) -> int:
     card = board.ExpectationCardFields(
         question=parsed.question, example=parsed.example, picture=picture
     )
-    client = session.forge.writer()
+    try:
+        client = session.forge.writer()
+    except protocol.ClaimError as error:
+        return _refuse(AskReason.UNAVAILABLE, error, json_mode=json_mode)
     number = int(parsed.item)
     try:
         body, config = _require_writable_target(client, number, command="ask")
