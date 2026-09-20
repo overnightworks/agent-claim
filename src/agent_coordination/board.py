@@ -1942,6 +1942,16 @@ def expectation_line_summary(line: ExpectationLine) -> str:
     return _brief(line.text, maximum=EXPECTATION_LINE_TEXT_MAXIMUM)
 
 
+class ExpectationAlreadyRuledError(protocol.ClaimError):
+    """`rule_expectation`'s own already-ruled refusal (issue #396) -- a
+    distinct type from `ExpectationOutOfRangeError` so a `--json`-emitting
+    caller can choose `already_ruled` without parsing the refusal prose."""
+
+
+class ExpectationOutOfRangeError(protocol.ClaimError):
+    """`rule_expectation`'s own out-of-range `--line` refusal (issue #396)."""
+
+
 def rule_expectation(
     body: str, index: int, ruling: str, ruled_on: date, *, note: str | None = None
 ) -> str:
@@ -1966,12 +1976,14 @@ def rule_expectation(
     located = locate_agent_claim_block(body)
     entries = _block_expectation_dicts(located.data)
     if not 1 <= index <= len(entries):
-        raise protocol.ClaimError(
+        raise ExpectationOutOfRangeError(
             f"line {index} out of range: this item has {len(entries)} expectation line(s)"
         )
     entry = entries[index - 1]
     if "ruling" in entry:
-        raise protocol.ClaimError(f"line {index} is already ruled; a changed ruling is a new line")
+        raise ExpectationAlreadyRuledError(
+            f"line {index} is already ruled; a changed ruling is a new line"
+        )
     text = cast(str, entry["text"]) if note is None else f"{entry['text']} Anmerkung: {note}"
     ruled_entry: dict[str, object] = {"text": text, "ruling": ruling, "ruled_on": ruled_on}
     new_entries = [*entries[: index - 1], ruled_entry, *entries[index:]]
@@ -1993,6 +2005,19 @@ class ExpectationCardFields:
     picture: str | None = None
 
 
+class ExpectationTextError(protocol.ClaimError):
+    """`append_expectation`'s own blank-`text` refusal (issue #396) -- a
+    distinct type from `ExpectationFieldError` so a `--json`-emitting caller
+    can choose `invalid_expectation` without parsing the refusal prose."""
+
+
+class ExpectationFieldError(protocol.ClaimError):
+    """`append_expectation`'s own optional-card-field refusal -- `question`,
+    `example`, or `picture` failing its own content rule (issue #396) -- so
+    a `--json`-emitting caller can choose `invalid_picture` without parsing
+    the refusal prose."""
+
+
 def append_expectation(
     body: str, text: str, default: str, *, card: ExpectationCardFields | None = None
 ) -> str:
@@ -2004,7 +2029,7 @@ def append_expectation(
     Byte-preserving outside the appended entry, the same write path as
     `rule_expectation`."""
     if not text.strip():
-        raise protocol.ClaimError("expectation text must be a non-empty string")
+        raise ExpectationTextError("expectation text must be a non-empty string")
     if default not in BLOCK_EXPECTATION_DEFAULTS:
         raise protocol.ClaimError(
             f"default must be one of {', '.join(sorted(BLOCK_EXPECTATION_DEFAULTS))}"
@@ -2017,7 +2042,7 @@ def append_expectation(
             continue
         reason = check(value)
         if reason is not None:
-            raise protocol.ClaimError(f"{key} {reason}")
+            raise ExpectationFieldError(f"{key} {reason}")
         entry[key] = value
     located = locate_agent_claim_block(body)
     entries = _block_expectation_dicts(located.data)
