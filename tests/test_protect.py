@@ -1483,6 +1483,103 @@ def test_protect_bash_denies_deleting_a_linked_worktrees_own_root(
     _assert_protect_decision(capsys, decision="deny", reason="path required")
 
 
+def test_protect_bash_judges_an_ordinary_directory_by_its_own_checkout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A real directory that is *not* itself a checkout root -- `rm -rf
+    <worktree>/docs` -- still reaches the ordinary claim-scope gate rather
+    than PROT-14's checkout-root denial: `_protect_checkout_denial`'s own
+    directory branch finds it is not the root it names, so it falls back to
+    the cheaper parent-first lookup exactly like a non-directory path
+    would (issue #380 delta, gate finding: `resolve_path_checkout(path)`
+    only decides the root question, never replaces the parent lookup for
+    every other directory)."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
+    _use_real_path_is_tracked(monkeypatch)
+    main, worktree = _protect_real_repo_with_worktree(tmp_path)
+    monkeypatch.chdir(main)
+    _patch_protect_claim(monkeypatch, branch="codex/issue-72-widget", scope=("src",))
+
+    assert (
+        _protect_main(
+            monkeypatch,
+            {
+                "toolName": "Bash",
+                "toolInput": {"command": f"rm -rf {worktree / 'docs'}"},
+                "cwd": str(main),
+            },
+        )
+        == 2
+    )
+    _assert_protect_decision(capsys, decision="deny", reason="rm docs outside claim scope")
+
+
+def _protect_real_repo_with_nested_worktree(
+    tmp_path: Path, *, slug: str = "issue-1-x"
+) -> tuple[Path, Path]:
+    """A real repository (`outer`) with one linked worktree nested *inside*
+    its own working tree (`outer/nested-worktrees/<slug>`), unlike
+    `_protect_real_repo_with_worktree`'s sibling layout: the nested root's
+    own parent directory sits inside `outer`'s checkout, so `git -C parent`
+    resolves to `outer` rather than to nothing -- the shape PROT-36 (issue
+    #380 round 4, gate finding) exists for, since a parent-first lookup
+    would otherwise let `outer`'s own checkout silently answer for a path
+    that is itself a different, nested checkout's own root."""
+    outer = tmp_path / "outer-repo"
+    outer.mkdir()
+    _real_git(outer, "init", "-q", "-b", "main")
+    _real_git(outer, "config", "user.name", "Test")
+    _real_git(outer, "config", "user.email", "test@example.com")
+    (outer / "README.md").write_text("hello\n")
+    (outer / ".agent-claim").mkdir()
+    (outer / ".agent-claim" / "board.toml").write_text("")
+    _real_git(outer, "add", "-f", "README.md", ".agent-claim/board.toml")
+    _real_git(outer, "commit", "-q", "-m", "initial")
+    _real_git(outer, "remote", "add", "origin", "https://example.invalid/example/repo.git")
+    _real_git(outer, "update-ref", "refs/remotes/origin/main", "HEAD")
+    _real_git(outer, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+    nested = outer / "nested-worktrees" / slug
+    nested.parent.mkdir(parents=True, exist_ok=True)
+    _real_git(outer, "worktree", "add", "-q", str(nested), "-b", f"codex/{slug}")
+    return outer, nested
+
+
+@pytest.mark.parametrize("payload_for", _TARGET_PATH_PAYLOAD_BUILDERS, ids=["write", "bash-rm"])
+def test_protect_denies_deleting_a_nested_worktrees_own_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    payload_for: Callable[[Path], dict[str, object]],
+) -> None:
+    """PROT-36 (issue #380 round 4, gate finding): a linked worktree whose
+    own root's *parent* directory sits inside another, outer git checkout
+    must still be judged by its own checkout -- resolved directly from the
+    root itself, before the outer checkout's parent-first lookup ever gets
+    a say -- so deleting it still denies `path required` (PROT-14) rather
+    than the outer checkout's own scope silently authorizing it. Proven for
+    both a payload path (`Write`, the accepted Edit-family behaviour change
+    this round) and a Bash-recognized one (`rm`), since both share the same
+    checkout-resolution chain."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
+    _use_real_path_is_tracked(monkeypatch)
+    outer, nested = _protect_real_repo_with_nested_worktree(tmp_path)
+    monkeypatch.chdir(outer)
+    payload = payload_for(nested)
+    if payload["toolName"] == "Bash":
+        payload["cwd"] = str(outer)
+
+    assert _protect_main(monkeypatch, payload) == 2
+    _assert_protect_decision(capsys, decision="deny", reason="path required")
+
+
 @pytest.mark.parametrize(
     "cwd_kind",
     ["main_default_branch", "main_other_branch", "outside_any_repository", "another_worktree"],
