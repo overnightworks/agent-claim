@@ -3450,8 +3450,17 @@ def _protect_checkout_denial(
     whose default branch cannot even be resolved there denies outright
     (gate G4 -- never `claim`'s own `{main, master}` guess, since a
     repository whose default branch is `trunk` would otherwise slip through
-    unnoticed as "not the default branch")."""
-    path_checkout = checkout.resolve_path_checkout(Path(absolute_path).parent)
+    unnoticed as "not the default branch"). `absolute_path`'s own parent is
+    tried first -- it need not exist yet for an Edit's new file, but its
+    parent always does inside a real checkout -- and `absolute_path` itself
+    only as a fallback: a path that names a checkout root exactly (its
+    parent sits outside every repository) is still judged by that checkout,
+    never silently treated as outside every repository (issue #380 delta,
+    gate finding: `rm -rf ../<repo>-worktrees/issue-1-x` must not bypass
+    PROT-32 this way); PROT-14 then denies it as the checkout root itself."""
+    path_checkout = checkout.resolve_path_checkout(
+        Path(absolute_path).parent
+    ) or checkout.resolve_path_checkout(Path(absolute_path))
     if path_checkout is None:
         return None, outside_repository_denial
     if not path_checkout.has_commit:
@@ -3462,30 +3471,59 @@ def _protect_checkout_denial(
     return path_checkout, None
 
 
-def _protect_basic_checkout_denial(
+_ProtectMissDenialBuilder = Callable[[protocol.ClaimState, checkout.PathCheckout, str, str], str]
+
+
+def _protect_checkout_scope_denial(
     raw_path: str,
-) -> tuple[checkout.PathCheckout | None, str | None]:
-    """The payload path's own resolved checkout, or an early denial reason
-    -- a relative payload path denies outright first (finding R2 -- every
-    provider `aco` supports sends an already-absolute `file_path`, so a
-    relative one is untrustworthy and never guessed at by joining it to the
-    hook process's own cwd, exactly the signal issue #314 removes), then
-    `_protect_checkout_denial`'s shared gate, denying "not in a repository"
-    for a path outside every checkout (PROT-10)."""
-    if not Path(raw_path).is_absolute():
-        return None, RELATIVE_PAYLOAD_PATH_DENIAL
-    return _protect_checkout_denial(
-        raw_path, outside_repository_denial=checkout.NOT_IN_A_REPOSITORY_REASON
+    *,
+    outside_repository_denial: str | None,
+    state_cache: _ProtectStateCache,
+    resolve_agent: Callable[[], str],
+    miss_denial: _ProtectMissDenialBuilder,
+) -> str | None:
+    """The Checkout/Default-Branch/Claim-Scope chain a payload path's own
+    write (`_protect_path_denial`) and a Bash-recognized path
+    (`_protect_bash_path_denial`) both run once `raw_path` is already known
+    absolute -- checkout, relative scope entry, live state, agent identity,
+    then overlap -- parameterised only by `raw_path` and each caller's own
+    denial sentence (issue #380 delta, gate finding: the two used to run two
+    separately written copies of this same four-step orchestration instead
+    of one shared chain).
+
+    `resolve_agent` is called only once a live state is already in hand:
+    `_protect_path_denial`'s own caller already resolved it eagerly and
+    hands back that value here for free (PROT-08: an unresolvable identity
+    must deny before any per-path checkout gate runs, so it cannot wait this
+    long); `_protect_bash_path_denial` resolves it only here instead
+    (PROT-31: a pattern that never gets this far never needed an identity at
+    all). `miss_denial` builds each caller's own scope-miss sentence from
+    the state, checkout, agent, and relative scope entry now in hand."""
+    path_checkout, denial = _protect_checkout_denial(
+        raw_path, outside_repository_denial=outside_repository_denial
+    )
+    if path_checkout is None:
+        return denial
+    relative = _relative_scope_entry(raw_path, toplevel=path_checkout.toplevel)
+    if relative is None:
+        return PATH_REQUIRED
+    state, denial = _protect_cached_claim_state_or_denial(path_checkout, state_cache=state_cache)
+    if state is None:
+        return denial
+    agent = resolve_agent()
+    return _protect_scope_denial(
+        state,
+        agent=agent,
+        branch=path_checkout.branch,
+        relative=relative,
+        miss_denial=miss_denial(state, path_checkout, agent, relative),
     )
 
 
 def _protect_path_denial(
     agent: str, raw_path: str, *, distinguish_scope: bool, state_cache: _ProtectStateCache
 ) -> str | None:
-    """The deny reason for one payload path's write, or `None` to allow. A
-    path that clears `_protect_basic_checkout_denial`'s gates is judged
-    against its own linked worktree's live claim, fetched at most once per
-    repository for this hook call (gate G5).
+    """The deny reason for one payload path's write, or `None` to allow.
 
     `apply_patch` sets `distinguish_scope` (issue #252): with several paths
     in one call, the payload never told the agent which one was the problem,
@@ -3495,24 +3533,26 @@ def _protect_path_denial(
     keeps the simpler `claim first` either way, matching its own payload's
     inability to name any other path.
     """
-    path_checkout, denial = _protect_basic_checkout_denial(raw_path)
-    if path_checkout is None:
-        return denial
-    relative = _relative_scope_entry(raw_path, toplevel=path_checkout.toplevel)
-    if relative is None:
-        return PATH_REQUIRED
-    state, denial = _protect_cached_claim_state_or_denial(path_checkout, state_cache=state_cache)
-    if state is None:
-        return denial
-    miss_denial = _protect_single_path_scope_miss_denial(
-        state,
-        agent=agent,
-        branch=path_checkout.branch,
-        relative=relative,
-        distinguish_scope=distinguish_scope,
-    )
-    return _protect_scope_denial(
-        state, agent=agent, branch=path_checkout.branch, relative=relative, miss_denial=miss_denial
+    if not Path(raw_path).is_absolute():
+        return RELATIVE_PAYLOAD_PATH_DENIAL
+
+    def miss_denial(
+        state: protocol.ClaimState, path_checkout: checkout.PathCheckout, agent: str, relative: str
+    ) -> str:
+        return _protect_single_path_scope_miss_denial(
+            state,
+            agent=agent,
+            branch=path_checkout.branch,
+            relative=relative,
+            distinguish_scope=distinguish_scope,
+        )
+
+    return _protect_checkout_scope_denial(
+        raw_path,
+        outside_repository_denial=checkout.NOT_IN_A_REPOSITORY_REASON,
+        state_cache=state_cache,
+        resolve_agent=lambda: agent,
+        miss_denial=miss_denial,
     )
 
 
@@ -3554,38 +3594,25 @@ def _protect_bash_path_denial(
     means no absolute base was ever known, so this allows outright before
     ever resolving identity, a checkout, or the store (PROT-31) -- the same
     "no identity, no repository lookup at all" order a command naming no
-    recognized pattern gets. Every remaining, absolute path runs the exact
-    same Checkout/Default-Branch/Claim-Scope chain a payload path's own
-    `_protect_path_denial` runs (`_protect_checkout_denial`,
-    `_relative_scope_entry`, `_protect_cached_claim_state_or_denial`,
-    `_protect_scope_denial` -- issue #380 delta, gate finding: sharing one
-    chain instead of a second copy is what keeps their checkout, symlink,
-    and claim handling from drifting apart), except: a path outside every
-    repository allows instead of PROT-10's deny (PROT-32); agent identity
-    resolves last, only once a live claim state is actually in hand, rather
-    than before any path even runs (review finding: resolving it eagerly
-    made an unresolvable identity deny a path PROT-31 should have allowed);
-    and a scope miss denies naming both the recognized pattern and the path
-    (PROT-33) rather than a bare `claim first`, since a command's own
-    several paths need telling apart."""
+    recognized pattern gets. Every remaining, absolute path runs
+    `_protect_checkout_scope_denial`'s own shared chain, except: a path
+    outside every repository allows instead of PROT-10's deny (PROT-32);
+    agent identity resolves last, only once a live claim state is actually
+    in hand, rather than before any path even runs (review finding:
+    resolving it eagerly made an unresolvable identity deny a path PROT-31
+    should have allowed); and a scope miss denies naming both the
+    recognized pattern and the path (PROT-33) rather than a bare `claim
+    first`, since a command's own several paths need telling apart."""
     if not Path(raw_path).is_absolute():
         return None
-    path_checkout, denial = _protect_checkout_denial(raw_path, outside_repository_denial=None)
-    if path_checkout is None:
-        return denial
-    relative = _relative_scope_entry(raw_path, toplevel=path_checkout.toplevel)
-    if relative is None:
-        return PATH_REQUIRED
-    state, denial = _protect_cached_claim_state_or_denial(path_checkout, state_cache=state_cache)
-    if state is None:
-        return denial
-    agent = checkout._resolved_agent(None)
-    return _protect_scope_denial(
-        state,
-        agent=agent,
-        branch=path_checkout.branch,
-        relative=relative,
-        miss_denial=f"{pattern} {relative} outside claim scope",
+    return _protect_checkout_scope_denial(
+        raw_path,
+        outside_repository_denial=None,
+        state_cache=state_cache,
+        resolve_agent=lambda: checkout._resolved_agent(None),
+        miss_denial=lambda _state, _path_checkout, _agent, relative: (
+            f"{pattern} {relative} outside claim scope"
+        ),
     )
 
 

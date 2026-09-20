@@ -1448,6 +1448,41 @@ def _protect_real_repo_with_worktree(
     return main, worktree
 
 
+def test_protect_bash_denies_deleting_a_linked_worktrees_own_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """PROT-14 reused for a Bash-recognized path (issue #380 delta, gate
+    finding): a path naming a linked worktree's own root directory exactly
+    -- `rm -rf ../<repo>-worktrees/issue-1-x` -- has a *parent*
+    (`<repo>-worktrees/`) that is never itself a git checkout, so resolving
+    the checkout from only the parent finds nothing. Trying the path itself
+    too still finds that checkout and denies it as that checkout's own root
+    (PROT-14), rather than silently allowing the whole checkout's deletion
+    through PROT-32's "outside every repository" allow."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    _set_agent_identity_env(monkeypatch, {checkout.GROK_SESSION_ID_ENV: "sess-1"})
+    _use_real_path_is_tracked(monkeypatch)
+    main, worktree = _protect_real_repo_with_worktree(tmp_path)
+    monkeypatch.chdir(main)
+
+    assert (
+        _protect_main(
+            monkeypatch,
+            {
+                "toolName": "Bash",
+                "toolInput": {"command": f"rm -rf {worktree}"},
+                "cwd": str(main),
+            },
+        )
+        == 2
+    )
+    _assert_protect_decision(capsys, decision="deny", reason="path required")
+
+
 @pytest.mark.parametrize(
     "cwd_kind",
     ["main_default_branch", "main_other_branch", "outside_any_repository", "another_worktree"],

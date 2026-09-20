@@ -248,6 +248,7 @@ _HEREDOC_TAB_STRIP_OPERATOR = "<<-"
 # Bash still expands `$name`/`` `cmd` `` inside double quotes; only a glob or
 # home-directory character (`~`, `*`, `?`, `[`) is literal there.
 _UNQUOTED_EXPANSION_TRIGGERS = frozenset("$`~*?[")
+_COMMENT_START = "#"
 _DOUBLE_QUOTED_EXPANSION_TRIGGERS = frozenset("$`")
 _DOUBLE_QUOTE_ESCAPABLE = frozenset('$`"\\')
 
@@ -269,9 +270,15 @@ class _CommandScanner:
         words: list[_Word] = []
         pending_heredocs: list[tuple[str, bool]] = []
         while self._position < self._length:
+            if self._skip_line_continuation():
+                continue
             self._skip_horizontal_whitespace()
+            if self._skip_line_continuation():
+                continue
             if self._position >= self._length:
                 break
+            if self._skip_comment_if_present():
+                continue
             character = self._command[self._position]
             if character == _NEWLINE:
                 self._position += 1
@@ -295,6 +302,33 @@ class _CommandScanner:
             and self._command[self._position] in _HORIZONTAL_WHITESPACE
         ):
             self._position += 1
+
+    def _skip_line_continuation(self) -> bool:
+        """`True`, having advanced past an unquoted `\\<newline>` pair --
+        Bash's own line continuation, invisible to the rest of the command
+        (issue #380 delta, ruling: never a false denial from text Bash does
+        not execute) -- so `rm \\` followed by a newline and `README.md`
+        tokenizes exactly like `rm README.md` on one line."""
+        if (
+            self._command[self._position : self._position + 1] == _ESCAPE
+            and self._command[self._position + 1 : self._position + 2] == _NEWLINE
+        ):
+            self._position += 2
+            return True
+        return False
+
+    def _skip_comment_if_present(self) -> bool:
+        """`True`, having advanced to the next newline (or the command's own
+        end), when `self._position` sits on a `#` that starts a comment --
+        only at a word's own start, i.e. only ever checked here right after
+        whitespace was skipped, never mid-word (issue #380 delta, ruling:
+        `git status # note; rm README.md` must never judge the `rm` its own
+        comment merely reads like)."""
+        if self._position >= self._length or self._command[self._position] != _COMMENT_START:
+            return False
+        newline_index = self._command.find(_NEWLINE, self._position)
+        self._position = newline_index if newline_index != -1 else self._length
+        return True
 
     def _read_operator(self) -> str:
         two = self._command[self._position : self._position + 2]
@@ -350,6 +384,8 @@ class _CommandScanner:
         expandable = False
         quote: str | None = None
         while self._position < self._length:
+            if quote is None and self._skip_line_continuation():
+                continue
             character = self._command[self._position]
             if quote is None:
                 ended = self._read_unquoted_word_character(character, characters)
@@ -429,21 +465,52 @@ def _tokenize_command(command: str) -> tuple[_Word, ...]:
 
 
 _COMMAND_SEPARATORS = frozenset({";", "&&", "||", "|"})
+_LIST_SEPARATORS = frozenset({";", "&&", "||"})
+_PIPE = "|"
+_GROUP_OPEN = "("
+_GROUP_CLOSE = ")"
 _FLAG_PREFIX = "-"
-# `sed -i <script> <path>`: at least the script and one path.
-_SED_SCRIPT_AND_PATH_COUNT = 2
+_END_OF_OPTIONS = "--"
 _CD_COMMAND = "cd"
 _CD_PREVIOUS_DIRECTORY = "-"
 _DEV_NULL = "/dev/null"
-_GIT_RESTORE_VALUE_OPTIONS = frozenset({"--source"})
+_GIT_RESTORE_VALUE_OPTIONS = frozenset({"--source", "-s", "--conflict", "--pathspec-from-file"})
+_SED_IN_PLACE_PREFIXES = ("-i", "--in-place")
+_SED_SCRIPT_VALUE_OPTIONS = frozenset({"-e", "--expression", "-f", "--file"})
+_SED_SCRIPT_VALUE_PREFIXES = ("-e", "--expression", "-f", "--file")
+_CP_TARGET_DIRECTORY_OPTIONS = frozenset({"-t", "--target-directory"})
+_GIT_CHECKOUT_SKIPPED_FLAGS = frozenset({"-f", "--ours", "--theirs"})
 
 
 def _is_command_separator(word: _Word) -> bool:
     """A real, unquoted `;`/`&&`/`||`/`|` operator, or a newline operator (a
     multi-line Bash `command` is one statement per physical line) -- never a
     quoted or escaped word that merely reads the same (issue #380 delta,
-    decision 1)."""
+    decision 1). Bounds one simple command's own word span; `_is_list_separator`
+    is the narrower check that decides whether a `cd` here may still change
+    the directory later commands resolve against."""
     return word.is_operator and (word.text in _COMMAND_SEPARATORS or word.text == _NEWLINE)
+
+
+def _is_list_separator(word: _Word) -> bool:
+    """A real `;`/`&&`/`||`/newline -- unlike `_is_command_separator`, never
+    `|`: a pipeline segment runs in its own subshell (issue #380 delta, gate
+    finding), so a `cd` on either side of `|` must never change the
+    directory anything else resolves against, while one before `;`/`&&`/`||`
+    still does."""
+    return word.is_operator and (word.text in _LIST_SEPARATORS or word.text == _NEWLINE)
+
+
+def _is_pipe(word: _Word) -> bool:
+    return word.is_operator and word.text == _PIPE
+
+
+def _is_group_open(word: _Word) -> bool:
+    return word.is_operator and word.text == _GROUP_OPEN
+
+
+def _is_group_close(word: _Word) -> bool:
+    return word.is_operator and word.text == _GROUP_CLOSE
 
 
 def _is_flag(word: _Word) -> bool:
@@ -473,7 +540,21 @@ def _operand_span_end(tokens: tuple[_Word, ...], start: int, end: int) -> int:
 
 
 def _non_flag_arguments(words: tuple[_Word, ...]) -> tuple[_Word, ...]:
-    return tuple(word for word in words if not _is_flag(word))
+    """Every operand in `words` that is not itself an option -- a leading
+    `-` marks one, except once a literal `--` end-of-options marker has been
+    seen: every word after it is a literal operand regardless of its own
+    leading `-` (issue #380 delta, gate finding: `rm -- -f` must judge
+    `-f`, never drop it as if it were still a flag)."""
+    result: list[_Word] = []
+    past_options = False
+    for word in words:
+        if past_options:
+            result.append(word)
+        elif word.text == _END_OF_OPTIONS:
+            past_options = True
+        elif not _is_flag(word):
+            result.append(word)
+    return tuple(result)
 
 
 def _skip_option_values(
@@ -483,17 +564,22 @@ def _skip_option_values(
     `value_options` flag takes (`--source HEAD`) rather than only the flag
     token itself (`--source=HEAD` is already one token `_is_flag` drops
     whole) -- issue #380 delta, review finding: `git restore --source HEAD
-    --staged f` must judge `f` alone, never `HEAD`."""
+    --staged f` must judge `f` alone, never `HEAD`. Honors the same `--`
+    end-of-options marker as `_non_flag_arguments`."""
     result: list[_Word] = []
     skip_next = False
+    past_options = False
     for word in words:
-        if skip_next:
+        if past_options:
+            result.append(word)
+        elif skip_next:
             skip_next = False
-            continue
-        if _is_flag(word):
+        elif word.text == _END_OF_OPTIONS:
+            past_options = True
+        elif _is_flag(word):
             skip_next = word.text in value_options
-            continue
-        result.append(word)
+        else:
+            result.append(word)
     return tuple(result)
 
 
@@ -525,14 +611,30 @@ def _match_move(words: tuple[_Word, ...]) -> tuple[str, tuple[_Word, ...]] | Non
     return PATTERN_MOVE, _non_flag_arguments(words[1:])
 
 
+def _cp_target_directory(arguments: tuple[_Word, ...]) -> _Word | None:
+    """The value right after a `-t`/`--target-directory` flag -- `cp`'s own
+    destination even though it comes before its sources on the command line
+    (issue #380 delta, gate finding: `cp -t /tmp README.md` must judge
+    `/tmp`, never the untouched `README.md`)."""
+    for index, word in enumerate(arguments):
+        if word.text in _CP_TARGET_DIRECTORY_OPTIONS and index + 1 < len(arguments):
+            return arguments[index + 1]
+    return None
+
+
 def _match_copy(words: tuple[_Word, ...]) -> tuple[str, tuple[_Word, ...]] | None:
-    """`cp`'s own last non-flag operand is its destination -- the only one it
-    actually writes; every earlier operand is a source it only reads (issue
-    #380 delta, review finding: `cp README.md /tmp/x` must judge `/tmp/x`
-    alone, never the untouched `README.md`)."""
+    """`cp`'s own destination: a `-t`/`--target-directory` value when given,
+    otherwise its last non-flag operand -- the only one it actually writes;
+    every earlier operand is a source it only reads (issue #380 delta,
+    review finding: `cp README.md /tmp/x` must judge `/tmp/x` alone, never
+    the untouched `README.md`)."""
     if words[0].text != PATTERN_COPY:
         return None
-    operands = _non_flag_arguments(words[1:])
+    arguments = words[1:]
+    target_directory = _cp_target_directory(arguments)
+    if target_directory is not None:
+        return PATTERN_COPY, (target_directory,)
+    operands = _non_flag_arguments(arguments)
     return (PATTERN_COPY, operands[-1:]) if operands else None
 
 
@@ -543,32 +645,57 @@ def _match_remove(words: tuple[_Word, ...]) -> tuple[str, tuple[_Word, ...]] | N
 
 
 def _match_sed_in_place(words: tuple[_Word, ...]) -> tuple[str, tuple[_Word, ...]] | None:
-    """`sed -i` (or `-i<suffix>`, e.g. `-i.bak`): the first non-flag
-    argument is `sed`'s own script, never a path, so only the ones after it
-    are files. `sed` without `-i` reads and writes nothing (it prints to
-    stdout), so it names no pattern at all."""
+    """`sed -i` (or `-i<suffix>`/`--in-place[=SUFFIX]`): with an explicit
+    `-e`/`--expression`/`-f`/`--file` script, every remaining non-flag
+    operand is a path -- there is no separate positional script at all
+    (issue #380 delta, gate finding: `sed -i -e p -e d /tmp/file` must judge
+    `/tmp/file` alone, never `d`, its own second `-e` value). Without one,
+    the first non-flag argument is `sed`'s own inline script, never a path,
+    so only the ones after it are files. `sed` without `-i`/`--in-place`
+    reads and writes nothing (it prints to stdout), so it names no pattern
+    at all."""
     if words[0].text != "sed":
         return None
     arguments = words[1:]
-    if not any(_is_flag(word) and word.text.startswith("-i") for word in arguments):
+    is_in_place_flag = any(
+        _is_flag(word) and word.text.startswith(_SED_IN_PLACE_PREFIXES) for word in arguments
+    )
+    if not is_in_place_flag:
         return None
-    scripts_and_paths = [word for word in arguments if not _is_flag(word)]
-    if len(scripts_and_paths) < _SED_SCRIPT_AND_PATH_COUNT:
-        return None
-    return PATTERN_SED_IN_PLACE, tuple(scripts_and_paths[1:])
+    operands = _skip_option_values(arguments, value_options=_SED_SCRIPT_VALUE_OPTIONS)
+    has_explicit_script = any(
+        _is_flag(word) and word.text.startswith(_SED_SCRIPT_VALUE_PREFIXES) for word in arguments
+    )
+    # With an explicit `-e`/`-f` script, every remaining operand is a path.
+    # Without one, the first is `sed`'s own inline script, consumed the same
+    # way whether `-i` is spelled `-i`, `-i.bak`, `--in-place`, or
+    # `--in-place=.bak` -- `sed --in-place=.bak 's/a/b/'` names no path at
+    # all, exactly like `sed -i 's/a/b/'`, since neither leaves an operand
+    # behind to be one.
+    paths = operands if has_explicit_script else operands[1:]
+    return (PATTERN_SED_IN_PLACE, paths) if paths else None
 
 
-_GIT_CHECKOUT_PREFIX_LENGTH = 3  # `git`, `checkout`, `--`
 _GIT_RESTORE_PREFIX_LENGTH = 2  # `git`, `restore`
 
 
 def _match_git_checkout(words: tuple[_Word, ...]) -> tuple[str, tuple[_Word, ...]] | None:
-    """`git checkout -- <path>...`, the only `checkout` form that overwrites
-    a working-tree path; `git checkout <branch>` names no path at all."""
-    prefix = tuple(word.text for word in words[:_GIT_CHECKOUT_PREFIX_LENGTH])
-    if len(words) < _GIT_CHECKOUT_PREFIX_LENGTH or prefix != ("git", "checkout", "--"):
+    """`git checkout [-f|--ours|--theirs]... -- <path>...`, the only
+    `checkout` form that overwrites a working-tree path (issue #380 delta,
+    gate finding: `git checkout -f -- f` must still be recognized);
+    `git checkout <branch>` names no path at all."""
+    if len(words) < _GIT_RESTORE_PREFIX_LENGTH or (words[0].text, words[1].text) != (
+        "git",
+        "checkout",
+    ):
         return None
-    return PATTERN_GIT_CHECKOUT, words[_GIT_CHECKOUT_PREFIX_LENGTH:]
+    remainder = words[_GIT_RESTORE_PREFIX_LENGTH:]
+    index = 0
+    while index < len(remainder) and remainder[index].text in _GIT_CHECKOUT_SKIPPED_FLAGS:
+        index += 1
+    if index >= len(remainder) or remainder[index].text != _END_OF_OPTIONS:
+        return None
+    return PATTERN_GIT_CHECKOUT, remainder[index + 1 :]
 
 
 def _match_git_restore(words: tuple[_Word, ...]) -> tuple[str, tuple[_Word, ...]] | None:
@@ -663,6 +790,119 @@ def _judged_redirect_pair(
     return pattern, _resolved_operand_path(current_directory, target.text)
 
 
+def _list_item_contains_pipe(tokens: tuple[_Word, ...], start: int) -> bool:
+    """Whether a `|` appears before the current list item's own end -- the
+    next `;`/`&&`/`||`/newline, or a parenthesised group boundary, whichever
+    comes first (issue #380 delta, gate finding: a `cd` anywhere in a
+    pipeline must never change the directory anything else resolves
+    against, since every one of its stages is its own subshell)."""
+    index = start
+    while index < len(tokens):
+        token = tokens[index]
+        if _is_list_separator(token) or _is_group_open(token) or _is_group_close(token):
+            return False
+        if _is_pipe(token):
+            return True
+        index += 1
+    return False
+
+
+class _CommandPathWalker:
+    """Walks `tokens` once, collecting every Bash-recognized write pattern's
+    own `(pattern, path)` pair while tracking the shell's own working
+    directory the way Bash would: a literal, resolvable `cd` changes it for
+    the rest of the enclosing list (issue #380 delta, decision 4); a
+    parenthesised group keeps its own copy that reverts at its own closing
+    `)` (issue #380 delta, gate finding: `(cd sub; rm f)`); and a `cd`
+    anywhere in a pipeline never changes anything at all, since a pipeline
+    stage is its own subshell (issue #380 delta, gate finding: `cd sub |
+    rm f`)."""
+
+    def __init__(self, tokens: tuple[_Word, ...], cwd: str | None) -> None:
+        self._tokens = tokens
+        self._pairs: list[tuple[str, str]] = []
+        self._directory_stack: list[str | None] = [cwd]
+
+    def walk(self) -> tuple[tuple[str, str], ...]:
+        index = 0
+        at_command_start = True
+        pipeline_has_pipe = False
+        while index < len(self._tokens):
+            boundary = self._advance_past_boundary(index, self._tokens[index])
+            if boundary is not None:
+                index, reset_pipeline = boundary
+                at_command_start = True
+                pipeline_has_pipe = pipeline_has_pipe and not reset_pipeline
+                continue
+            if not at_command_start:
+                index = self._consume_redirect_or_skip(index)
+                continue
+            if not pipeline_has_pipe:
+                pipeline_has_pipe = _list_item_contains_pipe(self._tokens, index)
+            index, ended = self._consume_simple_command(index, pipeline_has_pipe)
+            at_command_start = False
+            if ended:
+                break
+        return tuple(self._pairs)
+
+    def _advance_past_boundary(self, index: int, token: _Word) -> tuple[int, bool] | None:
+        """`(next_index, reset_pipeline)` when `token` is a group, list, or
+        pipe boundary -- pushing or popping the directory stack for a
+        parenthesised group along the way -- or `None` when `token` starts
+        an ordinary simple command instead. `reset_pipeline` is `True` for a
+        group or list boundary (a fresh pipeline may start here, so
+        `walk` must re-check whether it contains a `|`), `False` for a bare
+        `|` (still inside the same pipeline `_list_item_contains_pipe`
+        already scoped)."""
+        if _is_group_open(token):
+            self._directory_stack.append(self._directory_stack[-1])
+            return index + 1, True
+        if _is_group_close(token):
+            if len(self._directory_stack) > 1:
+                self._directory_stack.pop()
+            return index + 1, True
+        if _is_list_separator(token):
+            return index + 1, True
+        if _is_pipe(token):
+            return index + 1, False
+        return None
+
+    def _consume_simple_command(self, index: int, pipeline_has_pipe: bool) -> tuple[int, bool]:
+        end = _command_end(self._tokens, index)
+        operand_end = _operand_span_end(self._tokens, index, end)
+        words = self._tokens[index:operand_end]
+        if words and words[0].text == _CD_COMMAND:
+            return self._consume_cd(words, operand_end, pipeline_has_pipe)
+        matched = _first_command_match(words) if words else None
+        if matched is not None:
+            pattern, operand_words = matched
+            self._pairs.extend(
+                _judged_pairs(pattern, operand_words, current_directory=self._directory_stack[-1])
+            )
+        return operand_end, False
+
+    def _consume_cd(
+        self, words: tuple[_Word, ...], operand_end: int, pipeline_has_pipe: bool
+    ) -> tuple[int, bool]:
+        if pipeline_has_pipe:
+            return operand_end, False  # a piped `cd`'s own subshell changes nothing
+        directory, resolved = _cd_directory_update(self._directory_stack[-1], words)
+        if not resolved:
+            return operand_end, True  # unresolvable: end recognition outright (PROT-35)
+        self._directory_stack[-1] = directory
+        return operand_end, False
+
+    def _consume_redirect_or_skip(self, index: int) -> int:
+        redirect = _match_redirect(self._tokens, index)
+        if redirect is None:
+            return index + 1
+        pattern, target, next_index = redirect
+        pair = _judged_redirect_pair(pattern, target, current_directory=self._directory_stack[-1])
+        if pair is not None:
+            self._pairs.append(pair)
+        return next_index
+
+
 def hook_command_paths(command: str, *, cwd: str | None = None) -> tuple[tuple[str, str], ...]:
     """Every `(pattern, path)` pair a Bash `command`'s own recognized write
     patterns name, in the order they appear: a `>`/`>>` redirection
@@ -670,19 +910,27 @@ def hook_command_paths(command: str, *, cwd: str | None = None) -> tuple[tuple[s
     `sed -i`, `mv`, `cp` (its destination only), `rm`, `git checkout --`,
     and `git restore` (skipping its own options and their arguments). A
     relative path resolves against `cwd` -- the payload's own working
-    directory -- updated by every literal `cd <path> &&` seen first in the
-    same command (issue #380 delta, decision 4); an unresolvable `cd`
-    target (a variable, `-`, or no operand at all) ends recognition for the
-    rest of the command outright, the same as allowing it. An operand a
-    shell would expand first (an unquoted `$name`, backtick, `~`, `*`, `?`,
-    or `[`) is never judged either (decision 3): `protect` resolves and
-    judges whatever plain-text path remains, this function only recognizes
-    the pattern shape and joins it against the known directory (issue #380).
+    directory -- updated by every literal, resolvable `cd` (issue #380
+    delta, decision 4) for the rest of the enclosing `;`/`&&`/`||`/newline
+    list, never across a `|` (a pipeline stage is its own subshell), and
+    only inside its own parenthesised group when it names one (`_CommandPathWalker`).
+    An unresolvable `cd` target (a variable, `-`, or no operand at all) ends
+    recognition for the rest of the command outright, the same as allowing
+    it. An operand a shell would expand first (an unquoted `$name`,
+    backtick, `~`, `*`, `?`, or `[`) is never judged either (decision 3):
+    `protect` resolves and judges whatever plain-text path remains, this
+    function only recognizes the pattern shape and joins it against the
+    known directory (issue #380).
 
     Everything inside a recognized heredoc body -- between an unquoted
     `<<WORD`/`<<-WORD`/`<<'WORD'` and its terminator line -- is data, never
     scanned for a pattern of its own (decision 2): only the command line
-    naming the heredoc is judged.
+    naming the heredoc is judged. A `#` that starts a word is a comment to
+    the end of its own line, also never scanned; a trailing unquoted
+    backslash-newline joins the next physical line first, so a command
+    split across lines that way is judged exactly like the one line it
+    forms (issue #380 delta, ruling: never a false denial from text Bash
+    does not execute).
 
     A command naming none of these patterns -- or one this grammar cannot
     tokenize as a shell command at all (unbalanced quoting) -- yields no
@@ -693,40 +941,4 @@ def hook_command_paths(command: str, *, cwd: str | None = None) -> tuple[tuple[s
     docstring; the `## Never` section of `specs/protect.spec.md`).
     """
     tokens = _tokenize_command(command)
-    pairs: list[tuple[str, str]] = []
-    current_directory = cwd
-    index = 0
-    at_command_start = True
-    while index < len(tokens):
-        if _is_command_separator(tokens[index]):
-            at_command_start = True
-            index += 1
-            continue
-        if at_command_start:
-            end = _command_end(tokens, index)
-            operand_end = _operand_span_end(tokens, index, end)
-            words = tokens[index:operand_end]
-            at_command_start = False
-            if words and words[0].text == _CD_COMMAND:
-                current_directory, resolved = _cd_directory_update(current_directory, words)
-                if not resolved:
-                    return tuple(pairs)
-                index = operand_end
-                continue
-            matched = _first_command_match(words) if words else None
-            if matched is not None:
-                pattern, operand_words = matched
-                pairs.extend(
-                    _judged_pairs(pattern, operand_words, current_directory=current_directory)
-                )
-                index = operand_end
-                continue
-        redirect = _match_redirect(tokens, index)
-        if redirect is None:
-            index += 1
-            continue
-        pattern, target, index = redirect
-        pair = _judged_redirect_pair(pattern, target, current_directory=current_directory)
-        if pair is not None:
-            pairs.append(pair)
-    return tuple(pairs)
+    return _CommandPathWalker(tokens, cwd).walk()

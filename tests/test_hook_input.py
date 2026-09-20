@@ -487,6 +487,96 @@ def test_hook_patch_paths_returns_empty_for_unrecognized_text(text: str) -> None
             ((hook_input.PATTERN_REMOVE, 'a"b.txt'),),
             id="a-backslash-escaped-quote-inside-double-quotes-stays-literal",
         ),
+        pytest.param(
+            "rm -- -f",
+            ((hook_input.PATTERN_REMOVE, "-f"),),
+            id="a-literal-end-of-options-marker-un-hides-a-dash-prefixed-operand",
+        ),
+        pytest.param(
+            "cp -t /tmp README.md",
+            ((hook_input.PATTERN_COPY, "/tmp"),),
+            id="cp-target-directory-is-the-destination-even-though-it-comes-first",
+        ),
+        pytest.param(
+            "sed -i -e p -e d f",
+            ((hook_input.PATTERN_SED_IN_PLACE, "f"),),
+            id="sed-in-place-skips-every-explicit-scripts-own-value",
+        ),
+        pytest.param(
+            "sed --in-place=.bak f",
+            (),
+            id="sed-long-in-place-with-a-script-but-no-path-names-nothing",
+        ),
+        pytest.param(
+            "git restore -s HEAD f",
+            ((hook_input.PATTERN_GIT_RESTORE, "f"),),
+            id="git-restore-short-source-flag-skips-its-own-value",
+        ),
+        pytest.param(
+            "git restore --conflict merge f",
+            ((hook_input.PATTERN_GIT_RESTORE, "f"),),
+            id="git-restore-conflict-flag-skips-its-own-value",
+        ),
+        pytest.param(
+            "git restore --pathspec-from-file p.txt",
+            (),
+            id="git-restore-pathspec-from-file-is-read-only-and-never-judged",
+        ),
+        pytest.param(
+            "git restore -- -f",
+            ((hook_input.PATTERN_GIT_RESTORE, "-f"),),
+            id="git-restore-double-dash-un-hides-a-dash-prefixed-path-too",
+        ),
+        pytest.param(
+            "git checkout -f -- f",
+            ((hook_input.PATTERN_GIT_CHECKOUT, "f"),),
+            id="git-checkout-force-flag-before-double-dash-is-still-recognized",
+        ),
+        pytest.param(
+            "git checkout --ours -- f",
+            ((hook_input.PATTERN_GIT_CHECKOUT, "f"),),
+            id="git-checkout-ours-flag-before-double-dash-is-still-recognized",
+        ),
+        pytest.param(
+            "git status # note; rm README.md",
+            (),
+            id="a-comment-hides-everything-after-it-on-the-same-line",
+        ),
+        pytest.param(
+            "echo ok # note > README.md",
+            (),
+            id="a-comment-hides-an-apparent-redirect-on-the-same-line",
+        ),
+        pytest.param(
+            "rm \\\nREADME.md",
+            ((hook_input.PATTERN_REMOVE, "README.md"),),
+            id="a-backslash-newline-joins-the-next-physical-line-first",
+        ),
+        pytest.param(
+            "rm README.md \\\n&& echo done",
+            ((hook_input.PATTERN_REMOVE, "README.md"),),
+            id="a-backslash-newline-right-before-an-operator-names-no-spurious-word",
+        ),
+        pytest.param(
+            "\\\nrm README.md",
+            ((hook_input.PATTERN_REMOVE, "README.md"),),
+            id="a-backslash-newline-at-the-very-start-of-the-command-joins-too",
+        ),
+        pytest.param(
+            "r\\\nm README.md",
+            ((hook_input.PATTERN_REMOVE, "README.md"),),
+            id="a-backslash-newline-mid-word-joins-the-two-halves-into-one-word",
+        ),
+        pytest.param(
+            "'rm' README.md",
+            ((hook_input.PATTERN_REMOVE, "README.md"),),
+            id="a-quoted-command-name-still-executes-and-is-recognized",
+        ),
+        pytest.param(
+            "r\\m README.md",
+            ((hook_input.PATTERN_REMOVE, "README.md"),),
+            id="a-backslash-escaped-command-name-still-executes-and-is-recognized",
+        ),
     ],
 )
 def test_hook_command_paths_recognizes_every_write_pattern(
@@ -533,6 +623,30 @@ def test_hook_command_paths_recognizes_every_write_pattern(
             "/work",
             (),
             id="a-bare-cd-with-no-operand-cannot-be-resolved-and-ends-judgement",
+        ),
+        pytest.param(
+            "(cd sub; rm f)",
+            "/work",
+            ((hook_input.PATTERN_REMOVE, "/work/sub/f"),),
+            id="a-parenthesised-group-keeps-its-own-cd-that-reverts-at-the-close-paren",
+        ),
+        pytest.param(
+            "(cd sub; rm f); rm g",
+            "/work",
+            ((hook_input.PATTERN_REMOVE, "/work/sub/f"), (hook_input.PATTERN_REMOVE, "/work/g")),
+            id="a-groups-own-cd-never-leaks-past-its-own-close-paren",
+        ),
+        pytest.param(
+            "cd sub | rm f",
+            "/work",
+            ((hook_input.PATTERN_REMOVE, "/work/f"),),
+            id="a-cd-piped-into-another-command-never-changes-the-directory",
+        ),
+        pytest.param(
+            "cd /tmp | rm x",
+            None,
+            ((hook_input.PATTERN_REMOVE, "x"),),
+            id="a-piped-cd-never-changes-the-parent-shells-directory",
         ),
     ],
 )

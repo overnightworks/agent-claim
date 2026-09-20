@@ -115,25 +115,45 @@ fail-closed rather than guessing which paths it touches.
 `Bash` carries no path key at all: its `command` text is scanned for a
 short, fixed list of write patterns -- a real, unquoted `>`/`>>` redirection
 (a heredoc target such as `cat > path <<EOF` included), `tee`'s own file
-operands, `sed -i`, `mv` (every operand -- a source vanishes exactly like
-its destination is written), `cp` (its last operand, the only one it
-actually writes), `rm`, `git checkout --`, and `git restore` (skipping its
-own options and their arguments, e.g. `--source HEAD`, `--staged`, `--`) --
-each occurrence naming a `(pattern, path)` pair, in the order the command
-names them (issue #380). A quoted or backslash-escaped occurrence of the
-same characters (`echo '>' > f`) is data, never the operator or command
-name it merely reads like. `git checkout <branch>` and a plain `sed`
-without `-i` name no path at all, since neither writes a file; neither does
-a redirect whose own target is exactly `/dev/null`, or a
+operands, `sed -i` (or `-i<suffix>`/`--in-place[=suffix]`, skipping
+`-e`/`--expression`/`-f`/`--file` and their own values), `mv` (every
+operand -- a source vanishes exactly like its destination is written), `cp`
+(a `-t`/`--target-directory` value when given, otherwise its last operand --
+either way, the only one it actually writes), `rm`, `git checkout`
+(`-f`/`--ours`/`--theirs` before a literal `--`, then its path operands),
+and `git restore` (skipping `-s`/`--source`, `--conflict`, and
+`--pathspec-from-file` and their own values, and a literal `--`) -- each
+occurrence naming a `(pattern, path)` pair, in the order the command names
+them (issue #380). A literal `--` ends option parsing the same way Bash's
+own coreutils do: every operand after it is a path regardless of a leading
+`-` (`rm -- -f` judges `-f`). A quoted or backslash-escaped occurrence of a
+character that would otherwise be an operator (`echo '>' > f`) is data,
+never the operator it merely reads like -- but a quoted or backslash-escaped
+*command name* (`'rm' f`, `r\m f`) still executes exactly as Bash runs it
+and is recognized like the plain spelling. An unquoted `#` at the start of a
+word is a comment to the end of its own physical line, never scanned for a
+pattern of its own, exactly like Bash itself never runs what follows it on
+that line; an unquoted, trailing backslash-newline joins the next physical
+line first, so a command split that way is judged exactly like the one line
+it forms. `git checkout <branch>` (no `--`) and a plain `sed` without
+`-i`/`--in-place` name no path at all, since neither writes a file; neither
+does a redirect whose own target is exactly `/dev/null`, or a
 file-descriptor-duplication form (`2>&1`, `>&2`) -- its own "target" is
 another operator, never a real file. Unlike every other tool's own
 already-absolute payload path, a Bash pattern's own path is relative to the
 shell's own working directory: it resolves against the payload's own `cwd`
-field, updated by every literal `cd <path> &&` the command names first
+field, updated by every literal, resolvable `cd` the command names first
 (PROT-34), rather than the hook process's cwd, and PROT-09 does not apply to
-it at all. Every resolved path then runs the same Checkout, Default-Branch,
-and Claim-Scope gates a mutating tool's own path runs (PROT-11 no commit
-yet, PROT-12/PROT-13 not main, PROT-14 the checkout root, the store's own
+it at all. That directory changes for the rest of the enclosing
+`;`/`&&`/`||`/newline-separated list, never across a `|` -- a pipeline
+segment is its own subshell, so a `cd` on either side of one changes nothing
+outside it -- and a parenthesised `( ... )` group keeps its own copy that
+reverts at its own closing `)`, exactly like Bash's own subshell scoping.
+Every resolved path then runs the same Checkout, Default-Branch, and
+Claim-Scope gates a mutating tool's own path runs (PROT-11 no commit yet,
+PROT-12/PROT-13 not main, PROT-14 the checkout root -- including a path that
+names a linked worktree's own root directory exactly, judged by that
+checkout rather than by its parent, the store's own
 PROT-29/PROT-15/PROT-16/PROT-17, PROT-21/PROT-22 a covering claim), except a
 path outside every repository allows instead of PROT-10's deny, agent
 identity resolves only once a checkout and its live state are already in
@@ -142,9 +162,9 @@ the recognized pattern and the path rather than a bare `claim first`.
 
 - [ ] [PROT-30] A `command` naming none of these patterns -- or no string `command` at all -- allows without resolving identity, git, or the store.
 - [ ] [PROT-31] A recognized pattern's relative path resolves against the payload's own `cwd`, as PROT-34 updates it; with no known directory, that path allows outright, before identity resolves.
-- [ ] [PROT-32] A recognized pattern's own path outside every git repository allows, unlike PROT-10's deny for every other mutating tool.
+- [ ] [PROT-32] A recognized pattern's own path outside every git repository allows, unlike PROT-10's deny for every other mutating tool -- except a checkout's own root directory, which PROT-14 still denies.
 - [ ] [PROT-33] A recognized pattern's own path outside the live claim's scope denies `<pattern> <path> outside claim scope`, naming both (see E-PROT-08).
-- [ ] [PROT-34] A literal, resolvable `cd <path> &&` changes the directory every later path resolves against, even into a linked worktree, judged there like an absolute path would be.
+- [ ] [PROT-34] A literal, resolvable `cd` changes the directory every later path in its own `;`/`&&`/`||`/newline list resolves against -- never across a `|`, and only inside its own group.
 - [ ] [PROT-35] An unresolvable `cd` target -- expandable, `-`, or no operand -- ends recognition for the rest of the command outright, allowing it (see E-PROT-10).
 
 ## Forge-free
