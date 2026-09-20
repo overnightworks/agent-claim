@@ -5627,7 +5627,9 @@ def test_lazy_forge_builds_a_state_ref_board_under_the_state_ref_pin(
     about the checkout looks unusual."""
     _write_state_ref_pin(tmp_path)
     stub = FakeForge(repository=forge.RepositoryId("file", (), str(tmp_path)))
-    monkeypatch.setattr(issue_claim, "_state_ref_forge", lambda _repo, _remote: stub)
+    monkeypatch.setattr(
+        issue_claim, "_state_ref_forge", lambda _repo, _remote, *, directory=None: stub
+    )
 
     def unused(*_args: object, **_kwargs: object) -> None:
         pytest.fail("storage = state-ref must never build a GitHubForge")
@@ -5781,7 +5783,9 @@ def _landing_scenario(
         item_oids=item_oids,
         writer=_RefusingItemWriter(),
     )
-    monkeypatch.setattr(issue_claim, "_state_ref_forge", lambda _repo, _remote: client)
+    monkeypatch.setattr(
+        issue_claim, "_state_ref_forge", lambda _repo, _remote, *, directory=None: client
+    )
     claims = tuple(
         _active_claim(
             "Codex Sol",
@@ -13749,7 +13753,9 @@ def test_item_close_prints_json_under_the_state_ref_pin(
         forge.ItemState.OPEN, "Title", "Body text.\n", False
     )
     monkeypatch.setattr(client, "close_item", lambda _number: "2026-09-16T12:00:00Z", raising=False)
-    monkeypatch.setattr(issue_claim, "_state_ref_forge", lambda _repo, _remote: client)
+    monkeypatch.setattr(
+        issue_claim, "_state_ref_forge", lambda _repo, _remote, *, directory=None: client
+    )
 
     status = issue_claim.main(["item", "close", "42", "--json"])
 
