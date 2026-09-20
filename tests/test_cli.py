@@ -15760,6 +15760,41 @@ def test_item_show_refuses_an_unknown_id(
     assert capsys.readouterr().err == f"ERROR: #42 does not exist in {REPOSITORY}\n"
 
 
+def test_item_show_refuses_when_the_parent_read_fails(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #425 review: the parent read the header needs is inside `item
+    show`'s own refusal boundary, so a forge that fails it reports the same
+    envelope, never an error escaping past every `--json` printer."""
+    sentence = "GitHub returned a malformed parent issue"
+
+    def prepare() -> FakeForge:
+        client = FakeForge()
+        client.issue_references[42] = forge.ItemReference(
+            forge.ItemState.OPEN, "Title", "Body text.\n", False
+        )
+
+        def failing_parent_read(_number: int) -> board.ParentIssue | None:
+            raise forge.ForgeMalformedResponseError(sentence)
+
+        monkeypatch.setattr(client, "parent_issue", failing_parent_read)
+        monkeypatch.setattr(github, "GitHubForge", lambda _repository: client)
+        return client
+
+    prepare()
+    text_status = issue_claim.main(["--repo", REPOSITORY, "item", "show", "42"])
+    text = capsys.readouterr()
+
+    prepare()
+    json_status = issue_claim.main(["--repo", REPOSITORY, "item", "show", "42", "--json"])
+    envelope = capsys.readouterr()
+
+    assert (text_status, json_status) == (2, 2)
+    assert (text.out, text.err) == ("", f"ERROR: {sentence}\n")
+    assert envelope.err == text.err
+    _assert_json_refusal_object(envelope.err, envelope.out, reason="precondition_failed")
+
+
 def _item_new_github_storage_refusal(
     _monkeypatch: pytest.MonkeyPatch, _tmp_path: Path
 ) -> list[str]:

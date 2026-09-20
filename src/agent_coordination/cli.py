@@ -3365,8 +3365,9 @@ def _cmd_item_show(parsed: argparse.Namespace, session: _ReadSession) -> int:
     identically under `storage = "github"` (the forge's own issue body) and
     `storage = "state-ref"` (the item file's own body); closing an item
     never deletes it, so a closed item is shown exactly like an open one.
-    A missing id reports through the shared envelope as `precondition_failed`
-    (issue #425)."""
+    A missing id -- or a forge that fails either read this header needs --
+    reports through the shared envelope as `precondition_failed` (issue
+    #425)."""
     as_json = parsed.json
     try:
         client = session.forge()
@@ -3374,9 +3375,9 @@ def _cmd_item_show(parsed: argparse.Namespace, session: _ReadSession) -> int:
         reference = client.item_reference(number)
         if reference.state is forge.ItemState.MISSING:
             raise protocol.ClaimUnavailableError(_missing_item_refusal(number, client))
+        parent = client.parent_issue(number)
     except protocol.ClaimError as error:
         return _refuse(ItemReason.PRECONDITION_FAILED, error, as_json=as_json)
-    parent = client.parent_issue(number)
     body = reference.body or ""
     if as_json:
         _emit_json(
