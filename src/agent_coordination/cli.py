@@ -2741,13 +2741,14 @@ def _state_ref_forge(
     `directory` names the checkout this forge reads and writes through --
     `start` (issue #322 review finding 2) hands it the freshly created
     worktree so the worktree-scoped claim never reads a caller-checkout
-    snapshot cached before that worktree existed; every other caller omits
-    it and keeps the previous, process-cwd-bound behaviour.
+    snapshot cached before that worktree existed, including the default
+    branch itself; every other caller omits it and keeps the previous,
+    process-cwd-bound behaviour.
     """
     _refuse_repo_under_state_ref(repo)
     location = _canonical_remote_location(canonical_remote)
     repository = forge.RepositoryId(location.host, (), location.path)
-    default_branch = checkout.default_branch_name()
+    default_branch = checkout.default_branch_name(directory=directory)
     if default_branch is None:
         raise protocol.ClaimUnavailableError(
             "cannot resolve the default branch; run aco from a checkout with origin/HEAD set"

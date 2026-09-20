@@ -2081,6 +2081,42 @@ def _real_state_ref_start_scenario(
     return repo, remote, seeded_oid
 
 
+def test_state_ref_forge_resolves_default_branch_from_its_own_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Issue #322 review finding 1: `_state_ref_forge`'s default-branch read
+    must be scoped to its own `directory` parameter -- `start`'s freshly
+    created worktree, once one is handed in -- never left to read
+    `origin/HEAD` from the calling process's own cwd regardless of it. A
+    fake `checkout.default_branch_name` capturing the `directory` it
+    receives is the right proof here: the argument itself is the contract
+    this finding is about, not a git outcome a real checkout could also
+    produce by coincidence (every worktree of one repository tracks the
+    same `origin/HEAD`). Driven directly against `_state_ref_forge` (issue
+    #322 review, delta finding 1) rather than through `aco start` end to
+    end, since the full CLI flow also calls `checkout.default_branch_name`
+    from `_validate_worktree_branch`'s own, already worktree-scoped call
+    site and would conflate the two."""
+    _use_real_store(monkeypatch)
+    repo, remote = _real_repository_with_bare_remote(tmp_path)
+    (repo / "base.txt").write_text("base\n")
+    _real_git(repo, "add", "base.txt")
+    _real_git(repo, "commit", "-q", "-m", "initial")
+    _push_repository_trunk(repo, "origin")
+    store.bootstrap(worktree=repo, remote=str(remote))
+    recorded_directories: list[Path | None] = []
+
+    def fake_default_branch_name(*, directory: Path | None = None) -> str | None:
+        recorded_directories.append(directory)
+        return "main"
+
+    monkeypatch.setattr(checkout, "default_branch_name", fake_default_branch_name)
+
+    issue_claim._state_ref_forge(None, "origin", directory=repo)
+
+    assert recorded_directories == [repo]
+
+
 def test_start_under_state_ref_claims_from_the_worktree_it_creates(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
