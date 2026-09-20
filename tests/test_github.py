@@ -518,13 +518,21 @@ def test_github_adapter_closing_a_landed_item_skips_a_repeated_comment() -> None
 
 
 def test_github_adapter_finds_a_landing_comment_past_the_first_page() -> None:
-    """Issue #397: `gh api` caps a plain call at thirty comments per page.
-    With thirty unrelated comments ahead of this run's own landing comment
-    -- posted by a run whose close then failed -- a rerun must still find
-    it via `--paginate` and skip straight to closing, never posting it a
-    second time."""
-    unrelated = (json.dumps({"body": f"unrelated comment {index}"}) for index in range(30))
-    already_posted = "\n".join([*unrelated, json.dumps({"body": github.landing_comment(101)})])
+    """Issue #397: a plain `gh api` request serves only its own `per_page`
+    (100 here) without `--paginate`. With 150 unrelated comments ahead of
+    this run's own landing comment -- posted by a run whose close then
+    failed -- a rerun must still find it via `--paginate` and skip straight
+    to closing, never posting it a second time; dropping `--paginate` from
+    the request would make this fail, since the fake `gh` below then serves
+    only the truncated first page, which does not reach the landing
+    comment at index 150."""
+    unrelated_comments = [
+        json.dumps({"body": f"unrelated comment {index}"}) for index in range(150)
+    ]
+    all_comments = "\n".join(
+        [*unrelated_comments, json.dumps({"body": github.landing_comment(101)})]
+    )
+    first_page_only = "\n".join(unrelated_comments[:100])
     calls: list[list[str]] = []
     close_should_fail = True
 
@@ -532,7 +540,7 @@ def test_github_adapter_finds_a_landing_comment_past_the_first_page() -> None:
         calls.append(arguments)
         nonlocal close_should_fail
         if input_data is None:
-            return already_posted
+            return all_comments if "--paginate" in arguments else first_page_only
         if close_should_fail:
             close_should_fail = False
             raise forge.ForgeError("HTTP 500 close failed")
