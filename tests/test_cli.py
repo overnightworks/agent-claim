@@ -10788,7 +10788,7 @@ def test_cli_refusals_before_the_handler_print_the_shared_envelope(
 ) -> None:
     """Issue #425 review: identity resolution and `release`'s own branch and
     override checks (REL-06..08) refuse above every handler, so `main`'s own
-    sink prints the envelope for them (OUT-04); the text form keeps the bare
+    sink prints the envelope for them (OUT-05); the text form keeps the bare
     `ERROR:` sentence it always printed."""
     _prepare_pre_dispatch_refusal(monkeypatch, agent, branch)
     text_status = issue_claim.main(["--repo", "example/agent-claim", *arguments])
