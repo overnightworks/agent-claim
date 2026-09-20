@@ -3,6 +3,6 @@ agent = "Claude head (coordinator)"
 role = "builder"
 base = "1ce54f21aa2e07facb9261cafda5d559f1d7f741"
 branch = "claude/issue-432-json-slice7"
-scope = ["README.md", "specs/ask.spec.md", "specs/brief.spec.md", "specs/claim.spec.md", "specs/output.spec.md", "specs/release.spec.md", "specs/rule.spec.md", "src/agent_coordination/cli.py", "src/agent_coordination/protocol.py", "tests/test_board_serve.py", "tests/test_cli.py"]
+scope = ["README.md", "specs/ask.spec.md", "specs/board.spec.md", "specs/brief.spec.md", "specs/claim.spec.md", "specs/item.spec.md", "specs/output.spec.md", "specs/release.spec.md", "specs/rule.spec.md", "src/agent_coordination/cli.py", "src/agent_coordination/protocol.py", "tests/test_board_serve.py", "tests/test_cli.py"]
 opened_commit = "d7b39ba4385f4eb92e7a3e12df71800cb7da97a6"
 whole_reason = "die Hüllen-Scheibe: Parser, entkommende Fehler und Sweep sind eine Konvergenz"
