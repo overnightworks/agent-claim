@@ -58,21 +58,22 @@ here reads or writes it. `specs/bootstrap.spec.md` owns `bootstrap`;
 git worktree add ../repo-worktrees/issue-42-widget -b Ada/issue-42-widget
 cd ../repo-worktrees/issue-42-widget
 aco claim 42 --agent "Ada" --scope src/widget.py
-# edit, commit, push, open a pull request naming Work-Item: #42
-aco release 42 --merged 57
+# edit, commit, push, open a pull request naming Closes #42 and Work-Item: #42
+aco land 57
 ```
 
 `claim` refuses before the first edit unless the checkout is already a
 linked, isolated worktree on a non-main branch -- create it first, exactly
 as shown, naming the issue and agent in both the directory and the branch;
 `claim` then opens one live claim there and refuses out-of-order or blocked
-work by name unless overridden with `--out-of-order REASON`. `release
---merged <pull request>` verifies that pull request against GitHub -- merged
-into the default branch, its body naming this item -- before closing the
-item and releasing the claim, then reports what that landing freed and what
-to pull next. The exact preconditions, identity resolution, and refusals
-are `specs/claim.spec.md` and `specs/release.spec.md`'s own; the claim
-record itself -- scope, roles, resources, overlap -- is
+work by name unless overridden with `--out-of-order REASON`. `aco land <pull
+request>`, from a clean default-branch checkout, verifies it against GitHub
+-- mergeable, checks green, body carrying Closes and Work-Item -- merges it
+with a merge commit, deletes the branch, removes the lane's worktree, closes
+the item, releases the claim, and reports what that landing freed and what
+to pull next. The exact preconditions, identity resolution, and refusals are
+`specs/claim.spec.md`, `specs/land.spec.md`, and `specs/release.spec.md`'s
+own; the claim record itself -- scope, roles, resources, overlap -- is
 `specs/claim-record.spec.md`'s.
 
 ## Issueless lane claims
