@@ -400,7 +400,8 @@ def _add_board_parser(commands: argparse._SubParsersAction) -> None:
         action="store_true",
         help=(
             "mint a fresh persistent loopback token for --serve (issue #388), "
-            "replacing the one at ${XDG_CONFIG_HOME:-~/.config}/aco/board-token"
+            "replacing this board's own at "
+            "${XDG_CONFIG_HOME:-~/.config}/aco/boards/<board>/token"
         ),
     )
 

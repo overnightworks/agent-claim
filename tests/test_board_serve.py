@@ -490,9 +490,9 @@ def _mint_and_capture_url(
 def test_board_serve_prints_the_same_url_on_a_second_start(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Issue #388 proof 1: the token now lives in
-    `${XDG_CONFIG_HOME}/aco/board-token` (0600), minted once rather than per
-    start, so two starts on the same port print the identical URL."""
+    """Issue #388 proof 1: the token now lives in this board's own
+    `${XDG_CONFIG_HOME}/aco/boards/<board>/token` (0600), minted once rather
+    than per start, so two starts on the same port print the identical URL."""
     _served_board_environment(monkeypatch, tmp_path)
     monkeypatch.setattr(board_serve._BoardHTTPServer, "serve_forever", lambda self: None)
     port = _free_loopback_port()
