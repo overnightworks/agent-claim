@@ -4421,10 +4421,11 @@ def _verify_merge_commit_authority(
     landings: tuple[checkout.TrunkLanding, ...], pull_request: int, number: int, sha: str
 ) -> None:
     """Refuse a github `release --merged <pr>` whose merge commit does not
-    authorize closing `number` (issue #397, Befund 41): the pull request's
-    own mutable body identified `number` only to get here (see
-    `_verify_merged_release`) -- this is the actual authority, the same
-    `_trunk_landing_defect` reads for `storage = state-ref`."""
+    authorize closing `number` (issue #397, Befund 41): `number` is the
+    claim's own issue, resolved before `_verify_merged_release` ever calls
+    this -- never the pull request's own mutable body -- and this merge
+    commit trailer is the actual authority, the same `_trunk_landing_defect`
+    reads for `storage = state-ref`."""
     defect = _trunk_landing_defect(landings, number, sha)
     if defect is not None:
         raise protocol.ClaimUnavailableError(
