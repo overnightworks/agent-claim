@@ -55,7 +55,10 @@ START_DESCRIPTION = (
     "when neither exists yet, then claims it exactly as aco claim would; a second call "
     "against the same worktree only claims, or reports the live claim."
 )
-START_OUT_OF_ORDER_HELP = (
+# Shared by `claim` and `start` (issue #322 review finding): CLM-09's own contract, spelled
+# once so `start`'s pass-through help text can never drift from what `claim` itself does with
+# the flag -- specs/claim.spec.md:62's "the reason is never stored" holds for both.
+OUT_OF_ORDER_HELP = (
     "refuses a claim without a reason when a higher-priority actionable item is free or "
     "an open blocker remains; the reason is never stored, only downgrading the check"
 )
@@ -411,7 +414,7 @@ def _add_start_parser(commands: argparse._SubParsersAction) -> None:
         ),
     )
     start.add_argument("--whole", metavar="REASON", help=WHOLE_HELP)
-    start.add_argument("--out-of-order", metavar="REASON", help=START_OUT_OF_ORDER_HELP)
+    start.add_argument("--out-of-order", metavar="REASON", help=OUT_OF_ORDER_HELP)
 
 
 def _add_claim_parser(commands: argparse._SubParsersAction) -> None:
@@ -455,14 +458,7 @@ def _add_claim_parser(commands: argparse._SubParsersAction) -> None:
             "with it returns the active claim instead of writing a second one"
         ),
     )
-    claim.add_argument(
-        "--out-of-order",
-        metavar="REASON",
-        help=(
-            "refuses a claim without a reason when a higher-priority actionable item is "
-            "free or an open blocker remains; records why"
-        ),
-    )
+    claim.add_argument("--out-of-order", metavar="REASON", help=OUT_OF_ORDER_HELP)
     claim.add_argument(
         "--whole",
         metavar="REASON",
