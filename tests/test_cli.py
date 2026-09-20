@@ -13784,6 +13784,33 @@ def test_cli_brief_reports_branch_not_found_when_the_claim_branch_is_gone(
     ]
 
 
+def test_cli_brief_refuses_when_the_lane_tip_read_fails_outright(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Issue #390 finding 9b: `rev-parse --verify --quiet`'s exit `1` is the
+    one documented "does not resolve" outcome; any other nonzero exit --
+    here, a simulated broken git -- is a tool failure, not a missing
+    branch, and must refuse instead of printing `branch not found`."""
+    repository, base, _tip = _scratch_lane_repository(tmp_path)
+    client = FakeForge()
+    client.issue_references[258] = forge.ItemReference(forge.ItemState.OPEN, "Brief", "Broken git.")
+    monkeypatch.setattr(github, "GitHubForge", lambda _repository: client)
+    claim = _brief_claim(base)
+    _patch_store_write(monkeypatch, claim, ages={claim.claim_id: datetime(2026, 8, 20, tzinfo=UTC)})
+    monkeypatch.chdir(repository)
+    _stub_one_git_call(
+        monkeypatch,
+        ["rev-parse", "--verify", "--quiet", claim.branch],
+        exit_status=128,
+        stderr="simulated git failure",
+    )
+
+    status = issue_claim.main(["--repo", "example/agent-claim", "brief", "258"])
+
+    assert status == 2
+    assert capsys.readouterr().err == "ERROR: simulated git failure\n"
+
+
 def test_cli_brief_json_prints_one_object_with_body_claim_tip_and_touched(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:

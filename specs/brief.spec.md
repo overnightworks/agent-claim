@@ -23,6 +23,7 @@ point prints `ERROR: <sentence>` on stderr, exit `2`.
 |---|---|---|
 | a live issue claim, lane branch resolves | BRIEF-01, BRIEF-02, BRIEF-11, BRIEF-05 | BRIEF-06, BRIEF-10 |
 | a live issue claim, lane branch gone | BRIEF-04 | BRIEF-06, BRIEF-10 |
+| a live issue claim, lane branch read fails outright | BRIEF-18 | BRIEF-18 |
 | no live issue claim | BRIEF-03 | BRIEF-06 |
 | `<item>` names no item at all | BRIEF-08 | BRIEF-08 |
 | a non-GitHub canonical remote | BRIEF-07 | BRIEF-07 |
@@ -34,8 +35,9 @@ point prints `ERROR: <sentence>` on stderr, exit `2`.
 - [ ] [BRIEF-02] Under a live issue claim, `CLAIM` is followed by one line `<agent> (<role>) branch=<branch> base=<base>[ <age>]`, branch before base (see E-BRIEF-01).
 - [ ] [BRIEF-11] That claim line's indented lines are one per scope path, then `  whole: <reason>` only when the claim carries one (see E-BRIEF-01).
 - [ ] [BRIEF-03] With no live issue claim, `CLAIM` prints exactly `no active claim`; `TIP` prints no value line at all; `TOUCHED` lists nothing (see E-BRIEF-02).
-- [ ] [BRIEF-04] With a live claim whose branch resolves neither locally nor as `origin/<branch>`, `TIP` prints `branch not found` and `TOUCHED` lists nothing (see E-BRIEF-03).
+- [ ] [BRIEF-04] With a live claim whose branch resolves neither locally nor as `origin/<branch>` -- git itself answering "no such ref" -- `TIP` prints `branch not found` and `TOUCHED` lists nothing (see E-BRIEF-03).
 - [ ] [BRIEF-05] With a live claim whose branch resolves, `TIP` prints that branch's own commit id, and `TOUCHED` lists one path per line from a `git diff --name-only <base>..<tip>` (see E-BRIEF-01).
+- [ ] [BRIEF-18] When a live claim's branch read fails instead of answering not-found, `aco brief` refuses with git's own failure detail, exit `2`, `reason: unavailable` under `--json` (see E-BRIEF-12).
 - [ ] [BRIEF-08] `<item>` naming no item at all prints one empty line for the missing body, then every section exactly as BRIEF-01..06 describe with no live claim -- never a refusal (see E-BRIEF-06).
 
 ## `--json`
@@ -273,5 +275,21 @@ Setup: `origin` points at a non-GitHub remote, no other precondition
 $ aco brief 42 --json
 2> ERROR: no forge adapter for host <host>
 {"ok": false, "reason": "unavailable", "message": "no forge adapter for host <host>"}
+exit 2
+```
+
+### E-BRIEF-12 -- the claim branch's own git read fails outright
+
+Setup: bare-remote, fake `gh`, issue `#42` body `Broken git.`, a live claim on
+`#42` scoped to `README.md` whose branch read fails with a git error before
+git ever answers whether `ada/issue-42` resolves
+
+```console
+$ aco brief 42
+2> ERROR: <detail>
+exit 2
+$ aco brief 42 --json
+2> ERROR: <detail>
+{"ok": false, "reason": "unavailable", "message": "<detail>"}
 exit 2
 ```
