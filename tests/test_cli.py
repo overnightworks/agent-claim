@@ -2037,6 +2037,32 @@ def test_start_refuses_a_closed_or_missing_item(
     assert not (repo.parent / f"{repo.name}-worktrees").exists()
 
 
+def test_start_refuses_a_malformed_body_before_no_scope(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Issue #310 finding 43, mirrored for `start` (issue #406): a target
+    whose `agent-claim` block is malformed refuses by naming that defect --
+    the same block-defect reader `claim` shares -- before `start`'s own
+    claim delegation ever gets to name the less specific "item names no
+    scope"."""
+    repo = _start_scenario(monkeypatch, tmp_path)
+    monkeypatch.chdir(repo)
+    body = agent_claim_body(f'{MINIMAL_BLOCK_TOML}owner = "someone"\n')
+    issue = board_issue(314, "Fresh Slug Title", body)
+    client = FakeForge(board_issues=(issue,))
+    client.issue_references[314] = forge.ItemReference(
+        forge.ItemState.OPEN, issue.title, issue.body
+    )
+    monkeypatch.setattr(github, "GitHubForge", lambda _repository: client)
+
+    status = issue_claim.main(["--repo", REPOSITORY, "start", "314"])
+
+    assert status == 2
+    assert capsys.readouterr().err == (
+        "ERROR: #314 body malformed: owner: unknown top-level key owner\n"
+    )
+
+
 def _state_ref_item_body(title: str, *, scope: list[str] | None = None) -> str:
     data: dict[str, object] = {
         "version": 1,
