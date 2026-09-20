@@ -5054,6 +5054,15 @@ LAND_GITHUB_ONLY_REFUSAL = (
 )
 LAND_SELF_PACKAGE_NAME = "agent-coordination"
 LAND_REINSTALL_LINE = "reinstall: uv tool install --force --from . agent-coordination"
+# A check name is GitHub's own external vocabulary -- a workflow job or a
+# third-party status context's own title -- with no length limit this tool
+# controls, unlike the internal path names `protocol.named_with_overflow_count`
+# was written for (issue #405 review/gate finding): each name is truncated
+# here before that same three-then-`and N more` grammar ever sees it, and the
+# assembled sentence is capped again as a final backstop, so a single
+# 300-character check name can never print a refusal past 200 characters.
+LAND_CHECK_NAME_LENGTH_LIMIT = 40
+LAND_REFUSAL_LINE_LENGTH_LIMIT = 200
 
 
 def _land_not_open_refusal(number: int) -> str:
@@ -5064,8 +5073,22 @@ def _land_not_mergeable_refusal(number: int, state: str) -> str:
     return f"pull request #{number} is not mergeable ({state})"
 
 
+def _land_truncated_check_name(name: str) -> str:
+    if len(name) <= LAND_CHECK_NAME_LENGTH_LIMIT:
+        return name
+    return name[: LAND_CHECK_NAME_LENGTH_LIMIT - 1] + "…"
+
+
+def _land_bounded_refusal(sentence: str) -> str:
+    if len(sentence) <= LAND_REFUSAL_LINE_LENGTH_LIMIT:
+        return sentence
+    return sentence[: LAND_REFUSAL_LINE_LENGTH_LIMIT - 1] + "…"
+
+
 def _land_pending_check_names(checks: tuple[forge.CheckRun, ...]) -> tuple[str, ...]:
-    return tuple(check.name for check in checks if check.conclusion is None)
+    return tuple(
+        _land_truncated_check_name(check.name) for check in checks if check.conclusion is None
+    )
 
 
 def _land_failed_check(checks: tuple[forge.CheckRun, ...]) -> forge.CheckRun | None:
@@ -5091,8 +5114,10 @@ def _land_checks_refusal(number: int, checks: tuple[forge.CheckRun, ...]) -> str
         # Capped the same way `next`'s own `parallel:` line is (issue #348,
         # `protocol.named_with_overflow_count`): a pull request with many
         # still-running checks must never print a refusal past 200
-        # characters (issue #405 review finding).
-        return (
+        # characters (issue #405 review/gate finding) -- each name already
+        # truncated by `_land_pending_check_names` before this grammar sees
+        # it, `_land_bounded_refusal` a final backstop on the whole line.
+        return _land_bounded_refusal(
             f"pull request #{number} has checks still running: "
             f"{protocol.named_with_overflow_count(pending)}; wait for every check to succeed"
         )
@@ -5100,9 +5125,10 @@ def _land_checks_refusal(number: int, checks: tuple[forge.CheckRun, ...]) -> str
     if failed is not None:
         conclusion = failed.conclusion
         assert conclusion is not None  # `_land_failed_check` only returns a completed check.
-        return (
+        return _land_bounded_refusal(
             f"pull request #{number} has non-successful checks: "
-            f"{failed.name} ({conclusion}); land only after every check succeeds"
+            f"{_land_truncated_check_name(failed.name)} ({conclusion}); "
+            "land only after every check succeeds"
         )
     return None
 

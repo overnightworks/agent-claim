@@ -12856,6 +12856,13 @@ def _land_scenario(
             "wait for every check to succeed",
             id="check-running-name-list-capped",
         ),
+        pytest.param(
+            _land_readiness(checks=(forge.CheckRun("x" * 300, None),)),
+            "pull request #12 has checks still running: "
+            + ("x" * 39 + "…")
+            + "; wait for every check to succeed",
+            id="check-running-name-truncated",
+        ),
     ],
 )
 def test_land_refuses_every_readiness_defect_before_any_write(

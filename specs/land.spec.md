@@ -15,9 +15,12 @@ GitHub's own `mergeable_state`, `<name>`/`<conclusion>` one check's own name
 and conclusion. "Checks" is every check run GitHub reports for the head sha
 (every page of `check-runs`) plus every combined-status context
 (`commits/<sha>/status`; an external context such as SonarCloud counts);
-"no checks" means both are empty. A name list past three entries prints
-only the first three, then `and N more` (`protocol.named_with_overflow_count`),
-so no refusal line exceeds 200 characters. A refusal before any write
+"no checks" means both are empty. GitHub owns a check's own name -- no
+length this tool controls -- so each name is truncated to 40 characters
+with `…` before a name list past three entries prints only the first three,
+then `and N more` (`protocol.named_with_overflow_count`); the assembled
+sentence is then capped again so no refusal line ever prints past 200
+characters, even past that truncation. A refusal before any write
 prints `ERROR: <sentence>` on stderr, exit `2`, exactly as
 `specs/ref-store-cas.spec.md`'s own preamble documents; `aco land` has no
 `--json` mode.
