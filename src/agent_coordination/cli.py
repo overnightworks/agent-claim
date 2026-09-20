@@ -3526,25 +3526,29 @@ def _cmd_check(parsed: argparse.Namespace, session: _ReadSession) -> int:
         client = session.forge()
         # Read for its refusals only: a repository pinned to a grammar this
         # tool no longer reads, or a forge that cannot answer `blocked_by`,
-        # must fail here rather than hand back a half-read answer.
+        # must fail here rather than hand back a half-read answer. Every
+        # further forge read (the reference itself, the PR/issue body it
+        # dispatches to) stays inside this handler too, so a forge failure
+        # anywhere on the check path reports `unavailable` through the
+        # shared envelope rather than escaping to `main`'s legacy sink.
         config = _load_board_config(client, _resolve_toplevel())
+        repository = client.repository.path
+        reference = client.item_reference(number)
+        if reference.state is forge.ItemState.MISSING:
+            outcome = _missing_number(repository, number)
+        elif reference.is_landing:
+            _worktree, _remote, observed = _store_observation()
+            outcome = _pull_request_check(
+                client, tuple(observed.claims.values()), repository, number, config.storage
+            )
+        else:
+            outcome = _issue_check(
+                client, repository, reference.body or "", number, storage=config.storage
+            )
     except RepoMeaninglessUnderStateRefError as error:
         return _refuse(CheckReason.INVALID_USAGE, error, json_mode=json_mode)
     except protocol.ClaimError as error:
         return _refuse(CheckReason.UNAVAILABLE, error, json_mode=json_mode)
-    repository = client.repository.path
-    reference = client.item_reference(number)
-    if reference.state is forge.ItemState.MISSING:
-        outcome = _missing_number(repository, number)
-    elif reference.is_landing:
-        _worktree, _remote, observed = _store_observation()
-        outcome = _pull_request_check(
-            client, tuple(observed.claims.values()), repository, number, config.storage
-        )
-    else:
-        outcome = _issue_check(
-            client, repository, reference.body or "", number, storage=config.storage
-        )
     return outcome.report(as_json=json_mode)
 
 

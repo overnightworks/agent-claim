@@ -12987,12 +12987,14 @@ def test_check_reads_a_pull_request_in_one_dispatch_landing_and_classification_r
     assert client.requests == 4
 
 
-def test_check_json_prints_the_stdout_error_object_on_a_real_forge_failure(
+def test_check_json_reports_unavailable_on_a_real_forge_failure(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """A real `GitHubForge` (issue #199), not `FakeForge`: its own `_run`
-    chokepoint raises the forge failure, proving that cause -- not just a
-    conflict or a missing state ref -- reaches `main`'s general sink too."""
+    chokepoint raises the forge failure once dispatch itself reads the
+    reference, proving that cause reaches the shared envelope as `reason:
+    "unavailable"` (issue #404) rather than escaping to `main`'s legacy
+    generic `{"ok": false, "error": ...}` sink."""
 
     def failing_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
         raise forge.ForgeTransientError("gh: simulated network failure")
@@ -13004,7 +13006,7 @@ def test_check_json_prints_the_stdout_error_object_on_a_real_forge_failure(
 
     captured = capsys.readouterr()
     assert status == 2
-    _assert_json_error_object_mirrors_stderr(captured.err, captured.out)
+    _assert_json_refusal_object(captured.err, captured.out, reason="unavailable")
 
 
 @pytest.mark.parametrize(
