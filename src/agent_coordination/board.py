@@ -14,68 +14,26 @@ from typing import cast
 from . import items, metrics, protocol
 
 # The body-block codec (issue #419, audit #365 finding 3): parsed, validated,
-# and rendered in `body.py`, one layer below this module. `cli.py` (issue
-# #405) now imports `body` directly rather than reaching through
-# `board.<name>` (operator ruling 16.09.2026, audit #370 finding 10). The
-# names below that board.py's own code never calls (`BLOCK_CHILD_SKELETON`
-# through `rule_expectation`) stay imported and re-exported here (`__all__`)
-# because `test_board.py`, `test_state_board.py`, `test_board_serve.py`, and
-# `test_github.py` still reach them as `board.<name>`; those tests hold a
-# local variable named `body` for rendered item-body text in nearly every
-# function, so importing `body` there directly shadows the module for the
-# whole function (confirmed: the mechanical rename breaks `test_board.py`
-# with `AttributeError: 'str' object has no attribute 'expectation_lines'`).
-# Migrating those tests needs each shadowing local renamed first -- a
-# larger, non-mechanical change outside this lane's scope.
+# and rendered in `body.py`, one layer below this module. Every reader
+# imports the names it needs from `body` directly (operator ruling
+# 16.09.2026, audit #370 finding 10); `board.py` itself imports only what
+# its own board-builder code below actually calls.
 from .body import (
-    BLOCK_CHILD_SKELETON,
-    BLOCK_CONTAINER_SKELETON,
-    EXPECTATION_PICTURE_MAXIMUM_BYTES,
-    EXPECTATION_QUESTION_MAXIMUM_CHARACTERS,
     BodyReadState,
     Contract,
     ContractDefect,
-    ExpectationCardFields,
-    ExpectationLine,
     ExpectationProgress,
     ExpectationState,
     ItemKind,
     ParsedBody,
     SliceRow,
     Storage,
-    append_expectation,
     body_defect_text,
-    brief,
     closing_fence_delimiter,
-    contract_fields,
-    expectation_line_state,
-    expectation_line_summary,
-    expectation_lines,
-    locate_agent_claim_block,
     missing_or_empty_sections,
     opening_fence_delimiter,
     parse_body,
-    render_block,
-    replace_agent_claim_block,
-    rule_expectation,
 )
-
-__all__ = [
-    "BLOCK_CHILD_SKELETON",
-    "BLOCK_CONTAINER_SKELETON",
-    "EXPECTATION_PICTURE_MAXIMUM_BYTES",
-    "EXPECTATION_QUESTION_MAXIMUM_CHARACTERS",
-    "ExpectationCardFields",
-    "ExpectationLine",
-    "append_expectation",
-    "expectation_line_state",
-    "expectation_line_summary",
-    "expectation_lines",
-    "locate_agent_claim_block",
-    "render_block",
-    "replace_agent_claim_block",
-    "rule_expectation",
-]
 
 DEFAULT_PRIORITY_LABELS = ("security", "data", "ci", "product", "ux", "cleanup")
 CONFIG_PATH = Path(".agent-claim/board.toml")

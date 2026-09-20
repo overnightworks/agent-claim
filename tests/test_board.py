@@ -1,10 +1,8 @@
 """Behavioral tests for the pure `agent-claim` block write path `body.py`
 owns (#240, moved from `board.py` by #419): `rule_expectation`,
 `append_expectation`, and the `expectation_lines` projection `rule --line`,
-`ask`, and `rulings` all share. Reached here through `board.<name>`, the
-codec's own re-export while `cli.py`'s own migration (#405) is still
-pending. CLI wiring for `rule`/`ask`/`rulings` is covered in
-`tests/test_cli.py`."""
+`ask`, and `rulings` all share. CLI wiring for `rule`/`ask`/`rulings` is
+covered in `tests/test_cli.py`."""
 
 from __future__ import annotations
 
@@ -37,14 +35,30 @@ from board_fixtures import (
 )
 
 from agent_coordination import board, metrics, protocol
-from agent_coordination.body import EXPECTATION_LINE_TEXT_MAXIMUM, _expectation_picture_defect
+from agent_coordination.body import (
+    BLOCK_CHILD_SKELETON,
+    EXPECTATION_LINE_TEXT_MAXIMUM,
+    EXPECTATION_PICTURE_MAXIMUM_BYTES,
+    EXPECTATION_QUESTION_MAXIMUM_CHARACTERS,
+    ExpectationCardFields,
+    ExpectationLine,
+    _expectation_picture_defect,
+    append_expectation,
+    expectation_line_state,
+    expectation_line_summary,
+    expectation_lines,
+    locate_agent_claim_block,
+    render_block,
+    replace_agent_claim_block,
+    rule_expectation,
+)
 from agent_coordination.protocol import ClaimError, ClaimRequest
 
 # A real expectation sentence from this repository's own issue #230 (#240's
 # brief: take a real body as the fixture template rather than a synthetic
 # one) -- German prose, an em dash, and multiple sentences, none of which
 # need TOML escaping. The block interior itself is rendered through
-# `board.render_block`, the production serializer, never hand-typed.
+# `render_block`, the production serializer, never hand-typed.
 ISSUE_230_EXPECTATION_TEXT = (
     "Ein gezogenes Forge-Issue wird von aco nie verändert, geschlossen oder "
     "umgehängt; nur ein Marker-Kommentar, wenn der Spiegel eingeschaltet ist. "
@@ -65,7 +79,7 @@ def issue_230_body(*, default: str = "later") -> str:
     `Blocked by` line, then a block carrying one still-*proposed* line built
     from its real (later-ruled) expectation text -- `default` lets a test
     ask for a body that is already fully ruled instead."""
-    interior = board.render_block(
+    interior = render_block(
         {
             "version": 1,
             "now": "Konzept v3 (15.09.2026) nach Plan-Review und Regel-Gegen-Check.",
@@ -86,10 +100,10 @@ def test_rule_expectation_rules_a_proposed_line(ruling: str) -> None:
         f'{MINIMAL_BLOCK_TOML}[[expectation]]\ntext = "Ship it?"\ndefault = "later"\n'
     )
 
-    new_body = board.rule_expectation(body, 1, ruling, date(2026, 9, 15))
+    new_body = rule_expectation(body, 1, ruling, date(2026, 9, 15))
 
-    assert board.expectation_lines(new_body) == (
-        board.ExpectationLine(1, "Ship it?", ruling, date(2026, 9, 15)),
+    assert expectation_lines(new_body) == (
+        ExpectationLine(1, "Ship it?", ruling, date(2026, 9, 15)),
     )
     assert board.parse_body(new_body).expectation_state is board.ExpectationState.RULED
 
@@ -97,15 +111,15 @@ def test_rule_expectation_rules_a_proposed_line(ruling: str) -> None:
 @pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
 def test_rule_expectation_preserves_every_byte_outside_the_ruled_line(newline: str) -> None:
     body = issue_230_body().replace("\n", newline)
-    located = board.locate_agent_claim_block(body)
+    located = locate_agent_claim_block(body)
     prefix, suffix = body[: located.content_start], body[located.content_end :]
 
-    new_body = board.rule_expectation(body, 1, "yes", date(2026, 9, 15))
+    new_body = rule_expectation(body, 1, "yes", date(2026, 9, 15))
 
     assert new_body.startswith(prefix)
     assert new_body.endswith(suffix)
-    assert board.expectation_lines(new_body) == (
-        board.ExpectationLine(1, ISSUE_230_EXPECTATION_TEXT, "yes", date(2026, 9, 15)),
+    assert expectation_lines(new_body) == (
+        ExpectationLine(1, ISSUE_230_EXPECTATION_TEXT, "yes", date(2026, 9, 15)),
     )
 
 
@@ -118,7 +132,7 @@ def test_rule_expectation_refuses_an_already_ruled_line() -> None:
     ruled_at = date(2026, 9, 15)
 
     with pytest.raises(protocol.ClaimError, match="line 1 is already ruled"):
-        board.rule_expectation(body, 1, "no", ruled_at)
+        rule_expectation(body, 1, "no", ruled_at)
 
 
 @pytest.mark.parametrize("index", [0, 2])
@@ -130,7 +144,7 @@ def test_rule_expectation_refuses_an_out_of_range_line(index: int) -> None:
     ruled_at = date(2026, 9, 15)
 
     with pytest.raises(protocol.ClaimError, match="out of range"):
-        board.rule_expectation(body, index, "yes", ruled_at)
+        rule_expectation(body, index, "yes", ruled_at)
 
 
 def test_rule_expectation_refuses_an_unknown_ruling_value() -> None:
@@ -141,7 +155,7 @@ def test_rule_expectation_refuses_an_unknown_ruling_value() -> None:
     ruled_at = date(2026, 9, 15)
 
     with pytest.raises(protocol.ClaimError, match="ruling must be"):
-        board.rule_expectation(body, 1, "maybe", ruled_at)
+        rule_expectation(body, 1, "maybe", ruled_at)
 
 
 def test_rule_expectation_appends_a_note_to_the_ruled_line_text() -> None:
@@ -149,9 +163,9 @@ def test_rule_expectation_appends_a_note_to_the_ruled_line_text() -> None:
         f'{MINIMAL_BLOCK_TOML}[[expectation]]\ntext = "Ship it?"\ndefault = "later"\n'
     )
 
-    new_body = board.rule_expectation(body, 1, "yes", date(2026, 9, 15), note="Ja, sofort.")
+    new_body = rule_expectation(body, 1, "yes", date(2026, 9, 15), note="Ja, sofort.")
 
-    assert board.expectation_lines(new_body)[0].text == "Ship it? Anmerkung: Ja, sofort."
+    assert expectation_lines(new_body)[0].text == "Ship it? Anmerkung: Ja, sofort."
 
 
 # --- append_expectation ---
@@ -161,12 +175,12 @@ def test_rule_expectation_appends_a_note_to_the_ruled_line_text() -> None:
 def test_append_expectation_adds_a_proposed_line(default: str) -> None:
     body = agent_claim_body(MINIMAL_BLOCK_TOML)
 
-    new_body = board.append_expectation(body, "New question?", default)
+    new_body = append_expectation(body, "New question?", default)
 
-    assert board.expectation_lines(new_body) == (
-        board.ExpectationLine(1, "New question?", None, None, default=default),
+    assert expectation_lines(new_body) == (
+        ExpectationLine(1, "New question?", None, None, default=default),
     )
-    entries = board.locate_agent_claim_block(new_body).data["expectation"]
+    entries = locate_agent_claim_block(new_body).data["expectation"]
     assert entries == [{"text": "New question?", "default": default}]
     assert board.parse_body(new_body).expectation_state is board.ExpectationState.PROPOSED
 
@@ -176,25 +190,25 @@ def test_append_expectation_appends_after_existing_lines() -> None:
         f'{MINIMAL_BLOCK_TOML}[[expectation]]\ntext = "First"\ndefault = "yes"\n'
     )
 
-    new_body = board.append_expectation(body, "Second", "no")
+    new_body = append_expectation(body, "Second", "no")
 
-    assert board.expectation_lines(new_body) == (
-        board.ExpectationLine(1, "First", None, None, default="yes"),
-        board.ExpectationLine(2, "Second", None, None, default="no"),
+    assert expectation_lines(new_body) == (
+        ExpectationLine(1, "First", None, None, default="yes"),
+        ExpectationLine(2, "Second", None, None, default="no"),
     )
 
 
 @pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
 def test_append_expectation_preserves_every_byte_outside_the_appended_line(newline: str) -> None:
     body = issue_230_body(default="yes").replace("\n", newline)
-    located = board.locate_agent_claim_block(body)
+    located = locate_agent_claim_block(body)
     prefix, suffix = body[: located.content_start], body[located.content_end :]
 
-    new_body = board.append_expectation(body, "New question?", "yes")
+    new_body = append_expectation(body, "New question?", "yes")
 
     assert new_body.startswith(prefix)
     assert new_body.endswith(suffix)
-    assert board.expectation_lines(new_body)[-1] == board.ExpectationLine(
+    assert expectation_lines(new_body)[-1] == ExpectationLine(
         2, "New question?", None, None, default="yes"
     )
 
@@ -203,14 +217,14 @@ def test_append_expectation_refuses_empty_text() -> None:
     body = agent_claim_body(MINIMAL_BLOCK_TOML)
 
     with pytest.raises(protocol.ClaimError, match="non-empty"):
-        board.append_expectation(body, "   ", "yes")
+        append_expectation(body, "   ", "yes")
 
 
 def test_append_expectation_refuses_an_unknown_default() -> None:
     body = agent_claim_body(MINIMAL_BLOCK_TOML)
 
     with pytest.raises(protocol.ClaimError, match="default must be"):
-        board.append_expectation(body, "New question?", "maybe")
+        append_expectation(body, "New question?", "maybe")
 
 
 VALID_SVG_PICTURE = '<svg xmlns="http://www.w3.org/2000/svg"><circle cx="5" cy="5" r="4"/></svg>'
@@ -222,14 +236,14 @@ def test_append_expectation_writes_the_card_fields() -> None:
     them (every earlier `append_expectation` test) keeps reading `None` --
     absent keys leave the line unchanged."""
     body = agent_claim_body(MINIMAL_BLOCK_TOML)
-    card = board.ExpectationCardFields(
+    card = ExpectationCardFields(
         question="Ship it?", example="Release on Friday.", picture=VALID_SVG_PICTURE
     )
 
-    new_body = board.append_expectation(body, "New question?", "yes", card=card)
+    new_body = append_expectation(body, "New question?", "yes", card=card)
 
-    assert board.expectation_lines(new_body) == (
-        board.ExpectationLine(
+    assert expectation_lines(new_body) == (
+        ExpectationLine(
             1,
             "New question?",
             None,
@@ -240,7 +254,7 @@ def test_append_expectation_writes_the_card_fields() -> None:
             picture=VALID_SVG_PICTURE,
         ),
     )
-    entries = board.locate_agent_claim_block(new_body).data["expectation"]
+    entries = locate_agent_claim_block(new_body).data["expectation"]
     assert entries == [
         {
             "text": "New question?",
@@ -361,8 +375,8 @@ def test_append_expectation_writes_the_card_fields() -> None:
             id="srcdoc",
         ),
         pytest.param(
-            f"<svg>{'x' * board.EXPECTATION_PICTURE_MAXIMUM_BYTES}</svg>",
-            f"must be at most {board.EXPECTATION_PICTURE_MAXIMUM_BYTES} bytes",
+            f"<svg>{'x' * EXPECTATION_PICTURE_MAXIMUM_BYTES}</svg>",
+            f"must be at most {EXPECTATION_PICTURE_MAXIMUM_BYTES} bytes",
             id="oversized",
         ),
     ],
@@ -375,7 +389,7 @@ def test_expectation_picture_is_refused_by_both_the_parser_and_the_writer(
     `append_expectation` refuses the same picture before any write --
     `_expectation_picture_defect` is the one owner both share."""
     malformed_body = agent_claim_body(
-        board.render_block(
+        render_block(
             {
                 "version": 1,
                 "now": "N",
@@ -392,9 +406,9 @@ def test_expectation_picture_is_refused_by_both_the_parser_and_the_writer(
     )
 
     valid_body = agent_claim_body(MINIMAL_BLOCK_TOML)
-    card = board.ExpectationCardFields(picture=picture)
+    card = ExpectationCardFields(picture=picture)
     with pytest.raises(protocol.ClaimError, match=re.escape(match)):
-        board.append_expectation(valid_body, "New question?", "yes", card=card)
+        append_expectation(valid_body, "New question?", "yes", card=card)
 
 
 def test_expectation_picture_allows_an_internal_anchor_href_with_surrounding_spaces() -> None:
@@ -407,8 +421,8 @@ def test_expectation_picture_allows_an_internal_anchor_href_with_surrounding_spa
     assert _expectation_picture_defect(picture) is None
 
     body = agent_claim_body(MINIMAL_BLOCK_TOML)
-    updated = board.append_expectation(
-        body, "New question?", "yes", card=board.ExpectationCardFields(picture=picture)
+    updated = append_expectation(
+        body, "New question?", "yes", card=ExpectationCardFields(picture=picture)
     )
     assert board.parse_body(updated).read_state is board.BodyReadState.VALID
 
@@ -436,20 +450,18 @@ def test_expectation_picture_allows_an_animated_href_with_every_values_segment_i
 
 def test_append_expectation_refuses_an_overlong_question() -> None:
     body = agent_claim_body(MINIMAL_BLOCK_TOML)
-    card = board.ExpectationCardFields(
-        question="Q" * (board.EXPECTATION_QUESTION_MAXIMUM_CHARACTERS + 1)
-    )
+    card = ExpectationCardFields(question="Q" * (EXPECTATION_QUESTION_MAXIMUM_CHARACTERS + 1))
 
     with pytest.raises(protocol.ClaimError, match="question must be at most"):
-        board.append_expectation(body, "New question?", "yes", card=card)
+        append_expectation(body, "New question?", "yes", card=card)
 
 
 def test_append_expectation_refuses_an_empty_example() -> None:
     body = agent_claim_body(MINIMAL_BLOCK_TOML)
-    card = board.ExpectationCardFields(example="   ")
+    card = ExpectationCardFields(example="   ")
 
     with pytest.raises(protocol.ClaimError, match="example must be a non-empty string"):
-        board.append_expectation(body, "New question?", "yes", card=card)
+        append_expectation(body, "New question?", "yes", card=card)
 
 
 def test_parse_body_still_refuses_an_unknown_expectation_key() -> None:
@@ -521,7 +533,7 @@ def test_render_block_round_trips_question_example_and_a_multiline_picture() -> 
         ],
     }
 
-    reparsed = tomllib.loads(board.render_block(data))
+    reparsed = tomllib.loads(render_block(data))
 
     assert reparsed == data
 
@@ -536,15 +548,15 @@ def test_expectation_lines_reports_index_text_ruling_and_ruled_on() -> None:
         '[[expectation]]\ntext = "Settled one"\nruling = "no"\nruled_on = 2026-09-01\n'
     )
 
-    assert board.expectation_lines(body) == (
-        board.ExpectationLine(1, "Open one", None, None, default="later"),
-        board.ExpectationLine(2, "Settled one", "no", date(2026, 9, 1)),
+    assert expectation_lines(body) == (
+        ExpectationLine(1, "Open one", None, None, default="later"),
+        ExpectationLine(2, "Settled one", "no", date(2026, 9, 1)),
     )
 
 
 def test_expectation_lines_reads_question_example_and_picture() -> None:
     body = agent_claim_body(
-        board.render_block(
+        render_block(
             {
                 "version": 1,
                 "now": "N",
@@ -562,8 +574,8 @@ def test_expectation_lines_reads_question_example_and_picture() -> None:
         ).rstrip("\n")
     )
 
-    assert board.expectation_lines(body) == (
-        board.ExpectationLine(
+    assert expectation_lines(body) == (
+        ExpectationLine(
             1,
             "Ship it?",
             None,
@@ -585,30 +597,30 @@ def test_expectation_lines_reads_question_example_and_picture() -> None:
     ids=["no_block", "malformed"],
 )
 def test_expectation_lines_is_empty_for_an_unaddressable_body(body: str) -> None:
-    assert board.expectation_lines(body) == ()
+    assert expectation_lines(body) == ()
 
 
 def test_expectation_line_state_names_open_or_the_ruling_and_date() -> None:
-    open_line = board.ExpectationLine(1, "Open one", None, None)
-    ruled_line = board.ExpectationLine(2, "Settled one", "no", date(2026, 9, 1))
+    open_line = ExpectationLine(1, "Open one", None, None)
+    ruled_line = ExpectationLine(2, "Settled one", "no", date(2026, 9, 1))
 
-    assert board.expectation_line_state(open_line) == "open"
-    assert board.expectation_line_state(ruled_line) == "ruled no 2026-09-01"
+    assert expectation_line_state(open_line) == "open"
+    assert expectation_line_state(ruled_line) == "ruled no 2026-09-01"
 
 
 def test_expectation_line_summary_truncates_long_text() -> None:
-    line = board.ExpectationLine(1, "x" * 150, None, None)
+    line = ExpectationLine(1, "x" * 150, None, None)
 
-    summary = board.expectation_line_summary(line)
+    summary = expectation_line_summary(line)
 
     assert len(summary) == EXPECTATION_LINE_TEXT_MAXIMUM
     assert summary.endswith("…")
 
 
 def test_expectation_line_summary_keeps_short_text_unchanged() -> None:
-    line = board.ExpectationLine(1, "Short.", None, None)
+    line = ExpectationLine(1, "Short.", None, None)
 
-    assert board.expectation_line_summary(line) == "Short."
+    assert expectation_line_summary(line) == "Short."
 
 
 def _slice_pull_request_body(epic: int) -> str:
@@ -632,9 +644,9 @@ def test_render_block_round_trips_every_field() -> None:
         '[[slice]]\nindex = 4\ntitle = "Block contract in issue bodies"\n'
         'scope = ["src/agent_coordination/board.py"]\n'
     )
-    located = board.locate_agent_claim_block(agent_claim_body(toml_text))
+    located = locate_agent_claim_block(agent_claim_body(toml_text))
 
-    reparsed = tomllib.loads(board.render_block(located.data))
+    reparsed = tomllib.loads(render_block(located.data))
 
     assert reparsed == located.data
 
@@ -657,7 +669,7 @@ def test_render_block_places_scope_before_expectation_and_slice_tables() -> None
         "scope": ["src/widget.py"],
     }
 
-    rendered = board.render_block(data)
+    rendered = render_block(data)
 
     assert rendered.index("scope =") < rendered.index("[[expectation]]")
     assert rendered.index("scope =") < rendered.index("[[slice]]")
@@ -673,7 +685,7 @@ def test_render_block_renders_scope_sorted() -> None:
         "slice": [{"index": 1, "title": "Row", "scope": ["b.py", "a.py"]}],
     }
 
-    rendered = board.render_block(data)
+    rendered = render_block(data)
 
     assert 'scope = ["docs/plan.md", "src/widget.py"]' in rendered
     assert 'scope = ["a.py", "b.py"]' in rendered
@@ -694,7 +706,7 @@ def test_render_block_refuses_a_duplicate_scope_entry() -> None:
     }
 
     with pytest.raises(protocol.InvalidClaimMarkerError, match="duplicate paths"):
-        board.render_block(data)
+        render_block(data)
 
 
 def test_render_block_re_renders_a_canonical_scope_body_byte_exact() -> None:
@@ -707,17 +719,17 @@ def test_render_block_re_renders_a_canonical_scope_body_byte_exact() -> None:
         scope=["docs/plan.md", "src/widget.py"],
         slice=[{"index": 1, "title": "Row", "scope": ["src/agent_coordination/board.py"]}],
     )
-    located = board.locate_agent_claim_block(body)
+    located = locate_agent_claim_block(body)
     interior = body[located.content_start : located.content_end]
 
-    assert board.render_block(located.data, located.newline) == interior
+    assert render_block(located.data, located.newline) == interior
 
 
 def test_render_block_escapes_quotes_and_backslashes() -> None:
     toml_text = f'{MINIMAL_BLOCK_TOML}[[slice]]\nindex = 1\ntitle = "Quote \\" and back\\\\slash"\n'
-    located = board.locate_agent_claim_block(agent_claim_body(toml_text))
+    located = locate_agent_claim_block(agent_claim_body(toml_text))
 
-    reparsed = tomllib.loads(board.render_block(located.data))
+    reparsed = tomllib.loads(render_block(located.data))
 
     assert reparsed == located.data
 
@@ -729,10 +741,10 @@ def test_replace_agent_claim_block_preserves_crlf_and_surrounding_bytes() -> Non
         'version = 1\r\nnow = "N"\r\nnext = "X"\r\ndone_when = "D"\r\n'
         "```\r\n\r\nProse after.\r\n"
     )
-    located = board.locate_agent_claim_block(body)
+    located = locate_agent_claim_block(body)
     new_data = {**located.data, "now": "Changed"}
 
-    new_body = board.replace_agent_claim_block(body, located, new_data)
+    new_body = replace_agent_claim_block(body, located, new_data)
 
     assert new_body.startswith("Prose before.\r\n\r\n```agent-claim\r\n")
     assert new_body.endswith("```\r\n\r\nProse after.\r\n")
@@ -742,10 +754,10 @@ def test_replace_agent_claim_block_preserves_crlf_and_surrounding_bytes() -> Non
 
 def test_render_block_emits_an_empty_slice_array_after_removing_the_final_entry() -> None:
     toml_text = f'{MINIMAL_BLOCK_TOML}[[slice]]\nindex = 1\ntitle = "Only slice"\n'
-    located = board.locate_agent_claim_block(agent_claim_body(toml_text))
+    located = locate_agent_claim_block(agent_claim_body(toml_text))
     new_data = {**located.data, "slice": []}
 
-    rendered = board.render_block(new_data)
+    rendered = render_block(new_data)
 
     assert "slice = []" in rendered
     assert tomllib.loads(rendered)["slice"] == []
@@ -803,7 +815,7 @@ def test_timestamp_fails_loud_on_a_malformed_github_timestamp(raw_timestamp: str
 
 
 def test_child_skeleton_is_an_incomplete_contract_with_no_defects() -> None:
-    parsed = board.parse_body(board.BLOCK_CHILD_SKELETON)
+    parsed = board.parse_body(BLOCK_CHILD_SKELETON)
 
     assert parsed.read_state is board.BodyReadState.VALID
     assert parsed.contract_complete is False
@@ -2565,7 +2577,7 @@ def test_render_block_places_size_before_expectation_and_slice_tables() -> None:
         "size": "M",
     }
 
-    rendered = board.render_block(data)
+    rendered = render_block(data)
 
     assert rendered.index("size =") < rendered.index("[[expectation]]")
     assert rendered.index("size =") < rendered.index("[[slice]]")
@@ -2621,7 +2633,7 @@ def test_render_block_places_whole_before_expectation_and_slice_tables() -> None
         "whole": "one lane owns every adapter",
     }
 
-    rendered = board.render_block(data)
+    rendered = render_block(data)
 
     assert rendered.index("whole =") < rendered.index("[[expectation]]")
     assert rendered.index("whole =") < rendered.index("[[slice]]")
@@ -2672,12 +2684,12 @@ def test_parse_body_handles_a_body_with_no_trailing_newline() -> None:
 
 def test_locate_agent_claim_block_fails_loud_with_no_recognized_fence() -> None:
     with pytest.raises(ClaimError, match="found no recognized agent-claim fence"):
-        board.locate_agent_claim_block("## Now\nOld prose.\n")
+        locate_agent_claim_block("## Now\nOld prose.\n")
 
 
 def test_locate_agent_claim_block_fails_loud_with_an_unclosed_fence() -> None:
     with pytest.raises(ClaimError, match="found no closed agent-claim fence"):
-        board.locate_agent_claim_block("```agent-claim\nversion = 1\n")
+        locate_agent_claim_block("```agent-claim\nversion = 1\n")
 
 
 def test_parse_body_reads_an_emptied_slice_array_as_nothing_left_to_cut() -> None:

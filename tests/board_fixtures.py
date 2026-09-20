@@ -12,6 +12,7 @@ from datetime import UTC, date, datetime
 from types import MappingProxyType
 
 from agent_coordination import board, metrics, protocol
+from agent_coordination.body import render_block
 from agent_coordination.protocol import ClaimRequest
 
 BASE = "a" * 40
@@ -240,7 +241,7 @@ def complete_contract(
         "done_when": done_when,
         **block_entries,
     }
-    return agent_claim_body(board.render_block(data).rstrip("\n"))
+    return agent_claim_body(render_block(data).rstrip("\n"))
 
 
 FROZEN_TRIGGER = "eine zweite Maschine bekommt einen Grund"

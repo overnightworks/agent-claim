@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 import pytest
 
 from agent_coordination import board, items, protocol
+from agent_coordination.body import render_block
 from agent_coordination.protocol import ClaimUnavailableError, MalformedStateTreeError
 
 ITEM_ID = "aco-8f3a2c"
@@ -36,7 +37,7 @@ def _item_body(record: Mapping[str, object]) -> str:
     never hand-serialized, so a test fixture and the real writer can never
     drift apart (issue #248)."""
     data = {"version": 1, "now": "N", "next": "X", "done_when": "D", "record": dict(record)}
-    return f"Item body.\n\n```agent-claim\n{board.render_block(data)}```\n"
+    return f"Item body.\n\n```agent-claim\n{render_block(data)}```\n"
 
 
 def _defect_message(defects: tuple[board.ContractDefect, ...], field: str) -> str:

@@ -19,6 +19,7 @@ from board_fixtures import REPOSITORY
 from github_fixtures import LANDING_BRANCH, MERGE_COMMIT_SHA
 
 from agent_coordination import board, forge, github, process
+from agent_coordination.body import BLOCK_CHILD_SKELETON
 from agent_coordination.protocol import ClaimError
 
 GitHubForge = github.GitHubForge
@@ -294,16 +295,16 @@ def test_github_adapter_creates_a_child_and_links_it_as_a_sub_issue() -> None:
     client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
 
     child = client.create_child(
-        parent=79, title="Scheibe 4", body=board.BLOCK_CHILD_SKELETON, kind=board.ItemKind.TASK
+        parent=79, title="Scheibe 4", body=BLOCK_CHILD_SKELETON, kind=board.ItemKind.TASK
     )
 
     assert child == 101
     assert observed == [
         (
             ["api", "--method", "POST", f"repos/{REPOSITORY}/issues", "--input", "-"],
-            json.dumps(
-                {"title": "Scheibe 4", "body": board.BLOCK_CHILD_SKELETON, "type": "Task"}
-            ).encode("utf-8"),
+            json.dumps({"title": "Scheibe 4", "body": BLOCK_CHILD_SKELETON, "type": "Task"}).encode(
+                "utf-8"
+            ),
         ),
         (["api", f"repos/{REPOSITORY}/issues/101", "--jq", ".id"], None),
         (
@@ -363,16 +364,16 @@ def test_github_adapter_creates_an_issue_without_linking_it_as_a_child() -> None
     client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
 
     number = client._create_issue(
-        title="Scheibe 4", body=board.BLOCK_CHILD_SKELETON, kind=board.ItemKind.TASK
+        title="Scheibe 4", body=BLOCK_CHILD_SKELETON, kind=board.ItemKind.TASK
     )
 
     assert number == 101
     assert observed == [
         (
             ["api", "--method", "POST", f"repos/{REPOSITORY}/issues", "--input", "-"],
-            json.dumps(
-                {"title": "Scheibe 4", "body": board.BLOCK_CHILD_SKELETON, "type": "Task"}
-            ).encode("utf-8"),
+            json.dumps({"title": "Scheibe 4", "body": BLOCK_CHILD_SKELETON, "type": "Task"}).encode(
+                "utf-8"
+            ),
         )
     ]
 
