@@ -175,12 +175,16 @@ _LINEAGE_STAMP_FILENAME = "last-oid"
 #   against this checkout right after the fetch (issue #237 finding 25,
 #   reproduced in the audit, and again by
 #   `test_claim_ages_survives_a_gc_prune_of_the_just_fetched_history`);
-# - it makes the read atomic with the fetch itself, so a concurrent `git
-#   fetch` anywhere else in this same worktree -- which overwrites the one
-#   shared `FETCH_HEAD` file regardless of what it fetches -- can never be
-#   read as this fetch's own result (issue #310 finding 48: `aco rescope`
-#   once read a fixer agent's own concurrent `git fetch origin` as the state
-#   tip because both shared this worktree's `FETCH_HEAD`).
+# - it decouples the read from `FETCH_HEAD`, so a concurrent `git fetch`
+#   anywhere else in this same worktree -- which overwrites the one shared
+#   `FETCH_HEAD` file regardless of what it fetches -- can never be read as
+#   this fetch's own result (issue #310 finding 48: `aco rescope` once read
+#   a fixer agent's own concurrent `git fetch origin` as the state tip
+#   because both shared this worktree's `FETCH_HEAD`). The fetch itself
+#   lands the anchor in one atomic git ref update, but the read-back that
+#   follows, the lineage check against this worktree's stamp, and the
+#   stamp write are three separate steps: two concurrent `aco` processes in
+#   this same worktree are not serialised across them (owner: issue #418).
 # `refs/worktree/*` is git's own per-worktree ref namespace (never shared
 # across linked worktrees), the same worktree-private guarantee
 # `_lineage_stamp_path` already relies on, so anchoring here never touches
