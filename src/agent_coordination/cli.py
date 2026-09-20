@@ -3940,20 +3940,20 @@ def _emit_json(ok: bool, reason: StrEnum, **payload: object) -> None:
 
 
 class PreDispatchReason(StrEnum):
-    """The one `reason` every refusal raised before the chosen command's own
-    handler runs reports under `--json` (issue #425): agent identity
-    resolution, and `release`'s own branch and override checks, refuse above
-    every handler, so `main`'s own sink owns their envelope here instead of
-    each command carrying a second `precondition_failed` member for a
-    refusal its handler never sees."""
+    """The one `reason` every refusal raised before the chosen command starts
+    reports under `--json` (issue #425): agent identity resolution, and
+    `release`'s own branch and override checks, refuse before any command
+    runs, so `_dispatch` owns their envelope here instead of each command
+    carrying a second `precondition_failed` member for a refusal it never
+    sees itself."""
 
     PRECONDITION_FAILED = "precondition_failed"
 
 
 def _refuse(reason: StrEnum, error: protocol.ClaimError, *, as_json: bool) -> int:
     """One shared refusal report for every `--json` command (issue #396) and
-    for `main`'s own pre-dispatch sink (issue #425): `ERROR: <sentence>` on
-    stderr exactly as `main`'s own generic handler always printed it, then
+    for `_dispatch`'s own pre-start checks (issue #425): `ERROR: <sentence>`
+    on stderr exactly as `main`'s own generic sink always printed it, then
     -- only under `--json` -- the envelope naming this call's own reason
     instead of the dropped `error` key. Exit `2`, the one exit every refusal
     past the parser still uses."""
@@ -6722,16 +6722,35 @@ def _dispatch_item(parsed: argparse.Namespace) -> int:
     return _cmd_item_show(parsed, _ReadSession(forge=_LazyForge(parsed.repo)))
 
 
-def _dispatch(parsed: argparse.Namespace) -> int:
+def _resolved_before_the_command_starts(parsed: argparse.Namespace) -> str | None:
+    """Everything a writer needs settled before its own command starts
+    (issue #425): the agent identity it claims under, and `release`'s own
+    branch and override checks, which read the checkout rather than the
+    claim record. Returns `release`'s branch, `None` for every other
+    command."""
     if parsed.command in {"claim", "release", "rescope", "land"}:
         parsed.agent = checkout.resolved_agent(parsed.agent)
+    return _release_branch_for(parsed) if parsed.command == "release" else None
+
+
+def _dispatch(parsed: argparse.Namespace) -> int:
+    # Only the pre-start checks report through the shared envelope (issue
+    # #425); a refusal a command raises itself owns its own `reason`, so the
+    # dispatch below stays outside this boundary.
+    try:
+        release_branch = _resolved_before_the_command_starts(parsed)
+    except protocol.ClaimError as error:
+        return _refuse(
+            PreDispatchReason.PRECONDITION_FAILED,
+            error,
+            as_json=bool(getattr(parsed, "json", False)),
+        )
     if parsed.command == "item":
         return _dispatch_item(parsed)
     entry = _COMMAND_TABLE[parsed.command]
     if entry.session is _CommandSession.FORGE_FREE:
         result = entry.handler(parsed)
         return 0 if result is None else result
-    release_branch = _release_branch_for(parsed) if parsed.command == "release" else None
     forge_accessor = _LazyForge(parsed.repo)
     if parsed.command == "board" and parsed.serve:
         # `board --serve` writes through a click (issue #280), so it needs
@@ -6871,13 +6890,10 @@ def _read_status_body_or_dispatch(parsed: argparse.Namespace) -> int:
 def main(arguments: list[str] | None = None) -> int:
     # One `ERROR:` site for parsing (`board.parse_item_reference` is an
     # argparse `type=` whose own refusal is a `ClaimError`), a local
-    # workspace operation, and an ordinary dispatch (issue #372). A refusal
-    # raised before the chosen command's own handler -- identity
-    # resolution, and `release`'s own branch and override checks -- reports
-    # through the same envelope here (issue #425), so a `--json` caller
-    # never reads a bare stderr sentence; a parser refusal has no parsed
-    # `--json` to read yet, so that one stays text.
-    parsed: argparse.Namespace | None = None
+    # workspace operation, and an ordinary dispatch (issue #372). Whatever
+    # reaches here prints the plain sentence alone: a parser refusal has no
+    # parsed `--json` to read yet, and a refusal a command raises past its
+    # own reported vocabulary must not be dressed as one (issue #425).
     try:
         parsed = _parser().parse_args(arguments)
         if parsed.command in {"_run-at-login", "register", "run", "login"}:
@@ -6886,11 +6902,8 @@ def main(arguments: list[str] | None = None) -> int:
             return _protect()
         return _read_status_body_or_dispatch(parsed)
     except protocol.ClaimError as error:
-        return _refuse(
-            PreDispatchReason.PRECONDITION_FAILED,
-            error,
-            as_json=bool(getattr(parsed, "json", False)),
-        )
+        print(f"{CLI_ERROR_PREFIX}{error}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

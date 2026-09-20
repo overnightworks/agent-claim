@@ -10787,8 +10787,8 @@ def test_cli_refusals_before_the_handler_print_the_shared_envelope(
     branch: str | None,
 ) -> None:
     """Issue #425 review: identity resolution and `release`'s own branch and
-    override checks (REL-06..08) refuse above every handler, so `main`'s own
-    sink prints the envelope for them (OUT-05); the text form keeps the bare
+    override checks (REL-06..08) refuse before the named command starts, so
+    they print the shared envelope (OUT-05); the text form keeps the bare
     `ERROR:` sentence it always printed."""
     _prepare_pre_dispatch_refusal(monkeypatch, agent, branch)
     text_status = issue_claim.main(["--repo", "example/agent-claim", *arguments])
@@ -15105,6 +15105,10 @@ def test_cli_brief_reports_branch_not_found_when_the_claim_branch_is_gone(
     ]
 
 
+def _unreadable_item_reference(_number: int) -> forge.ItemReference:
+    raise ClaimError("simulated forge read failure")
+
+
 def test_cli_brief_refuses_when_the_lane_tip_read_fails_outright(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
@@ -15130,6 +15134,29 @@ def test_cli_brief_refuses_when_the_lane_tip_read_fails_outright(
 
     assert status == 2
     assert capsys.readouterr().err == "ERROR: simulated git failure\n"
+
+
+def test_cli_brief_json_leaves_an_unspecified_forge_failure_as_the_bare_sentence(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Issue #425 review: the shared `precondition_failed` envelope covers
+    only what runs before a command starts. A failure `brief` itself does not
+    name keeps the plain `ERROR:` sentence and exit `2`, never a `reason`
+    outside BRIEF's own vocabulary."""
+    repository, base, _tip = _scratch_lane_repository(tmp_path)
+    client = FakeForge()
+    monkeypatch.setattr(github, "GitHubForge", lambda _repository: client)
+    monkeypatch.setattr(client, "item_reference", _unreadable_item_reference)
+    claim = _brief_claim(base)
+    _patch_store_write(monkeypatch, claim, ages={claim.claim_id: datetime(2026, 8, 20, tzinfo=UTC)})
+    monkeypatch.chdir(repository)
+
+    status = issue_claim.main(["--repo", "example/agent-claim", "brief", "258", "--json"])
+
+    captured = capsys.readouterr()
+    assert status == 2
+    assert captured.err == "ERROR: simulated forge read failure\n"
+    assert captured.out == ""
 
 
 def test_cli_brief_json_prints_one_object_with_body_claim_tip_and_touched(
