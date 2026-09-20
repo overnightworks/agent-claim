@@ -572,6 +572,47 @@ def test_board_projects_fixture_json_without_github_writes(
     assert 11 not in [item["number"] for item in payload["ready_now"]]
 
 
+def test_board_json_pins_the_raw_envelope_text_for_a_single_item(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """The raw bytes `board` prints on success (OUT-nn's own key order,
+    `ok`/`reason` first, and its trailing newline), not just the parsed dict
+    `test_board_projects_fixture_json_without_github_writes` already covers."""
+    _single_item_board_environment(monkeypatch, tmp_path)
+
+    assert issue_claim.main(["--repo", "example/agent-claim", "board", "--json"]) == 0
+
+    assert capsys.readouterr().out == (
+        '{"ok": true, "reason": "projected", "items": [{"number": 10, "title": "Plain item", '
+        '"labels": [], "kind": null, "priority_category": 6, "priority_bucket": "unlabelled", '
+        '"priority_order": 0, "container": null, "container_parent": null, "scope": null, '
+        '"contract": {"now": "Work is ready.", "next": "Ship #10.", '
+        '"done_when": "The work is merged.", "defects": []}, "next_step": "Ship #10.", '
+        '"contract_complete": true, "projectionless_idea": false, "expectation_state": "-", '
+        '"expectation_progress": {"open": 0, "total": 0}, "ruling_landings": null, '
+        '"ruling_old": null, "frozen_trigger": null, "freed_on": null, "freed_days": null, '
+        '"stage": "text-only", "age_days": 1, "idle_days": 1, "active_claim": null, '
+        '"claim_age": null, "claim_old": false, "unblocks_count": 0, "score": -10, '
+        '"actionable": true, "actionable_reason": null, "size": null, "has_slices": false, '
+        '"estimate": null, "open_blockers": [], "foreign_blockers": []}], '
+        '"ready_now": [{"number": 10, "title": "Plain item", "labels": [], "kind": null, '
+        '"priority_category": 6, "priority_bucket": "unlabelled", "priority_order": 0, '
+        '"container": null, "container_parent": null, "scope": null, '
+        '"contract": {"now": "Work is ready.", "next": "Ship #10.", '
+        '"done_when": "The work is merged.", "defects": []}, "next_step": "Ship #10.", '
+        '"contract_complete": true, "projectionless_idea": false, "expectation_state": "-", '
+        '"expectation_progress": {"open": 0, "total": 0}, "ruling_landings": null, '
+        '"ruling_old": null, "frozen_trigger": null, "freed_on": null, "freed_days": null, '
+        '"stage": "text-only", "age_days": 1, "idle_days": 1, "active_claim": null, '
+        '"claim_age": null, "claim_old": false, "unblocks_count": 0, "score": -10, '
+        '"actionable": true, "actionable_reason": null, "size": null, "has_slices": false, '
+        '"estimate": null, "open_blockers": [], "foreign_blockers": []}], "stale": [], '
+        '"recovery": [], "landings": [], "uncut": [], "requests": 3, '
+        '"measurements": {"classes": [], "unfinished": 0, "unparsed": 0, "since": null, '
+        '"as_of": "2026-08-21"}}\n'
+    )
+
+
 def _lane(item: str, day: int, hours: int) -> metrics.LaneEvent:
     return metrics.LaneEvent(
         item=item,
@@ -1218,6 +1259,19 @@ def test_rulings_renders_text_json_and_empty_success(
     assert json.loads(capsys.readouterr().out) == {"ok": True, "reason": "listed", "rulings": []}
 
 
+def test_rulings_json_pins_the_raw_envelope_text_for_the_empty_success(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """The raw bytes `rulings` prints on success (OUT-nn's own key order,
+    `ok`/`reason`/`rulings`, and its trailing newline), not just the parsed
+    dict `test_rulings_renders_text_json_and_empty_success` already covers."""
+    _configured_board_client(monkeypatch, tmp_path, open_issues=())
+
+    assert issue_claim.main(["--repo", "example/agent-claim", "rulings", "--json"]) == 0
+
+    assert capsys.readouterr().out == '{"ok": true, "reason": "listed", "rulings": []}\n'
+
+
 def test_rulings_json_carries_question_example_and_picture(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
@@ -1564,6 +1618,28 @@ def test_next_reports_the_highest_scored_actionable_item(
         assert rendered == expected_output
     else:
         assert json.loads(rendered) == expected_output
+
+
+def test_next_json_pins_the_raw_envelope_text_for_a_work_item_success(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """The raw bytes `next` prints on success (OUT-nn's own key order,
+    `ok`/`reason` first, and its trailing newline), not just the parsed dict
+    `test_next_reports_the_highest_scored_actionable_item` already covers."""
+    _configured_board_client(
+        monkeypatch, tmp_path, open_issues=_TOP_AND_BLOCKED, dependencies=_BLOCKED_BY_ELEVEN
+    )
+
+    assert issue_claim.main(["--repo", "example/agent-claim", "next", "--json"]) == 0
+
+    assert capsys.readouterr().out == (
+        '{"ok": true, "reason": "work_item", "recovery": [], '
+        '"skipped": [{"number": 12, "reason": "blocked by #11"}], '
+        '"parallel": {"first_scope_unknown": true, "candidates": [], "scope_unknown": []}, '
+        '"close": [], "number": 11, "score": 10, "title": "Top work", "next": "Claim #11.", '
+        '"command": "aco claim 11 --scope <paths>", "ruling_landings": null, '
+        '"ruling_old": null}\n'
+    )
 
 
 PULLED_WITH_REFINING_FIRST = (
