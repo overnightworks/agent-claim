@@ -817,6 +817,83 @@ def test_github_adapter_reads_a_successful_combined_status_aggregate_as_a_named_
     assert readiness.checks == (forge.CheckRun("sonarcloud", "success"),)
 
 
+def test_github_adapter_landing_rejects_a_malformed_status_summary_shape() -> None:
+    """Issue #405 CI coverage follow-up: the combined-status summary read is
+    exactly one JSON value; more than one -- `gh`'s own paginated-array
+    shape, say -- is a malformed summary, not a valid aggregate verdict."""
+    two_values = json.dumps({"state": "success", "total": 0}) + json.dumps(
+        {"state": "success", "total": 0}
+    )
+
+    def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
+        path = arguments[1]
+        if path == _READINESS_PULL_REQUEST_PATH:
+            return json.dumps(
+                {"state": "open", "headSha": MERGE_COMMIT_SHA, "mergeableState": "clean"}
+            )
+        if path.startswith(_READINESS_CHECK_RUNS_PATH):
+            return ""
+        if path == _READINESS_STATUS_PATH:
+            return two_values
+        assert path.startswith(_READINESS_STATUS_PATH)
+        return ""
+
+    client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
+
+    with pytest.raises(ClaimError, match="malformed commit status summary"):
+        client.landing_readiness(57)
+
+
+def test_github_adapter_landing_rejects_a_malformed_status_summary_fields() -> None:
+    """Issue #405 CI coverage follow-up: a combined-status summary whose own
+    `state`/`total` fields fail their own shape check -- a negative `total`,
+    here -- refuses as malformed, the field-level defect beside
+    `test_github_adapter_landing_rejects_a_malformed_status_summary_shape`'s
+    "more than one value" defect."""
+
+    def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
+        path = arguments[1]
+        if path == _READINESS_PULL_REQUEST_PATH:
+            return json.dumps(
+                {"state": "open", "headSha": MERGE_COMMIT_SHA, "mergeableState": "clean"}
+            )
+        if path.startswith(_READINESS_CHECK_RUNS_PATH):
+            return ""
+        if path == _READINESS_STATUS_PATH:
+            return json.dumps({"state": "success", "total": -1})
+        assert path.startswith(_READINESS_STATUS_PATH)
+        return ""
+
+    client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
+
+    with pytest.raises(ClaimError, match="malformed commit status summary"):
+        client.landing_readiness(57)
+
+
+def test_github_adapter_landing_rejects_a_malformed_status_name() -> None:
+    """Issue #405 CI coverage follow-up: a combined-status names page entry
+    with no usable `name` field refuses loud, never silently dropped from
+    the refusal sentence it would otherwise name."""
+
+    def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
+        path = arguments[1]
+        if path == _READINESS_PULL_REQUEST_PATH:
+            return json.dumps(
+                {"state": "open", "headSha": MERGE_COMMIT_SHA, "mergeableState": "clean"}
+            )
+        if path.startswith(_READINESS_CHECK_RUNS_PATH):
+            return ""
+        if path == _READINESS_STATUS_PATH:
+            return json.dumps({"state": "failure", "total": 1})
+        assert path.startswith(_READINESS_STATUS_PATH)
+        return json.dumps({"name": ""})
+
+    client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
+
+    with pytest.raises(ClaimError, match=r"malformed commit status$"):
+        client.landing_readiness(57)
+
+
 def test_github_adapter_accepts_a_mergeable_state_it_has_never_seen_before() -> None:
     """Issue #405: `mergeable_state` is GitHub's own open vocabulary --
     read verbatim, never a closed set this adapter could refuse a genuine,

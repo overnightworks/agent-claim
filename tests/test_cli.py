@@ -12052,6 +12052,49 @@ def test_release_merged_accepts_an_issueless_lane_that_landed_without_an_item(
     assert store.fetch_state(worktree=Path("."), remote="origin").claims == {}
 
 
+def test_release_merged_refuses_an_issueless_lane_landing_off_trunk(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #405 CI coverage follow-up: `_trunk_no_item_landing_defect`'s
+    own off-trunk branch, the `LaneIdentity` counterpart to
+    `test_release_merged_refuses_a_landing_it_cannot_verify`'s `off-trunk`
+    case -- an issue-less lane's merge commit missing from the walked
+    trunk refuses exactly the same way."""
+    merged_release_client(monkeypatch, body="No-Item: docs", lane=True, landings=())
+
+    assert issue_claim.main(["--repo", REPOSITORY, "release", "--merged", "12"]) == 2
+
+    assert capsys.readouterr().err == (
+        f"ERROR: merge commit {MERGE_COMMIT_SHA} of pull request #12 "
+        "is not on the first-parent trunk\n"
+    )
+
+
+def test_release_merged_refuses_an_issueless_lane_landing_with_a_classification_defect(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #405 CI coverage follow-up: `_trunk_no_item_landing_defect`
+    surfaces the walked trunk's own `ClassificationDefect` message
+    verbatim when the merge commit's own trailer is malformed, never a
+    generic "no `No-Item:` trailer" refusal."""
+    merged_release_client(
+        monkeypatch,
+        body="No-Item: docs",
+        lane=True,
+        landings=(
+            _trunk_landing(
+                MERGE_COMMIT_SHA, board.ClassificationDefect("names two conflicting issues")
+            ),
+        ),
+    )
+
+    assert issue_claim.main(["--repo", REPOSITORY, "release", "--merged", "12"]) == 2
+
+    assert capsys.readouterr().err == (
+        f"ERROR: merge commit {MERGE_COMMIT_SHA} of pull request #12 names two conflicting issues\n"
+    )
+
+
 @pytest.mark.parametrize(
     ("scenario", "reason"),
     [
@@ -12771,13 +12814,18 @@ def _land_preflight_client(
     return client
 
 
-def _land_repository(tmp_path: Path, *, set_head: bool = True) -> Path:
-    """A real bare-remote-backed repository (issue #405) with `LANDING_BRANCH`
+def _land_repository(
+    tmp_path: Path, *, set_head: bool = True, branch: str = LANDING_BRANCH
+) -> Path:
+    """A real bare-remote-backed repository (issue #405) with `branch`
     diverged from `main` by one pushed commit and `main` itself checked out
     clean -- `aco land`'s own merge, branch deletion, and fast-forward run
     against real git here, the one proof a fake checkout cannot give.
     `set_head=False` skips recording `origin/HEAD`, the one precondition a
-    test of the "default branch unknown" refusal needs missing."""
+    test of the "default branch unknown" refusal needs missing. `branch`,
+    when it names a lane branch instead of the default `LANDING_BRANCH`,
+    stands the real checkout an issue-less (`No-Item:`) land proves against
+    (issue #405 CI coverage follow-up)."""
     repo, _remote = _real_repository_with_bare_remote(tmp_path)
     (repo / "base.txt").write_text("base\n")
     _real_git(repo, "add", "base.txt")
@@ -12786,11 +12834,11 @@ def _land_repository(tmp_path: Path, *, set_head: bool = True) -> Path:
         _push_repository_trunk(repo, "origin")
     else:
         _real_git(repo, "push", "-q", "origin", "main")
-    _real_git(repo, "checkout", "-q", "-b", LANDING_BRANCH)
+    _real_git(repo, "checkout", "-q", "-b", branch)
     (repo / "feature.txt").write_text("feature\n")
     _real_git(repo, "add", "feature.txt")
     _real_git(repo, "commit", "-q", "-m", "feature work")
-    _real_git(repo, "push", "-q", "origin", LANDING_BRANCH)
+    _real_git(repo, "push", "-q", "origin", branch)
     _real_git(repo, "checkout", "-q", "main")
     return repo
 
@@ -12801,22 +12849,26 @@ def _land_scenario(
     *,
     set_head: bool = True,
     claim_agent: str = "Ada",
+    branch: str = LANDING_BRANCH,
+    issue: int | None = WORK_ITEM_ISSUE,
+    body: str | None = None,
 ) -> tuple[Path, FakeForge]:
     """`claim_agent`, when it differs from the `Ada` session identity set
     below, stands the same foreign claim `_land_preflight_client`'s own
     `claim_agent` proves against a fake reader (issue #405 round-4 finding
     5), but here against `land`'s real merge/checkout path, so a
     `--coordinator-override --role coordinator` land of it can be proven
-    reaching the merge, not just proven refused without those flags."""
-    repo = _land_repository(tmp_path, set_head=set_head)
-    standing = request(
-        "landing", claim_agent, issue=WORK_ITEM_ISSUE, branch=LANDING_BRANCH, scope=("src",)
-    )
+    reaching the merge, not just proven refused without those flags.
+    `branch`/`issue`/`body`, when they name an issue-less lane instead of
+    the default `Work-Item:` scenario, stand `_land_preflight`'s own
+    `LaneIdentity` branch (issue #405 CI coverage follow-up)."""
+    repo = _land_repository(tmp_path, set_head=set_head, branch=branch)
+    standing = request("landing", claim_agent, issue=issue, branch=branch, scope=("src",))
     client = FakeForge()
     client.landings[12] = landing_pull_request(
-        body=f"Work-Item: #{WORK_ITEM_ISSUE}\n\nCloses #{WORK_ITEM_ISSUE}",
+        body=body or f"Work-Item: #{WORK_ITEM_ISSUE}\n\nCloses #{WORK_ITEM_ISSUE}",
         merged=False,
-        head_ref_name=LANDING_BRANCH,
+        head_ref_name=branch,
     )
     client.readiness_by_number[12] = _land_readiness()
     client.merge_repository = repo
@@ -12957,6 +13009,26 @@ def test_land_refuses_a_closed_work_item_before_its_own_missing_claim(
     assert client.merge_calls == []
 
 
+def test_land_refuses_a_classification_defect_from_a_missing_claim(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #405 CI coverage follow-up: `_classification_defect`'s own
+    claim-check branch inside `_land_preflight` -- distinct from
+    `test_land_refuses_a_classification_defect_reusing_checks_own_rules`'s
+    shape defect and `test_land_refuses_a_closed_work_item_before_its_own_
+    missing_claim`'s LANDCMD-08-first ordering -- an *open* work item with
+    no live claim at all refuses by its own missing claim."""
+    client = _land_preflight_client(monkeypatch, readiness=_land_readiness(), claimed=False)
+
+    assert issue_claim.main(["--repo", REPOSITORY, "land", "12"]) == 2
+
+    assert capsys.readouterr().err == (
+        f"ERROR: pull request #12 has no active claim for #{WORK_ITEM_ISSUE} "
+        f"on branch {LANDING_BRANCH!r}\n"
+    )
+    assert client.merge_calls == []
+
+
 def test_land_refuses_a_foreign_claim_before_the_merge(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -13033,6 +13105,28 @@ def test_land_merges_a_green_pull_request_and_runs_the_release_path(
     assert client.landings[12].merge_commit == trunk_after
     out = capsys.readouterr().out
     assert "freed:" in out and "next:" in out
+
+
+def test_land_merges_an_issueless_lane_pull_request(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Issue #405 CI coverage follow-up: `_land_preflight`'s own
+    `LaneIdentity` branch -- an issue-less, `No-Item:` pull request -- merges
+    through `land`'s real path exactly as a `Work-Item:` one does
+    (`test_land_merges_a_green_pull_request_and_runs_the_release_path`
+    proves the work-item branch): no item to close, but the claim releases."""
+    _repo, client = _land_scenario(
+        monkeypatch, tmp_path, branch=LANE_BRANCH, issue=None, body="No-Item: docs"
+    )
+
+    assert issue_claim.main(["--repo", REPOSITORY, "land", "12"]) == 0
+
+    [(number, head_sha, _title, body)] = client.merge_calls
+    assert (number, head_sha) == (12, MERGE_COMMIT_SHA)
+    assert body.strip().split("\n\n")[-1] == "No-Item: docs"
+    assert client.deleted_branches == [LANE_BRANCH]
+    assert client.closed_issues == set()
+    assert store.fetch_state(worktree=Path("."), remote="origin").claims == {}
 
 
 def test_land_merges_a_foreign_claim_under_a_coordinator_override(
