@@ -3300,7 +3300,7 @@ def test_apply_release_intent_refuses_a_coordinator_override_without_coordinator
         coordinator_override=True,
     )
 
-    with pytest.raises(protocol.ClaimUnavailableError, match="requires role coordinator"):
+    with pytest.raises(protocol.ClaimUnavailableError, match="requires --role coordinator"):
         protocol.apply(claimed, release)
 
 

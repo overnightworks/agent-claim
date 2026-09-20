@@ -369,7 +369,7 @@ def test_apply_landing_intent_allows_a_coordinator_override() -> None:
         ),
         pytest.param(
             lambda: _landing_intent(coordinator_override=True),
-            "requires role coordinator",
+            "requires --role coordinator",
             id="override-without-coordinator-role",
         ),
         pytest.param(
