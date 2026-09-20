@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import io
 import json
@@ -13878,17 +13879,35 @@ def test_a_dash_dash_ends_the_options_of_its_own_level_only(
         assert captured.out == ""
 
 
-def test_a_dash_dash_before_the_command_leaves_that_commands_flags_alone(
+def _stock_argparse_reads_a_dash_dash_as_the_command_name() -> bool:
+    """Ask this interpreter's own argparse what a leading `--` becomes before
+    a subcommand action: the command name, or nothing at all. CPython changed
+    that within a release series, so the answer is measured rather than read
+    off a version number."""
+    parser = argparse.ArgumentParser(prog="oracle", add_help=False)
+    parser.add_subparsers(dest="command", required=True).add_parser("status")
+
+    with contextlib.redirect_stderr(io.StringIO()):
+        try:
+            parser.parse_args(["--", "status"])
+        except SystemExit:
+            return True
+    return False
+
+
+def test_a_dash_dash_before_the_command_follows_the_parse_argparse_made(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """The mode follows the parse argparse actually made, never the raw
-    tokens (issue #432). CPython 3.12 hands a leading `--` past the
-    subcommand action, so `status` is chosen and reads the `--json` behind
-    it -- the envelope; 3.11 refuses `--` as the command name itself, so no
-    command was ever chosen that could declare the flag."""
+    tokens (issue #432). Where this interpreter's argparse drops a leading
+    `--` before the subcommand action, `status` is chosen and reads the
+    `--json` behind it -- the envelope; where that `--` reaches the action it
+    is the command name nobody declares, so no command was ever chosen that
+    could declare the flag. Which of the two a CPython release does is a
+    change in argparse itself, so the oracle above measures it here."""
     arguments = ["--", "status", "--json", "--nope"]
 
-    if sys.version_info < (3, 12):
+    if _stock_argparse_reads_a_dash_dash_as_the_command_name():
         with pytest.raises(SystemExit) as refused:
             issue_claim.main(arguments)
         assert refused.value.code == 2
