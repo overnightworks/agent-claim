@@ -8392,7 +8392,9 @@ def test_cli_claim_and_release_accept_json_while_parent_and_bootstrap_reject_it(
     assert released.json is True
     assert omitted_claim.json is False
     assert omitted_release.json is False
-    assert issue_claim.main(["--json", "status"]) == 2
+    with pytest.raises(SystemExit) as refused_parent:
+        issue_claim.main(["--json", "status"])
+    assert refused_parent.value.code == 2
     with pytest.raises(SystemExit) as refused_bootstrap:
         issue_claim.main(["bootstrap", "--json"])
     assert refused_bootstrap.value.code == 2
@@ -13785,9 +13787,9 @@ def test_a_refused_parse_under_json_prints_the_invalid_usage_envelope(
     arguments: list[str], message: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """OUT-06 (issue #432): a `--json` caller reads one object for every
-    refusal, including the ones the parser itself raises before any command
-    is chosen -- an outcome flag it requires, a flag it does not know, and a
-    positional value its own reader refuses."""
+    refusal its command's own parse raises before that command ever runs --
+    an outcome flag it requires, a flag it does not know, and a positional
+    value its own reader refuses."""
     status = issue_claim.main([*arguments, "--json"])
 
     captured = capsys.readouterr()
@@ -13840,6 +13842,60 @@ def test_an_abbreviated_json_flag_asks_for_the_envelope_too(
     the prefix, so argparse accepts it and the refusal answers in the shape
     that caller asked for (issue #432)."""
     status = issue_claim.main(["release", "42", "--jso"])
+
+    captured = capsys.readouterr()
+    assert status == 2
+    _assert_json_refusal_object(captured.err, captured.out, reason="invalid_usage")
+
+
+@pytest.mark.parametrize(
+    ("arguments", "envelope"),
+    [
+        pytest.param(
+            ["status", "--json", "--", "--nope"], True, id="json-before-the-commands-own-dash-dash"
+        ),
+        pytest.param(
+            ["status", "--", "--json"], False, id="json-behind-the-commands-own-dash-dash"
+        ),
+    ],
+)
+def test_a_dash_dash_ends_the_options_of_its_own_level_only(
+    arguments: list[str], envelope: bool, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A `--` ends the options of the parser level that reads it and of no
+    other (issue #432): `status --json -- --nope` still asked for the
+    envelope, while behind `status`'s own `--` the very same spelling is
+    just the item reference `status` refuses. Both refusals are `status`'s
+    own item reader, so the tokens alone never decide the shape."""
+    status = issue_claim.main(arguments)
+
+    captured = capsys.readouterr()
+    assert status == 2
+    assert captured.err.startswith("ERROR: ")
+    if envelope:
+        _assert_json_refusal_object(captured.err, captured.out, reason="invalid_usage")
+    else:
+        assert captured.out == ""
+
+
+def test_a_dash_dash_before_the_command_leaves_that_commands_flags_alone(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The mode follows the parse argparse actually made, never the raw
+    tokens (issue #432). CPython 3.12 hands a leading `--` past the
+    subcommand action, so `status` is chosen and reads the `--json` behind
+    it -- the envelope; 3.11 refuses `--` as the command name itself, so no
+    command was ever chosen that could declare the flag."""
+    arguments = ["--", "status", "--json", "--nope"]
+
+    if sys.version_info < (3, 12):
+        with pytest.raises(SystemExit) as refused:
+            issue_claim.main(arguments)
+        assert refused.value.code == 2
+        assert capsys.readouterr().out == ""
+        return
+
+    status = issue_claim.main(arguments)
 
     captured = capsys.readouterr()
     assert status == 2

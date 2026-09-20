@@ -943,6 +943,7 @@ class _RecordingSubParsersAction(argparse._SubParsersAction):
     depends on."""
 
     chosen: argparse.ArgumentParser | None = None
+    handed_down: tuple[str, ...] = ()
 
     def __call__(
         self,
@@ -951,8 +952,9 @@ class _RecordingSubParsersAction(argparse._SubParsersAction):
         values: str | Sequence[Any] | None,
         option_string: str | None = None,
     ) -> None:
-        name, *_ = cast(Sequence[str], values)
+        name, *handed_down = cast(Sequence[str], values)
         self.chosen = self._name_parser_map.get(name)
+        self.handed_down = tuple(handed_down)
         super().__call__(parser, namespace, values, option_string)
 
 
@@ -6984,14 +6986,12 @@ def _read_status_body_or_dispatch(parsed: argparse.Namespace) -> int:
     return _dispatch(parsed)
 
 
-def _chosen_subparser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser | None:
-    """The subcommand parser this parse selected under `parser`, or `None`
-    when it never chose one."""
-    subcommands = next(
+def _subcommands(parser: argparse.ArgumentParser) -> _RecordingSubParsersAction | None:
+    """`parser`'s own subcommand action, or `None` for a leaf command."""
+    return next(
         (action for action in parser._actions if isinstance(action, _RecordingSubParsersAction)),
         None,
     )
-    return None if subcommands is None else subcommands.chosen
 
 
 def _spells_json_flag(token: str, parser: argparse.ArgumentParser) -> bool:
@@ -7008,20 +7008,29 @@ def _spells_json_flag(token: str, parser: argparse.ArgumentParser) -> bool:
     return [option for option in declared if option.startswith(spelling)] == [JSON_FLAG]
 
 
+def _level_options(tokens: tuple[str, ...]) -> tuple[str, ...]:
+    """The tokens one parser level still reads as options. A bare `--` ends
+    that level's options and nothing else's: argparse marks the rest of this
+    level's tokens as non-options, then hands what follows the command name
+    down untouched, and the next level scans it for a `--` of its own."""
+    return tokens[: tokens.index(LONG_OPTION_PREFIX)] if LONG_OPTION_PREFIX in tokens else tokens
+
+
 def _asked_for_json(root: argparse.ArgumentParser, given: list[str]) -> bool:
     """Whether this invocation asked for JSON, answered by the parsers it
     reached rather than by the raw tokens alone (issue #432): only a command
     declaring `--json` can answer in the envelope, so `aco bootstrap --json`
     stays argparse's own text, while `aco release --jso` -- an abbreviation
-    argparse accepts -- is JSON. A bare `--` ends argparse's options, so
-    nothing behind it is a flag."""
-    options = given[: given.index(LONG_OPTION_PREFIX)] if LONG_OPTION_PREFIX in given else given
-    parser: argparse.ArgumentParser | None = root
-    while parser is not None:
-        if any(_spells_json_flag(token, parser) for token in options):
+    argparse accepts -- is JSON. Each level is asked about its own tokens,
+    the ones argparse handed it, so a `--` cuts that level alone."""
+    parser, tokens = root, tuple(given)
+    while True:
+        if any(_spells_json_flag(token, parser) for token in _level_options(tokens)):
             return True
-        parser = _chosen_subparser(parser)
-    return False
+        subcommands = _subcommands(parser)
+        if subcommands is None or subcommands.chosen is None:
+            return False
+        parser, tokens = subcommands.chosen, subcommands.handed_down
 
 
 def main(arguments: list[str] | None = None) -> int:
