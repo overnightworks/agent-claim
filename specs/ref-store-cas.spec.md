@@ -67,7 +67,7 @@ exit `2`, exactly as `specs/claim-record.spec.md` already documents.
 - [ ] [CAS-09] This worktree's own last-observed tip is stamped at `<git-dir>/aco/last-oid` -- private to it, never shared with another linked worktree of the same checkout.
 - [ ] [CAS-10] A worktree with no stamp yet at `<git-dir>/aco/last-oid` accepts any tip its first fetch reads, never refusing `... the ref may have been rewritten` (CAS-11).
 - [ ] [CAS-11] A fetched tip that is not a descendant of this worktree's own stamp refuses `refs/aco/state moved from <old> to <new> without <old> as an ancestor of the new tip; the ref may have been rewritten`.
-- [ ] [CAS-48] A lineage check's `merge-base --is-ancestor` exiting anything but `0` or `1` refuses `cannot check whether <old> is an ancestor of <new>: <detail>`, never "the ref may have been rewritten".
+- [ ] [CAS-48] A lineage check that cannot run refuses `cannot check whether <old> is an ancestor of <new>: <detail>`, never "the ref may have been rewritten" (see E-CAS-07).
 - [ ] [CAS-12] A worktree that observed the ref, then fetches again after it was deleted, refuses `refs/aco/state was previously observed at <old> but is now absent; the ref may have been deleted`.
 
 ## The compare-and-swap transition and its retries
@@ -247,5 +247,15 @@ Setup: bare-remote, bootstrapped, a rejected push whose commit actually landed, 
 ```console
 $ aco claim 42 --scope README.md
 2> ERROR: cannot read commit <sha> while searching for operation_id <id>: <detail>
+exit 2
+```
+
+### E-CAS-07 — a lineage check that cannot run at all
+
+Setup: bare-remote, bootstrapped, this worktree's own stamped commit no longer resolvable in the local repository (a corrupted or pruned object store)
+
+```console
+$ aco status
+2> ERROR: cannot check whether <old> is an ancestor of <new>: <detail>
 exit 2
 ```

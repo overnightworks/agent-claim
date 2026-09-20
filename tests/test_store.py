@@ -831,19 +831,34 @@ def test_lineage_error_when_the_ref_is_rewritten_without_this_worktrees_stamp_as
 
 
 def test_lineage_check_fails_loud_when_merge_base_cannot_be_read_at_all(
-    bare_remote: Path, worktree: Path
+    monkeypatch: pytest.MonkeyPatch, bare_remote: Path, worktree: Path
 ) -> None:
-    """Issue #390 finding 10: `merge-base --is-ancestor`'s exit `1` is the
-    one documented "not an ancestor" outcome (proven above); every other
+    """Issue #390 finding 10/CAS-48: `merge-base --is-ancestor`'s exit `1` is
+    the one documented "not an ancestor" outcome (proven above); every other
     nonzero exit -- here, an unresolvable stamped commit -- is a git
-    failure, not a lineage fact, and must never be reported as "the ref may
-    have been rewritten"."""
+    failure, not a lineage fact, and must refuse CAS-48's exact sentence,
+    never "the ref may have been rewritten"."""
     tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
     store._write_lineage_stamp(worktree, _UNRESOLVABLE_OBJECT_ID)
     assert tip != _UNRESOLVABLE_OBJECT_ID
+    real_run_captured = process.run_captured
 
-    with pytest.raises(protocol.ClaimError, match="cannot check whether") as raised:
+    def fake_run_captured(arguments: list[str]) -> process.CapturedResult:
+        if "merge-base" in arguments:
+            return process.CapturedResult(
+                exit_status=128, stdout=b"", stderr=b"simulated unresolvable commit\n"
+            )
+        return real_run_captured(arguments)
+
+    monkeypatch.setattr(store.process, "run_captured", fake_run_captured)
+
+    with pytest.raises(protocol.ClaimError) as raised:
         store.fetch_state(worktree=worktree, remote=str(bare_remote))
+
+    assert str(raised.value) == (
+        f"cannot check whether {_UNRESOLVABLE_OBJECT_ID} is an ancestor of {tip}: "
+        "simulated unresolvable commit"
+    )
     assert not isinstance(raised.value, protocol.StateLineageError)
 
 
