@@ -18,7 +18,7 @@ rules = [
   "Keep command literals in one local per test scenario, and use at most one # budget: line for the whole lane.",
   "Edit the owning spec in the same PR for any printed literal, exit code, or --json shape you alter or add, keeping each criterion within 200 characters, naming no implementation names, copying literals from the printer, placing --repo before the subcommand, and giving an example transcript for every new refusal, with a criterion to file:line table in the PR body.",
   "Before finishing, fetch and rebase onto origin/main, re-run the checks the rebase touched, and commit with clear one-topic subjects ending in the trailer line Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>.",
-  "Push the branch and open the pull request with gh pr create --base main --head <branch> --title <title> --body-file <file>, whose body carries what changed and why, the proofs with their exact commands, a Work-Item: #<n> line, and the footer \"🤖 Generated with [Claude Code](https://claude.com/claude-code)\"; never merge it.",
+  "Push the branch and open the pull request with gh pr create --base main --head <branch> --title <title> --body-file <file>, whose body carries what changed and why, the proofs with their exact commands, then before the footer the lines Closes #<n> and Work-Item: #<n>, and the footer \"🤖 Generated with [Claude Code](https://claude.com/claude-code)\"; never merge it; then run aco check <pr> from the worktree and fix anything it refuses.",
   "Update a pull request body only with gh api -X PATCH repos/overnightworks/agent-claim/pulls/<pr> --input - and a {\"body\": ...} payload, never gh pr edit --body-file.",
   "Report a contradiction between the body and the code or a spec instead of building it silently, with file:line evidence and a proposal; build the part that is not in question.",
   "Report at the end the pull request URL, the tip SHA, the files touched, each proof with its command and result, and anything left out and why.",
@@ -71,7 +71,7 @@ checks = [
 rules = [
   "Never land another lane's claim; the head holds the landing decision.",
   "Merge or fast-forward main only after every required review and CI check is green.",
-  "Carry a Work-Item: #<n> trailer on the merge commit.",
+  "Land with aco land <pr> from a clean checkout of the default branch; it composes the merge commit itself, never gh pr merge.",
   "Release the claim once the merge lands.",
   "Reinstall the tool from the freshly merged main afterward.",
 ]

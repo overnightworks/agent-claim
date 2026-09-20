@@ -58,8 +58,8 @@ here reads or writes it. `specs/bootstrap.spec.md` owns `bootstrap`;
 git worktree add ../repo-worktrees/issue-42-widget -b Ada/issue-42-widget
 cd ../repo-worktrees/issue-42-widget
 aco claim 42 --agent "Ada" --scope src/widget.py
-# edit, commit, push, open a pull request naming Work-Item: #42
-aco release 42 --merged 57
+# edit, commit, push, open a pull request naming Closes #42 and Work-Item: #42
+aco land 57
 ```
 
 `claim` refuses before the first edit unless the checkout is already a
