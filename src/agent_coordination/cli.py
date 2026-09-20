@@ -5343,7 +5343,13 @@ def _cmd_land(parsed: argparse.Namespace, session: _WriteSession) -> None:
     else:
 
         def claims_provider() -> protocol.ClaimState:
-            _worktree, _canonical_remote, observed = _store_observation()
+            # `store.peek_state`, never `_store_observation`'s
+            # `fetch_state` (issue #405 review/gate finding): a pull
+            # request this preflight goes on to refuse must anchor no ref
+            # and stamp no lineage -- the same read-only requirement
+            # `_reset_observation` already carries for `reset`.
+            canonical_remote = _canonical_remote_name(_resolve_toplevel())
+            observed = store.peek_state(worktree=Path.cwd(), remote=canonical_remote)
             _require_state_ref(observed)
             return observed
 
@@ -6440,14 +6446,14 @@ def _execute_reset(*, worktree: Path, remote: str, plan: ResetPlan) -> None:
 
 def _reset_observation() -> tuple[Path, str, protocol.ClaimState]:
     """`reset`'s own state read (issue #298, 19.09.2026 gate finding 1):
-    `store.read_state_for_reset` instead of `_store_observation`'s ordinary
+    `store.peek_state` instead of `_store_observation`'s ordinary
     `fetch_state`, so a broken lineage -- exactly what `reset` exists to
     recover from -- never blocks it, and so a dry run, a live-claim
     refusal, or a failed export writes no per-worktree stamp or anchor
     (finding 2)."""
     canonical_remote = _canonical_remote_name(_resolve_toplevel())
     worktree = Path.cwd()
-    state = store.read_state_for_reset(worktree=worktree, remote=canonical_remote)
+    state = store.peek_state(worktree=worktree, remote=canonical_remote)
     return worktree, canonical_remote, state
 
 

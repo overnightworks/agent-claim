@@ -69,6 +69,7 @@ exit `2`, exactly as `specs/claim-record.spec.md` already documents.
 - [ ] [CAS-11] A fetched tip that is not a descendant of this worktree's own stamp refuses `refs/aco/state moved from <old> to <new> without <old> as an ancestor of the new tip; the ref may have been rewritten`.
 - [ ] [CAS-48] A lineage check that cannot run refuses `cannot check whether <old> is an ancestor of <new>: <detail>`, never "the ref may have been rewritten" (see E-CAS-07).
 - [ ] [CAS-12] A worktree that observed the ref, then fetches again after it was deleted, refuses `refs/aco/state was previously observed at <old> but is now absent; the ref may have been deleted`.
+- [ ] [CAS-49] `store.peek_state` (`reset`, `land`'s claim observation) reads the remote's tip via `FETCH_HEAD` alone; this worktree's anchor and lineage stamp stay untouched -- `fetch_state` alone advances both.
 
 ## The compare-and-swap transition and its retries
 

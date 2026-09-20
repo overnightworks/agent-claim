@@ -7679,6 +7679,13 @@ class _FakeStore:
     def fetch_state(self, *, worktree: Path, remote: str) -> protocol.ClaimState:
         return self.state
 
+    def peek_state(self, *, worktree: Path, remote: str) -> protocol.ClaimState:
+        # This fake never models the anchor/lineage-stamp side effect
+        # `fetch_state` alone carries against real git, so the same
+        # in-memory state answers both (issue #405): `land`'s claims
+        # observation is the one caller this fake needs it for.
+        return self.state
+
     def commit_transition(
         self,
         *,
@@ -7732,6 +7739,7 @@ def _patch_store_write(
         unparsed_lifecycle_commits=unparsed_lifecycle_commits,
     )
     monkeypatch.setattr(store, "fetch_state", fake.fetch_state)
+    monkeypatch.setattr(store, "peek_state", fake.peek_state)
     monkeypatch.setattr(store, "commit_transition", fake.commit_transition)
     monkeypatch.setattr(store, "claim_ages", fake.claim_ages)
     monkeypatch.setattr(store, "claim_lifecycle", fake.claim_lifecycle)
@@ -15424,6 +15432,7 @@ def test_item_show_refuses_an_unknown_id(
 # before the file's own autouse `_stub_store_write` ever runs, so each
 # `reset` test can hand the real functions straight back to `store`.
 _REAL_STORE_FETCH_STATE = store.fetch_state
+_REAL_STORE_PEEK_STATE = store.peek_state
 _REAL_STORE_COMMIT_TRANSITION = store.commit_transition
 _REAL_STORE_CLAIM_AGES = store.claim_ages
 _REAL_STORE_CLAIM_LIFECYCLE = store.claim_lifecycle
@@ -15434,6 +15443,7 @@ def _use_real_store(monkeypatch: pytest.MonkeyPatch) -> None:
     `reset` proves real git behaviour end to end, never the fake's own
     agreement with itself."""
     monkeypatch.setattr(store, "fetch_state", _REAL_STORE_FETCH_STATE)
+    monkeypatch.setattr(store, "peek_state", _REAL_STORE_PEEK_STATE)
     monkeypatch.setattr(store, "commit_transition", _REAL_STORE_COMMIT_TRANSITION)
     monkeypatch.setattr(store, "claim_ages", _REAL_STORE_CLAIM_AGES)
     monkeypatch.setattr(store, "claim_lifecycle", _REAL_STORE_CLAIM_LIFECYCLE)

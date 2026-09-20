@@ -1001,18 +1001,27 @@ def fetch_state(*, worktree: Path, remote: str = DEFAULT_CANONICAL_REMOTE) -> Cl
     return state
 
 
-def read_state_for_reset(*, worktree: Path, remote: str = DEFAULT_CANONICAL_REMOTE) -> ClaimState:
-    """Read `STATE_REF` on `remote` for `reset` alone (issue #298, 19.09.2026
-    gate finding 1): the one read in this module that skips `fetch_state`'s
-    own lineage guard, anchor, and stamp.
+def peek_state(*, worktree: Path, remote: str = DEFAULT_CANONICAL_REMOTE) -> ClaimState:
+    """Read `STATE_REF` on `remote` for a caller that must not write (issue
+    #298, 19.09.2026 gate finding 1; issue #405 review/gate finding, `land`'s
+    read-only preflight): the one read in this module that skips
+    `fetch_state`'s own lineage guard, anchor, and stamp -- a fetch into
+    `FETCH_HEAD` alone is a read of remote state, never a write of this
+    worktree's own.
 
-    `reset` exists to recover from exactly what `_check_lineage` refuses -- a
-    rewritten or deleted ref this worktree's own stamp disagrees with -- so
-    it reads and acts on whatever tip is on `remote` right now, never
-    against this worktree's history. And because a dry run, a live-claim
-    refusal, or a failed export must change nothing durable (finding 2),
-    this performs no per-worktree write at all: no `_anchor_fetched_tip`, no
-    `_write_lineage_stamp`.
+    `reset` uses this to recover from exactly what `_check_lineage` refuses
+    -- a rewritten or deleted ref this worktree's own stamp disagrees with --
+    so it reads and acts on whatever tip is on `remote` right now, never
+    against this worktree's history. `land`'s preflight uses it to observe a
+    live claim before its first write: a pull request this preflight goes on
+    to refuse must never have anchored a ref or stamped a lineage the merge
+    itself never happens. Both callers share the same requirement -- a dry
+    run, a live-claim refusal, a failed export, or a refused merge must
+    change nothing durable -- so this performs no per-worktree write at all:
+    no `_anchor_fetched_tip`, no `_write_lineage_stamp`. `fetch_state` stays
+    the write-capable read every live transition (`claim`, `release`, ...)
+    still needs, since those callers go on to write and must keep this
+    worktree's own lineage current.
     """
     probed = _ls_remote_state(worktree, remote)
     if probed is None:

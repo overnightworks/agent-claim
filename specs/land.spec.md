@@ -45,6 +45,11 @@ prints `ERROR: <sentence>` on stderr, exit `2`, exactly as
 
 ## Preflight, read-only, in order
 
+Every step here reads only: the one local `refs/aco/state` read LANDCMD-10's
+claim check needs is `store.peek_state` (CAS-49), never `fetch_state` --
+this worktree's own fetch anchor and lineage stamp stay untouched by a
+preflight, refused or not, exactly as `reset`'s own read does.
+
 - [ ] [LANDCMD-01] Under `storage = "state-ref"`, `aco land <n>` refuses `aco land is a github command; storage = state-ref has no pull requests to land`, exit `2`, before any read.
 - [ ] [LANDCMD-02] A pull request that is not open refuses `pull request #<n> is not open; it cannot be landed`, exit `2`.
 - [ ] [LANDCMD-03] A pull request whose own `mergeable_state` is not `clean` refuses `pull request #<n> is not mergeable (<state>)`, exit `2`.

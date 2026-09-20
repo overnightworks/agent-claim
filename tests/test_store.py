@@ -441,6 +441,33 @@ def test_fetch_state_reads_via_fetch_head_without_creating_the_shared_state_ref(
     assert anchor == created
 
 
+def test_peek_state_reads_the_current_tip_without_touching_the_anchor_or_lineage_stamp(
+    bare_remote: Path, worktree: Path
+) -> None:
+    """`store.peek_state` (issue #405 review/gate finding, `land`'s
+    read-only preflight): a fetch into `FETCH_HEAD` alone reads whatever
+    tip is on the remote right now -- even one another writer landed after
+    this worktree's own last observation -- without ever anchoring it or
+    stamping its own lineage, unlike `fetch_state`, which would advance
+    both to the newly read tip (CAS-49)."""
+    first_tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    store.fetch_state(worktree=worktree, remote=str(bare_remote))
+    anchor_before = _git("rev-parse", store._FETCH_ANCHOR_REF, cwd=worktree).stdout.strip()
+    stamp_before = store._read_lineage_stamp(worktree)
+    assert (anchor_before, stamp_before) == (first_tip, first_tip)
+    tree = _git("rev-parse", f"{first_tip}^{{tree}}", cwd=worktree).stdout.strip()
+    second_tip = _git(
+        "commit-tree", tree, "-p", first_tip, "-m", "a later transition", cwd=worktree
+    ).stdout.strip()
+    _git("push", str(bare_remote), f"{second_tip}:{store.STATE_REF}", cwd=worktree)
+
+    state = store.peek_state(worktree=worktree, remote=str(bare_remote))
+
+    assert state.tip == second_tip
+    assert _git("rev-parse", store._FETCH_ANCHOR_REF, cwd=worktree).stdout.strip() == anchor_before
+    assert store._read_lineage_stamp(worktree) == stamp_before
+
+
 @pytest.mark.parametrize(
     ("files", "expected_error", "match"),
     [
