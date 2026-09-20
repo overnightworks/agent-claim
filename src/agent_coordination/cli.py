@@ -2399,32 +2399,57 @@ class CheckKind(StrEnum):
     MISSING = "missing"
 
 
+class CheckReason(StrEnum):
+    """`aco check`'s own `--json` `reason` vocabulary (`specs/check.spec.md`,
+    issue #404): `valid` the only exit `0`; `blocked` the only exit `3`
+    (a valid, complete issue with an open dependency); every other member
+    exits `2`. `valid`/`malformed`/`incomplete` mirror
+    `board.BodyShapeVerdict`'s own three values -- the body-shape decision
+    `check` and `body --check` both read, never re-derived from a defect
+    sentence's own prefix."""
+
+    VALID = board.BodyShapeVerdict.VALID.value
+    BLOCKED = "blocked"
+    MALFORMED = board.BodyShapeVerdict.MALFORMED.value
+    INCOMPLETE = board.BodyShapeVerdict.INCOMPLETE.value
+    INVALID_CLASSIFICATION = "invalid_classification"
+    MISSING = "missing"
+    INVALID_USAGE = "invalid_usage"
+    UNAVAILABLE = "unavailable"
+
+
 @dataclass(frozen=True)
 class CheckOutcome:
-    """One `check` answer: the line a human reads, and the reason a caller
-    acts on -- `None` when the subject passed."""
+    """One `check` answer: the line a human reads, and the `--json` `reason`
+    a caller acts on. `message` mirrors the line's own finding without its
+    `ISSUE #<n> `/`REFUSED: #<n> ` prefix; `blocked_by` is only ever set
+    together with `CheckReason.BLOCKED` (issue #404)."""
 
     kind: CheckKind
     number: int
     line: str
-    refused: str | None = None
+    reason: CheckReason
+    message: str | None = None
+    blocked_by: tuple[str, ...] = ()
 
-    def as_json(self) -> dict[str, object]:
-        payload: dict[str, object] = {
-            "ok": self.refused is None,
-            "kind": self.kind.value,
-            "number": self.number,
-        }
-        if self.refused is not None:
-            payload["refused"] = self.refused
-        return payload
+    def exit_code(self) -> int:
+        if self.reason is CheckReason.VALID:
+            return 0
+        if self.reason is CheckReason.BLOCKED:
+            return 3
+        return 2
 
     def report(self, *, as_json: bool) -> int:
         if as_json:
-            print(json.dumps(self.as_json()))
+            payload: dict[str, object] = {"kind": self.kind.value, "number": self.number}
+            if self.blocked_by:
+                payload["blocked_by"] = list(self.blocked_by)
+            if self.message is not None:
+                payload["message"] = self.message
+            _emit_json(self.reason is CheckReason.VALID, self.reason, **payload)
         else:
-            print(self.line, file=sys.stderr if self.refused is not None else sys.stdout)
-        return 1 if self.refused is not None else 0
+            print(self.line, file=sys.stderr if self.message is not None else sys.stdout)
+        return self.exit_code()
 
 
 def _pull_request_check(
@@ -2442,12 +2467,14 @@ def _pull_request_check(
             CheckKind.PULL_REQUEST,
             detail.number,
             f"REFUSED: pull request #{detail.number} {checked.message}",
+            CheckReason.INVALID_CLASSIFICATION,
             checked.message,
         )
     return CheckOutcome(
         CheckKind.PULL_REQUEST,
         detail.number,
         f"PR #{detail.number} by {detail.author} declares {checked}",
+        CheckReason.VALID,
     )
 
 
@@ -2455,7 +2482,9 @@ def _missing_number(repository: str, number: int) -> CheckOutcome:
     """A number neither mode can read, named without claiming which of the
     two it would have been."""
     finding = f"does not exist in {repository}"
-    return CheckOutcome(CheckKind.MISSING, number, f"REFUSED: #{number} {finding}", finding)
+    return CheckOutcome(
+        CheckKind.MISSING, number, f"REFUSED: #{number} {finding}", CheckReason.MISSING, finding
+    )
 
 
 def _issue_line(number: int, finding: str) -> str:
@@ -2463,24 +2492,21 @@ def _issue_line(number: int, finding: str) -> str:
     return f"ISSUE #{number} {finding}"
 
 
-def _refused_issue(number: int, finding: str) -> CheckOutcome:
-    return CheckOutcome(CheckKind.ISSUE, number, _issue_line(number, finding), finding)
+def _refused_issue(
+    number: int, finding: str, reason: CheckReason, *, blocked_by: tuple[str, ...] = ()
+) -> CheckOutcome:
+    return CheckOutcome(
+        CheckKind.ISSUE, number, _issue_line(number, finding), reason, finding, blocked_by
+    )
 
 
 def _body_shape_defects(
     body: str, *, storage: board.Storage = board.Storage.GITHUB
 ) -> tuple[str, ...]:
-    """Every finding a body's own shape can carry without asking a forge
-    anything -- malformed (one sentence per schema defect) or incomplete
-    (one joined sentence, matching `check <item>`'s own wording).
-    `_issue_check` and `body --check` (issue #262) both read this; neither
-    writes a second rendering of these sentences. `storage` gates the one
-    storage-specific extension, `[record]` (issue #248)."""
-    parsed = board.parse_body(body, storage=storage)
-    if parsed.read_state is board.BodyReadState.MALFORMED:
-        return tuple(board.body_defect_text(defect) for defect in parsed.contract.defects)
-    missing = board.missing_or_empty_sections(parsed.contract)
-    return (f"body incomplete: {', '.join(missing)}",) if missing else ()
+    """`item edit`'s own accessor (issue #287) onto `board.body_shape_check`
+    (issue #404): only the defect sentences, never the verdict `check
+    <item>` and `body --check` read for their own `--json` `reason`."""
+    return board.body_shape_check(body, storage=storage).defects
 
 
 def _issue_check(
@@ -2495,16 +2521,18 @@ def _issue_check(
     readable, complete, and unblocked. Its dependencies come from GitHub's
     own `blocked_by` relation, or the state-ref item's own `[record]` table
     under `storage = "state-ref"` -- a body never states them itself."""
-    shape_defects = _body_shape_defects(body, storage=storage)
-    if shape_defects:
-        return _refused_issue(number, shape_defects[0])
+    shape = board.body_shape_check(body, storage=storage)
+    if shape.defects:
+        return _refused_issue(number, shape.defects[0], CheckReason(shape.verdict.value))
     blockers = board.open_dependency_blockers(client.list_board_dependencies(number), repository)
     if blockers:
-        named = ", ".join(
+        labels = tuple(
             board.open_blocker_label(blocker, repository, storage) for blocker in blockers
         )
-        return _refused_issue(number, f"blocked by {named}")
-    return CheckOutcome(CheckKind.ISSUE, number, _issue_line(number, "body ok"))
+        return _refused_issue(
+            number, f"blocked by {', '.join(labels)}", CheckReason.BLOCKED, blocked_by=labels
+        )
+    return CheckOutcome(CheckKind.ISSUE, number, _issue_line(number, "body ok"), CheckReason.VALID)
 
 
 BODY_TEMPLATE_KINDS = ("task", "feature", "container")
@@ -2533,18 +2561,32 @@ def _read_body_check_input() -> str:
         ) from error
 
 
-def _body_check_report(defects: tuple[str, ...], *, as_json: bool) -> int:
-    """The one rendering of a `body --check` answer: `check <item>`'s own
-    sentences (`_body_shape_defects`), never truncated to the first, since
-    there is no live item here to refuse a single verdict about."""
+class BodyCheckReason(StrEnum):
+    """`aco body --check`'s own `--json` `reason` vocabulary
+    (`specs/body.spec.md`, issue #404): `valid`/`malformed`/`incomplete`
+    mirror `board.BodyShapeVerdict`'s own three values -- the same
+    body-shape decision `check <item>`'s own `CheckReason` reads."""
+
+    VALID = board.BodyShapeVerdict.VALID.value
+    MALFORMED = board.BodyShapeVerdict.MALFORMED.value
+    INCOMPLETE = board.BodyShapeVerdict.INCOMPLETE.value
+    INVALID_USAGE = "invalid_usage"
+    UNAVAILABLE = "unavailable"
+
+
+def _body_check_report(check: board.BodyShapeCheck, *, as_json: bool) -> int:
+    """The one rendering of a `body --check` answer: `board.body_shape_check`'s
+    own sentences, never truncated to the first, since there is no live
+    item here to refuse a single verdict about."""
+    ok = check.verdict is board.BodyShapeVerdict.VALID
     if as_json:
-        print(json.dumps({"ok": not defects, "defects": list(defects)}))
-    elif defects:
-        for defect in defects:
+        _emit_json(ok, BodyCheckReason(check.verdict.value), defects=list(check.defects))
+    elif check.defects:
+        for defect in check.defects:
             print(defect, file=sys.stderr)
     else:
         print("body ok")
-    return 1 if defects else 0
+    return 0 if ok else 2
 
 
 def _cmd_body(parsed: argparse.Namespace) -> int:
@@ -2559,13 +2601,22 @@ def _cmd_body(parsed: argparse.Namespace) -> int:
     one under `storage = "github"`, the same gate `_state_ref_forge`'s own
     items already read through `_decode_item`."""
     if parsed.check:
+        json_mode = parsed.json
         if parsed.kind is not None or parsed.parent is not None:
-            raise protocol.ClaimUnavailableError(
-                "--kind and --parent apply only to --template, not --check"
+            return _refuse(
+                BodyCheckReason.INVALID_USAGE,
+                protocol.ClaimUnavailableError(
+                    "--kind and --parent apply only to --template, not --check"
+                ),
+                json_mode=json_mode,
             )
-        config = _board_config(_resolve_toplevel())
-        defects = _body_shape_defects(_read_body_check_input(), storage=config.storage)
-        return _body_check_report(defects, as_json=parsed.json)
+        try:
+            config = _board_config(_resolve_toplevel())
+            body = _read_body_check_input()
+        except protocol.ClaimError as error:
+            return _refuse(BodyCheckReason.UNAVAILABLE, error, json_mode=json_mode)
+        check = board.body_shape_check(body, storage=config.storage)
+        return _body_check_report(check, as_json=json_mode)
     if parsed.json:
         raise protocol.ClaimUnavailableError("--json applies only to --check, not --template")
     print(_body_template(parsed.kind or DEFAULT_BODY_TEMPLATE_KIND, parsed.parent), end="")
@@ -3469,13 +3520,19 @@ def _cmd_check(parsed: argparse.Namespace, session: _ReadSession) -> int:
     fetches the state ref."""
     if isinstance(parsed.number, str):
         return _check_trunk_commit(parsed)
+    json_mode = parsed.json
     number = int(parsed.number)
-    client = session.forge()
+    try:
+        client = session.forge()
+        # Read for its refusals only: a repository pinned to a grammar this
+        # tool no longer reads, or a forge that cannot answer `blocked_by`,
+        # must fail here rather than hand back a half-read answer.
+        config = _load_board_config(client, _resolve_toplevel())
+    except RepoMeaninglessUnderStateRefError as error:
+        return _refuse(CheckReason.INVALID_USAGE, error, json_mode=json_mode)
+    except protocol.ClaimError as error:
+        return _refuse(CheckReason.UNAVAILABLE, error, json_mode=json_mode)
     repository = client.repository.path
-    # Read for its refusals only: a repository pinned to a grammar this tool
-    # no longer reads, or a forge that cannot answer `blocked_by`, must fail
-    # here rather than hand back a half-read answer.
-    config = _load_board_config(client, _resolve_toplevel())
     reference = client.item_reference(number)
     if reference.state is forge.ItemState.MISSING:
         outcome = _missing_number(repository, number)
@@ -3488,7 +3545,7 @@ def _cmd_check(parsed: argparse.Namespace, session: _ReadSession) -> int:
         outcome = _issue_check(
             client, repository, reference.body or "", number, storage=config.storage
         )
-    return outcome.report(as_json=parsed.json)
+    return outcome.report(as_json=json_mode)
 
 
 def _trunk_classification_text(classification: board.TrunkClassification) -> str:
