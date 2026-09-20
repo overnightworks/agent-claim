@@ -39,7 +39,7 @@ matching line.
 |---|---|---|---|---|
 | single `Work-Item:` trailer | LAND-01 | LAND-48 | LAND-47, LAND-52, LAND-59 | LAND-42 |
 | repeated `Work-Item:` trailer | LAND-02 | LAND-48 | LAND-52, LAND-59 | LAND-42 |
-| control byte inside a trailer value | LAND-03 | — | — | — |
+| control byte inside a trailer value | — (lands nothing, LAND-42) | LAND-03 | — | — |
 | valid `Work-Item:` + closing reference | — | LAND-04 | LAND-29, LAND-49 | LAND-41 |
 | valid `No-Item:` + lane claim | — | LAND-05 | LAND-37 | — |
 | no classification / no trailer | — | LAND-06, LAND-58 | LAND-32, LAND-52, LAND-62 | — |
@@ -75,7 +75,7 @@ matching line.
 
 - [ ] [LAND-01] A merge or squash commit whose own trailer block carries `Work-Item: #10` marks #10 `code-landed` in `aco board`'s STAGE column, whether or not any pull request body also names it.
 - [ ] [LAND-02] A trailer block repeating `Work-Item:` (a squash commit carrying `Work-Item: #11` and `Work-Item: #12`) marks every named item `code-landed`, unlike a pull request body, which allows only one.
-- [ ] [LAND-03] A trailer value with a control byte (`#12\x1f#13`) reads as one literal value: `aco board` refuses `ERROR: '#12\x1f#13' is not an item reference; use aco-xxxxxx, #n, or the bare number n`, exit `2`.
+- [ ] [LAND-03] A trailer value with a control byte (`#12\x1f#13`) reads as one literal value, never split at the control byte: the commit classifies as a defect and lands nothing there, the same as a contradictory trunk trailer (LAND-42) -- `aco board` proceeds, exit `0`. `aco check <sha>` on that commit refuses `REFUSED: <sha> <that defect sentence>`, exit `1`, the same shape as LAND-60.
 - [ ] [LAND-48] `aco check <sha>` reads `<sha>`'s own trailer: `Work-Item:` prints `<sha> declares Work-Item: #<n>`, `No-Item:` prints `<sha> declares No-Item: <kind>`, exit `0`.
 - [ ] [LAND-57] A `<sha>` outside the walked first-parent trunk refuses `<sha> is not on the first-parent trunk`, exit `1`.
 - [ ] [LAND-58] A trunk `<sha>` carrying neither trailer refuses `<sha> carries no \`Work-Item:\` or \`No-Item:\` trailer`, exit `1`.
