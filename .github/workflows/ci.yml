@@ -40,6 +40,53 @@ jobs:
         run: >-
           uv run --locked pytest -n auto --cov=agent_coordination --cov-report=xml:coverage.xml
           --cov-report=term-missing --cov-fail-under=100
+      # pytest-cov's --cov-fail-under evaluates the combined line+branch number
+      # once --cov-branch is on, so the blocking step above stays line-only.
+      # This second, informational run measures branches on the side (issue
+      # #317 Lane 2): it must not fail the job while the gap it reports is
+      # still open, which is why it gets its own step and continue-on-error
+      # instead of an extra flag on the step above.
+      - name: Branch coverage (informational)
+        if: matrix.python == '3.12'
+        continue-on-error: true
+        run: |
+          uv run --locked pytest -n auto --cov=agent_coordination --cov-branch \
+            --cov-report=json:coverage-branch.json
+          python3 - <<'PYTHON'
+          import json
+          import os
+
+          with open("coverage-branch.json") as report_file:
+              report = json.load(report_file)
+
+          branch_percent = report["totals"]["percent_branches_covered"]
+          print(f"Branch coverage: {branch_percent:.2f}%")
+
+          worst_modules = sorted(
+              report["files"].items(),
+              key=lambda item: item[1]["summary"]["missing_branches"],
+              reverse=True,
+          )[:10]
+
+          summary_lines = [
+              "## Branch coverage (informational)",
+              "",
+              f"Total: {branch_percent:.2f}%",
+              "",
+              "Modules with the most uncovered branches:",
+              "",
+              "| Module | Missing branches | Branch % |",
+              "| --- | ---: | ---: |",
+          ]
+          summary_lines += [
+              f"| {path} | {file_info['summary']['missing_branches']} | "
+              f"{file_info['summary']['percent_branches_covered']:.2f}% |"
+              for path, file_info in worst_modules
+          ]
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary_file:
+              summary_file.write("\n".join(summary_lines) + "\n")
+          PYTHON
       - if: matrix.python == '3.12'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
