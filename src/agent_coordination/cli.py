@@ -3588,13 +3588,16 @@ def _print_brief(composition: _BriefComposition) -> None:
         _print_brief_step_rules(composition.step_rules)
 
 
-def _emit_json(ok: bool, reason: str, **payload: object) -> None:
+def _emit_json(ok: bool, reason: StrEnum, **payload: object) -> None:
     """The one `--json` envelope owner (issue #396, `specs/output.spec.md`):
     `ok` and `reason` always print first, in that order -- `reason` a
     stable enum token, never an `error` object -- then the payload in the
     order given, with an optional `message` (free prose) moved last so a
     reader can stop before it. `ask`, `rule`, and `brief` are its first
-    callers, on success and on every refusal alike."""
+    callers, on success and on every refusal alike. `reason` is typed
+    `StrEnum` -- the shared base every command's own reason vocabulary
+    (`AskReason`, `RuleReason`, `BriefReason`) already subclasses -- so a
+    loose string can never reach this envelope."""
     message = payload.pop("message", None)
     envelope: dict[str, object] = {"ok": ok, "reason": reason}
     envelope.update(payload)
@@ -3603,7 +3606,7 @@ def _emit_json(ok: bool, reason: str, **payload: object) -> None:
     print(json.dumps(envelope))
 
 
-def _refuse(reason: str, error: protocol.ClaimError, *, json_mode: bool) -> int:
+def _refuse(reason: StrEnum, error: protocol.ClaimError, *, json_mode: bool) -> int:
     """One shared refusal report for `ask`/`rule`/`brief` (issue #396):
     `ERROR: <sentence>` on stderr exactly as `main`'s own generic handler
     always printed it, then -- only under `--json` -- the envelope naming
