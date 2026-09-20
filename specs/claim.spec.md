@@ -37,6 +37,9 @@ number, `<path>` a repository-relative path, `<reason>` a free-text sentence.
 | a check refuses, with `--json` | CLM-17 | CLM-17 | CLM-17 |
 | `--resource NAME` | CLAIM-41..46 | CLAIM-41..46 | CLAIM-41..46 |
 | wide scope (width gate) | CLM-18 | CLM-18 | CLM-18 |
+| wide scope, `--whole` omitted, the item's own body names one | CLM-21 | CLM-21 | — |
+| wide scope, neither `--whole` nor the item's own body names one | CLM-22 | CLM-22 | CLM-18 |
+| higher-priority item names neither `scope` nor a `[[slice]]` row | CLM-23 | CLM-23 | — |
 
 ## The checkout precondition
 
@@ -73,6 +76,9 @@ to the clause each names below.
 - [ ] [CLM-17] With `--json`, any error-level check refuses `{"refused": true, "issue": <n>, "checks": [...]}` on stdout, exit `2`, never the `{"ok": false, "error": ...}` REL-24 shape.
 - [ ] [CLM-18] A scope tripping the width gate refuses before any write, in the wording `claim-record.spec.md` owns (CLAIM-25, CLAIM-26, CLAIM-29), exit `2`.
 - [ ] [CLM-19] A successful `--json` claim's object carries `versioned_files`, `versioned_files_total`, `share`, `touches` and `checks`, beside the fields CLAIM-* already owns.
+- [ ] [CLM-21] With `--whole` omitted, a target naming its own top-level `whole` admits a wide scope exactly as `--whole REASON` would; that sentence lands on the claim (see E-CLM-05).
+- [ ] [CLM-22] Neither `--whole` nor the target's own body `whole` present, the width gate's refusal ends `; pass --whole REASON or set whole in the body`, exit `2` (see E-CLM-05).
+- [ ] [CLM-23] A higher-ranked item naming neither `scope` nor a `[[slice]]` row is skipped by CLM-08's own walk (`specs/next.spec.md` NEXT-23); claiming past it costs no `--out-of-order`.
 
 ## Never
 
@@ -80,6 +86,8 @@ to the clause each names below.
 - `--out-of-order` never downgrades CLM-11 (container), CLM-12 (closed/missing), or a body-contract/body-incomplete refusal: only the out-of-order and blocked checks read it.
 - Lane mode never runs a slice-rule check at all: there is no target issue to weigh against the board.
 - `aco claim` never re-derives a replayed claim's scope from the item's body: it takes the live claim's own stored scope outright (CLAIM-53).
+- Lane mode never reads a body `whole` field either: a lane names no item to read one from, so its width gate keeps CLM-18's own wording, never CLM-21/22's.
+- `aco rescope` never reads a target's body `whole` field: only `--whole` or the live claim's own already-stored reason justifies a wide rescope.
 
 ## Examples
 
@@ -128,4 +136,23 @@ $ aco claim 10 --scope src/lower.py --claim-id fixed
 CLAIMED issue #10: fixed
 1 of 6 versioned files (17%); overlaps no other open claims
 exit 0
+```
+
+### E-CLM-05 — a wide scope justified from the item's own body, and the refusal when neither names one
+
+Setup: bare-remote, bootstrapped, a linked worktree on `ada/issue-42`, issue `#42` with `scope = [4 paths]` and `whole = "the four adapters share one lock"` in its body
+
+```console
+$ aco claim 42
+CLAIMED issue #42: <claim-id>
+0 of 6 versioned files (0%); overlaps no other open claims
+exit 0
+```
+
+Setup: bare-remote, bootstrapped, a linked worktree on `ada/issue-43`, issue `#43` with `scope = [4 paths]` and no `whole` in its body
+
+```console
+$ aco claim 43
+2> ERROR: scope is wide: 4 paths exceeds three; pass --whole REASON or set whole in the body
+exit 2
 ```

@@ -36,6 +36,7 @@ line per defect, and by a reader as the item's own reason (BODY-50..BODY-52).
 | `slice = []` | BODY-49 | — | — |
 | `scope` defective | BODY-53..BODY-56 | BODY-50 | BODY-52 |
 | `size` valid or defective | BODY-57..BODY-59 | BODY-50 (defective only) | BODY-52 (defective only) |
+| `whole` valid or defective | BODY-60..BODY-62 | BODY-50 (defective only) | BODY-52 (defective only) |
 | complete valid block | BODY-14 | — | — |
 
 ## Fence and surroundings
@@ -55,7 +56,7 @@ line per defect, and by a reader as the item's own reason (BODY-50..BODY-52).
 - [ ] [BODY-10] A block missing `now`, `next` or `done_when` prints one `body malformed: <key>: <key> is required` line per missing key on stderr, exit `1`.
 - [ ] [BODY-11] A block whose `now`, `next` or `done_when` is not a string prints `body malformed: <key>: <key> must be a string` on stderr, exit `1`.
 - [ ] [BODY-12] A block with all three projection keys present and empty is valid but unfilled: `aco body --check` prints `body incomplete: Now, Next, Done when` on stderr, exit `1`.
-- [ ] [BODY-13] A top-level key outside `version`, `now`, `next`, `done_when`, `frozen_until`, `scope`, `size`, `expectation`, `slice` prints `body malformed: <key>: unknown top-level key <key>`, exit `1`.
+- [ ] [BODY-13] A top-level key outside `version`, `now`, `next`, `done_when`, `frozen_until`, `scope`, `size`, `whole`, `expectation`, `slice` prints `body malformed: <key>: unknown top-level key <key>`, exit `1`.
 - [ ] [BODY-14] A block whose three projection keys are all non-empty and whose optional tables are valid prints `body ok` on stdout, exit `0`, with nothing on stderr (see E-BODY-01).
 
 ## `[record]`, the state-ref item identity
@@ -131,6 +132,17 @@ line per defect, and by a reader as the item's own reason (BODY-50..BODY-52).
   size = "XL"    # not one of S, M, L
   size = ["S"]   # a list, not a scalar
   size = {}      # a table, not a scalar
+  ```
+
+## `whole`, the item's own wide-scope justification
+
+- [ ] [BODY-60] A block with no `whole` key is valid: absence means no stored reason, never a default one, and `aco body --check` prints `body ok`, exit `0`.
+- [ ] [BODY-61] `whole = "<reason>"` with any non-blank text is valid: `aco body --check` prints `body ok`, exit `0`; `specs/claim.spec.md` (CLM-21) owns what `claim`/`start` do with it.
+- [ ] [BODY-62] A blank or non-string `whole` prints `body malformed: whole: whole must be a non-empty string`, exit `1`, the same sentence for every invalid shape.
+
+  ```
+  whole = "   "  # blank after trimming
+  whole = 1      # not a string
   ```
 
 ## Never

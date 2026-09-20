@@ -3,10 +3,12 @@
 `aco item new`/`show`/`edit`/`close`: the one straight-to-`refs/aco/state`
 item lifecycle (issues #285, #287, #289, #316, #337, #357). This file owns
 each command's own flags (`--title`, `--kind`, `--parent`, `--origin`,
-`--scope`, `--size`), its printed and `--json` shapes, and `item edit`'s
-record-merge rule. `specs/body-block.spec.md` also owns the stored `size`
-field's own schema (BODY-57..BODY-59), cited by ITEM-20 rather than
-restated.
+`--scope`, `--size`, `--whole`), its printed and `--json` shapes, and `item
+edit`'s record-merge rule. `specs/body-block.spec.md` also owns the stored
+`size` field's own schema (BODY-57..BODY-59), cited by ITEM-20 rather than
+restated, and the stored `whole` field's own schema (BODY-60..BODY-62),
+cited by ITEM-23/24; `specs/claim.spec.md` owns what `claim`/`start` do
+with a stored `whole` (CLM-21/22).
 `specs/storage-pin.spec.md` already owns the storage-pin refusal under
 `storage = "github"` (PIN-09..PIN-11), the id-argument grammar (PIN-08), the
 fresh-id mint and its collision refusal (PIN-06, PIN-07, PIN-19), the unknown-
@@ -37,6 +39,7 @@ runner's own git object ids.
 | state-ref pin, `--origin` given | ITEM-19 | — | — | — |
 | `--origin` malformed | ITEM-06 | — | — | — |
 | `--size` given, valid or invalid | ITEM-20 | — | ITEM-21, ITEM-22 | — |
+| `--whole` given, valid or invalid | ITEM-23 | — | ITEM-24 | — |
 | an item, open or closed | — | ITEM-07, ITEM-08 | — | — |
 | an unknown id | PIN-18 | ITEM-10 | PIN-23 | PIN-28 |
 | `storage = "github"` | PIN-09 | ITEM-11 | PIN-10 | PIN-11 |
@@ -59,6 +62,7 @@ runner's own git object ids.
   $ aco item new --title "Ship it" --size M
   writes size = "M" at the block's top level, ahead of [record]
   ```
+- [ ] [ITEM-23] `--whole REASON` writes the item's own top-level `whole` (BODY-60..BODY-62), the same bound `claim`'s own `--whole` enforces; `claim`/`start` read it back when their own call names none (CLM-21).
 
 ## `item show`
 
@@ -81,6 +85,7 @@ runner's own git object ids.
   patches size = "L" only; every other field, including the body outside it, is untouched
   ```
 - [ ] [ITEM-22] `item edit --size` prints `EDITED #<n> size=<S|M|L>` (`--json`: `{"item", "size"}`); an invalid value is refused by argparse before any write.
+- [ ] [ITEM-24] `item edit --whole REASON` patches only the top-level `whole`, reads no stdin, works under both storages, prints `EDITED #<n> whole=<reason>` (`--json`: `{"item", "whole"}`).
 
 ## `item close`
 
