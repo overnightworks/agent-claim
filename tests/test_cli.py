@@ -2126,14 +2126,34 @@ def test_start_under_state_ref_claims_from_the_worktree_it_creates(
     existed. A real bare remote and a real `refs/aco/state` (`_use_real_store`)
     prove it end to end: the claim `start` prints is read back through
     `store.fetch_state` scoped to the worktree path itself, not the
-    original checkout."""
+    original checkout. Both checkouts share the same bare remote, so that
+    final read alone would also pass under the pre-fix bug -- reusing
+    `session.forge()`'s cached instance for the claim never even calls
+    `_state_ref_forge` a second time, but the claim write itself is
+    resolved by `_cmd_claim`'s own `directory` argument regardless of which
+    forge instance served the claim, so it lands in the right place either
+    way. The recorded `directory` each `_state_ref_forge` call receives
+    (issue #322 review, delta finding 2) is what distinguishes the two: a
+    reused forge never resolves a second one at all, while the fix's fresh
+    instance resolves its last one against the created worktree."""
     repo, _remote, _seeded_oid = _real_state_ref_start_scenario(monkeypatch, tmp_path)
     item_id = items.format_item_id(314)
+    real_state_ref_forge = issue_claim._state_ref_forge
+    recorded_directories: list[Path | None] = []
+
+    def recording_state_ref_forge(
+        repo_argument: str | None, canonical_remote: str, *, directory: Path | None = None
+    ) -> state_board.StateRefBoard:
+        recorded_directories.append(directory)
+        return real_state_ref_forge(repo_argument, canonical_remote, directory=directory)
+
+    monkeypatch.setattr(issue_claim, "_state_ref_forge", recording_state_ref_forge)
 
     status = issue_claim.main(["start", "314", "--scope", "src/x.py"])
 
     assert status == 0
     worktree = repo.parent / f"{repo.name}-worktrees" / _START_WORKTREE_NAME
+    assert recorded_directories[-1] == worktree
     claim_id = _claimed_line_id(capsys.readouterr().out, f"issue {item_id}")
     live = store.fetch_state(worktree=worktree, remote="origin").claims
     claim = live[protocol.claim_key(protocol.IssueIdentity(314), _START_BRANCH)]
