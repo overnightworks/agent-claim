@@ -394,14 +394,19 @@ def test_post_rule_with_a_missing_invalid_or_oversized_content_length_is_a_bad_r
     assert served_board.client.item_bodies == {}
 
 
-@pytest.mark.parametrize("conflicting_flag", ["--html", "--json"])
-def test_serve_refuses_together_with_html_or_json(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, conflicting_flag: str
-) -> None:
+def test_serve_refuses_together_with_html(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _single_item_board_environment(monkeypatch, tmp_path)
 
     with pytest.raises(SystemExit):
-        issue_claim.main(["--repo", "example/agent-claim", "board", "--serve", conflicting_flag])
+        issue_claim.main(["--repo", "example/agent-claim", "board", "--serve", "--html"])
+
+
+def test_serve_refuses_together_with_json(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The parser refuses the pair before `--serve` binds a port; the shape
+    that refusal takes under `--json` is OUT-06's, pinned once elsewhere."""
+    _single_item_board_environment(monkeypatch, tmp_path)
+
+    assert issue_claim.main(["--repo", "example/agent-claim", "board", "--serve", "--json"]) == 2
 
 
 def test_board_serve_dispatches_through_the_write_session_and_prints_the_url(
