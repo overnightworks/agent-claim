@@ -46,7 +46,7 @@ including the surviving refusal, is `specs/landing-grammar.spec.md`'s own
 ## Item identity: `aco-xxxxxx` versus `#n`
 
 - [ ] [PIN-06] `aco item new --title TITLE` under `storage = "state-ref"` prints exactly one line, the minted id `aco-` plus six lowercase hex characters, exit `0` (see E-PIN-03).
-- [ ] [PIN-07] `aco item new --title TITLE --json` prints `{"item": "aco-xxxxxx", "number": n}`.
+- [ ] [PIN-07] `aco item new --title TITLE --json` prints `specs/output.spec.md`'s envelope: `{"ok": true, "reason": "created", "item": "aco-xxxxxx", "number": n}`.
 - [ ] [PIN-08] An id argument matching none of `aco-xxxxxx`, `#n`, or the bare number `n` refuses `'<value>' is not an item reference; use aco-xxxxxx, #n, or the bare number n` (see E-PIN-04).
 
 ## Commands refused by the wrong pin
