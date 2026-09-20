@@ -496,7 +496,7 @@ class GitHubForge:
             merge_commit = None
         elif isinstance(merge_commit_field, dict):
             oid = merge_commit_field.get("oid")
-            if oid is not None and not isinstance(oid, str):
+            if not isinstance(oid, str):
                 raise forge.ForgeMalformedResponseError(MALFORMED_PULL_REQUEST)
             merge_commit = oid
         else:
