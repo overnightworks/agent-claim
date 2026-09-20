@@ -570,6 +570,558 @@ def test_github_adapter_fails_loud_on_a_malformed_issue_comment() -> None:
         client.close_landed_item(79, pull_request=101)
 
 
+_READINESS_PULL_REQUEST_PATH = f"repos/{REPOSITORY}/pulls/57"
+_READINESS_CHECK_RUNS_PATH = f"repos/{REPOSITORY}/commits/{MERGE_COMMIT_SHA}/check-runs"
+_READINESS_STATUS_PATH = f"repos/{REPOSITORY}/commits/{MERGE_COMMIT_SHA}/status"
+
+
+def _readiness_client(
+    *,
+    check_run_pages: dict[int, list[dict[str, object]]],
+    statuses: list[dict[str, object]],
+    mergeable_state: str = "clean",
+) -> tuple[GitHubForge, list[list[str]]]:
+    """`statuses` names each combined-status context and its own
+    `conclusion` (`None` for pending, else the state string) the way
+    `landing_readiness`'s own result reads it; this fixture derives the
+    endpoint's own aggregate `state`/`total_count` summary from that same
+    list -- `pending` if any conclusion is still `None`, else `failure` if
+    any is non-`success`, else `success` -- so a caller unions readiness
+    exactly as before while the two real calls (summary, then a paginated
+    names page only when the summary is not passing) stay faithful to
+    `_combined_status_checks`'s own shape."""
+    calls: list[list[str]] = []
+    pull_request = json.dumps(
+        {"state": "open", "headSha": MERGE_COMMIT_SHA, "mergeableState": mergeable_state}
+    )
+    conclusions = [row.get("conclusion") for row in statuses]
+    if not statuses:
+        combined_state = "pending"  # GitHub's own default state for zero statuses.
+    elif any(conclusion is None for conclusion in conclusions):
+        combined_state = "pending"
+    elif any(conclusion != "success" for conclusion in conclusions):
+        combined_state = "failure"
+    else:
+        combined_state = "success"
+    summary = json.dumps({"state": combined_state, "total": len(statuses)})
+    name_page = [{"name": row["name"]} for row in statuses]
+
+    def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
+        calls.append(arguments)
+        path = arguments[1]
+        if path == _READINESS_PULL_REQUEST_PATH:
+            return pull_request
+        if path.startswith(_READINESS_CHECK_RUNS_PATH):
+            page = int(path.rsplit("page=", 1)[1])
+            return "\n".join(json.dumps(row) for row in check_run_pages.get(page, []))
+        if path == _READINESS_STATUS_PATH:
+            return summary
+        assert path.startswith(_READINESS_STATUS_PATH)
+        page = int(path.rsplit("page=", 1)[1])
+        return "\n".join(json.dumps(row) for row in name_page) if page == 1 else ""
+
+    return GitHubForge(github._repository_id(REPOSITORY), run=fake_run), calls
+
+
+def test_github_adapter_reads_landing_readiness_from_the_pull_request_and_its_checks() -> None:
+    """Issue #405: `landing_readiness` reads the pull request itself (open
+    state, head sha, mergeable state), the check-runs endpoint against that
+    same head sha, and the combined commit status -- never `gh pr checks`,
+    which reads the pull request's current head rather than the one this
+    call pins."""
+    client, calls = _readiness_client(
+        check_run_pages={1: [{"name": "build", "conclusion": "success"}]},
+        statuses=[],
+    )
+
+    readiness = client.landing_readiness(57)
+
+    assert calls == [
+        [
+            "api",
+            _READINESS_PULL_REQUEST_PATH,
+            "--jq",
+            "{state,headSha:.head.sha,mergeableState:.mergeable_state}",
+        ],
+        [
+            "api",
+            f"{_READINESS_CHECK_RUNS_PATH}?per_page=100&page=1",
+            "--jq",
+            '.check_runs[] | {name,conclusion:(if .status == "completed" '
+            "then .conclusion else null end)}",
+        ],
+        [
+            "api",
+            _READINESS_STATUS_PATH,
+            "--jq",
+            "{state:.state,total:.total_count}",
+        ],
+    ]
+    assert readiness == forge.LandingReadiness(
+        57, True, MERGE_COMMIT_SHA, "clean", (forge.CheckRun("build", "success"),)
+    )
+
+
+def test_github_adapter_reads_a_check_run_reported_only_on_a_later_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #405 review finding: a check run GitHub reports only on page
+    two of `check-runs` still counts toward readiness -- a merge must not
+    become possible just because a run sorted past the first page."""
+    monkeypatch.setattr(github, "ISSUES_PER_PAGE", 1)
+    client, _calls = _readiness_client(
+        check_run_pages={
+            1: [{"name": "build", "conclusion": "success"}],
+            2: [{"name": "lint", "conclusion": None}],
+        },
+        statuses=[],
+    )
+
+    readiness = client.landing_readiness(57)
+
+    assert readiness.checks == (
+        forge.CheckRun("build", "success"),
+        forge.CheckRun("lint", None),
+    )
+
+
+def test_github_adapter_reads_a_pending_status_context() -> None:
+    """Issue #405 review finding: an external status context (SonarCloud,
+    say) still `pending` reads as a not-yet-completed check, exactly as a
+    check run with no conclusion does."""
+    client, _calls = _readiness_client(
+        check_run_pages={1: [{"name": "build", "conclusion": "success"}]},
+        statuses=[{"name": "sonarcloud", "conclusion": None}],
+    )
+
+    readiness = client.landing_readiness(57)
+
+    assert readiness.checks == (
+        forge.CheckRun("build", "success"),
+        forge.CheckRun("sonarcloud", None),
+    )
+
+
+def test_github_adapter_reads_a_failing_status_context() -> None:
+    """Issue #405 review finding: an external status context that failed
+    reads as a completed, non-successful check, so `aco land`'s preflight
+    refuses on it exactly as it would a failed check run."""
+    client, _calls = _readiness_client(
+        check_run_pages={1: [{"name": "build", "conclusion": "success"}]},
+        statuses=[{"name": "sonarcloud", "conclusion": "failure"}],
+    )
+
+    readiness = client.landing_readiness(57)
+
+    assert readiness.checks == (
+        forge.CheckRun("build", "success"),
+        forge.CheckRun("sonarcloud", "failure"),
+    )
+
+
+def test_github_adapter_reads_a_pending_combined_status_aggregate_with_an_empty_names_page() -> (
+    None
+):
+    """Issue #405 review/gate finding: the combined-status endpoint's own
+    aggregate `state` decides the verdict, never a per-context
+    reconstruction of it -- a `pending` aggregate with `total_count > 0`
+    still blocks even when its own `statuses` page comes back empty (a
+    context posted after this read, say), named under
+    `EXTERNAL_STATUS_FALLBACK_NAME` rather than read as "no checks" and
+    passed silently."""
+
+    def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
+        path = arguments[1]
+        if path == _READINESS_PULL_REQUEST_PATH:
+            return json.dumps(
+                {"state": "open", "headSha": MERGE_COMMIT_SHA, "mergeableState": "clean"}
+            )
+        if path.startswith(_READINESS_CHECK_RUNS_PATH):
+            return ""
+        if path == _READINESS_STATUS_PATH:
+            return json.dumps({"state": "pending", "total": 1})
+        assert path.startswith(_READINESS_STATUS_PATH)
+        return ""
+
+    client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
+
+    readiness = client.landing_readiness(57)
+
+    assert readiness.checks == (forge.CheckRun(github.EXTERNAL_STATUS_FALLBACK_NAME, None),)
+
+
+def test_github_adapter_reads_a_failing_combined_status_aggregate() -> None:
+    """Issue #405 review/gate finding: a `failure` (or `error`) aggregate
+    from the combined-status endpoint blocks the same way, named from
+    whatever context its own paginated `statuses` does carry."""
+
+    def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
+        path = arguments[1]
+        if path == _READINESS_PULL_REQUEST_PATH:
+            return json.dumps(
+                {"state": "open", "headSha": MERGE_COMMIT_SHA, "mergeableState": "clean"}
+            )
+        if path.startswith(_READINESS_CHECK_RUNS_PATH):
+            return ""
+        if path == _READINESS_STATUS_PATH:
+            return json.dumps({"state": "failure", "total": 1})
+        assert path.startswith(_READINESS_STATUS_PATH)
+        return json.dumps({"name": "sonarcloud"})
+
+    client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
+
+    readiness = client.landing_readiness(57)
+
+    assert readiness.checks == (forge.CheckRun("sonarcloud", "failure"),)
+
+
+def test_github_adapter_reads_an_error_combined_status_aggregate() -> None:
+    """Issue #405 round-4 finding 2: an `error` aggregate from the
+    combined-status endpoint blocks exactly as `failure` does -- both are
+    non-`success` verdicts this adapter reads verbatim as the check's own
+    conclusion."""
+
+    def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
+        path = arguments[1]
+        if path == _READINESS_PULL_REQUEST_PATH:
+            return json.dumps(
+                {"state": "open", "headSha": MERGE_COMMIT_SHA, "mergeableState": "clean"}
+            )
+        if path.startswith(_READINESS_CHECK_RUNS_PATH):
+            return ""
+        if path == _READINESS_STATUS_PATH:
+            return json.dumps({"state": "error", "total": 1})
+        assert path.startswith(_READINESS_STATUS_PATH)
+        return json.dumps({"name": "sonarcloud"})
+
+    client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
+
+    readiness = client.landing_readiness(57)
+
+    assert readiness.checks == (forge.CheckRun("sonarcloud", "error"),)
+
+
+def test_github_adapter_reads_a_successful_combined_status_aggregate_as_a_named_check() -> None:
+    """Issue #405 round-4 finding 2: a `success` aggregate with statuses
+    present is itself a named, successful check -- a pull request whose
+    only CI is a combined status (no check runs at all) must still expose
+    it, or `aco land`'s preflight misreads a green pull request as exposing
+    no CI checks and refuses it."""
+    client, _calls = _readiness_client(
+        check_run_pages={},
+        statuses=[{"name": "sonarcloud", "conclusion": "success"}],
+    )
+
+    readiness = client.landing_readiness(57)
+
+    assert readiness.checks == (forge.CheckRun("sonarcloud", "success"),)
+
+
+def test_github_adapter_landing_rejects_a_malformed_status_summary_shape() -> None:
+    """Issue #405 CI coverage follow-up: the combined-status summary read is
+    exactly one JSON value; more than one -- `gh`'s own paginated-array
+    shape, say -- is a malformed summary, not a valid aggregate verdict."""
+    two_values = json.dumps({"state": "success", "total": 0}) + json.dumps(
+        {"state": "success", "total": 0}
+    )
+
+    def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
+        path = arguments[1]
+        if path == _READINESS_PULL_REQUEST_PATH:
+            return json.dumps(
+                {"state": "open", "headSha": MERGE_COMMIT_SHA, "mergeableState": "clean"}
+            )
+        if path.startswith(_READINESS_CHECK_RUNS_PATH):
+            return ""
+        if path == _READINESS_STATUS_PATH:
+            return two_values
+        assert path.startswith(_READINESS_STATUS_PATH)
+        return ""
+
+    client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
+
+    with pytest.raises(ClaimError, match="malformed commit status summary"):
+        client.landing_readiness(57)
+
+
+def test_github_adapter_landing_rejects_a_malformed_status_summary_fields() -> None:
+    """Issue #405 CI coverage follow-up: a combined-status summary whose own
+    `state`/`total` fields fail their own shape check -- a negative `total`,
+    here -- refuses as malformed, the field-level defect beside
+    `test_github_adapter_landing_rejects_a_malformed_status_summary_shape`'s
+    "more than one value" defect."""
+
+    def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
+        path = arguments[1]
+        if path == _READINESS_PULL_REQUEST_PATH:
+            return json.dumps(
+                {"state": "open", "headSha": MERGE_COMMIT_SHA, "mergeableState": "clean"}
+            )
+        if path.startswith(_READINESS_CHECK_RUNS_PATH):
+            return ""
+        if path == _READINESS_STATUS_PATH:
+            return json.dumps({"state": "success", "total": -1})
+        assert path.startswith(_READINESS_STATUS_PATH)
+        return ""
+
+    client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
+
+    with pytest.raises(ClaimError, match="malformed commit status summary"):
+        client.landing_readiness(57)
+
+
+def test_github_adapter_landing_rejects_a_malformed_status_name() -> None:
+    """Issue #405 CI coverage follow-up: a combined-status names page entry
+    with no usable `name` field refuses loud, never silently dropped from
+    the refusal sentence it would otherwise name."""
+
+    def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
+        path = arguments[1]
+        if path == _READINESS_PULL_REQUEST_PATH:
+            return json.dumps(
+                {"state": "open", "headSha": MERGE_COMMIT_SHA, "mergeableState": "clean"}
+            )
+        if path.startswith(_READINESS_CHECK_RUNS_PATH):
+            return ""
+        if path == _READINESS_STATUS_PATH:
+            return json.dumps({"state": "failure", "total": 1})
+        assert path.startswith(_READINESS_STATUS_PATH)
+        return json.dumps({"name": ""})
+
+    client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
+
+    with pytest.raises(ClaimError, match=r"malformed commit status$"):
+        client.landing_readiness(57)
+
+
+def test_github_adapter_accepts_a_mergeable_state_it_has_never_seen_before() -> None:
+    """Issue #405: `mergeable_state` is GitHub's own open vocabulary --
+    read verbatim, never a closed set this adapter could refuse a genuine,
+    simply-not-yet-enumerated answer against."""
+
+    def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
+        path = arguments[1]
+        if "pulls" in path:
+            return json.dumps(
+                {"state": "open", "headSha": MERGE_COMMIT_SHA, "mergeableState": "exploding"}
+            )
+        if path.startswith(_READINESS_CHECK_RUNS_PATH):
+            return ""
+        if path == _READINESS_STATUS_PATH:
+            return json.dumps({"state": "success", "total": 0})
+        return ""
+
+    client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
+
+    readiness = client.landing_readiness(57)
+
+    assert readiness.mergeable_state == "exploding"
+
+
+def test_github_adapter_fails_loud_on_an_empty_mergeable_state() -> None:
+    client = GitHubForge(
+        github._repository_id(REPOSITORY),
+        run=lambda arguments, input_data=None: json.dumps(
+            {"state": "open", "headSha": MERGE_COMMIT_SHA, "mergeableState": ""}
+        ),
+    )
+
+    with pytest.raises(ClaimError, match="malformed pull request"):
+        client.landing_readiness(57)
+
+
+def test_github_adapter_merges_a_pull_request_with_a_pinned_sha() -> None:
+    """Issue #405: `merge_landing` merges through `gh api --method PUT
+    pulls/<n>/merge`, never `gh pr merge`, which re-reads the pull
+    request's own current head instead of the sha this call pins."""
+    observed: list[tuple[list[str], bytes | None]] = []
+
+    def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
+        observed.append((arguments, input_data))
+        return json.dumps({"merged": True, "sha": MERGE_COMMIT_SHA})
+
+    client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
+
+    sha = client.merge_landing(
+        57, head_sha=MERGE_COMMIT_SHA, title="Merge pull request #57", body="Work-Item: #42\n"
+    )
+
+    assert sha == MERGE_COMMIT_SHA
+    assert observed == [
+        (
+            ["api", "--method", "PUT", f"repos/{REPOSITORY}/pulls/57/merge", "--input", "-"],
+            json.dumps(
+                {
+                    "sha": MERGE_COMMIT_SHA,
+                    "merge_method": "merge",
+                    "commit_title": "Merge pull request #57",
+                    "commit_message": "Work-Item: #42\n",
+                }
+            ).encode("utf-8"),
+        )
+    ]
+
+
+@pytest.mark.parametrize("status", [405, 409])
+def test_github_adapter_reports_a_merge_conflict_when_the_pull_request_changed(
+    status: int,
+) -> None:
+    """Issue #405: a 405 or 409 from the merge endpoint means the pull
+    request's head moved since `landing_readiness` read it -- translated to
+    `ForgeMergeConflictError` so `aco land` can name its one recovery: re-run."""
+    client = GitHubForge(
+        github._repository_id(REPOSITORY),
+        run=lambda arguments, input_data=None: (_ for _ in ()).throw(
+            forge.ForgeError(f"HTTP {status} pull request changed")
+        ),
+    )
+
+    with pytest.raises(forge.ForgeMergeConflictError):
+        client.merge_landing(57, head_sha=MERGE_COMMIT_SHA, title="t", body="Work-Item: #42\n")
+
+
+def test_github_adapter_deletes_a_merged_branch() -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
+        calls.append(arguments)
+        return ""
+
+    client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
+
+    client.delete_branch(LANDING_BRANCH)
+
+    assert calls == [
+        ["api", "--method", "DELETE", f"repos/{REPOSITORY}/git/refs/heads/{LANDING_BRANCH}"]
+    ]
+
+
+@pytest.mark.parametrize(
+    "decoded",
+    [
+        "HTTP 404 Not Found",
+        "gh: Reference does not exist (HTTP 422)",
+        "HTTP 422 Reference does not exist",
+    ],
+)
+def test_github_adapter_deleting_an_already_absent_branch_is_idempotent(decoded: str) -> None:
+    """Issue #405 review finding 5: `gh api`'s real error text puts the
+    message before the code (`gh: Reference does not exist (HTTP 422)`);
+    the reversed order is covered alongside it so neither order regresses."""
+
+    def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
+        raise forge.ForgeNotFoundError(decoded) if "404" in decoded else forge.ForgeError(decoded)
+
+    client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
+
+    client.delete_branch(LANDING_BRANCH)
+
+
+def test_github_adapter_delete_branch_reraises_an_unrelated_422() -> None:
+    """Issue #405 review finding: only GitHub's own "reference does not
+    exist" 422 is idempotent absence; any other 422 -- a protected branch
+    refusing the delete, say -- is a real failure `delete_branch` must
+    still surface, not silently treat as already gone."""
+    client = GitHubForge(
+        github._repository_id(REPOSITORY),
+        run=lambda arguments, input_data=None: (_ for _ in ()).throw(
+            forge.ForgeError("HTTP 422 Validation Failed: branch is protected")
+        ),
+    )
+
+    with pytest.raises(forge.ForgeError, match="branch is protected"):
+        client.delete_branch(LANDING_BRANCH)
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        pytest.param(lambda client: client.delete_branch(LANDING_BRANCH), id="delete-branch"),
+        pytest.param(
+            lambda client: client.merge_landing(
+                57, head_sha=MERGE_COMMIT_SHA, title="t", body="Work-Item: #42\n"
+            ),
+            id="merge-landing",
+        ),
+    ],
+)
+def test_github_adapter_reraises_a_failure_unrelated_to_its_own_classification(
+    action: Callable[[GitHubForge], object],
+) -> None:
+    """Both `delete_branch`'s idempotent-absence handling and
+    `merge_landing`'s conflict translation only ever intercept their own
+    named case; any other `ForgeError` -- a transient gateway timeout, say
+    -- passes through unchanged."""
+    client = GitHubForge(
+        github._repository_id(REPOSITORY),
+        run=lambda arguments, input_data=None: (_ for _ in ()).throw(
+            forge.ForgeError("HTTP 500 gateway timeout")
+        ),
+    )
+
+    with pytest.raises(forge.ForgeError, match="gateway timeout"):
+        action(client)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param("not a dict", id="not-a-dict"),
+        pytest.param({"name": "", "conclusion": "success"}, id="empty-name"),
+        pytest.param({"name": "build", "conclusion": ""}, id="empty-conclusion"),
+        pytest.param({"name": "build", "conclusion": 5}, id="non-string-conclusion"),
+    ],
+)
+def test_github_adapter_fails_loud_on_a_malformed_check_run(value: object) -> None:
+    client = GitHubForge(
+        github._repository_id(REPOSITORY), run=lambda arguments, input_data=None: ""
+    )
+
+    with pytest.raises(ClaimError, match="malformed check run"):
+        client._check_run(value)
+
+
+def test_github_adapter_fails_loud_on_a_malformed_readiness_response() -> None:
+    """`landing_readiness` reads its pull request's own `--jq` filter as
+    exactly one JSON value; more than one -- `gh`'s own paginated-array
+    shape, say -- is a malformed pull request, not a valid readiness."""
+    two_values = json.dumps({"state": "open"}) + json.dumps({"state": "closed"})
+    client = GitHubForge(
+        github._repository_id(REPOSITORY), run=lambda arguments, input_data=None: two_values
+    )
+
+    with pytest.raises(ClaimError, match="malformed pull request"):
+        client.landing_readiness(57)
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        pytest.param({"merged": False, "sha": MERGE_COMMIT_SHA}, id="not-merged"),
+        pytest.param({"merged": True, "sha": "not-a-sha"}, id="malformed-sha"),
+        pytest.param({"merged": True}, id="missing-sha"),
+    ],
+)
+def test_github_adapter_fails_loud_on_a_malformed_merge_result(result: dict[str, object]) -> None:
+    client = GitHubForge(
+        github._repository_id(REPOSITORY),
+        run=lambda arguments, input_data=None: json.dumps(result),
+    )
+
+    with pytest.raises(ClaimError, match="malformed merge result"):
+        client.merge_landing(57, head_sha=MERGE_COMMIT_SHA, title="t", body="Work-Item: #42\n")
+
+
+def test_github_adapter_fails_loud_on_a_merge_result_with_more_than_one_value() -> None:
+    two_values = json.dumps({"merged": True}) + json.dumps({"merged": True})
+    client = GitHubForge(
+        github._repository_id(REPOSITORY), run=lambda arguments, input_data=None: two_values
+    )
+
+    with pytest.raises(ClaimError, match="malformed merge result"):
+        client.merge_landing(57, head_sha=MERGE_COMMIT_SHA, title="t", body="Work-Item: #42\n")
+
+
 def test_recent_merged_pull_requests_refuses_a_window_that_ends_before_it_starts() -> None:
     """A fixed far-future `since` -- never `datetime.now(UTC)`-relative -- so
     this stays deterministic regardless of when the suite runs: a real-clock

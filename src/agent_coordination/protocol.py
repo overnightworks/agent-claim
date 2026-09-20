@@ -691,9 +691,6 @@ class ClaimId(str):
         return super().__new__(cls, value)
 
 
-COORDINATOR_ROLE = "coordinator"
-
-
 # --- Claim key codec (criterion 10, issue #176 slice C2) -------------------
 #
 # One path segment, no `/`, collision-free and reversible -- the only owner
@@ -1164,10 +1161,11 @@ def _authorize_release(current: ActiveClaim, intent: ReleaseIntent | LandingInte
     or an explicit coordinator override by role coordinator. Shared by
     `ReleaseIntent` and `LandingIntent` (issue #359): a landing's own claim
     release is authorized exactly the way an ordinary release is, never a
-    second rule."""
+    second rule. Delegates its own role check to `_require_coordinator_override`
+    (issue #405 round-4 finding 2) -- the one printer for CLAIM-39's sentence,
+    never a second wording of the same refusal."""
     if intent.coordinator_override:
-        if intent.role != COORDINATOR_ROLE:
-            raise ClaimUnavailableError("a coordinator override requires role coordinator")
+        _require_coordinator_override(intent.role)
         return
     if not _same_claimant(current, intent):
         raise ClaimUnavailableError(
