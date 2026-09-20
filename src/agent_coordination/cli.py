@@ -122,7 +122,7 @@ def _optional_whole_reason(arguments: argparse.Namespace) -> str | None:
     raw = getattr(arguments, "whole", None)
     if raw is None:
         return None
-    return protocol._outbound_text(raw, "whole reason", maximum=512)
+    return protocol._outbound_text(raw, _WHOLE_REASON_LABEL, maximum=512)
 
 
 def _wide_scope_condition(trip: protocol.WideScopeTrip) -> str:
@@ -137,6 +137,13 @@ def _wide_scope_condition(trip: protocol.WideScopeTrip) -> str:
     percent = round(100 * covered / total)
     path_word = "path" if covered == 1 else "paths"
     return f"{covered} {path_word} of {total} versioned files ({percent} %) exceeds a quarter"
+
+
+_WHOLE_REASON_LABEL = "whole reason"
+"""`protocol._outbound_text`'s own field name for a `--whole`/body `whole` value
+(issue #399), named once here beside the width-gate refusal it justifies --
+`_optional_whole_reason`, `_cmd_item_edit_whole` and `_whole_from_item_body`
+all bound the same reason text and must refuse by the same name."""
 
 
 def _wide_scope_refusal(trip: protocol.WideScopeTrip, *, names_body_fallback: bool) -> str:
@@ -2955,7 +2962,7 @@ def _cmd_item_edit_whole(parsed: argparse.Namespace) -> int:
     located = _located_block_or_refuse(
         number, body, command=ITEM_EDIT_WHOLE_COMMAND, storage=storage
     )
-    reason = protocol._outbound_text(parsed.whole, "whole reason", maximum=512)
+    reason = protocol._outbound_text(parsed.whole, _WHOLE_REASON_LABEL, maximum=512)
     new_data = {**located.data, "whole": reason}
     client.update_item_body(number, board.replace_agent_claim_block(body, located, new_data))
     _print_item_edit_whole_result(number, reason, as_json=parsed.json)
@@ -4902,7 +4909,7 @@ def _requested_whole_reason(raw: str | None) -> str | None:
     `protocol._outbound_text` bound `claim`'s own `--whole` already enforces
     (`_optional_whole_reason`), so the two never drift on what a legal
     reason looks like."""
-    return None if raw is None else protocol._outbound_text(raw, "whole reason", maximum=512)
+    return None if raw is None else protocol._outbound_text(raw, _WHOLE_REASON_LABEL, maximum=512)
 
 
 def _block_body_with_whole(body: str, whole: str | None) -> str:
