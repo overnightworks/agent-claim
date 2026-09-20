@@ -3,6 +3,6 @@ agent = "Claude head (coordinator)"
 role = "builder"
 base = "5c9f6f578c295c5b812ba30c2f476da8199e3fcc"
 branch = "claude/issue-425-json-slice4"
-scope = ["specs/cut.spec.md", "specs/item.spec.md", "specs/output.spec.md", "specs/release.spec.md", "specs/storage-pin.spec.md", "specs/workspace.spec.md", "src/agent_coordination/cli.py", "tests/test_cli.py"]
+scope = ["specs/claim.spec.md", "specs/cut.spec.md", "specs/item.spec.md", "specs/output.spec.md", "specs/release.spec.md", "specs/rescope.spec.md", "specs/storage-pin.spec.md", "specs/workspace.spec.md", "src/agent_coordination/cli.py", "tests/test_cli.py"]
 opened_commit = "f0ff88193d86b80f6d76d13cae6a085c5aa62d35"
 whole_reason = "one envelope change across release, cut and item and their three specs; the slice is one contract"
