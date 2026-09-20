@@ -28,6 +28,10 @@ branch prefix, `<claim-id>` the acquired claim's own id.
 | the computed branch name is already taken elsewhere | START-08 |
 | a worktree at the computed path sits on a different branch | START-09 |
 | a worktree at the computed path belongs to a foreign checkout | START-13 |
+| the built branch name is unsafe as a git ref | START-14 |
+| a non-worktree directory already sits at the computed path | START-15 |
+| a live claim on the target is held by a different agent or branch | START-16 |
+| a clean resume's own `--scope` differs from the live claim's stored scope | START-17 |
 | every case | START-05 |
 
 ## Creating or resuming the worktree
@@ -61,6 +65,10 @@ brand-new id, never a stale or deterministic per-item one.
 - [ ] [START-09] A worktree at the computed path on a different branch refuses `worktree <path> exists on branch '<other>', not '<branch>'; remove it, or pass --slug to choose a different worktree`, exit 2.
 - [ ] [START-10] A worktree at the computed path with uncommitted changes refuses `worktree <path> is dirty: <paths>; commit or clean it before resuming`, exit 2 (paths named as CLM-05 names them).
 - [ ] [START-13] A worktree at the computed path that is not this repository's own -- a foreign root, this repository's own main checkout, or a different repository's worktree -- refuses by name (see E-START-05).
+- [ ] [START-14] An unsafe branch prefix refuses `agent identity '<prefix>' is not usable in a branch name: '<branch>' is not a safe Git ref`, exit `2`, before any git write (see E-START-07).
+- [ ] [START-15] Something other than a git worktree already sitting at the computed path refuses `path exists and is not a worktree of this repository`, exit `2` (see E-START-08).
+- [ ] [START-16] A live claim on the target held by a different agent or branch is never silently resumed: it falls through to the ordinary claim path, refused by CLAIM-11's own sentence (see E-START-09).
+- [ ] [START-17] A resume's own explicit `--scope` disagreeing with the live claim's stored scope refuses `live claim scope differs; release it first`, exit `2` (see E-START-10).
 
 ## Never
 
@@ -80,7 +88,7 @@ title and body.
 
 ### E-START-01 -- a fresh item gets a worktree, a branch, and a claim in one call
 
-Setup: bare-remote, fake `gh`, issue `#314` open, title `Fresh Slug`, body `scope = ["src/x.py"]`
+Setup: bare-remote, bootstrapped, fake `gh`, issue `#314` open, title `Fresh Slug`, body `scope = ["src/x.py"]`
 
 ```console
 $ aco start 314
@@ -93,7 +101,7 @@ exit 0
 
 ### E-START-02 -- a second call resumes the live claim by lookup, same id and all
 
-Setup: bare-remote, fake `gh`, issue `#314` as above, already `aco start 314`
+Setup: bare-remote, bootstrapped, fake `gh`, issue `#314` as above, already `aco start 314`
 
 ```console
 $ aco start 314
@@ -108,7 +116,7 @@ exit 0
 
 ### E-START-03 -- a closed item refuses before anything is built
 
-Setup: bare-remote, fake `gh`, issue `#314` closed
+Setup: bare-remote, bootstrapped, fake `gh`, issue `#314` closed
 
 ```console
 $ aco start 314
@@ -118,7 +126,7 @@ exit 2
 
 ### E-START-04 -- an explicit `--slug` failing the derived shape refuses before any worktree
 
-Setup: bare-remote, fake `gh`, issue `#314` open
+Setup: bare-remote, bootstrapped, fake `gh`, issue `#314` open
 
 ```console
 $ aco start 314 --slug Bad_Slug
@@ -128,7 +136,7 @@ exit 2
 
 ### E-START-05 -- a worktree at the computed path belongs to a different repository
 
-Setup: bare-remote, fake `gh`, issue `#314` open, `/work/agent-claim-worktrees/issue-314-fresh-slug`
+Setup: bare-remote, bootstrapped, fake `gh`, issue `#314` open, `/work/agent-claim-worktrees/issue-314-fresh-slug`
 already a linked worktree of an unrelated repository, on branch `ada/issue-314-fresh-slug`
 
 ```console
@@ -139,7 +147,7 @@ exit 2
 
 ### E-START-06 -- a clean resume with no live claim mints a fresh id, never a stale one
 
-Setup: bare-remote, fake `gh`, issue `#314` as E-START-01, already `aco start 314` then
+Setup: bare-remote, bootstrapped, fake `gh`, issue `#314` as E-START-01, already `aco start 314` then
 `aco release 314 --abandoned "stopped for the day"` -- the worktree stands, untouched, with no
 live claim on it
 
@@ -153,3 +161,45 @@ exit 0
 ```
 
 `<fresh-claim-id>` differs from any id minted for #314 before it.
+
+### E-START-07 -- an unsafe identity prefix refuses before any worktree
+
+Setup: bare-remote, bootstrapped, fake `gh`, issue `#314` open, title `Fresh Slug`, `ACO_AGENT` set to `-bad`
+
+```console
+$ aco start 314
+2> ERROR: agent identity '-bad' is not usable in a branch name: '-bad/issue-314-fresh-slug' is not a safe Git ref
+exit 2
+```
+
+### E-START-08 -- something other than a worktree already sits at the computed path
+
+Setup: bare-remote, bootstrapped, fake `gh`, issue `#314` open, title `Fresh Slug`,
+`/work/agent-claim-worktrees/issue-314-fresh-slug` already a plain directory, not a git worktree
+
+```console
+$ aco start 314
+2> ERROR: path exists and is not a worktree of this repository
+exit 2
+```
+
+### E-START-09 -- a live claim held by a different agent is never silently resumed
+
+Setup: bare-remote, bootstrapped, fake `gh`, issue `#314` as E-START-01, a live claim on `#314`
+held by `Grok sess-9` on branch `grok/issue-314-other`
+
+```console
+$ aco start 314
+2> ERROR: issue #314 is claimed by Grok sess-9 (builder) on issue #314 branch grok/issue-314-other
+exit 2
+```
+
+### E-START-10 -- resuming with a `--scope` that disagrees with the live claim refuses
+
+Setup: bare-remote, bootstrapped, fake `gh`, issue `#314` as E-START-01, already `aco start 314`
+
+```console
+$ aco start 314 --scope src/other.py
+2> ERROR: live claim scope differs; release it first
+exit 2
+```
