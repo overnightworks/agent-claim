@@ -99,7 +99,7 @@ does, before either reads a single issue -- cited there, not restated.
 ## `--html`
 
 - [ ] [BOARD-15] `--html` with no `PATH` writes the page to stdout; `--html PATH` writes it to that file and stdout stays empty (see E-BOARD-05).
-- [ ] [BOARD-16] `--html`, `--json`, and `--serve` are mutually exclusive: combining two refuses `aco board: error: argument <second>: not allowed with argument <first>`, exit `2`, before any read (see E-BOARD-06).
+- [ ] [BOARD-16] `--html`, `--json`, `--serve` are exclusive: the pair refuses `argument <second>: not allowed with argument <first>`, exit `2`, before any read; `--json` per OUT-06 (see E-BOARD-06).
 - [ ] [BOARD-17] Lanes lists one card per live claim, `<label> <title>` heading, Agent/Branch/Alter always, and Now/Next/Blocked by/Done when only when the contract carries them (see E-BOARD-05).
 - [ ] [BOARD-18] The page carries exactly five `<h2>` sections in order: `Wartet auf dich <N>`, `Lanes <N>`, `Themen` (uncounted), `Landungen <N>`, `Messungen` (uncounted, issue #357) (see E-BOARD-05).
 - [ ] [BOARD-19] An empty `Wartet auf dich`/`Lanes` list renders `<p class="empty">nichts</p>`; an empty `Themen` list renders `<li class="empty">nichts</li>`.
@@ -225,9 +225,14 @@ Setup: bare-remote, fake `gh`
 
 ```console
 $ aco board --html --json
-2> aco board: error: argument --json: not allowed with argument --html
+2> ERROR: argument --json: not allowed with argument --html
+{"ok": false, "reason": "invalid_usage", "message": "argument --json: not allowed with argument --html"}
 exit 2
 ```
+
+A pair without `--json` — `--html --serve` — prints no object at all, only
+argparse's own usage block and `aco board: error: argument --serve: not
+allowed with argument --html` on stderr, exit `2`.
 
 ### E-BOARD-07 — `--serve` prints one URL line
 

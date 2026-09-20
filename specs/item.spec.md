@@ -96,7 +96,7 @@ runner's own git object ids.
 ## `--json` and the shared envelope
 
 - [ ] [ITEM-17] Every other runtime refusal from `item new`/`show`/`edit`/`close`, reached with `--json`, prints `specs/output.spec.md`'s envelope, `reason: "precondition_failed"`, exit `2`.
-- [ ] [ITEM-18] An argparse-level refusal — a malformed `--origin`, or an item argument PIN-08 refuses — prints only the `ERROR:` line, exit `2`; `--json` never adds an envelope object there.
+- [ ] [ITEM-18] An argparse-level refusal — a malformed `--origin`, or an item argument PIN-08 refuses — prints the `ERROR:` line, exit `2`, and under `--json` OUT-06's envelope.
 - [ ] [ITEM-25] `item edit`'s own malformed piped body (PIN-24) reports `reason: "body_invalid"` instead, `defects` the same list `body --check`'s own `--json` carries, exit `2`.
 
 ## Never
