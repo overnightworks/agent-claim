@@ -35,6 +35,8 @@ from . import (
     workspace,
 )
 
+CLI_ERROR_PREFIX = "ERROR: "
+
 DEFAULT_CLAIM_ROLE = "builder"
 NEXT_PULL_DESCRIPTION = (
     "Pulling is not dispatching: an item whose expectations are still unruled is "
@@ -3894,7 +3896,7 @@ def _refuse(reason: StrEnum, error: protocol.ClaimError, *, as_json: bool) -> in
     always printed it, then -- only under `--json` -- the envelope naming
     this call's own reason instead of the dropped `error` key. Exit `2`,
     the one exit every refusal past the parser still uses."""
-    print(f"ERROR: {error}", file=sys.stderr)
+    print(f"{CLI_ERROR_PREFIX}{error}", file=sys.stderr)
     if as_json:
         _emit_json(False, reason, message=str(error))
     return 2
@@ -5059,10 +5061,13 @@ LAND_REINSTALL_LINE = "reinstall: uv tool install --force --from . agent-coordin
 # controls, unlike the internal path names `protocol.named_with_overflow_count`
 # was written for (issue #405 review/gate finding): each name is truncated
 # here before that same three-then-`and N more` grammar ever sees it, and the
-# assembled sentence is capped again as a final backstop, so a single
-# 300-character check name can never print a refusal past 200 characters.
+# assembled sentence is capped again as a final backstop -- short enough that
+# `main`'s own `CLI_ERROR_PREFIX` still fits under the same 200-character
+# printed-line budget (issue #405 round-4 finding) -- so several long check
+# names can never print a refusal line past 200 characters.
 LAND_CHECK_NAME_LENGTH_LIMIT = 40
 LAND_REFUSAL_LINE_LENGTH_LIMIT = 200
+LAND_REFUSAL_SENTENCE_LENGTH_LIMIT = LAND_REFUSAL_LINE_LENGTH_LIMIT - len(CLI_ERROR_PREFIX)
 
 
 def _land_not_open_refusal(number: int) -> str:
@@ -5080,9 +5085,9 @@ def _land_truncated_check_name(name: str) -> str:
 
 
 def _land_bounded_refusal(sentence: str) -> str:
-    if len(sentence) <= LAND_REFUSAL_LINE_LENGTH_LIMIT:
+    if len(sentence) <= LAND_REFUSAL_SENTENCE_LENGTH_LIMIT:
         return sentence
-    return sentence[: LAND_REFUSAL_LINE_LENGTH_LIMIT - 1] + "…"
+    return sentence[: LAND_REFUSAL_SENTENCE_LENGTH_LIMIT - 1] + "…"
 
 
 def _land_pending_check_names(checks: tuple[forge.CheckRun, ...]) -> tuple[str, ...]:
@@ -6735,7 +6740,7 @@ def main(arguments: list[str] | None = None) -> int:
             return _protect()
         return _read_status_body_or_dispatch(parsed)
     except protocol.ClaimError as error:
-        print(f"ERROR: {error}", file=sys.stderr)
+        print(f"{CLI_ERROR_PREFIX}{error}", file=sys.stderr)
         if getattr(parsed, "json", False):
             print(json.dumps({"ok": False, "error": str(error)}))
         return 2

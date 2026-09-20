@@ -12863,6 +12863,15 @@ def _land_scenario(
             + "; wait for every check to succeed",
             id="check-running-name-truncated",
         ),
+        pytest.param(
+            _land_readiness(
+                checks=tuple(forge.CheckRun("x" * 300, None) for _ in range(5))
+            ),
+            "pull request #12 has checks still running: "
+            + ", ".join([("x" * 39 + "…")] * 3)
+            + ", and 2 more; wait for ev…",
+            id="check-running-many-long-names-bounded-with-error-prefix",
+        ),
     ],
 )
 def test_land_refuses_every_readiness_defect_before_any_write(
@@ -12873,12 +12882,16 @@ def test_land_refuses_every_readiness_defect_before_any_write(
 ) -> None:
     """Issue #405 Beweis 1: every readiness-based preflight refusal merges
     nothing, deletes no branch, and reaches no store write -- `aco land`'s
-    own read-only order."""
+    own read-only order. The printed line (issue #405 round-4 finding) never
+    exceeds 200 characters including `main`'s own `ERROR: ` prefix, not just
+    the sentence the refusal builds before that prefix is added."""
     client = _land_preflight_client(monkeypatch, readiness=readiness)
 
     assert issue_claim.main(["--repo", REPOSITORY, "land", "12"]) == 2
 
-    assert capsys.readouterr().err == f"ERROR: {reason}\n"
+    error_line = capsys.readouterr().err
+    assert error_line == f"ERROR: {reason}\n"
+    assert len(error_line.rstrip("\n")) <= issue_claim.LAND_REFUSAL_LINE_LENGTH_LIMIT
     assert client.merge_calls == []
     assert client.deleted_branches == []
 
