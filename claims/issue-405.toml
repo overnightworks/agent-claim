@@ -1,0 +1,8 @@
+claim_id = "b4e17d23289644da9a8279620432c59e"
+agent = "Claude head (coordinator)"
+role = "builder"
+base = "5be7d22c841af0522288a440b0b18afcf2a42428"
+branch = "claude/issue-405-aco-land"
+scope = ["specs/land.spec.md", "specs/landing-grammar.spec.md", "specs/release.spec.md", "src/agent_coordination/checkout.py", "src/agent_coordination/cli.py", "src/agent_coordination/forge.py", "src/agent_coordination/github.py", "tests/github_fixtures.py", "tests/test_cli.py", "tests/test_github.py"]
+opened_commit = "1de112c04183bd6cb845514e5895baf89bb6ba14"
+whole_reason = "aco land: two forge port operations, the GitHub adapter, the command, its spec and tests"
