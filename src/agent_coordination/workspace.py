@@ -12,7 +12,7 @@ import tempfile
 import tomllib
 import uuid
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -169,19 +169,46 @@ def board_token(path: Path, *, mint_new: bool = False) -> str:
     return _first_board_token(path)
 
 
+class _BoardTokenNotFoundError(Exception):
+    """Internal marker (issue #388, round 4): `path` has nothing minted at
+    it yet -- `_read_board_token`'s own signal, raised only on the open
+    call's `FileNotFoundError`, that `_first_board_token` catches to know a
+    mint is needed instead of a refusal. Never a `WorkspaceError`: it never
+    reaches a caller outside this module."""
+
+
 def _write_temporary_token_file(directory: Path, name: str, content: bytes) -> str:
     """A private (0600), fsynced temporary file in `directory` holding
     `content`, ready to be published at `name`'s own path by `os.link` or
     `os.replace` -- shared by both mint paths below so a token is only ever
     visible at its final name once fully written, never as an empty or
-    partial file there."""
+    partial file there. A write, flush, fsync, or chmod failure after
+    `mkstemp` removes that temporary file (best effort) before re-raising,
+    so a failed mint never leaves a `.board-token.*` file behind."""
     descriptor, temporary_name = tempfile.mkstemp(prefix=f".{name}.", dir=directory)
-    with os.fdopen(descriptor, "wb") as handle:
-        handle.write(content)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.chmod(temporary_name, _PRIVATE_FILE_MODE)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary_name, _PRIVATE_FILE_MODE)
+    except OSError:
+        _discard_temporary_token_file(temporary_name)
+        raise
     return temporary_name
+
+
+def _discard_temporary_token_file(temporary_name: str) -> None:
+    """Best-effort cleanup of a mint's own now-unneeded temporary file,
+    called only after the mint's real outcome -- a token to return, the
+    winner's file to read back, or a `WorkspaceError` already decided from
+    the failure that preceded this call -- is settled. An unlink failure
+    here, `ENOENT` or anything else, is swallowed rather than raised: the
+    file is disposable litter once that outcome exists, so surfacing a
+    second, unrelated `OSError` here would only replace a successful
+    result or the named refusal with a worse, un-named one."""
+    with suppress(OSError):
+        os.unlink(temporary_name)
 
 
 def _mint_board_token(path: Path, token: str) -> None:
@@ -192,27 +219,42 @@ def _mint_board_token(path: Path, token: str) -> None:
     failure -- an owner-unwritable directory, a full disk -- refuses naming
     the token path rather than raising a raw `OSError` or reaching
     `_atomic_write`'s unrelated "login recovery state" wording, since this
-    path never touches that state."""
+    path never touches that state; a `replace` failure also removes the
+    temporary file it could not publish."""
     try:
         temporary_name = _write_temporary_token_file(
             path.parent, path.name, (token + "\n").encode()
         )
+    except OSError as error:
+        raise WorkspaceError(_invalid_board_token_message(path)) from error
+    try:
         os.replace(temporary_name, path)
     except OSError as error:
+        _discard_temporary_token_file(temporary_name)
         raise WorkspaceError(_invalid_board_token_message(path)) from error
 
 
 def _first_board_token(path: Path) -> str:
-    """The token at `path`, minting it first when nothing is there yet. The
-    mint writes a private, fsynced temporary file in the same directory and
-    publishes it with `os.link` rather than `O_CREAT | O_EXCL` on the final
-    path itself: `link` either creates `path` pointing at the same,
-    fully-written inode, or fails `EEXIST` because another process's mint
-    already won -- there is never a window where `path` exists but is still
-    empty, the way opening the final name directly for writing would leave
-    one. The loser reads the winner's file back instead of writing a
-    second, diverging token; an owner-unwritable directory refuses naming
-    the token path the same way `_mint_board_token` does."""
+    """The token at `path`: read back when a start finds one already
+    minted -- a read needs no write access to `path`'s own directory, so
+    BOARD-32's "minted only when missing" holds even when that directory is
+    owner-unwritable -- minting only when the open itself reports there is
+    nothing there yet (`_BoardTokenNotFoundError`, raised only on `ENOENT`; any
+    other read failure is `_read_board_token`'s own refusal to raise, not a
+    "go ahead and mint" signal). The mint writes a private, fsynced
+    temporary file in the same directory and publishes it with `os.link`
+    rather than `O_CREAT | O_EXCL` on the final path itself: `link` either
+    creates `path` pointing at the same, fully-written inode, or fails
+    `EEXIST` because another process's mint already won -- there is never a
+    window where `path` exists but is still empty, the way opening the
+    final name directly for writing would leave one. The loser reads the
+    winner's file back instead of writing a second, diverging token; an
+    owner-unwritable directory refuses naming the token path the same way
+    `_mint_board_token` does."""
+    try:
+        return _read_board_token(path)
+    except _BoardTokenNotFoundError:
+        pass
     token = secrets.token_urlsafe(BOARD_TOKEN_BYTES)
     try:
         temporary_name = _write_temporary_token_file(
@@ -227,7 +269,7 @@ def _first_board_token(path: Path) -> str:
     except OSError as error:
         raise WorkspaceError(_invalid_board_token_message(path)) from error
     finally:
-        os.unlink(temporary_name)
+        _discard_temporary_token_file(temporary_name)
     return token
 
 
@@ -254,9 +296,14 @@ def _read_board_token(path: Path) -> str:
     moment `fstat` reports it, before any read is attempted. Content is
     read as bytes and decoded only after every `fstat` check passes, so
     invalid UTF-8 refuses the same named way an `OSError` on open or read
-    does, rather than raising a bare `UnicodeDecodeError`."""
+    does, rather than raising a bare `UnicodeDecodeError`. The open's own
+    `FileNotFoundError` is the one exception raised as `_BoardTokenNotFoundError`
+    instead: `_first_board_token`'s own "nothing minted yet" signal, never
+    a refusal a caller outside this module would see."""
     try:
         descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError as error:
+        raise _BoardTokenNotFoundError from error
     except OSError as error:
         raise WorkspaceError(_invalid_board_token_message(path)) from error
     try:

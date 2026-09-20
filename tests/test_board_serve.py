@@ -800,6 +800,63 @@ def test_two_concurrent_first_starts_converge_on_one_token(
     assert workspace._read_board_token(token_path) == tokens[0]
 
 
+def test_board_token_reads_an_existing_token_without_directory_write_access(
+    tmp_path: Path,
+) -> None:
+    """Issue #388 (round 4): BOARD-32's own "minted only when missing" --
+    an ordinary start with a token already on disk reads it back without
+    ever needing write access to its own directory, so a directory an
+    operator later locks down to owner-read-only (`0500`) still serves the
+    same stable URL instead of attempting, and failing, a mint."""
+    token_directory = tmp_path / "aco"
+    token_path = token_directory / "board-token"
+    minted = workspace.board_token(token_path)
+    token_directory.chmod(0o500)
+
+    try:
+        assert workspace.board_token(token_path) == minted
+    finally:
+        token_directory.chmod(0o700)
+
+
+def test_first_board_token_returns_the_token_even_when_cleanup_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Issue #388 (round 4): the mint's own temporary file failing to
+    unlink after a successful `os.link` publish must never replace that
+    already-successful result with a raw `OSError` -- the temporary file is
+    disposable litter once the real token is published and readable."""
+    token_path = tmp_path / "board-token"
+
+    def _raise(*_args: object, **_kwargs: object) -> None:
+        raise OSError("simulated cleanup failure")
+
+    monkeypatch.setattr(os, "unlink", _raise)
+
+    token = workspace._first_board_token(token_path)
+
+    assert workspace._read_board_token(token_path) == token
+
+
+def test_write_temporary_token_file_removes_its_own_temp_file_on_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Issue #388 (round 4): a write/flush/fsync/chmod failure after
+    `mkstemp` removes its own temporary file (best effort) before
+    re-raising, so a failed mint never leaves a `.board-token.*` file
+    behind for the directory's owner to find."""
+
+    def _raise(*_args: object, **_kwargs: object) -> None:
+        raise OSError("simulated disk failure")
+
+    monkeypatch.setattr(os, "fsync", _raise)
+
+    with pytest.raises(OSError, match="simulated disk failure"):
+        workspace._write_temporary_token_file(tmp_path, "board-token", b"x" * 43 + b"\n")
+
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_ensure_board_token_directory_refuses_when_mkdir_fails(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
