@@ -934,7 +934,13 @@ class GitHubForge:
         failure between the two `_run` calls below) must read this before
         posting the same comment a second time."""
         raw = self._run(
-            ["api", f"repos/{self.repository}/issues/{number}/comments", "--jq", ".[] | {body}"]
+            [
+                "api",
+                "--paginate",
+                f"repos/{self.repository}/issues/{number}/comments?per_page=100",
+                "--jq",
+                ".[] | {body}",
+            ]
         )
         for value in self._json_lines(raw, "issue comment"):
             if not isinstance(value, dict) or not isinstance(value.get("body"), str):

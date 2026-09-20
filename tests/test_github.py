@@ -435,6 +435,13 @@ def test_github_adapter_updates_an_item_body() -> None:
 
 
 _LANDING_COMMENTS_PATH = f"repos/{REPOSITORY}/issues/79/comments"
+_LANDING_COMMENTS_READ = [
+    "api",
+    "--paginate",
+    f"{_LANDING_COMMENTS_PATH}?per_page=100",
+    "--jq",
+    ".[] | {body}",
+]
 
 
 def test_github_adapter_closes_a_landed_item_with_a_comment_first() -> None:
@@ -453,7 +460,7 @@ def test_github_adapter_closes_a_landed_item_with_a_comment_first() -> None:
     client.close_landed_item(79, pull_request=101)
 
     assert observed == [
-        (["api", _LANDING_COMMENTS_PATH, "--jq", ".[] | {body}"], None),
+        (_LANDING_COMMENTS_READ, None),
         (
             ["api", _LANDING_COMMENTS_PATH, "--input", "-"],
             json.dumps({"body": github.landing_comment(101)}).encode("utf-8"),
@@ -484,7 +491,7 @@ def test_github_adapter_closing_a_landed_item_never_reaches_close_when_the_comme
         client.close_landed_item(79, pull_request=101)
 
     assert calls == [
-        ["api", _LANDING_COMMENTS_PATH, "--jq", ".[] | {body}"],
+        _LANDING_COMMENTS_READ,
         ["api", _LANDING_COMMENTS_PATH, "--input", "-"],
     ]
 
@@ -505,7 +512,42 @@ def test_github_adapter_closing_a_landed_item_skips_a_repeated_comment() -> None
     client.close_landed_item(79, pull_request=101)
 
     assert calls == [
-        ["api", _LANDING_COMMENTS_PATH, "--jq", ".[] | {body}"],
+        _LANDING_COMMENTS_READ,
+        ["api", "--method", "PATCH", f"repos/{REPOSITORY}/issues/79", "--input", "-"],
+    ]
+
+
+def test_github_adapter_finds_a_landing_comment_past_the_first_page() -> None:
+    """Issue #397: `gh api` caps a plain call at thirty comments per page.
+    With thirty unrelated comments ahead of this run's own landing comment
+    -- posted by a run whose close then failed -- a rerun must still find
+    it via `--paginate` and skip straight to closing, never posting it a
+    second time."""
+    unrelated = (json.dumps({"body": f"unrelated comment {index}"}) for index in range(30))
+    already_posted = "\n".join([*unrelated, json.dumps({"body": github.landing_comment(101)})])
+    calls: list[list[str]] = []
+    close_should_fail = True
+
+    def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
+        calls.append(arguments)
+        nonlocal close_should_fail
+        if input_data is None:
+            return already_posted
+        if close_should_fail:
+            close_should_fail = False
+            raise forge.ForgeError("HTTP 500 close failed")
+        return ""
+
+    client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
+
+    with pytest.raises(forge.ForgeError, match="close failed"):
+        client.close_landed_item(79, pull_request=101)
+    client.close_landed_item(79, pull_request=101)
+
+    assert calls == [
+        _LANDING_COMMENTS_READ,
+        ["api", "--method", "PATCH", f"repos/{REPOSITORY}/issues/79", "--input", "-"],
+        _LANDING_COMMENTS_READ,
         ["api", "--method", "PATCH", f"repos/{REPOSITORY}/issues/79", "--input", "-"],
     ]
 
