@@ -733,14 +733,34 @@ def test_github_adapter_deleting_an_already_absent_branch_is_idempotent(decoded:
     client.delete_branch(LANDING_BRANCH)
 
 
-def test_github_adapter_reraises_an_unrelated_failure_deleting_a_branch() -> None:
-    def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
-        raise forge.ForgeError("HTTP 500 gateway timeout")
-
-    client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
+@pytest.mark.parametrize(
+    "action",
+    [
+        pytest.param(lambda client: client.delete_branch(LANDING_BRANCH), id="delete-branch"),
+        pytest.param(
+            lambda client: client.merge_landing(
+                57, head_sha=MERGE_COMMIT_SHA, title="t", body="Work-Item: #42\n"
+            ),
+            id="merge-landing",
+        ),
+    ],
+)
+def test_github_adapter_reraises_a_failure_unrelated_to_its_own_classification(
+    action: Callable[[GitHubForge], object],
+) -> None:
+    """Both `delete_branch`'s idempotent-absence handling and
+    `merge_landing`'s conflict translation only ever intercept their own
+    named case; any other `ForgeError` -- a transient gateway timeout, say
+    -- passes through unchanged."""
+    client = GitHubForge(
+        github._repository_id(REPOSITORY),
+        run=lambda arguments, input_data=None: (_ for _ in ()).throw(
+            forge.ForgeError("HTTP 500 gateway timeout")
+        ),
+    )
 
     with pytest.raises(forge.ForgeError, match="gateway timeout"):
-        client.delete_branch(LANDING_BRANCH)
+        action(client)
 
 
 @pytest.mark.parametrize(
@@ -772,16 +792,6 @@ def test_github_adapter_fails_loud_on_a_malformed_readiness_response() -> None:
 
     with pytest.raises(ClaimError, match="malformed pull request"):
         client.landing_readiness(57)
-
-
-def test_github_adapter_reraises_a_merge_failure_unrelated_to_a_conflict() -> None:
-    def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
-        raise forge.ForgeError("HTTP 500 gateway timeout")
-
-    client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
-
-    with pytest.raises(forge.ForgeError, match="gateway timeout"):
-        client.merge_landing(57, head_sha=MERGE_COMMIT_SHA, title="t", body="Work-Item: #42\n")
 
 
 @pytest.mark.parametrize(
