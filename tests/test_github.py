@@ -1595,6 +1595,12 @@ def test_github_adapter_fails_loud_when_github_answers_for_another_pull_request(
             api_pull_request(mergeCommit={"oid": "not-a-sha"}), id="malformed-merge-commit-oid"
         ),
         pytest.param(
+            api_pull_request(mergeCommit={"oid": 1234567}), id="merge-commit-oid-not-a-string"
+        ),
+        pytest.param(
+            api_pull_request(mergeCommit=MERGE_COMMIT_SHA), id="merge-commit-not-an-object"
+        ),
+        pytest.param(
             api_pull_request(mergedAt=None, mergeCommit={"oid": MERGE_COMMIT_SHA}),
             id="unmerged-with-a-merge-commit",
         ),

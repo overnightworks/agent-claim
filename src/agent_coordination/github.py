@@ -492,9 +492,15 @@ class GitHubForge:
         merged_at = value.get("mergedAt")
         merged = merged_at is not None
         merge_commit_field = value.get("mergeCommit")
-        merge_commit = (
-            merge_commit_field.get("oid") if isinstance(merge_commit_field, dict) else None
-        )
+        if merge_commit_field is None:
+            merge_commit = None
+        elif isinstance(merge_commit_field, dict):
+            oid = merge_commit_field.get("oid")
+            if oid is not None and not isinstance(oid, str):
+                raise forge.ForgeMalformedResponseError(MALFORMED_PULL_REQUEST)
+            merge_commit = oid
+        else:
+            raise forge.ForgeMalformedResponseError(MALFORMED_PULL_REQUEST)
         if (
             isinstance(number, bool)
             or not isinstance(number, int)
