@@ -899,7 +899,7 @@ def test_protect_bash_allows_a_relative_path_when_the_payload_carries_no_cwd(
     (`specs/protect.spec.md`'s own `## Never`). No claim is set up at all:
     a resolver that fell back to guessing a cwd would deny `claim first`
     here instead of allowing. `_forbid_protect_git_github_and_identity`'s
-    own `_resolved_agent` stub is left in place, unlike the sibling tests
+    own `resolved_agent` stub is left in place, unlike the sibling tests
     below: this path must never resolve identity at all (issue #380 delta,
     review finding: resolving it eagerly, before this allow, used to turn an
     unresolvable identity into a wrongful PROT-08 deny here)."""

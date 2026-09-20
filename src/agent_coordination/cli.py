@@ -245,7 +245,7 @@ def _request(
     empty tuple instead of raising: `_cmd_claim` replaces it with the
     item's own body scope, or a live claim's stored scope on replay, before
     this request's scope ever reaches a wide-scope check or a write."""
-    agent = protocol._outbound_text(checkout._resolved_agent(arguments.agent), "agent", maximum=128)
+    agent = protocol._outbound_text(checkout.resolved_agent(arguments.agent), "agent", maximum=128)
     role = protocol._outbound_text(arguments.role, "role", maximum=64)
     base = (
         checkout._git_output(["rev-parse", "HEAD"], directory=directory)
@@ -4152,7 +4152,7 @@ def _cmd_start(parsed: argparse.Namespace, session: _WriteSession) -> int:
     # mismatch falls through to the fresh-claim path below, which raises the
     # store's own "is claimed by ..." conflict.
     live = observed.claims.get(protocol.claim_key(identity, branch))
-    agent = checkout._resolved_agent(None)
+    agent = checkout.resolved_agent(None)
     if (
         live is not None
         and live.agent == agent
@@ -5395,7 +5395,7 @@ def _dispatch_item(parsed: argparse.Namespace) -> int:
 
 def _dispatch(parsed: argparse.Namespace) -> int:
     if parsed.command in {"claim", "release", "rescope"}:
-        parsed.agent = checkout._resolved_agent(parsed.agent)
+        parsed.agent = checkout.resolved_agent(parsed.agent)
     if parsed.command == "item":
         return _dispatch_item(parsed)
     entry = _COMMAND_TABLE[parsed.command]

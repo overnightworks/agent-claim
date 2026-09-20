@@ -673,7 +673,7 @@ def trunk_landings(remote: str, depth: int) -> tuple[TrunkLanding, ...]:
     )
 
 
-def _resolved_agent(explicit: str | None) -> str:
+def resolved_agent(explicit: str | None) -> str:
     if explicit is not None:
         return _outbound_text(explicit, "agent", maximum=128)
     configured = os.environ.get(ACO_AGENT_ENV)
@@ -689,18 +689,6 @@ def _resolved_agent(explicit: str | None) -> str:
         "agent identity is required: pass --agent or set "
         f"{ACO_AGENT_ENV}, {GROK_SESSION_ID_ENV}, or {CLAUDE_SESSION_ID_ENV}"
     )
-
-
-def resolved_agent(explicit: str | None) -> str:
-    """Public re-export of `_resolved_agent` for `protect.judge` (issue #394,
-    ownership finding 10): a thin dynamically-dispatching wrapper, not a
-    bare `resolved_agent = _resolved_agent` alias, so `tests/cli_fixtures.py`'s
-    `monkeypatch.setattr(checkout, "_resolved_agent", ...)` fixtures --
-    outside this lane's own claim scope -- keep intercepting every call
-    made through this public name too; a bare alias would instead freeze
-    the original function object at import time and stop honouring that
-    patch silently."""
-    return _resolved_agent(explicit)
 
 
 # One owner for `start`'s own path/branch naming scheme (issue #322): the
@@ -749,7 +737,7 @@ def validate_slug(slug: str) -> str:
 
 def branch_prefix_for_identity() -> str:
     """`start`'s own branch prefix (issue #322) -- my inclination, not a
-    settled decision: read from the same identity signals `_resolved_agent`
+    settled decision: read from the same identity signals `resolved_agent`
     reads, in the same precedence, since it is the same acting identity,
     only rendered as a short git-branch-safe token instead of a full agent
     name. The first word of `ACO_AGENT`, lowercased, when set (`"Claude head
