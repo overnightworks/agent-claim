@@ -3,6 +3,6 @@ agent = "Claude head (coordinator)"
 role = "builder"
 base = "d70c4156e3fbeeb9a414c0e5baa3b830a17ea97a"
 branch = "claude/issue-397-merge-commit-authority"
-scope = ["specs/landing-grammar.spec.md", "specs/release.spec.md", "src/agent_coordination/checkout.py", "src/agent_coordination/cli.py", "src/agent_coordination/forge.py", "src/agent_coordination/github.py", "tests/test_cli.py", "tests/test_github.py"]
+scope = ["scripts/test_budget_ratchet.txt", "specs/landing-grammar.spec.md", "specs/release.spec.md", "src/agent_coordination/checkout.py", "src/agent_coordination/cli.py", "src/agent_coordination/forge.py", "src/agent_coordination/github.py", "tests/github_fixtures.py", "tests/test_checkout.py", "tests/test_cli.py", "tests/test_github.py"]
 opened_commit = "a5763c2770038c6ba2f3472fd633f9a522531181"
 whole_reason = "landing authority: forge landing result, release verification, specs and tests"
