@@ -8369,6 +8369,28 @@ def test_cli_claim_without_scope_refuses_a_missing_target_by_name(
     _assert_json_refusal_object(captured.err, captured.out, reason="target_invalid")
 
 
+def test_cli_claim_without_scope_reports_unavailable_for_a_forge_outage(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A forge outage while deriving scope (issue #406, CLM-27) is a
+    different failure from a missing or pull-request target: it never
+    appears in the open-board listing `client.item_reference` itself
+    raises `forge.ForgeTransientError` reading it, so `claim --json`
+    reports `unavailable`, not `target_invalid`."""
+    client = _arranged_claim_client(monkeypatch)
+
+    def unreachable(number: int) -> forge.ItemReference:
+        raise forge.ForgeTransientError("gh: connection reset")
+
+    monkeypatch.setattr(client, "item_reference", unreachable)
+
+    status = issue_claim.main(_claim_argv("--json"))
+
+    assert status == 2
+    captured = capsys.readouterr()
+    _assert_json_refusal_object(captured.err, captured.out, reason="unavailable")
+
+
 def test_cli_claim_derives_whole_from_the_items_own_body_when_wide(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

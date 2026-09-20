@@ -4203,15 +4203,19 @@ def _item_target_body(
     for its slice-rule checks -- when the target is open, so a derived
     scope costs no separate body read; a closed, missing, or pull-request
     target never appears there, and falls back to the one single-item
-    lookup `_issue_reference_state` uses for the same reason (issue #245),
-    raising `_ClaimTargetInvalidError` by name (issue #406) instead of
-    `_item_body_or_refuse`'s own generic refusal."""
+    lookup `_issue_reference_state` uses for the same reason (issue #245).
+    `_item_body_or_refuse`'s own `ClaimUnavailableError` -- missing or a
+    pull request, CLM-24's own two conditions -- becomes
+    `_ClaimTargetInvalidError` by name (issue #406); a forge outage or
+    malformed response (`forge.ForgeError`, raised by `client.item_reference`
+    itself) is a different failure and passes through unwrapped to
+    `_cmd_claim`'s `unavailable` catch-all (CLM-27)."""
     issue = open_by_number.get(number)
     if issue is not None:
         return issue.body
     try:
         return _item_body_or_refuse(client, number, command="claim")
-    except protocol.ClaimError as error:
+    except protocol.ClaimUnavailableError as error:
         raise _ClaimTargetInvalidError(str(error)) from error
 
 
