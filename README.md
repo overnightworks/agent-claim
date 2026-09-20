@@ -270,7 +270,7 @@ by exactly one file below; this table is the map, not a copy.
 | `aco next` | `specs/next.spec.md` | names the one action the board recommends pulling now |
 | `aco cut` | `specs/cut.spec.md` | dispatches a container's next slice as a fresh child |
 | `aco item new/show/edit/close` | `specs/item.spec.md` | the state-ref item lifecycle |
-| `aco body --template/--check` | `specs/body.spec.md` | composes or validates a body offline |
+| `aco body --check` | `specs/body.spec.md` | validates a piped body offline |
 | `aco protect` | `specs/protect.spec.md` | the `PreToolUse` hook's write verdict |
 | `aco register/run/login` | `specs/workspace.spec.md` | records, resumes, and autostarts a provider workspace mapping |
 | `agent-claim` block grammar | `specs/body-block.spec.md` | the fenced TOML block every item-reading command parses |
