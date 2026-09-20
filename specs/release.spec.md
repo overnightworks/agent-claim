@@ -52,7 +52,7 @@ never storage-aware. A refusal reaching the shared collection point prints
 | landing board read hits an unreachable forge | — | REL-22 | — |
 | no landing to report | — | — | REL-21 |
 | any refusal past the parser, with `--json` | REL-24 | REL-24 | REL-24 |
-| a successful outcome's own worktree/branch cleanup | — | REL-25..REL-29 | REL-29 |
+| a successful outcome's own worktree/branch cleanup | — | REL-25..REL-32 | REL-33 |
 
 ## Flags and outcome
 
@@ -106,22 +106,29 @@ A successful `--merged` outcome (issue #322) removes the lane's own linked workt
 branch when both are safe to remove -- after the release's own store transition already
 committed, so a cleanup problem never turns a released claim back into a live one. The remote
 branch stays the forge merge's own business: only the local worktree and the local branch move
-here, never anything on `remote`.
+here, never anything on `remote`. Every outcome is loud: exactly one `worktree: <outcome>` line
+follows the report in text, and the same text becomes `--json`'s own `worktree` value -- `removed`
+when both are gone, `kept -- <reason>` otherwise, one owner for both shapes so they can never
+drift apart.
 
-- [ ] [REL-25] The lane's own linked worktree, clean, whose branch is already merged into the canonical remote's own trunk, is removed together with that local branch (see E-REL-08).
-- [ ] [REL-26] `--keep-worktree` skips that removal outright, worktree and branch both left exactly as found (see E-REL-09).
-- [ ] [REL-27] A release run from inside the lane's own worktree cannot remove its own cwd: it prints `worktree: kept, this release ran from inside it` (stderr under `--json`) and keeps both.
-- [ ] [REL-28] A dirty worktree, a branch not yet provably merged, or no linked worktree on that branch: cleanup declines silently, worktree and branch left as found, exit code unaffected.
-- [ ] [REL-29] `--abandoned` never attempts this cleanup at all, the same as it never resolves a forge target (LAND-39).
+- [ ] [REL-25] A clean linked worktree whose branch is already merged into the canonical remote's own trunk is removed together with that local branch: `worktree: removed` (see E-REL-08).
+- [ ] [REL-26] `--keep-worktree` skips that removal outright: `worktree: kept -- --keep-worktree was given`, worktree and branch both left exactly as found (see E-REL-09).
+- [ ] [REL-27] A release run from inside the lane's own worktree cannot remove its own cwd: `worktree: kept -- release ran from inside it`, and keeps both (see E-REL-10).
+- [ ] [REL-28] A dirty worktree keeps it: `worktree: kept -- dirty`, exit code unaffected (see E-REL-11).
+- [ ] [REL-29] A branch not yet provably merged into the default branch keeps it: `worktree: kept -- not merged into the default branch` (see E-REL-12).
+- [ ] [REL-30] No linked worktree found on that branch keeps nothing to report: `worktree: kept -- no linked worktree found` (see E-REL-13).
+- [ ] [REL-31] The branch checked out on this repository's own shared main checkout, not a linked worktree, keeps it: `worktree: kept -- branch checked out elsewhere` (see E-REL-14).
+- [ ] [REL-32] A git failure while removing either keeps both and reports it: `worktree: kept -- git failure: <detail>`, the release itself stays committed regardless.
+- [ ] [REL-33] `--abandoned` never attempts this cleanup at all, the same as it never resolves a forge target (LAND-39).
 
 ## Never
 
 - `release` never reads or checks the released item's own body contract (REL-23).
-- `--abandoned` never resolves a forge target, reads the board, or prints `freed`/`next`/`hint`, ever (LAND-39); nor does it ever remove a worktree or branch (REL-29).
+- `--abandoned` never resolves a forge target, reads the board, or prints `freed`/`next`/`hint`, ever (LAND-39); nor does it ever remove a worktree or branch (REL-33).
 - `--claim-id` is never a second selector among several live claims: at most one claim is ever live per identity (`specs/claim-record.spec.md`), so it only ever confirms or refuses the one claim identity/branch resolution already found.
 - A `--branch`/`--claim-id` disagreement is never silently resolved by preferring one: REL-11 refuses instead.
 - A forge outage discovered after the release's own store transition already committed never undoes or fails that transition (LAND-50): the claim stays released regardless of whether `freed`/`next` could be reported.
-- A worktree/branch cleanup problem after that same commit never undoes or fails it either (REL-28): the claim stays released regardless of whether cleanup removed anything.
+- A worktree/branch cleanup problem after that same commit never undoes or fails it either (REL-28..REL-32): the claim stays released regardless of whether cleanup removed anything.
 - Cleanup never touches the remote branch a forge merge already owns: only the local worktree and local branch are ever removed.
 
 ## Examples
@@ -234,7 +241,23 @@ exit 0
 
 `/work/agent-claim-worktrees/issue-42-widget` and branch `ada/issue-42` are both gone afterward.
 
-### E-REL-09 — running from inside the lane worktree keeps it, one line and all
+### E-REL-09 — `--keep-worktree` skips cleanup outright
+
+Setup: bare-remote, fake `gh`, a linked worktree `/work/agent-claim-worktrees/issue-42-widget`
+on `ada/issue-42`, already merged into `main`, run from the main checkout, issue `#42` claimed
+
+```console
+$ aco release 42 --merged 57 --keep-worktree
+RELEASED issue #42: <claim-id>
+freed: none
+next: none
+worktree: kept -- --keep-worktree was given
+exit 0
+```
+
+`/work/agent-claim-worktrees/issue-42-widget` and branch `ada/issue-42` both remain.
+
+### E-REL-10 — running from inside the lane worktree keeps it, one line and all
 
 Setup: bare-remote, fake `gh`, a linked worktree on `ada/issue-42`, already merged into `main`,
 issue `#42` claimed, run from inside that same worktree
@@ -244,6 +267,63 @@ $ aco release 42 --merged 57
 RELEASED issue #42: <claim-id>
 freed: none
 next: none
-worktree: kept, this release ran from inside it
+worktree: kept -- release ran from inside it
+exit 0
+```
+
+### E-REL-11 — a dirty worktree keeps it
+
+Setup: bare-remote, fake `gh`, a linked worktree on `ada/issue-42`, already merged into `main`,
+run from the main checkout, an uncommitted file sitting in that worktree, issue `#42` claimed
+
+```console
+$ aco release 42 --merged 57
+RELEASED issue #42: <claim-id>
+freed: none
+next: none
+worktree: kept -- dirty
+exit 0
+```
+
+### E-REL-12 — a branch not yet locally merged keeps it
+
+Setup: bare-remote, fake `gh` reporting pull request `#57` merged, a linked worktree on
+`ada/issue-42` whose branch this checkout has not itself merged into `main` yet, run from the
+main checkout, issue `#42` claimed
+
+```console
+$ aco release 42 --merged 57
+RELEASED issue #42: <claim-id>
+freed: none
+next: none
+worktree: kept -- not merged into the default branch
+exit 0
+```
+
+### E-REL-13 — no linked worktree ever built for the branch
+
+Setup: bare-remote, fake `gh`, branch `ada/issue-42` merged into `main` with no linked worktree
+of its own (the claim came from a plain checkout), issue `#42` claimed
+
+```console
+$ aco release 42 --merged 57
+RELEASED issue #42: <claim-id>
+freed: none
+next: none
+worktree: kept -- no linked worktree found
+exit 0
+```
+
+### E-REL-14 — the branch sits on this repository's own main checkout, not a linked worktree
+
+Setup: bare-remote, fake `gh`, branch `ada/issue-42` checked out on this repository's own main
+checkout rather than a linked worktree, run from an unrelated linked worktree, issue `#42` claimed
+
+```console
+$ aco release 42 --merged 57
+RELEASED issue #42: <claim-id>
+freed: none
+next: none
+worktree: kept -- branch checked out elsewhere
 exit 0
 ```
