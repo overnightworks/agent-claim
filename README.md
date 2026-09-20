@@ -252,15 +252,17 @@ object's first two keys, and `reason` is the token to branch on: a stable
 word from that command's own vocabulary, never a sentence to match against,
 and never a payload key whose presence you test -- a success may carry `ok`
 and `reason` alone. A closing `message` is prose for a person, the sentence
-stderr's `ERROR:` line carries wherever the command writes one. A usage
+stderr's `ERROR:` line carries -- optional even on a refusal, because not
+every refusal writes a sentence beside the object. A usage
 error the parser itself raises joins the same object, but only for a
 command that declares `--json`: `aco bootstrap --json` stays argparse's own
 text on stderr, stdout empty. A non-zero exit is not always a refusal --
 `next` exits non-zero on an empty board without refusing anything
-(`specs/next.spec.md`). `aco check <sha>` is the one carve-out left: its
-object still carries `sha` and `refused` where every other command carries
-`reason` and `message`, it writes no sentence on stderr beside it, and it
-exits `1` — issue #435 owns that shape until it moves.
+(`specs/next.spec.md`). `aco check <sha>` is the one carve-out left: it
+answers in `ok` and `sha` where every other command answers in `ok` and
+`reason`, adds the defect sentence as `refused` only when it refuses, and
+writes nothing on stderr beside the object -- exit `0` when the commit is
+sound, `1` when it is not — issue #435 owns that shape until it moves.
 `specs/output.spec.md` owns the envelope; each command's spec owns its own
 `reason` values.
 
