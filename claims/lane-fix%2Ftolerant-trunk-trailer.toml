@@ -1,8 +1,0 @@
-claim_id = "560cf13d03454413b6479ca63ac769c6"
-agent = "claude-head"
-role = "builder"
-base = "5c9f6f578c295c5b812ba30c2f476da8199e3fcc"
-branch = "fix/tolerant-trunk-trailer"
-scope = ["specs/landing-grammar.spec.md", "src/agent_coordination/board.py", "tests/test_board.py", "tests/test_checkout.py"]
-opened_commit = "db43739a6bdf44e617374187a42015c9f2d8d177"
-whole_reason = "the three checkout tests and LAND-03 follow the tolerant trunk classification"
