@@ -1,0 +1,82 @@
+[build]
+rules = [
+  "Work only in the worktree and branch the brief names; never edit the main checkout or another worktree.",
+  "Never run aco claim, release, rescope, rule, or item edit; never scan the board or start follow-up work.",
+  "Do not touch README.md unless the brief explicitly says so; another lane may hold it.",
+  "Treat the issue body read with gh issue view <n> --json body --jq .body as the contract.",
+  "Follow AGENTS.md and the coding and testing conventions as written.",
+  "Be economical with turns: read whole files once, batch shell commands, and never re-read what has already been read.",
+  "Before any test run, read /proc/loadavg; above 18 wait a minute and retry; never run the full suite, a full coverage run, or -n auto.",
+  "Run only the named test modules or -k selections that prove the change, with PYTEST_XDIST_AUTO_NUM_WORKERS=4; CI on the pushed branch is the gate.",
+  "Sync the environment once with uv sync --locked --group dev --python 3.12, then run every command through uv run --locked from the worktree root.",
+  "Confirm every line added or changed in src/ is covered before reporting; CI requires 100% coverage on Python 3.12.",
+  "Keep exactly one expression that can raise inside every pytest.raises block; hoist every construction, fake, and type wrapper into named locals first.",
+  "Keep cognitive complexity at 15 or below per function, and never repeat a string literal three or more times in src/; name it once in its owner instead.",
+  "Never let a function always return the same constant, never duplicate a block, and never add an inline scanner suppression.",
+  "Never compare freshly constructed dataclasses inline; compare tuples in a named helper instead.",
+  "Drive behaviour through the real entry point and its CLI fixtures; one parametrized test per family; never assert mock call counts or pin internals.",
+  "Keep command literals in one local per test scenario, and use at most one # budget: line for the whole lane.",
+  "Edit the owning spec in the same PR for any printed literal, exit code, or --json shape you alter or add, keeping each criterion within 200 characters, naming no implementation names, copying literals from the printer, placing --repo before the subcommand, and giving an example transcript for every new refusal, with a criterion to file:line table in the PR body.",
+  "Before finishing, fetch and rebase onto origin/main, re-run the checks the rebase touched, and commit with clear one-topic subjects ending in the trailer line Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>.",
+  "Push the branch and open the pull request with gh pr create --base main --head <branch> --title <title> --body-file <file>, whose body carries what changed and why, the proofs with their exact commands, a Work-Item: #<n> line, and the footer \"🤖 Generated with [Claude Code](https://claude.com/claude-code)\"; never merge it.",
+  "Update a pull request body only with gh api -X PATCH repos/overnightworks/agent-claim/pulls/<pr> --input - and a {\"body\": ...} payload, never gh pr edit --body-file.",
+  "Report a contradiction between the body and the code or a spec instead of building it silently, with file:line evidence and a proposal; build the part that is not in question.",
+  "Report at the end the pull request URL, the tip SHA, the files touched, each proof with its command and result, and anything left out and why.",
+]
+checks = [
+  "uv lock --check",
+  "uv run --locked ruff check .",
+  "uv run --locked ruff format --check .",
+  "uv run --locked pyright src tests scripts",
+  "uv run --locked vulture src scripts/vulture_whitelist.py --min-confidence 60",
+  "uv run --locked python scripts/check_root_layout.py",
+  "uv run --locked lint-imports",
+  "PYTEST_XDIST_AUTO_NUM_WORKERS=4 uv run --locked pytest <targeted modules or -k selection> --cov=agent_coordination --cov-report=term-missing",
+  "uv run --locked python scripts/test_budget.py --ci --target origin/main",
+  "uv run --locked python scripts/similar_methods.py --ci",
+  "uv run --locked python scripts/test_inventory.py --ci",
+]
+
+[review]
+rules = [
+  "Stay read-only: never edit a file, never commit, never push.",
+  "Mark every finding blocking or follow-up, each with file:line evidence.",
+  "Call a finding blocking only when it is a defect the reviewed diff introduces against the ruled sentences, the contract, or a repository rule, or when it touches data safety, security, secrets, a public contract, or a failing check.",
+  "Print the verdict, APPROVE or REVISE, on the review's own first line; REVISE only while a blocking finding remains.",
+  "Send a follow-up to its owning item, or to the review's distributor issue when it has none, instead of opening a fresh item or another review round for it.",
+  "Cite the unchanged evidence when a follow-up is pre-existing behaviour the lane did not change.",
+]
+checks = [
+  "gh pr checks --watch --interval 60",
+  "git diff origin/main...<branch> -- <scope>",
+  "PYTEST_XDIST_AUTO_NUM_WORKERS=4 uv run --locked pytest <the builder's named modules>",
+]
+
+[fix]
+rules = [
+  "Read every finding verbatim from the review before starting; never invent a new one.",
+  "Resolve one finding group per commit, naming the finding in the commit subject.",
+  "Stay inside the lane's own worktree, branch, and scope; never widen it to fix an unrelated finding.",
+  "Leave a follow-up finding to its owning item; fix only what the review marked blocking.",
+  "Ask for a delta re-check after the fix batch instead of a fresh full review.",
+]
+checks = [
+  "uv run --locked ruff check .",
+  "uv run --locked ruff format --check .",
+  "uv run --locked pyright src tests scripts",
+  "PYTEST_XDIST_AUTO_NUM_WORKERS=4 uv run --locked pytest <targeted modules or -k selection> --cov=agent_coordination --cov-report=term-missing",
+]
+
+[land]
+rules = [
+  "Never land another lane's claim; the head holds the landing decision.",
+  "Merge or fast-forward main only after every required review and CI check is green.",
+  "Carry a Work-Item: #<n> trailer on the merge commit.",
+  "Release the claim once the merge lands.",
+  "Reinstall the tool from the freshly merged main afterward.",
+]
+checks = [
+  "gh pr checks <pr> --watch --interval 60",
+  "git fetch origin && git log --oneline origin/main..<branch>",
+  "uv tool install --force --from . aco",
+]

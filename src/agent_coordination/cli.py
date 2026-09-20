@@ -633,6 +633,12 @@ def _add_brief_parser(commands: argparse._SubParsersAction) -> None:
         help="print one item's body, live claim, lane tip and touched files for a dispatch",
     )
     brief.add_argument("item", type=board.parse_item_reference, help="the work item to brief")
+    brief.add_argument(
+        "--step",
+        choices=[step.value for step in board.BriefStep],
+        default=None,
+        help="also print this lane step's own rules and checks from .agent-claim/brief.toml",
+    )
     brief.add_argument("--json", action="store_true", help=JSON_HELP)
 
 
@@ -3786,28 +3792,55 @@ def _print_brief_claim(
         print(f"  whole: {claim.whole_reason}")
 
 
-def _print_brief(
-    body: str,
-    live: _BriefClaim | None,
-    observed_at: datetime,
-    tip: str | None,
-    touched: tuple[str, ...],
-) -> None:
-    print(body)
+def _print_brief_step_rules(step_rules: board.BriefStepRules) -> None:
+    """`RULES` and `CHECKS` (issue #324): two more sections after the four
+    `_print_brief` always prints, only under `--step` -- the repository's own
+    `.agent-claim/brief.toml` entries for that lane step, one per line."""
+    print()
+    print("RULES")
+    for rule in step_rules.rules:
+        print(rule)
+    print()
+    print("CHECKS")
+    for check in step_rules.checks:
+        print(check)
+
+
+@dataclass(frozen=True)
+class _BriefComposition:
+    """One `aco brief`'s full composed reads (issue #324): the four sections
+    `_print_brief` always prints, plus, only under `--step`, the repository's
+    own rules and checks -- gathered once so the text and `--json` renderers
+    print the same reads with no chance to drift apart."""
+
+    body: str
+    live: _BriefClaim | None
+    observed_at: datetime
+    tip: str | None
+    touched: tuple[str, ...]
+    step_rules: board.BriefStepRules | None
+
+
+def _print_brief(composition: _BriefComposition) -> None:
+    print(composition.body)
     print()
     print("CLAIM")
-    if live is None:
+    if composition.live is None:
         print("no active claim")
     else:
-        _print_brief_claim(live.claim, live.opened_at, observed_at)
+        _print_brief_claim(
+            composition.live.claim, composition.live.opened_at, composition.observed_at
+        )
     print()
     print("TIP")
-    if live is not None:
-        print(tip if tip is not None else "branch not found")
+    if composition.live is not None:
+        print(composition.tip if composition.tip is not None else "branch not found")
     print()
     print("TOUCHED")
-    for path in touched:
+    for path in composition.touched:
         print(path)
+    if composition.step_rules is not None:
+        _print_brief_step_rules(composition.step_rules)
 
 
 def _brief_claim_json(live: _BriefClaim, observed_at: datetime) -> dict[str, object]:
@@ -3823,24 +3856,44 @@ def _brief_claim_json(live: _BriefClaim, observed_at: datetime) -> dict[str, obj
     }
 
 
-def _brief_json(
-    body: str,
-    live: _BriefClaim | None,
-    observed_at: datetime,
-    tip: str | None,
-    touched: tuple[str, ...],
-) -> int:
-    print(
-        json.dumps(
-            {
-                "body": body,
-                "claim": None if live is None else _brief_claim_json(live, observed_at),
-                "tip": tip,
-                "touched": list(touched),
-            }
-        )
-    )
+def _brief_json(composition: _BriefComposition) -> int:
+    live = composition.live
+    payload: dict[str, object] = {
+        "body": composition.body,
+        "claim": None if live is None else _brief_claim_json(live, composition.observed_at),
+        "tip": composition.tip,
+        "touched": list(composition.touched),
+    }
+    step_rules = composition.step_rules
+    if step_rules is not None:
+        payload["rules"] = list(step_rules.rules)
+        payload["checks"] = list(step_rules.checks)
+    print(json.dumps(payload))
     return 0
+
+
+def _brief_config(toplevel: Path) -> board.BriefConfig | None:
+    """`.agent-claim/brief.toml`'s own content, read only when the file is
+    actually tracked by git (issue #324) -- the same tracked-file
+    requirement `_board_config` enforces for `board.toml`'s storage pin, so
+    an ignored or not-yet-added file never quietly answers for the
+    repository. `None` either when it is untracked or when `load_brief_config`
+    finds no such file at all."""
+    if not checkout.path_is_tracked(board.BRIEF_CONFIG_PATH.as_posix(), directory=toplevel):
+        return None
+    return board.load_brief_config(toplevel / board.BRIEF_CONFIG_PATH)
+
+
+def _brief_step_rules_or_refusal(step: str | None) -> board.BriefStepRules | None:
+    """`--step`'s own rules and checks, or `None` when the brief carries no
+    `--step` at all -- the one branch that must stay untouched by
+    `.agent-claim/brief.toml`'s presence or content (BRIEF-16)."""
+    if step is None:
+        return None
+    config = _brief_config(_resolve_toplevel())
+    if config is None:
+        raise protocol.ClaimError(f"no {board.BRIEF_CONFIG_PATH} in the repository")
+    return config.for_step(board.BriefStep(step))
 
 
 def _cmd_brief(parsed: argparse.Namespace, session: _ReadSession) -> int:
@@ -3850,6 +3903,7 @@ def _cmd_brief(parsed: argparse.Namespace, session: _ReadSession) -> int:
     the forge, its live claim from the store, the claim branch's current tip,
     and the files the lane touches against its base. Never a new data
     source, and never a write."""
+    step_rules = _brief_step_rules_or_refusal(parsed.step)
     item = int(parsed.item)
     client = session.forge()
     body = client.item_reference(item).body or ""
@@ -3862,9 +3916,10 @@ def _cmd_brief(parsed: argparse.Namespace, session: _ReadSession) -> int:
         tip = _lane_tip(live.claim.branch)
         touched = _touched_files(live.claim.base, tip) if tip is not None else ()
     observed_at = datetime.now(UTC)
+    composition = _BriefComposition(body, live, observed_at, tip, touched, step_rules)
     if parsed.json:
-        return _brief_json(body, live, observed_at, tip, touched)
-    _print_brief(body, live, observed_at, tip, touched)
+        return _brief_json(composition)
+    _print_brief(composition)
     return 0
 
 
