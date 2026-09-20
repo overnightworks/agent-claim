@@ -1392,6 +1392,37 @@ def test_resolve_or_create_worktree_refuses_a_worktree_from_a_different_reposito
         )
 
 
+def test_resolve_or_create_worktree_refuses_a_path_that_is_not_a_checkout_root_itself(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #322 review finding 2: a path resolving into the middle of some
+    repository's own working tree -- rather than a checkout root by itself --
+    must never be adopted as `start`'s own worktree, even when a branch of
+    the same name happens to exist elsewhere in that repository."""
+    caller = _scratch_git_repository(tmp_path)
+    nested = caller / "nested"
+    nested.mkdir()
+    monkeypatch.chdir(caller)
+
+    with pytest.raises(ClaimError, match="is not a checkout root by itself"):
+        checkout.resolve_or_create_worktree(nested, "codex/issue-1-widget", remote="origin")
+
+
+def test_resolve_or_create_worktree_refuses_the_repositorys_own_main_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #322 review finding 2: `path` resolving to this repository's own
+    main checkout, not a linked worktree, must never be adopted -- only a
+    linked worktree is ever safe to treat as one of `start`'s own lanes."""
+    caller = _scratch_git_repository(tmp_path)
+    monkeypatch.chdir(caller)
+
+    with pytest.raises(
+        ClaimError, match="is a repository's own main checkout, not a linked worktree"
+    ):
+        checkout.resolve_or_create_worktree(caller, "codex/issue-1-widget", remote="origin")
+
+
 def test_worktree_on_branch_finds_the_one_matching_path(tmp_path: Path) -> None:
     main, worktree = _repo_with_linked_worktree(tmp_path)
 
