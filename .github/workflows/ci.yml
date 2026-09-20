@@ -84,6 +84,11 @@ jobs:
               for path, file_info in worst_modules
           ]
 
+          # Job summaries have no read API, so the table is echoed to the log
+          # too -- otherwise this run's own evidence would be unreadable
+          # outside the GitHub UI.
+          print("\n".join(summary_lines))
+
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary_file:
               summary_file.write("\n".join(summary_lines) + "\n")
           PYTHON
