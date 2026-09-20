@@ -143,7 +143,7 @@ runner's own values; `<agent>` and `<role>` are the claimant's.
 
 ## One claim's own `--json` field order
 
-- [ ] [CLAIM-69] Every command's own `--json` view of a live claim spreads the same fixed fields, `issue`/`lane`, `claim_id`, `agent`, `role`, `base`, `branch`, `scope`, before any field only that view carries.
+- [ ] [CLAIM-69] Every command's `--json` claim view sits in `specs/output.spec.md`'s envelope (OUT-nn), spreading `issue`/`lane`, `claim_id`, `agent`, `role`, `base`, `branch`, `scope` before any view-only field.
 
 ## Never
 
