@@ -830,6 +830,38 @@ def test_lineage_error_when_the_ref_is_rewritten_without_this_worktrees_stamp_as
         store.fetch_state(worktree=worktree, remote=str(bare_remote))
 
 
+def test_lineage_check_fails_loud_when_merge_base_cannot_be_read_at_all(
+    monkeypatch: pytest.MonkeyPatch, bare_remote: Path, worktree: Path
+) -> None:
+    """Issue #390 finding 10/CAS-48: `merge-base --is-ancestor`'s exit `1` is
+    the one documented "not an ancestor" outcome (proven above); every other
+    nonzero exit -- here, an unresolvable stamped commit -- is a git
+    failure, not a lineage fact, and must refuse CAS-48's exact sentence,
+    never "the ref may have been rewritten"."""
+    tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
+    store._write_lineage_stamp(worktree, _UNRESOLVABLE_OBJECT_ID)
+    assert tip != _UNRESOLVABLE_OBJECT_ID
+    real_run_captured = process.run_captured
+
+    def fake_run_captured(arguments: list[str]) -> process.CapturedResult:
+        if "merge-base" in arguments:
+            return process.CapturedResult(
+                exit_status=128, stdout=b"", stderr=b"simulated unresolvable commit\n"
+            )
+        return real_run_captured(arguments)
+
+    monkeypatch.setattr(store.process, "run_captured", fake_run_captured)
+
+    with pytest.raises(protocol.ClaimError) as raised:
+        store.fetch_state(worktree=worktree, remote=str(bare_remote))
+
+    assert str(raised.value) == (
+        f"cannot check whether {_UNRESOLVABLE_OBJECT_ID} is an ancestor of {tip}: "
+        "simulated unresolvable commit"
+    )
+    assert not isinstance(raised.value, protocol.StateLineageError)
+
+
 def test_first_fetch_in_a_worktree_accepts_any_tip_without_a_prior_stamp(
     bare_remote: Path, worktree: Path, tmp_path: Path
 ) -> None:
@@ -1313,6 +1345,63 @@ def test_push_retry_stops_instead_of_committing_again_when_the_search_fails(
     assert log.stdout.strip() == "1"
 
 
+def _fake_run_captured_failing_candidate_log(
+    real: Callable[[list[str]], process.CapturedResult],
+) -> Callable[[list[str]], process.CapturedResult]:
+    """Every real git subprocess runs except the per-candidate `git log -1`
+    inside `_find_operation_id`'s search -- distinguished from that
+    function's own outer `git log --format=%H` listing (issue #390 finding
+    9a) by the `-1` argument the inner read alone carries."""
+
+    def fake(arguments: list[str]) -> process.CapturedResult:
+        if "log" in arguments and "-1" in arguments:
+            return process.CapturedResult(
+                exit_status=1, stdout=b"", stderr=b"simulated candidate read failure"
+            )
+        return real(arguments)
+
+    return fake
+
+
+def test_push_retry_never_pushes_twice_when_a_candidates_own_message_read_fails(
+    monkeypatch: pytest.MonkeyPatch, bare_remote: Path, worktree: Path
+) -> None:
+    """Issue #390 finding 9a: after a lost response, `push_tree`'s retry
+    searches new history for its own `operation_id` before assuming nothing
+    landed. Reading a broken per-candidate read as "not found" would let the
+    retry build and push a second commit on top of the one that already
+    landed -- exactly the double push the search exists to prevent. Run
+    against the pre-fix `_find_operation_id` (which reads a failing
+    candidate read as "not found"), this test is red: the retry does not
+    stop, and `transport.calls` climbs past `1` as it exhausts
+    `_MAX_PUSH_ATTEMPTS` pushing repeatedly instead.
+    """
+    observed = store.fetch_state(worktree=worktree, remote=str(bare_remote))
+    transport = _AcceptThenRaiseTransport()
+    operation_id = "operation-under-test"
+    pending = store.PendingCommit(
+        tree_oid=store._write_bootstrap_tree(worktree),
+        message=f"bootstrap empty claim state\n\noperation_id: {operation_id}\n",
+        operation_id=operation_id,
+    )
+    monkeypatch.setattr(
+        store.process,
+        "run_captured",
+        _fake_run_captured_failing_candidate_log(process.run_captured),
+    )
+
+    with pytest.raises(protocol.ClaimError, match="cannot read commit"):
+        store.push_tree(
+            worktree=worktree,
+            remote=str(bare_remote),
+            observed=observed,
+            pending=pending,
+            transport=transport,
+        )
+
+    assert transport.calls == 1
+
+
 def test_commit_tree_fails_loud_on_an_unresolvable_tree(worktree: Path) -> None:
     with pytest.raises(protocol.ClaimError):
         store._commit_tree(
@@ -1359,6 +1448,79 @@ def _committed_claim(bare_remote: Path, worktree: Path, *, issue: int) -> protoc
     )
     return next(
         claim for claim in state.claims.values() if claim.identity == protocol.IssueIdentity(issue)
+    )
+
+
+def _raw_commit_message(remote: Path, commit: str) -> str:
+    """`commit`'s own stored message, exactly as committed -- `git cat-file
+    -p` read past its header block, never `git log --format=%B`, which
+    prints one extra trailing blank line of its own that a byte-for-byte
+    pin would otherwise mistake for part of the commit."""
+    _headers, message = _git("cat-file", "-p", commit, cwd=remote).stdout.split("\n\n", 1)
+    return message
+
+
+def test_commit_transition_writes_the_exact_trailer_block_for_a_claim_and_a_landing(
+    bare_remote: Path, worktree: Path
+) -> None:
+    """Issue #390 finding 4: `_transition_message`'s trailer block is the
+    one machine-readable shape `claim_lifecycle` and `_find_operation_id`
+    read back key by key, in order -- pin every `key: value` line of a
+    claim transition's and a landing transition's own commit, read back
+    from the real pushed commit through `commit_transition`'s public write
+    path, never `_transition_message` called directly (which could drift
+    from what a real commit actually carries)."""
+    store.bootstrap(worktree=worktree, remote=str(bare_remote))
+
+    claim_state = store.commit_transition(
+        worktree=worktree,
+        remote=str(bare_remote),
+        subject=store.ClaimTransitionSubject("claim issue 42", item="42"),
+        intent=_issue_claim_intent(42, claim_id="claim-42", operation_id="op-claim-42"),
+    )
+    assert claim_state.tip is not None
+    claim_message = _raw_commit_message(bare_remote, str(claim_state.tip))
+    assert claim_message == (
+        "claim issue 42\n\noperation_id: op-claim-42\nclaim_id: claim-42\nitem: 42\nintent: claim\n"
+    )
+
+    item_id = "aco-000001"
+    open_oid = protocol.ObjectId(_blob(worktree, b"open\n"))
+    store.commit_transition(
+        worktree=worktree,
+        remote=str(bare_remote),
+        subject=store.TransitionSubject("create item aco-000001"),
+        intent=protocol.ItemWriteIntent(
+            item_id=item_id, expected=None, new_oid=open_oid, operation_id="op-item-create"
+        ),
+    )
+    closed_oid = protocol.ObjectId(_blob(worktree, b"closed\n"))
+
+    landing_state = store.commit_transition(
+        worktree=worktree,
+        remote=str(bare_remote),
+        subject=store.ClaimTransitionSubject("release issue 42", item="42"),
+        intent=protocol.LandingIntent(
+            item_id=item_id,
+            item_expected=open_oid,
+            item_new_oid=closed_oid,
+            claim_id=protocol.ClaimId("claim-42"),
+            agent="Ada",
+            role="builder",
+            outcome=protocol.LandedRelease(commit=protocol.ObjectId("d" * 40)),
+            operation_id="op-land-42",
+        ),
+    )
+    assert landing_state.tip is not None
+    landing_message = _raw_commit_message(bare_remote, str(landing_state.tip))
+    assert landing_message == (
+        "release issue 42\n"
+        "\n"
+        "operation_id: op-land-42\n"
+        "item_id: aco-000001\n"
+        "claim_id: claim-42\n"
+        "item: 42\n"
+        "intent: landing\n"
     )
 
 
