@@ -1,0 +1,8 @@
+claim_id = "d226e561298540d0844314f596c40307"
+agent = "Claude head (coordinator)"
+role = "builder"
+base = "db603331584974865151d307880b8613f5d1022f"
+branch = "claude/issue-407-brief-tip-loud"
+scope = ["specs/brief.spec.md", "src/agent_coordination/checkout.py", "src/agent_coordination/cli.py", "tests/test_cli.py"]
+opened_commit = "ddcc0f11d6a524c0d15bb56d3e5de48a62fb7b11"
+whole_reason = "brief tip read: fail loud on git failure, spec criterion and tests"
