@@ -251,9 +251,11 @@ refusal as an answer (one did, 08.09.2026). `ok` and `reason` are always the
 object's first two keys, and `reason` is the token to branch on: a stable
 word from that command's own vocabulary, never a sentence to match against,
 and never a payload key whose presence you test -- a success may carry `ok`
-and `reason` alone. A closing `message` is prose for a person, the sentence
-stderr's `ERROR:` line carries -- optional even on a refusal, because not
-every refusal writes a sentence beside the object. A usage
+and `reason` alone. A closing `message` is prose for a person: the refusal's own
+sentence, the one the text form prints -- behind `ERROR: ` for most
+commands, behind `REFUSED: <sha> ` for `aco check <sha>` -- and optional,
+because not every refusal names one. It is no promise of a matching
+stderr line: under `--json`, `check` writes the object alone. A usage
 error the parser itself raises joins the same object, but only for a
 command that declares `--json`: `aco bootstrap --json` stays argparse's own
 text on stderr, stdout empty. A non-zero exit is not always a refusal --
