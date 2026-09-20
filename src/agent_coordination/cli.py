@@ -13,7 +13,7 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, date, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import cast
+from typing import TypeVar, cast
 
 from . import (
     __version__,
@@ -3457,10 +3457,27 @@ def _protect_checkout_denial(
     parent sits outside every repository) is still judged by that checkout,
     never silently treated as outside every repository (issue #380 delta,
     gate finding: `rm -rf ../<repo>-worktrees/issue-1-x` must not bypass
-    PROT-32 this way); PROT-14 then denies it as the checkout root itself."""
-    path_checkout = checkout.resolve_path_checkout(
-        Path(absolute_path).parent
-    ) or checkout.resolve_path_checkout(Path(absolute_path))
+    PROT-32 this way); PROT-14 then denies it as the checkout root itself.
+    A directory is resolved as itself first, before its parent, when it is
+    itself a checkout root: a nested checkout's own root -- one whose parent
+    directory happens to sit inside an outer repository, e.g. a worktrees
+    directory the outer checkout tracks -- would otherwise have the outer
+    checkout's parent-first lookup answer for it, letting that outer
+    checkout's own scope silently stand in for the nested root's own PROT-14
+    gate (issue #380 delta, gate finding). A non-directory path (an
+    ordinary file, existing or not yet written) never names a checkout root,
+    so it keeps the cheaper parent-first order."""
+    path = Path(absolute_path)
+    if path.is_dir():
+        self_checkout = checkout.resolve_path_checkout(path)
+        if self_checkout is not None and self_checkout.toplevel == path:
+            path_checkout = self_checkout
+        else:
+            path_checkout = checkout.resolve_path_checkout(path.parent) or self_checkout
+    else:
+        path_checkout = checkout.resolve_path_checkout(
+            path.parent
+        ) or checkout.resolve_path_checkout(path)
     if path_checkout is None:
         return None, outside_repository_denial
     if not path_checkout.has_commit:
@@ -3556,28 +3573,50 @@ def _protect_path_denial(
     )
 
 
+_ProtectItem = TypeVar("_ProtectItem")
+
+
+def _protect_first_denial(
+    items: tuple[_ProtectItem, ...],
+    *,
+    denial_for: Callable[[_ProtectItem, _ProtectStateCache], str | None],
+) -> int:
+    """Judges every one of `items` -- a mutating tool's own payload paths, or
+    a Bash command's own recognized `(pattern, path)` pairs -- against
+    `denial_for`'s own per-item chain, sharing one `state_cache` between all
+    of them (gate G5: several items in one call can name the same
+    repository through different worktrees, and re-fetching per item would
+    let each be judged against a different snapshot of a store that can
+    move between them). The first denial wins; naming none at all allows
+    (issue #380 delta, gate finding: `_protect_write` and `_protect_bash`
+    used to each build their own cache and run their own copy of this same
+    loop instead of sharing it, risking the two drifting apart)."""
+    state_cache: _ProtectStateCache = {}
+    for item in items:
+        denial = denial_for(item, state_cache)
+        if denial is not None:
+            return _hook_deny(denial)
+    return _hook_allow()
+
+
 def _protect_write(tool_name: str, payload: dict[str, object]) -> int:
     """`protect` is forge-free (issue #245): it authorizes a write from the
     live store state alone, never a forge target, so it never resolves a
     repository or calls `gh` -- `--repo` is meaningless here and simply
     unused. Several paths in one `apply_patch` call may each sit in a
-    different checkout (issue #314): each is judged in its own, and the
-    first denial wins. `state_cache` is this one hook call's own state
-    snapshot, shared by every path in the same repository (gate G5) --
-    never carried between calls, so every invocation still reads live."""
+    different checkout (issue #314): each is judged in its own via
+    `_protect_first_denial`, and the first denial wins."""
     raw_paths = _protect_hook_paths(tool_name, payload)
     if not raw_paths:
         return _hook_deny(PATH_REQUIRED)
     agent = checkout._resolved_agent(None)
     distinguish_scope = tool_name == APPLY_PATCH_TOOL_NAME
-    state_cache: _ProtectStateCache = {}
-    for raw_path in raw_paths:
-        denial = _protect_path_denial(
+    return _protect_first_denial(
+        raw_paths,
+        denial_for=lambda raw_path, state_cache: _protect_path_denial(
             agent, raw_path, distinguish_scope=distinguish_scope, state_cache=state_cache
-        )
-        if denial is not None:
-            return _hook_deny(denial)
-    return _hook_allow()
+        ),
+    )
 
 
 def _protect_bash_cwd(payload: dict[str, object]) -> str | None:
@@ -3619,12 +3658,13 @@ def _protect_bash_path_denial(
 def _protect_bash(payload: dict[str, object]) -> int:
     """`Bash`'s own command-text judgment (issue #380): every
     `(pattern, path)` pair `hook_input.hook_command_paths` recognizes in
-    the call's own `command` runs `_protect_bash_path_denial`'s chain, the
-    first denial winning. A missing or non-string `command`, or one naming
-    no recognized pattern at all, allows outright without ever resolving
-    identity, git, or the store -- `protect` cannot judge what it cannot
-    see (`specs/protect.spec.md`'s own `## Never`), and failing closed here
-    would block the overwhelming majority of harmless shell calls."""
+    the call's own `command` runs `_protect_bash_path_denial`'s chain via
+    `_protect_first_denial`, the first denial winning. A missing or
+    non-string `command`, or one naming no recognized pattern at all,
+    allows outright without ever resolving identity, git, or the store --
+    `protect` cannot judge what it cannot see (`specs/protect.spec.md`'s
+    own `## Never`), and failing closed here would block the overwhelming
+    majority of harmless shell calls."""
     tool_input = _hook_field(payload, "toolInput", "tool_input")
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
     if not isinstance(command, str):
@@ -3632,12 +3672,12 @@ def _protect_bash(payload: dict[str, object]) -> int:
     pairs = hook_input.hook_command_paths(command, cwd=_protect_bash_cwd(payload))
     if not pairs:
         return _hook_allow()
-    state_cache: _ProtectStateCache = {}
-    for pattern, raw_path in pairs:
-        denial = _protect_bash_path_denial(pattern, raw_path, state_cache=state_cache)
-        if denial is not None:
-            return _hook_deny(denial)
-    return _hook_allow()
+    return _protect_first_denial(
+        pairs,
+        denial_for=lambda pair, state_cache: _protect_bash_path_denial(
+            pair[0], pair[1], state_cache=state_cache
+        ),
+    )
 
 
 def _protect_dispatch(effect: HookToolEffect, tool_name: str, payload: dict[str, object]) -> int:
