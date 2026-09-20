@@ -1239,6 +1239,14 @@ def _run_refused(arguments: list[str], capsys: pytest.CaptureFixture[str]) -> st
     return err
 
 
+def _first_ruling_date(capsys: pytest.CaptureFixture[str]) -> str:
+    """`rulings --json`'s first listed line's own `ruled_on` (issue #412's
+    envelope: the array now sits under the `rulings` key), read back so a
+    README-sequence assertion never has to guess the wall clock."""
+    payload = json.loads(_run_ok(["rulings", "--json"], capsys))
+    return str(payload["rulings"][0]["lines"][0]["ruled_on"])
+
+
 def _filled_body(template: str, *, now: str, next_step: str, done_when: str) -> str:
     """A `body --template` skeleton with its three blank projection keys
     filled -- the one substitution the README's "fill Now/Next/Done when"
@@ -3258,8 +3266,7 @@ class TestCliStateRefForge:
         # flake across a UTC midnight between the `rule` call above and here.
         assert _run_ok(["rulings"], capsys).strip() == (
             f"{container_id} 0/1: A week without a forge\n  1 ruled yes "
-            f"{json.loads(_run_ok(['rulings', '--json'], capsys))[0]['lines'][0]['ruled_on']}"
-            f": {asked_text}"
+            f"{_first_ruling_date(capsys)}: {asked_text}"
         )
 
         child_state = json.loads(_run_ok(["item", "show", child_id, "--json"], capsys))["state"]

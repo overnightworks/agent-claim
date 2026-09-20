@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 import tomllib
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -1748,10 +1747,15 @@ def locate_agent_claim_block(body: str) -> LocatedBlock:
     return LocatedBlock(tomllib.loads(content), content_start, content_end, newline)
 
 
+# The shape one decoded JSON object takes -- one alias so `cast` names a
+# real type instead of repeating the `"dict[str, object]"` string literal
+# (python:S1192).
+_JsonObject = dict[str, object]
+
 # The shape a decoded homogeneous array of tables (`[[expectation]]`,
 # `[[slice]]`) or an `asdict`'d list of dataclasses takes -- one alias so
 # `cast` names a real type instead of repeating the string.
-_JsonRows = list[dict[str, object]]
+_JsonRows = list[_JsonObject]
 
 # `protocol.toml_string` is this repository's one TOML basic-string writer
 # (issue #378): it lives below this module in the Layers contract, so it is
@@ -3390,9 +3394,9 @@ def _container_next_action(
 def _project_blocker_references(entry: dict[str, object], key: str, repository: str) -> None:
     """Rewrite `entry[key]` (a list of `asdict`'d `IssueReference`s) into the
     pre-#150 local-int list plus a sibling `foreign_blockers` key (A2) -- the
-    one projector `board_json` uses for both `BoardItem.open_blockers` and
-    each open child's `ChildItem.blocked_by`, never a mixed `int | str` list
-    and never re-parsed from a label."""
+    one projector `board_payload` uses for both `BoardItem.open_blockers`
+    and each open child's `ChildItem.blocked_by`, never a mixed `int | str`
+    list and never re-parsed from a label."""
     references = cast(_JsonRows, entry.pop(key))
     entry[key] = [
         reference["number"] for reference in references if reference["repository"] == repository
@@ -3424,12 +3428,33 @@ def _project_landing_row(row: dict[str, object]) -> None:
     non-`null`, so a consumer never has to branch on which evidence
     dataclass produced a row."""
     row["committed_at"] = cast(datetime, row["committed_at"]).astimezone(UTC).isoformat()
-    evidence = cast("dict[str, object]", row.pop("evidence"))
+    evidence = cast(_JsonObject, row.pop("evidence"))
     row["sha"] = evidence.get("sha")
     row["pull_request"] = evidence.get("number")
 
 
-def board_json(board: Board) -> str:
+def _tuples_to_lists(value: object) -> object:
+    """`asdict(board)` preserves every tuple-typed dataclass field as a
+    tuple; a JSON array carries no such distinction, so `board_payload`
+    walks the finished payload once more here and turns every tuple into a
+    list -- the one place this module guarantees its own return is
+    genuinely JSON-shaped, the same way every other command's hand-built
+    `--json` payload in `cli.py` already is."""
+    if isinstance(value, dict):
+        return {key: _tuples_to_lists(item) for key, item in value.items()}
+    if isinstance(value, tuple | list):
+        return [_tuples_to_lists(item) for item in value]
+    return value
+
+
+def board_payload(board: Board) -> dict[str, object]:
+    """`board`'s own `--json`/envelope payload (issue #412): every value
+    already JSON-primitive -- dates and datetimes turned to ISO text,
+    blocker references split and re-keyed, every tuple turned into a list
+    -- so `cli.py`'s emitter can serialize it with a plain `json.dumps`,
+    with no `default=` fallback of its own. The one owner both
+    `board --json` and a future embedded read share; `board --html`/
+    `--serve` render through `board_html.py` instead and never call this."""
     payload = asdict(board)
     repository = payload.pop("repository")
     for group in ("items", "ready_now", "stale", "recovery"):
@@ -3448,8 +3473,8 @@ def board_json(board: Board) -> str:
         _project_landing_row(row)
     for finding in cast(_JsonRows, payload["uncut"]):
         _project_uncut_row_scope(finding)
-    _project_measurements(cast("dict[str, object]", payload["measurements"]))
-    return json.dumps(payload, default=lambda value: value.value)
+    _project_measurements(cast(_JsonObject, payload["measurements"]))
+    return cast(_JsonObject, _tuples_to_lists(payload))
 
 
 def _project_measurements(measurements: dict[str, object]) -> None:

@@ -11,6 +11,7 @@ import tomllib
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from typing import cast
 
 import pytest
 from board_fixtures import (
@@ -1132,6 +1133,24 @@ def test_board_records_the_latest_closed_dependency(
     assert by_number[21].freed_on is None
 
 
+def _payload_items(payload: dict[str, object]) -> list[dict[str, object]]:
+    """`board_payload`'s own `items` array, cast back from the envelope's
+    declared `dict[str, object]` (issue #412) so a test can index one row
+    without every nested key losing its type to `object`."""
+    return cast("list[dict[str, object]]", payload["items"])
+
+
+def _payload_measurements(payload: dict[str, object]) -> dict[str, object]:
+    """The same cast, for `board_payload`'s own `measurements` object."""
+    return cast("dict[str, object]", payload["measurements"])
+
+
+def _as_dict(value: object) -> dict[str, object]:
+    """One more level of the same cast, for a nested `board_payload` object
+    (an item's own `container`, here) whose keys a test still needs typed."""
+    return cast("dict[str, object]", value)
+
+
 def test_board_reports_when_the_last_stale_dependency_closed() -> None:
     dependent, blocked_by = blocked_issue(
         20,
@@ -1154,7 +1173,7 @@ def test_board_reports_when_the_last_stale_dependency_closed() -> None:
         now=datetime(2026, 9, 5, tzinfo=UTC),
     )
 
-    item = json.loads(board.board_json(projected))["items"][0]
+    item = _payload_items(board.board_payload(projected))[0]
     assert item["freed_on"] == "2026-09-03"
     assert item["freed_days"] == 2
 
@@ -1193,7 +1212,7 @@ def test_board_text_and_json_show_freed_on_and_freed_days() -> None:
     assert freed_cell("Blocked") == "-"
     assert freed_cell("Never blocked") == "-"
 
-    items = {item["number"]: item for item in json.loads(board.board_json(projected))["items"]}
+    items = {item["number"]: item for item in _payload_items(board.board_payload(projected))}
     assert items[20]["freed_on"] == "2026-09-03"
     assert items[20]["freed_days"] == 2
     assert items[21]["freed_on"] is None
@@ -1430,9 +1449,9 @@ def test_board_shows_container_progress_and_refuses_it_as_actionable() -> None:
     assert "CONTAINERS" in rendered
     assert "#120 1/2 closed; open: #121" in rendered
 
-    payload = json.loads(board.board_json(projected))
-    container_json = next(item for item in payload["items"] if item["number"] == 120)
-    child_json = next(item for item in payload["items"] if item["number"] == 121)
+    payload = board.board_payload(projected)
+    container_json = next(item for item in _payload_items(payload) if item["number"] == 120)
+    child_json = next(item for item in _payload_items(payload) if item["number"] == 121)
     assert container_json["kind"] == "container"
     assert container_json["container"] == {
         "closed": 1,
@@ -1479,9 +1498,9 @@ def test_board_shows_a_container_child_blocked_by_another_open_issue() -> None:
 
     assert "#120 0/1 closed; open: #121 (blocked by #130)" in board.render(projected)
 
-    payload = json.loads(board.board_json(projected))
-    container_json = next(item for item in payload["items"] if item["number"] == 120)
-    assert container_json["container"]["open_children"] == [
+    payload = board.board_payload(projected)
+    container_json = next(item for item in _payload_items(payload) if item["number"] == 120)
+    assert _as_dict(container_json["container"])["open_children"] == [
         {"number": 121, "state": "open", "blocked_by": [130], "foreign_blockers": []}
     ]
 
@@ -1607,9 +1626,9 @@ def test_board_json_splits_a_container_childs_foreign_blocker() -> None:
         dependencies=dependencies,
     )
 
-    payload = json.loads(board.board_json(projected))
-    container_json = next(item for item in payload["items"] if item["number"] == 120)
-    open_children = container_json["container"]["open_children"]
+    payload = board.board_payload(projected)
+    container_json = next(item for item in _payload_items(payload) if item["number"] == 120)
+    open_children = _as_dict(container_json["container"])["open_children"]
 
     assert open_children == [
         {
@@ -1657,8 +1676,8 @@ def test_board_json_carries_a_nonzero_priority_order_for_a_critical_label() -> N
         board.BoardConfig(priority_labels=("ux", "security")),
         now=datetime(2026, 8, 21, tzinfo=UTC),
     )
-    payload = json.loads(board.board_json(projected))
-    by_number = {item["number"]: item for item in payload["items"]}
+    payload = board.board_payload(projected)
+    by_number = {item["number"]: item for item in _payload_items(payload)}
 
     assert by_number[60]["priority_order"] == 1
     assert by_number[61]["priority_order"] == 0
@@ -1819,7 +1838,7 @@ def test_board_json_and_render_report_an_uncut_slice_entry() -> None:
     )
 
     assert projected.uncut == (board.UncutSlices(160, (board.SliceRow(1, "Undispatched slice"),)),)
-    payload = json.loads(board.board_json(projected))
+    payload = board.board_payload(projected)
     assert payload["uncut"] == [
         {"item": 160, "rows": [{"index": 1, "title": "Undispatched slice"}]}
     ]
@@ -1863,7 +1882,7 @@ def test_board_json_carries_a_scoped_uncut_slice_row_canonically() -> None:
             160, (board.SliceRow(1, "Undispatched slice", ("docs/plan.md", "src/widget.py")),)
         ),
     )
-    payload = json.loads(board.board_json(projected))
+    payload = board.board_payload(projected)
     assert payload["uncut"] == [
         {
             "item": 160,
@@ -1940,7 +1959,7 @@ def test_board_json_and_render_name_several_uncut_rows_by_index() -> None:
             ),
         ),
     )
-    payload = json.loads(board.board_json(projected))
+    payload = board.board_payload(projected)
     assert payload["uncut"] == [
         {
             "item": 122,
@@ -3048,8 +3067,8 @@ def test_board_json_splits_local_and_foreign_blockers_only_in_block_mode() -> No
         dependencies=dependencies,
     )
 
-    payload = json.loads(board.board_json(projected))
-    item = next(item for item in payload["items"] if item["number"] == 300)
+    payload = board.board_payload(projected)
+    item = next(item for item in _payload_items(payload) if item["number"] == 300)
 
     assert item["open_blockers"] == [3]
     assert item["foreign_blockers"] == ["overnightworks/other-repo#7"]
@@ -3068,8 +3087,8 @@ def test_board_json_carries_an_empty_foreign_blockers_list_without_a_foreign_dep
         now=datetime(2026, 8, 21, tzinfo=UTC),
     )
 
-    payload = json.loads(board.board_json(projected))
-    item = next(item for item in payload["items"] if item["number"] == 10)
+    payload = board.board_payload(projected)
+    item = next(item for item in _payload_items(payload) if item["number"] == 10)
 
     assert item["open_blockers"] == [642]
     assert item["foreign_blockers"] == []
@@ -3785,8 +3804,8 @@ def test_board_json_carries_estimate_and_measurements() -> None:
         lane_events=lane_events,
     )
 
-    payload = json.loads(board.board_json(projected))
-    item = next(entry for entry in payload["items"] if entry["number"] == 206)
+    payload = board.board_payload(projected)
+    item = next(entry for entry in _payload_items(payload) if entry["number"] == 206)
     assert item["size"] == "M"
     assert item["estimate"] == {
         "item": "206",
@@ -3795,7 +3814,7 @@ def test_board_json_carries_estimate_and_measurements() -> None:
         "n": 3,
         "weak": False,
     }
-    measurements = payload["measurements"]
+    measurements = _payload_measurements(payload)
     assert measurements["unfinished"] == 0
     assert measurements["unparsed"] == 0
     assert measurements["since"] == "2026-08-10T00:00:00+00:00"

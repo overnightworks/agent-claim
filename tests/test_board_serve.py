@@ -27,7 +27,12 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 import pytest
 from board_fixtures import board_issue, complete_contract, proposed_expectation
 from cli_fixtures import stub_board_config_tracked
-from test_cli import FakeForge, _patch_store_write, _single_item_board_environment
+from test_cli import (
+    FakeForge,
+    _assert_json_refusal_object,
+    _patch_store_write,
+    _single_item_board_environment,
+)
 
 from agent_coordination import board, board_serve, checkout, forge, github, protocol, workspace
 from agent_coordination import cli as issue_claim
@@ -944,6 +949,22 @@ def test_new_token_without_serve_refuses(capsys: pytest.CaptureFixture[str]) -> 
 
     assert exit_code == 2
     assert "--new-token requires --serve" in captured.err
+
+
+def test_new_token_without_serve_reports_invalid_usage_under_json(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """BOARD-39 (issue #412): the same refusal, now through the emitter --
+    `invalid_usage`, never the broad `unavailable` every other `board`
+    refusal falls to."""
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "board", "--new-token", "--json"]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 2
+    assert captured.err == "ERROR: --new-token requires --serve\n"
+    _assert_json_refusal_object(captured.err, captured.out, reason="invalid_usage")
 
 
 def _noop_render_page(_refused: str | None) -> str:

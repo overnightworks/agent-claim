@@ -13,7 +13,9 @@ never restates a fact another file already owns: `<label>`'s two forms and
 the Landungen pairing rule are `specs/landing-grammar.spec.md`'s
 (LAND-41..54); the untracked-pin refusal is `specs/storage-pin.spec.md`'s
 (PIN-01); the ruling a click on that page writes is `specs/rule.spec.md`'s
-(RULE-01..09). `--serve`'s own request/response wire contract is not this
+(RULE-01..09); `specs/output.spec.md` owns the `--json` envelope itself
+(OUT-nn: key order, `ok`, `message`) that wraps BOARD-11's own top-level
+keys. `--serve`'s own request/response wire contract is not this
 lane's to invent and is not specified here. `board`'s own ranking,
 scoring, and per-column cell semantics (`SCORE`, `PRIORITY`, `AGE`, ...)
 are pre-existing, untouched behaviour this lane does not re-derive into
@@ -26,8 +28,9 @@ number, `<label>` an item as `specs/landing-grammar.spec.md` prints it.
 
 | state \ trigger | text (default) | `--json` | `--html` | `--serve` |
 |---|---|---|---|---|
-| unsupported canonical-remote host | BOARD-02 | BOARD-02 | BOARD-02 | BOARD-02 |
+| unsupported canonical-remote host | BOARD-02 | BOARD-02, BOARD-43 | BOARD-02 | BOARD-02 |
 | untracked `.agent-claim/board.toml` | PIN-01 (cited) | PIN-01 (cited) | PIN-01 (cited) | PIN-01 (cited) |
+| `--repo` under `storage = "state-ref"` | BOARD-42 | BOARD-42, BOARD-43 | BOARD-42 | — |
 | an item claimed or malformed | BOARD-03 | — | — | — |
 | board empty of ready/stale/recovery rows | BOARD-04 | — | — | — |
 | landed-but-open items exist | BOARD-05 | — | — | — |
@@ -36,6 +39,7 @@ number, `<label>` an item as `specs/landing-grammar.spec.md` prints it.
 | an item with no recognized `kind` | BOARD-08 | BOARD-08 | — | — |
 | an uncut `[[slice]]` row | BOARD-09 | BOARD-14 | — | — |
 | a completed run | BOARD-10 | BOARD-11, BOARD-13 | — | — |
+| `--json`'s success/refusal envelope | — | BOARD-11, BOARD-43 (OUT-nn cited) | — | — |
 | `--html`/`--json`/`--serve` combined | BOARD-16 | BOARD-16 | BOARD-16 | BOARD-16 |
 | `--html PATH` given, or omitted | — | — | BOARD-15 | — |
 | open expectation lines, cards | — | — | BOARD-18, BOARD-19, BOARD-21 | — |
@@ -45,7 +49,7 @@ number, `<label>` an item as `specs/landing-grammar.spec.md` prints it.
 | `--serve`'s persistent loopback token, minted or read | — | — | — | BOARD-32, BOARD-33, BOARD-34 |
 | `--serve` naming a port another process already holds | — | — | — | BOARD-35 |
 | an already-ruled `[[expectation]]` line | — | — | BOARD-36, BOARD-37, BOARD-38 | BOARD-36, BOARD-37, BOARD-38 |
-| `--new-token` given without `--serve` | BOARD-39 | BOARD-39 | BOARD-39 | — |
+| `--new-token` given without `--serve` | BOARD-39 | BOARD-39, BOARD-43 | BOARD-39 | — |
 | the token file's own content, or its directory's mode | — | — | — | BOARD-40, BOARD-41 |
 
 ## The shared forge precondition
@@ -55,6 +59,7 @@ does, before either reads a single issue -- cited there, not restated.
 
 - [ ] [BOARD-02] A canonical remote whose host is not GitHub refuses `ERROR: no forge adapter for host <host>`, exit `2`, before any GitHub read is made (see E-BOARD-01).
 - [ ] [BOARD-01] `board` reaches the same untracked-`.agent-claim/board.toml` refusal `specs/storage-pin.spec.md` owns (PIN-01), exit `2`, before the host check above ever runs.
+- [ ] [BOARD-42] Under `storage = "state-ref"`, `board`/`next`/`rulings` resolve the state-ref forge like `item show`/`edit`/`close`; `--repo` there refuses the same as those (PIN-04, PIN-05).
 
 ## Text output
 
@@ -79,7 +84,15 @@ does, before either reads a single issue -- cited there, not restated.
 
 ## `--json`
 
-- [ ] [BOARD-11] The top-level object carries exactly `items`, `ready_now`, `stale`, `recovery`, `landings`, `uncut`, `requests`, `measurements` -- never a `repository` key (see E-BOARD-04).
+- [ ] [BOARD-11] `board --json` wraps OUT-nn (`reason: "projected"`) around `items`, `ready_now`, `stale`, `recovery`, `landings`, `uncut`, `requests`, `measurements` only, never `repository` (E-BOARD-04).
+- [ ] [BOARD-43] `--json` on a dispatched refusal (BOARD-02, BOARD-39, BOARD-42) prints that envelope with the sentence as `message` and `reason` below, exit `2` (see E-BOARD-15).
+
+`reason`, by which refusal fired:
+
+| refusal | `reason` |
+|---|---|
+| PIN-04 (`--repo` under `storage = state-ref`), BOARD-39 (`--new-token` without `--serve`) | `invalid_usage` |
+| BOARD-02 (no forge adapter for host), PIN-05 (no resolvable default branch) | `unavailable` |
 - [ ] [BOARD-12] Each `landings` row carries `{"item", "committed_at", "sha", "pull_request"}`, exactly one of `sha`/`pull_request` non-`null` (LAND-54).
 - [ ] [BOARD-13] Each item's `open_blockers` is split into a same-repository `int` list plus a sibling `foreign_blockers` list of `"<repository>#<n>"` strings, never one mixed list.
 - [ ] [BOARD-14] An `uncut` row's own `scope` key is present, canonical and non-empty only when that row carries a `scope` of its own; a scopeless row's object carries no `scope` key at all, never `"scope": null`.
@@ -205,8 +218,19 @@ Setup: bare-remote, fake `gh`, one open issue `#10`
 
 ```console
 $ aco board --json
-{"items": [...], "ready_now": [...], "stale": [], "recovery": [], "landings": [], "uncut": [], "requests": 3, "measurements": {"classes": [], "unfinished": 0, "unparsed": 0, "since": null, "as_of": "<date>"}}
+{"ok": true, "reason": "projected", "items": [...], "ready_now": [...], "stale": [], "recovery": [], "landings": [], "uncut": [], "requests": 3, "measurements": {"classes": [], "unfinished": 0, "unparsed": 0, "since": null, "as_of": "<date>"}}
 exit 0
+```
+
+### E-BOARD-15 — `--json` refusal envelope, `--repo` under `storage = state-ref`
+
+Setup: bare-remote, `storage = "state-ref"` tracked
+
+```console
+$ aco --repo acme/items board --json
+2> ERROR: --repo is meaningless under storage = state-ref
+{"ok": false, "reason": "invalid_usage", "message": "--repo is meaningless under storage = state-ref"}
+exit 2
 ```
 
 ### E-BOARD-05 — `--html` to a file, and its five sections
