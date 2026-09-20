@@ -109,7 +109,7 @@ Every outcome below needs a real or faked console and is therefore proven by
 its own named test in `tests/test_workspace.py` (task scope: "no real
 terminal or tmux"), never by a transcript in this file. `aco run` always
 prints `KEY: <state>` or, with a detail, `KEY: <state>: <detail>`, one line
-per selected project, and exits `1` if any outcome is `failed` or `ownership
+per selected project, and exits `2` if any outcome is `failed` or `ownership
 unknown`, else `0`.
 
 - [ ] [WS-37] No existing console, and no still-running external process from its own live registration, prints `KEY: started` after opening a fresh console.
@@ -145,7 +145,7 @@ accepted unchanged, never chmodded.
 - [ ] [WS-57] The second line, `configuration: <missing|malformed|empty|valid>`, reads `missing` with no file, `malformed` if it fails to parse, `empty` if valid with no projects, else `valid` (see E-WS-17).
 - [ ] [WS-58] With no login-attempt record at all, the third line is `attempt: no login attempt recorded`, exit `0` (see E-WS-17).
 - [ ] [WS-59] A well-formed attempt prints `attempt: <id> <started_at> <state>`, one `KEY: <outcome>` line per project, `workspace: <failure>` and `completed: <t>` only if present, exit `0` (see E-WS-18).
-- [ ] [WS-60] A login-attempt record that fails to parse prints `attempt: malformed` and exits `1`, echoing none of its own bytes (see E-WS-19).
+- [ ] [WS-60] A login-attempt record that fails to parse prints `attempt: malformed` and exits `2`, echoing none of its own bytes (see E-WS-19).
 
 ## `_run-at-login`: one serialized recovery attempt (hidden command)
 
@@ -155,9 +155,9 @@ login-attempt record `login status` later reads.
 
 - [ ] [WS-61] A run whose selected projects all recover, none already externally live, exits `0` and notifies `Workspace recovery completed for <n> project(s).` (see E-WS-20).
 - [ ] [WS-62] A run notifies `Workspace recovery completed for <n> project(s). <k> project(s) already had live owners; no console was opened.` when `k` of the outcomes are `external live`.
-- [ ] [WS-63] A run notifies `Workspace recovery completed for <n> project(s). <k> project(s) failed recovery.` and exits `1` when `k` of the outcomes are `failed` or `ownership unknown`.
-- [ ] [WS-64] A mapping this attempt cannot even read notifies `Workspace recovery failed.`, exit `1`, recording `failure = "workspace failure"` (see E-WS-20).
-- [ ] [WS-65] A mapping that validates but names no projects to run is treated the same as WS-64: `workspace failure`, exit `1` (see E-WS-20).
+- [ ] [WS-63] A run notifies `Workspace recovery completed for <n> project(s). <k> project(s) failed recovery.` and exits `2` when `k` of the outcomes are `failed` or `ownership unknown`.
+- [ ] [WS-64] A mapping this attempt cannot even read notifies `Workspace recovery failed.`, exit `2`, recording `failure = "workspace failure"` (see E-WS-20).
+- [ ] [WS-65] A mapping that validates but names no projects to run is treated the same as WS-64: `workspace failure`, exit `2` (see E-WS-20).
 - [ ] [WS-66] A failure to even write the running attempt record notifies `Workspace recovery could not record its attempt.` and exits `2`, before any project runs.
 - [ ] [WS-67] An interrupted attempt leaves `state = "running"`, no outcomes or completion (test evidence, `test_login_recovery_keeps_unknown_outcomes_after_interruption`).
 
@@ -364,7 +364,7 @@ $ aco login status
 launcher: disabled
 configuration: missing
 attempt: malformed
-exit 1
+exit 2
 ```
 
 ### E-WS-20 -- `_run-at-login` on nothing but console-free preconditions
@@ -376,7 +376,7 @@ Setup: bare-remote, temporary `XDG_CONFIG_HOME`/`XDG_STATE_HOME`, mapping presen
 
 ```console
 $ aco _run-at-login; echo "exit $?"
-exit 1
+exit 2
 $ aco login status
 launcher: disabled
 configuration: empty

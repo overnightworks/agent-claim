@@ -95,7 +95,7 @@ def test_login_attempt_is_running_before_recovery_and_records_ordered_safe_outco
             "123e4567-e89b-42d3-a456-426614174000", "2026-09-09T00:00:00+00:00", "running"
         )
     ]
-    assert result.exit_status == 1
+    assert result.exit_status == 2
     assert workspace.load_login_attempt(state_path) == workspace.LoginAttempt(
         "123e4567-e89b-42d3-a456-426614174000",
         "2026-09-09T00:00:00+00:00",
@@ -595,7 +595,7 @@ def test_login_recovery_records_an_empty_workspace_result_as_a_failure(
 
     result = workspace.run_login_recovery(tmp_path / "workspace.toml", state_path)
 
-    assert result.exit_status == 1
+    assert result.exit_status == 2
     assert workspace.load_login_attempt(state_path).failure == "workspace failure"
 
 

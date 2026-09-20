@@ -6103,7 +6103,7 @@ def _run_workspace(parsed: argparse.Namespace) -> int:
         suffix = f": {outcome.detail}" if outcome.detail else ""
         print(f"{outcome.project}: {outcome.state}{suffix}")
     return (
-        1
+        2
         if any(
             outcome.state in {workspace.RunState.FAILED, workspace.RunState.UNKNOWN}
             for outcome in outcomes
@@ -6152,7 +6152,7 @@ def _login_status() -> int:
         return 0
     except workspace.WorkspaceError:
         print("attempt: malformed")
-        return 1
+        return 2
     print(f"attempt: {attempt.attempt_id} {attempt.started_at} {attempt.state}")
     for project, outcome in attempt.outcomes:
         print(f"{project}: {outcome}")
