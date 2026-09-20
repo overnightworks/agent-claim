@@ -11,7 +11,8 @@ may and may not carry -- and applies to every command whose own spec cites
 naming its own `reason` vocabulary with examples. Every `--json` command's
 own spec now cites this file (issue #425 finished the migration ask/rule/
 brief started), including the refusals that fire before the
-named command starts (OUT-05).
+named command starts (OUT-05) and the ones the argument parser itself
+raises before a command is even chosen (OUT-06, issue #432).
 
 ## Behavior table
 
@@ -20,6 +21,7 @@ named command starts (OUT-05).
 | a migrated command's own success | OUT-01, OUT-02 |
 | a migrated command's own refusal | OUT-01, OUT-03 |
 | a refusal before the named command starts | OUT-01, OUT-05 |
+| a refusal the argument parser itself raises | OUT-01, OUT-06 |
 
 ## The envelope
 
@@ -27,6 +29,7 @@ named command starts (OUT-05).
 - [ ] [OUT-02] `ok` is `true` only for that command's own success outcome; `reason` is always one stable token from that command's own enum, documented by its own spec, never a free sentence.
 - [ ] [OUT-03] A refusal's `reason` names its enum member, never an `error` object; an optional `message` -- the sentence stderr's `ERROR:` line already printed -- is always the envelope's last key, when given.
 - [ ] [OUT-05] A refusal raised before the named command starts -- a missing identity, `release`'s branch checks -- prints this envelope, `reason` `precondition_failed`, its sentence as `message`.
+- [ ] [OUT-06] A refusal the argument parser raises -- an unknown flag, a missing required one, an unreadable positional -- prints this envelope, `reason` `invalid_usage`, exit `2` (see E-OUT-04).
 - OUT-04 (retired 20.09.2026, issue #425): the `{"ok": false, "error": "<sentence>"}` fallback it kept for a command whose own spec cited no `OUT-nn` no longer exists; every `--json` command cites this file now.
 
 ## Never
@@ -34,7 +37,8 @@ named command starts (OUT-05).
 - This file never lists a command's own vocabulary: `ask`, `rule`, and `brief` each document their own `reason` members, with examples, in their own spec.
 - `ok`/`reason` never reorder around a command's payload: `reason` is always the second key, never last, never interleaved with structured detail keys.
 - `message` never carries structured data: every structured detail (`item`, `index`, `claim`, `checks`, and the like) is its own sibling key, never packed into the prose.
-- A refusal the argument parser itself raises never prints this envelope (issue #425): `--json` is not parsed yet there, so that one refusal stays the plain `ERROR:` sentence alone.
+- A parser refusal without `--json` never changes shape (issue #432): stdout stays empty and stderr carries argparse's own usage block and sentence, exactly as it did before the envelope reached this refusal at all.
+- `--json` is never read off a parsed command here: the flag is recognised in the raw arguments, so a command that never parsed still answers in the shape its caller asked for.
 - `protect` never joins this envelope, migrated or not: its hook protocol (`{"decision": …}`, exit `0`/`2`) is a permanent exception (`specs/protect.spec.md`).
 - `board --serve` never prints this file's own `--json` envelope either: its own request/response wire contract is permanently `specs/board.spec.md`'s own, not this file's.
 - `bootstrap`, `reset`, `start`, `register`, `run`, and `login` never gain a `--json` mode of their own (each command's own product decision, not a pending migration): each names it in its own `## Never` (`specs/bootstrap.spec.md`, `specs/reset.spec.md`, `specs/start.spec.md`, `specs/workspace.spec.md`).
@@ -77,3 +81,18 @@ $ aco claim 42 --scope src --json
 {"ok": false, "reason": "precondition_failed", "message": "agent identity is required: pass --agent or set ACO_AGENT, GROK_SESSION_ID, or CLAUDE_SESSION_ID"}
 exit 2
 ```
+
+### E-OUT-04 -- a usage error the parser itself raises
+
+Setup: bare-remote, bootstrapped, `storage = "state-ref"` tracked
+
+```console
+$ aco release --json
+2> ERROR: one of the arguments --merged --abandoned is required
+{"ok": false, "reason": "invalid_usage", "message": "one of the arguments --merged --abandoned is required"}
+exit 2
+```
+
+Without `--json` the same invocation prints no object at all, only argparse's
+own usage block and `aco release: error: one of the arguments --merged
+--abandoned is required` on stderr, exit `2`.

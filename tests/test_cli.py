@@ -944,8 +944,10 @@ def test_board_html_and_json_are_mutually_exclusive(
 ) -> None:
     _single_item_board_environment(monkeypatch, tmp_path)
 
-    with pytest.raises(SystemExit):
-        issue_claim.main(["--repo", "example/agent-claim", "board", "--html", "--json"])
+    status = issue_claim.main(["--repo", "example/agent-claim", "board", "--html", "--json"])
+
+    assert status == 2
+    assert json.loads(capsys.readouterr().out)["reason"] == "invalid_usage"
 
 
 def test_board_naming_no_output_mode_refuses_before_any_read(
@@ -8358,10 +8360,7 @@ def test_cli_claim_and_release_accept_json_while_parent_and_bootstrap_reject_it(
     assert omitted_claim.json is False
     assert omitted_release.json is False
     for arguments in (["--json", "status"], ["bootstrap", "--json"]):
-        parser = issue_claim._parser()
-        with pytest.raises(SystemExit) as exited:
-            parser.parse_args(arguments)
-        assert exited.value.code == 2
+        assert issue_claim.main(arguments) == 2
 
 
 @pytest.mark.parametrize(
@@ -13714,11 +13713,68 @@ def test_release_refuses_a_branch_and_claim_id_naming_different_claims(
     ],
 )
 def test_release_requires_exactly_one_landing_outcome(arguments: list[str]) -> None:
-    parser = issue_claim._parser()
     with pytest.raises(SystemExit) as exited:
-        parser.parse_args(arguments)
+        issue_claim.main(arguments)
 
     assert exited.value.code == 2
+
+
+ARGPARSE_USAGE_REFUSALS = [
+    pytest.param(
+        ["release", "42"],
+        "one of the arguments --merged --abandoned is required",
+        id="release-naming-no-outcome",
+    ),
+    pytest.param(
+        ["claim", "42", "--scope", "src", "--nope"],
+        "unrecognized arguments: --nope",
+        id="claim-carrying-an-unknown-flag",
+    ),
+]
+UNREADABLE_ITEM_REFERENCE_REFUSAL = pytest.param(
+    ["status", "notanumber"],
+    "'notanumber' is not an item reference; use aco-xxxxxx, #n, or the bare number n",
+    id="status-naming-an-unreadable-item-reference",
+)
+
+
+@pytest.mark.parametrize(
+    ("arguments", "message"), [*ARGPARSE_USAGE_REFUSALS, UNREADABLE_ITEM_REFERENCE_REFUSAL]
+)
+def test_a_refused_parse_under_json_prints_the_invalid_usage_envelope(
+    arguments: list[str], message: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """OUT-06 (issue #432): a `--json` caller reads one object for every
+    refusal, including the ones the parser itself raises before any command
+    is chosen -- an outcome flag it requires, a flag it does not know, and a
+    positional value its own reader refuses."""
+    status = issue_claim.main([*arguments, "--json"])
+
+    captured = capsys.readouterr()
+    assert status == 2
+    assert json.loads(captured.out) == {
+        "ok": False,
+        "reason": "invalid_usage",
+        "message": message,
+    }
+    assert captured.err == f"ERROR: {message}\n"
+
+
+@pytest.mark.parametrize(("arguments", "message"), ARGPARSE_USAGE_REFUSALS)
+def test_a_refused_parse_without_json_keeps_the_usage_text(
+    arguments: list[str], message: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """OUT-06's own Never clause: without `--json` the parser's refusal is
+    still argparse's own usage block and sentence on stderr, exit `2`, with
+    stdout untouched."""
+    with pytest.raises(SystemExit) as exited:
+        issue_claim.main(arguments)
+
+    captured = capsys.readouterr()
+    assert exited.value.code == 2
+    assert captured.out == ""
+    assert captured.err.startswith("usage: aco")
+    assert captured.err.endswith(f"error: {message}\n")
 
 
 PARENT_ISSUE = 79
@@ -14741,7 +14797,7 @@ def test_cli_bootstrap_takes_no_ledger_argument() -> None:
     assert parser.prog == "aco"
     assert all("--ledger" not in action.option_strings for action in bootstrap._actions)
     with pytest.raises(SystemExit):
-        parser.parse_args(["bootstrap", "--ledger", "5"])
+        issue_claim.main(["bootstrap", "--ledger", "5"])
 
 
 def test_cli_bootstrap_ignores_repo_and_a_non_github_remote(
