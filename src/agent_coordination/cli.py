@@ -3752,11 +3752,11 @@ def _cmd_check(parsed: argparse.Namespace, session: _ReadSession) -> int:
     #359, LAND-48), or a number that is in neither number space. Only the
     pull-request side needs the live claims, so the issue side never
     fetches the state ref."""
-    if isinstance(parsed.number, str):
-        return _check_trunk_commit(parsed)
     as_json = parsed.json
-    number = int(parsed.number)
     try:
+        if isinstance(parsed.number, str):
+            return _check_trunk_commit(parsed)
+        number = int(parsed.number)
         client = session.forge()
         # Read for its refusals only: a repository pinned to a grammar this
         # tool no longer reads, or a forge that cannot answer `blocked_by`,
@@ -4079,37 +4079,37 @@ def _cmd_brief(parsed: argparse.Namespace, session: _ReadSession) -> int:
     names the body, the lane tip ... and the commands"): the item's body from
     the forge, its live claim from the store, the claim branch's current tip,
     and the files the lane touches against its base. Never a new data
-    source, and never a write. Every refusal this function itself can name
-    (BRIEF-07, BRIEF-09's PIN-04/PIN-05, BRIEF-15, BRIEF-18's lane-tip read)
-    reports through `_refuse`; anything else -- an unspecified forge read
-    failure -- still reaches `main`'s own generic handler untouched."""
+    source, and never a write. Every refusal on this path -- BRIEF-07,
+    BRIEF-09's PIN-04/PIN-05, BRIEF-15, BRIEF-18's lane-tip read, and the
+    item read itself, which is a forge call like any other (issue #432) --
+    reports through `_refuse` under this command's own vocabulary."""
     as_json = parsed.json
     try:
-        step_rules = _brief_step_rules_or_refusal(parsed.step)
-    except protocol.ClaimError as error:
-        return _refuse(BriefReason.UNAVAILABLE, error, as_json=as_json)
-    item = int(parsed.item)
-    try:
-        client = session.forge()
+        return _brief_report(parsed, session)
     except RepoMeaninglessUnderStateRefError as error:
         return _refuse(BriefReason.INVALID_USAGE, error, as_json=as_json)
     except protocol.ClaimError as error:
         return _refuse(BriefReason.UNAVAILABLE, error, as_json=as_json)
-    body = client.item_reference(item).body or ""
+
+
+def _brief_report(parsed: argparse.Namespace, session: _ReadSession) -> int:
+    """`brief`'s own composition and printing, every refusal raised by name
+    for `_cmd_brief` to report."""
+    step_rules = _brief_step_rules_or_refusal(parsed.step)
+    item = int(parsed.item)
+    client = session.forge()
+    item_body = client.item_reference(item).body or ""
     worktree, _remote, state = _store_observation()
     live = _brief_live_claim(worktree, state, item)
     if live is None:
         tip: str | None = None
         touched: tuple[str, ...] = ()
     else:
-        try:
-            tip = _lane_tip(live.claim.branch)
-        except protocol.ClaimError as error:
-            return _refuse(BriefReason.UNAVAILABLE, error, as_json=as_json)
+        tip = _lane_tip(live.claim.branch)
         touched = _touched_files(live.claim.base, tip) if tip is not None else ()
     observed_at = datetime.now(UTC)
-    composition = _BriefComposition(body, live, observed_at, tip, touched, step_rules)
-    if as_json:
+    composition = _BriefComposition(item_body, live, observed_at, tip, touched, step_rules)
+    if parsed.json:
         return _brief_json(composition)
     _print_brief(composition)
     return 0
@@ -4312,12 +4312,12 @@ def _cmd_rulings(parsed: argparse.Namespace, session: _ReadSession) -> int:
     try:
         issues = session.forge().list_open_board_issues()
         projected = _observed_board(session, issues=issues).board
+        bodies = {issue.number: issue.body for issue in issues}
+        storage = _board_config(_resolve_toplevel()).storage
     except RepoMeaninglessUnderStateRefError as error:
         return _refuse(RulingsReason.INVALID_USAGE, error, as_json=as_json)
     except protocol.ClaimError as error:
         return _refuse(RulingsReason.UNAVAILABLE, error, as_json=as_json)
-    bodies = {issue.number: issue.body for issue in issues}
-    storage = _board_config(_resolve_toplevel()).storage
     _rulings(projected, bodies, as_json=as_json, storage=storage)
     return 0
 
@@ -4334,6 +4334,7 @@ def _cmd_next(parsed: argparse.Namespace, session: _ReadSession) -> int:
     as_json = parsed.json
     try:
         observed = _observed_board(session)
+        storage = _board_config(_resolve_toplevel()).storage
     except RepoMeaninglessUnderStateRefError as error:
         return _refuse(NextReason.INVALID_USAGE, error, as_json=as_json)
     except protocol.ClaimError as error:
@@ -4349,7 +4350,6 @@ def _cmd_next(parsed: argparse.Namespace, session: _ReadSession) -> int:
         parallel=board.parallel_set(projected, observed.live_claims, action),
         close=board.zero_cost_closes(projected),
     )
-    storage = _board_config(_resolve_toplevel()).storage
     if as_json:
         _next_json(report, storage)
     else:
@@ -6265,19 +6265,24 @@ def _rule_item_reason(error: _RuleItemError) -> RuleReason:
     return RuleReason.LINE_OUT_OF_RANGE
 
 
+def _rule_expectation_line(parsed: argparse.Namespace, session: _WriteSession) -> int:
+    """`rule`'s own work, every refusal raised by name for `_cmd_rule` to
+    report."""
+    client = session.forge.writer()
+    number = int(parsed.item)
+    ruled_line, open_remaining = rule_item(client, number, parsed.line, parsed.ruling, parsed.note)
+    _emit_rule_result(number, ruled_line, open_remaining, as_json=parsed.json)
+    return 0
+
+
 def _cmd_rule(parsed: argparse.Namespace, session: _WriteSession) -> int:
+    """`rule`'s own `--json` refusals (issue #396), for the whole command and
+    not only its first steps (issue #432): the body write inside the shared
+    ruling path can fail like any other forge call, and a failure there names
+    this command's own `unavailable` rather than escaping the envelope."""
     as_json = parsed.json
     try:
-        client = session.forge.writer()
-    except RepoMeaninglessUnderStateRefError as error:
-        return _refuse(RuleReason.INVALID_USAGE, error, as_json=as_json)
-    except protocol.ClaimError as error:
-        return _refuse(RuleReason.UNAVAILABLE, error, as_json=as_json)
-    number = int(parsed.item)
-    try:
-        ruled_line, open_remaining = rule_item(
-            client, number, parsed.line, parsed.ruling, parsed.note
-        )
+        return _rule_expectation_line(parsed, session)
     except (
         _TargetUnavailableError,
         _InvalidTargetError,
@@ -6285,8 +6290,10 @@ def _cmd_rule(parsed: argparse.Namespace, session: _WriteSession) -> int:
         body.ExpectationOutOfRangeError,
     ) as error:
         return _refuse(_rule_item_reason(error), error, as_json=as_json)
-    _emit_rule_result(number, ruled_line, open_remaining, as_json=as_json)
-    return 0
+    except RepoMeaninglessUnderStateRefError as error:
+        return _refuse(RuleReason.INVALID_USAGE, error, as_json=as_json)
+    except protocol.ClaimError as error:
+        return _refuse(RuleReason.UNAVAILABLE, error, as_json=as_json)
 
 
 def _board_token_location(repository: forge.RepositoryId) -> workspace.BoardTokenLocation:
@@ -6430,37 +6437,45 @@ def _ask_expectation_reason(
     return AskReason.INVALID_EXPECTATION
 
 
-def _cmd_ask(parsed: argparse.Namespace, session: _WriteSession) -> int:
-    as_json = parsed.json
-    try:
-        picture = _read_picture_file(parsed.picture) if parsed.picture else None
-    except _PictureFileError as error:
-        return _refuse(AskReason.INVALID_PICTURE, error, as_json=as_json)
+def _append_expectation_card(parsed: argparse.Namespace, session: _WriteSession) -> int:
+    """`ask`'s own work, every refusal raised by name for `_cmd_ask` to
+    report: the picture file is read before the forge is ever resolved, so a
+    missing one refuses before the item body is fetched."""
+    picture = _read_picture_file(parsed.picture) if parsed.picture else None
     card = body.ExpectationCardFields(
         question=parsed.question, example=parsed.example, picture=picture
     )
-    try:
-        client = session.forge.writer()
-    except RepoMeaninglessUnderStateRefError as error:
-        return _refuse(AskReason.INVALID_USAGE, error, as_json=as_json)
-    except protocol.ClaimError as error:
-        return _refuse(AskReason.UNAVAILABLE, error, as_json=as_json)
+    client = session.forge.writer()
     number = int(parsed.item)
-    try:
-        current_body, config = _require_writable_target(client, number, command="ask")
-    except (_TargetUnavailableError, _InvalidTargetError) as error:
-        return _refuse(_ask_target_reason(error), error, as_json=as_json)
-    try:
-        new_body = body.append_expectation(current_body, parsed.text, parsed.default, card=card)
-    except (body.ExpectationTextError, body.ExpectationFieldError) as error:
-        return _refuse(_ask_expectation_reason(error), error, as_json=as_json)
+    current_body, config = _require_writable_target(client, number, command="ask")
+    new_body = body.append_expectation(current_body, parsed.text, parsed.default, card=card)
     index = len(body.expectation_lines(new_body, storage=config.storage))
     client.update_item_body(number, new_body)
     asked = _AskedLine(
         item=number, index=index, text=parsed.text, default=parsed.default, card=card
     )
-    _emit_ask_result(asked, as_json=as_json)
+    _emit_ask_result(asked, as_json=parsed.json)
     return 0
+
+
+def _cmd_ask(parsed: argparse.Namespace, session: _WriteSession) -> int:
+    """`ask`'s own `--json` refusals (issue #396), for the whole command and
+    not only its first steps (issue #432): the body write this command ends
+    with can fail like any other forge call, and a failure there names this
+    command's own `unavailable` rather than escaping the envelope."""
+    as_json = parsed.json
+    try:
+        return _append_expectation_card(parsed, session)
+    except _PictureFileError as error:
+        return _refuse(AskReason.INVALID_PICTURE, error, as_json=as_json)
+    except (_TargetUnavailableError, _InvalidTargetError) as error:
+        return _refuse(_ask_target_reason(error), error, as_json=as_json)
+    except (body.ExpectationTextError, body.ExpectationFieldError) as error:
+        return _refuse(_ask_expectation_reason(error), error, as_json=as_json)
+    except RepoMeaninglessUnderStateRefError as error:
+        return _refuse(AskReason.INVALID_USAGE, error, as_json=as_json)
+    except protocol.ClaimError as error:
+        return _refuse(AskReason.UNAVAILABLE, error, as_json=as_json)
 
 
 def _release_branch_for(parsed: argparse.Namespace) -> str | None:

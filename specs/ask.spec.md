@@ -35,6 +35,7 @@ always the argument given; `<k>` the fresh line's 1-based index.
 | item does not exist | RULE-07 (cited) | ASK-09 | — |
 | this forge cannot write the body | RULE-06 (cited) | ASK-09 | — |
 | `--repo` given, `storage = "state-ref"` | ASK-11 | ASK-09 | — |
+| the body write itself fails | ASK-12 | ASK-12 | — |
 
 ## Appending a proposed line
 
@@ -55,6 +56,7 @@ text (BODY-01..BODY-50); a picture's own content rules are BODY-37..BODY-42.
 - [ ] [ASK-09] `--json` on a dispatched refusal (ASK-05..ASK-08, ASK-10, ASK-11, RULE-06..RULE-08) prints the envelope with `reason` from the table below and the sentence as `message`, exit `2` (see E-ASK-05).
 - [ ] [ASK-10] A `--question`/`--example` failing BODY-34..36 refuses `<field> <reason>`, exit `2`, before any write; `<field>` is `question` or `example`, `<reason>` from the table below (see E-ASK-06).
 - [ ] [ASK-11] Under `storage = "state-ref"`, `aco ask` resolves the state-ref forge like `aco rule`; `--repo` there refuses the same as PIN-04 (see E-ASK-07).
+- [ ] [ASK-12] A forge failure appending the line -- the body write itself included -- refuses `ERROR: <sentence>`, exit `2`, `--json` `reason: "unavailable"` (see E-ASK-08).
 
 `reason`, by which refusal fired:
 
@@ -64,7 +66,7 @@ text (BODY-01..BODY-50); a picture's own content rules are BODY-37..BODY-42.
 | ASK-06 (`--picture` unreadable), ASK-07 (`--picture` content refused) | `invalid_picture` |
 | ASK-08 (blank `--text`), ASK-10 (`--question`/`--example` content refused) | `invalid_expectation` |
 | ASK-11 (`--repo` under `storage = state-ref`, cites PIN-04) | `invalid_usage` |
-| RULE-06 (forge cannot write, cited) | `unavailable` |
+| RULE-06 (forge cannot write, cited), ASK-12 (the append itself fails) | `unavailable` |
 
 `<reason>` for ASK-10, checked in this fixed order:
 
@@ -189,5 +191,16 @@ Setup: bare-remote, bootstrapped, `storage = "state-ref"` tracked
 $ aco ask <item-id> --text "New question?" --repo acme/items --json
 2> ERROR: --repo is meaningless under storage = state-ref
 {"ok": false, "reason": "invalid_usage", "message": "--repo is meaningless under storage = state-ref"}
+exit 2
+```
+
+### E-ASK-08 -- the body write itself fails
+
+Setup: bare-remote, bootstrapped, `storage = "state-ref"` tracked, `<item-id>` open, the forge failing the body write with `<detail>`
+
+```console
+$ aco ask <item-id> --text "New question?" --json
+2> ERROR: <detail>
+{"ok": false, "reason": "unavailable", "message": "<detail>"}
 exit 2
 ```

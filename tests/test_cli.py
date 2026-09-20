@@ -4278,6 +4278,39 @@ def test_ask_appends_a_proposed_line_and_rulings_shows_it_as_open(
     )
 
 
+FAILING_BODY_WRITES = [
+    pytest.param(["ask", str(RULE_ITEM), "--text", "New question?"], id="ask"),
+    pytest.param(["rule", str(RULE_ITEM), "--line", "1", "--yes"], id="rule"),
+]
+
+
+@pytest.mark.parametrize("arguments", FAILING_BODY_WRITES)
+def test_a_failing_body_write_names_the_command_own_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    arguments: list[str],
+) -> None:
+    """ASK-12 and RULE-11 (issue #432): the write both commands end with can
+    fail like any other forge call, and used to escape the handler with the
+    bare sentence alone, leaving a `--json` caller nothing on stdout."""
+    toml_text = f'{MINIMAL_BLOCK_TOML}[[expectation]]\ntext = "Ship it?"\ndefault = "later"\n'
+    client = _client_with_item(monkeypatch, tmp_path, RULE_ITEM, agent_claim_body(toml_text))
+    client.fail_update_item_body = True
+    refusal = "update item body failed (simulated)"
+
+    status = issue_claim.main(["--repo", "example/agent-claim", *arguments, "--json"])
+
+    captured = capsys.readouterr()
+    assert status == 2
+    assert captured.err == f"ERROR: {refusal}\n"
+    assert json.loads(captured.out) == {
+        "ok": False,
+        "reason": "unavailable",
+        "message": refusal,
+    }
+
+
 def test_ask_json_reports_item_index_text_and_default(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
@@ -15196,13 +15229,12 @@ def test_cli_brief_refuses_when_the_lane_tip_read_fails_outright(
     assert capsys.readouterr().err == "ERROR: simulated git failure\n"
 
 
-def test_cli_brief_json_leaves_an_unspecified_forge_failure_as_the_bare_sentence(
+def test_cli_brief_json_names_a_failing_item_read_unavailable(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
-    """Issue #425 review: the shared `precondition_failed` envelope covers
-    only what runs before a command starts. A failure `brief` itself does not
-    name keeps the plain `ERROR:` sentence and exit `2`, never a `reason`
-    outside BRIEF's own vocabulary."""
+    """BRIEF-19 (issue #432): the item read is a forge call like any other,
+    so a failure there is this command's own `unavailable`. It used to escape
+    the handler and leave a `--json` caller with an empty stdout."""
     repository, base, _tip = _scratch_lane_repository(tmp_path)
     client = FakeForge()
     monkeypatch.setattr(github, "GitHubForge", lambda _repository: client)
@@ -15216,7 +15248,11 @@ def test_cli_brief_json_leaves_an_unspecified_forge_failure_as_the_bare_sentence
     captured = capsys.readouterr()
     assert status == 2
     assert captured.err == "ERROR: simulated forge read failure\n"
-    assert captured.out == ""
+    assert json.loads(captured.out) == {
+        "ok": False,
+        "reason": "unavailable",
+        "message": "simulated forge read failure",
+    }
 
 
 def test_cli_brief_json_prints_one_object_with_body_claim_tip_and_touched(

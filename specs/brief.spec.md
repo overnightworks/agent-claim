@@ -28,6 +28,7 @@ point prints `ERROR: <sentence>` on stderr, exit `2`.
 | `<item>` names no item at all | BRIEF-08 | BRIEF-08 |
 | a non-GitHub canonical remote | BRIEF-07 | BRIEF-07 |
 | `storage = "state-ref"` | BRIEF-09 | BRIEF-09 |
+| the item read itself fails | BRIEF-19 | BRIEF-19 |
 
 ## The four sections, always in this order
 
@@ -61,14 +62,15 @@ point prints `ERROR: <sentence>` on stderr, exit `2`.
 
 - [ ] [BRIEF-07] `aco brief <item>` on a canonical remote whose host has no forge adapter refuses `no forge adapter for host <host>`, exit `2`, before any forge resolution (see E-BRIEF-05).
 - [ ] [BRIEF-09] Under `storage = "state-ref"`, `aco brief <item>` resolves the state-ref forge like `item show`/`edit`/`close`; `--repo` there refuses the same as those (PIN-04, PIN-05).
-- [ ] [BRIEF-17] `--json` on a dispatched refusal (BRIEF-07, BRIEF-09, BRIEF-15) prints `specs/output.spec.md`'s envelope with the sentence as `message` and `reason` from the table below, exit `2` (see E-BRIEF-11).
+- [ ] [BRIEF-17] `--json` on a dispatched refusal (BRIEF-07, BRIEF-09, BRIEF-15, BRIEF-19) prints `specs/output.spec.md`'s envelope, the sentence as `message`, `reason` from the table below (see E-BRIEF-11).
+- [ ] [BRIEF-19] A forge failure reading the item refuses `ERROR: <sentence>`, exit `2`, `--json` `reason: "unavailable"` (see E-BRIEF-13).
 
 `reason`, by which refusal fired:
 
 | refusal | `reason` |
 |---|---|
 | PIN-04 (`--repo` under `storage = state-ref`) | `invalid_usage` |
-| BRIEF-07 (no forge adapter for host), PIN-05 (no resolvable default branch), BRIEF-15 (no tracked `.agent-claim/brief.toml`) | `unavailable` |
+| BRIEF-07 (no forge adapter for host), PIN-05 (no resolvable default branch), BRIEF-15 (no tracked `.agent-claim/brief.toml`), BRIEF-19 (the item read fails) | `unavailable` |
 
 ## Never
 
@@ -288,6 +290,17 @@ git ever answers whether `ada/issue-42` resolves
 $ aco brief 42
 2> ERROR: <detail>
 exit 2
+$ aco brief 42 --json
+2> ERROR: <detail>
+{"ok": false, "reason": "unavailable", "message": "<detail>"}
+exit 2
+```
+
+### E-BRIEF-13 -- the item read itself fails
+
+Setup: bare-remote, fake `gh`, the forge failing the item read with `<detail>`
+
+```console
 $ aco brief 42 --json
 2> ERROR: <detail>
 {"ok": false, "reason": "unavailable", "message": "<detail>"}
