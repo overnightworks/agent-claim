@@ -1,0 +1,7 @@
+claim_id = "251517d175db471880dfcfd6bbfdca52"
+agent = "Claude head (coordinator)"
+role = "builder"
+base = "5c9f6f578c295c5b812ba30c2f476da8199e3fcc"
+branch = "claude/issue-426-store-fetch-anchor"
+scope = ["specs/ref-store-cas.spec.md", "src/agent_coordination/store.py", "tests/test_store.py"]
+opened_commit = "8b9b74d9b75b2f35a00662e5b81d030e2a2464b3"
