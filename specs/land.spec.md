@@ -78,7 +78,7 @@ preflight, refused or not, exactly as `reset`'s own read does.
 - [ ] [LANDCMD-15] A failure deleting the branch, fast-forwarding, or in the delegated `release --merged` prints `MERGED pull request #<n> as <sha>; follow-up incomplete: <step>; re-run aco land <n>`, exit `2`.
 - [ ] [LANDCMD-16] Deleting the merged branch is idempotent: a forge already reporting it absent is success, not a refusal.
 - [ ] [LANDCMD-17] In this package's own repository, a successful landing's last line is `reinstall: uv tool install --force --from . agent-coordination`; any other repository prints nothing further.
-- [ ] [LANDCMD-18] A rerun skips every preflight check but LANDCMD-19 and the merge, verifies the trailer as `release --merged` does (LAND-62, LAND-64), and resumes -- never a second merge.
+- [ ] [LANDCMD-18] A rerun skips every preflight check but LANDCMD-11 and LANDCMD-19, verifies the trailer as `release --merged` does (LAND-62, LAND-64), and resumes -- never a second merge.
 
 ## Never
 
