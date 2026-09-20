@@ -37,7 +37,8 @@ runner's own values; `<agent>` and `<role>` are the claimant's.
 | foreign claim, coordinator override | CLAIM-51 | — | CLAIM-38, CLAIM-39, CLAIM-40 |
 | hand-corrupted claim file | CLAIM-06..CLAIM-08, CLAIM-59..CLAIM-63 | CLAIM-06..CLAIM-08, CLAIM-59..CLAIM-63 | — |
 | hand-corrupted claim key | CLAIM-09, CLAIM-56, CLAIM-64..CLAIM-66 | CLAIM-09, CLAIM-56, CLAIM-64..CLAIM-66 | — |
-| item naming its own scope | CLAIM-53, CLAIM-54, CLAIM-55, CLAIM-67 | — | — |
+| item naming its own scope | CLAIM-53, CLAIM-54, CLAIM-55, CLAIM-67, CLAIM-68 | — | — |
+| one claim's own `--json` view | CLAIM-69 | CLAIM-69 | CLAIM-69 |
 
 ## The record and its key
 
@@ -138,6 +139,11 @@ runner's own values; `<agent>` and `<role>` are the claimant's.
 - [ ] [CLAIM-54] A `--scope` set differing from the item's own `scope` refuses `claim scope differs from the item's scope; correct the item first`, exit `2`, so no reader claims a false disjointness.
 - [ ] [CLAIM-55] An item naming no `scope` refuses issue-mode `aco claim 42` without `--scope` with `item names no scope; pass --scope`, exit `2`.
 - [ ] [CLAIM-67] An explicit `--scope` matching the item's own `scope` as a set, reordered, still claims: CLAIM-54 refuses only a genuine mismatch, never a reordering.
+- [ ] [CLAIM-68] Deriving scope from a malformed `agent-claim` block names that block's own defect (the family `aco body --check` reports) before it ever refuses CLAIM-55's less specific "item names no scope".
+
+## One claim's own `--json` field order
+
+- [ ] [CLAIM-69] Every command's `--json` claim view sits in `specs/output.spec.md`'s envelope (OUT-nn), spreading `issue`/`lane`, `claim_id`, `agent`, `role`, `base`, `branch`, `scope` before any view-only field.
 
 ## Never
 

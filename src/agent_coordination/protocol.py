@@ -60,6 +60,16 @@ class ClaimUnavailableError(ClaimError):
     pass
 
 
+class ClaimConflictError(ClaimUnavailableError):
+    """`apply()`'s own refusal to write a claim intent because another live
+    claim, a consumed claim id, or a resource hold already occupies the
+    value (issue #406, CLM-25) -- distinct from every other
+    `ClaimUnavailableError` (a transport, git, lineage, or
+    retry-exhaustion failure surfacing through `store.commit_transition`)
+    so `cli._cmd_claim` can choose `claim_conflict` over the broader
+    `unavailable` by type rather than by parsing prose."""
+
+
 class InvalidClaimMarkerError(ClaimError):
     pass
 
@@ -1025,17 +1035,17 @@ def _auto_resource_value(occupied: set[int]) -> int:
     return value
 
 
-def _explicit_resource_conflict(state: ClaimState, name: str, value: int) -> ClaimUnavailableError:
+def _explicit_resource_conflict(state: ClaimState, name: str, value: int) -> ClaimConflictError:
     holder = next(
         (claim for claim in state.claims.values() if claim.resource == ResourceHold(name, value)),
         None,
     )
     if holder is not None:
-        return ClaimUnavailableError(
+        return ClaimConflictError(
             f"{name} {value} is held by {holder.agent} ({holder.role}) on "
             f"{_identity_summary(holder.identity, holder.branch)}"
         )
-    return ClaimUnavailableError(f"{name} {value} was already consumed and cannot be reused")
+    return ClaimConflictError(f"{name} {value} was already consumed and cannot be reused")
 
 
 def _resolved_resource(
@@ -1095,14 +1105,14 @@ def _apply_claim_intent(state: ClaimState, intent: ClaimIntent) -> ClaimState:
     if intent.claim_id in state.consumed_ids:
         if live is not None and _claim_matches_intent(live[1], intent):
             return state
-        raise ClaimUnavailableError(
+        raise ClaimConflictError(
             f"claim id {intent.claim_id!r} is already on this ledger, active or "
             "released; release it, then claim again with a fresh claim id"
         )
     blocked_by = blocking_claims(tuple(state.claims.values()), intent)
     if blocked_by:
         owner = blocked_by[0]
-        raise ClaimUnavailableError(
+        raise ClaimConflictError(
             f"{_identity_summary(intent.identity, intent.branch)} is claimed by "
             f"{owner.agent} ({owner.role}) on {_identity_summary(owner.identity, owner.branch)} "
             f"branch {owner.branch}"
