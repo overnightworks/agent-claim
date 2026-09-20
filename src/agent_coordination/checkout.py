@@ -556,6 +556,22 @@ def is_default_branch(branch: str, *, directory: Path | None = None) -> bool:
     return branch in DEFAULT_BRANCH_FALLBACK
 
 
+def refuse_unclean_default_branch_checkout(*, directory: Path | None = None) -> str:
+    """`land`'s own precondition (issue #405): the checkout at `directory`
+    (or the calling process's own cwd) must already sit on the repository's
+    default branch with nothing uncommitted, since `land` fast-forwards that
+    exact branch in place once its merge succeeds -- returns the default
+    branch name once proven; raises the ruled refusal otherwise."""
+    branch = default_branch_name(directory=directory)
+    if branch is None:
+        raise ClaimError(DEFAULT_BRANCH_UNKNOWN_REASON)
+    current = _git_output(["branch", "--show-current"], directory=directory)
+    dirty = _git_output(["status", "--porcelain"], directory=directory)
+    if current != branch or dirty:
+        raise ClaimError(f"land must run from a clean checkout of the default branch {branch!r}")
+    return branch
+
+
 def _trunk_ref(remote: str, *, directory: Path | None = None) -> str:
     """`remote`'s trunk ref, read from `directory` via `-C` when given or
     the calling process's own cwd otherwise: its recorded `HEAD` symbolic
@@ -710,6 +726,22 @@ def trunk_landings(remote: str, depth: int, *, fetch: bool = False) -> tuple[Tru
         )
         for index in range(0, len(fields), 4)
     )
+
+
+def fast_forward_default_branch(remote: str, branch: str, *, directory: Path | None = None) -> None:
+    """`land`'s own step once its merge succeeds (issue #405): fetch
+    `remote` then fast-forward the checkout's local `branch` to the fresh
+    trunk tip it just fetched. `--ff-only` refuses loud rather than
+    rewriting history if the local branch somehow diverged -- never true in
+    the ordinary case, since `refuse_unclean_default_branch_checkout`
+    already proved this exact checkout clean and on this exact branch
+    before the merge ever ran."""
+    fetch = _git_run(["fetch", remote], directory=directory)
+    if fetch.exit_status != 0:
+        raise ClaimError(process.git_failure_detail(fetch))
+    result = _git_run(["merge", "--ff-only", f"{remote}/{branch}"], directory=directory)
+    if result.exit_status != 0:
+        raise ClaimError(process.git_failure_detail(result))
 
 
 def resolved_agent(explicit: str | None) -> str:

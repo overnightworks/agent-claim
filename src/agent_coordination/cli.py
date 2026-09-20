@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import sys
+import tomllib
 import uuid
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
@@ -552,6 +553,30 @@ def _add_release_parser(commands: argparse._SubParsersAction) -> None:
     release.add_argument("--json", action="store_true", help=JSON_HELP)
 
 
+def _add_land_parser(commands: argparse._SubParsersAction) -> None:
+    land = commands.add_parser(
+        "land",
+        help="merge a green pull request with its pinned head sha and run its release path",
+    )
+    land.add_argument("pull_request", type=int, help="the pull request number to land")
+    land.add_argument("--agent", help=AGENT_HELP)
+    land.add_argument("--role", help=ROLE_ON_LIVE_CLAIM_HELP)
+    land.add_argument(
+        "--coordinator-override",
+        action="store_true",
+        help="land another agent's claim as the coordinator; requires --role coordinator",
+    )
+    land.add_argument(
+        "--keep-worktree",
+        action="store_true",
+        help=(
+            "keep the lane's local worktree and branch after landing; by default a clean "
+            "worktree whose branch is already merged is removed"
+        ),
+    )
+    land.add_argument("--json", action="store_true", help=JSON_HELP)
+
+
 def _add_rescope_parser(commands: argparse._SubParsersAction) -> None:
     rescope = commands.add_parser(
         "rescope", help="add or drop paths on a live claim without releasing"
@@ -886,6 +911,7 @@ def _subparser_build_order() -> tuple[Callable[[argparse._SubParsersAction], Non
         table["start"].add_parser,
         table["claim"].add_parser,
         table["release"].add_parser,
+        table["land"].add_parser,
         table["rescope"].add_parser,
         table["cut"].add_parser,
         table["ask"].add_parser,
@@ -2739,9 +2765,30 @@ class _MergedLandingClose:
     pull_request: int
 
 
+def _trunk_no_item_landing_defect(
+    landings: tuple[checkout.TrunkLanding, ...], sha: str
+) -> str | None:
+    """Why `sha` does not authorize an issue-less lane's own `--merged`
+    release (issue #405, #397 gate follow-up): mirrors `_trunk_landing_defect`'s
+    own walk of the first-parent trunk, for the one classification shape
+    that names no work item at all -- read from the merge commit's own
+    trailer block, never the pull request's mutable `body` (issue #397,
+    Befund 41)."""
+    landing = next((entry for entry in landings if entry.sha == sha), None)
+    if landing is None:
+        return "is not on the first-parent trunk"
+    classification = landing.classification
+    if classification is None:
+        return "carries no `Work-Item:` or `No-Item:` trailer"
+    if isinstance(classification, board.ClassificationDefect):
+        return classification.message
+    if not isinstance(classification, board.NoItemClassification):
+        return "carries a `Work-Item:` trailer; an issue-less lane needs a `No-Item:` trailer"
+    return None
+
+
 def _verify_merged_release(
     client: github.GitHubForge,
-    repository: str,
     identity: protocol.ClaimIdentity,
     merged: protocol.MergedRelease,
     canonical_remote: str,
@@ -2756,14 +2803,13 @@ def _verify_merged_release(
     `LandingIntent` path is `storage = state-ref`'s equivalent, so this only
     ever runs under `storage = github` (see `_cmd_release`).
 
-    An issue release's authority is the merge commit's own trailer block
-    (issue #397, Befund 41), verified through the walked first-parent trunk
-    exactly as `storage = state-ref` already does -- never the pull
-    request's own `body`, which stays mutable long after the merge and once
-    was edited to remove the very `Work-Item:` line a release depended on.
-    An issue-less lane still reads `body` to identify that it declares no
-    item at all (`No-Item:`); a lane closes nothing a trailer could
-    authorize instead.
+    Every release's authority -- an issue's own closing reference and an
+    issue-less lane's own declaration alike -- is the merge commit's own
+    trailer block (issue #397, Befund 41; issue #405 gate follow-up),
+    verified through the walked first-parent trunk exactly as `storage =
+    state-ref` already does -- never the pull request's own `body`, which
+    stays mutable long after the merge and once was edited to remove the
+    very `Work-Item:` line a release depended on.
     """
     detail = client.landing(merged.pull_request)
     if not detail.merged:
@@ -2774,20 +2820,15 @@ def _verify_merged_release(
             f"pull request #{detail.number} merged into {detail.target_branch!r}, "
             f"not the default branch {default_branch!r}"
         )
-    if isinstance(identity, protocol.LaneIdentity):
-        classification = board.parse_pull_request_classification(detail.body, repository)
-        if isinstance(classification, board.ClassificationDefect):
-            raise protocol.ClaimUnavailableError(
-                f"pull request #{detail.number} {classification.message}"
-            )
-        if isinstance(classification, board.WorkItemClassification):
-            raise protocol.ClaimUnavailableError(
-                f"pull request #{detail.number} names {classification.item}; "
-                "an issue-less lane needs a No-Item line"
-            )
-        return None
     assert detail.merge_commit is not None  # `detail.merged` is true; github.py guarantees this.
     landings = checkout.trunk_landings(canonical_remote, TRUNK_LANDING_DEPTH, fetch=True)
+    if isinstance(identity, protocol.LaneIdentity):
+        defect = _trunk_no_item_landing_defect(landings, detail.merge_commit)
+        if defect is not None:
+            raise protocol.ClaimUnavailableError(
+                f"merge commit {detail.merge_commit} of pull request #{detail.number} {defect}"
+            )
+        return None
     _verify_merge_commit_authority(landings, detail.number, identity.issue, detail.merge_commit)
     reference = _fetch_issue_reference(client, identity.issue)
     if reference.state is forge.ItemState.OPEN:
@@ -4813,9 +4854,7 @@ def _cmd_release(parsed: argparse.Namespace, session: _WriteSession) -> None:
         # cast is honest, not a suppression: `_LazyForge.__call__` builds
         # exactly a `github.GitHubForge` for every other storage pin.
         client = cast(github.GitHubForge, session.forge())
-        pending_close = _verify_merged_release(
-            client, client.repository.path, identity, outcome, canonical_remote
-        )
+        pending_close = _verify_merged_release(client, identity, outcome, canonical_remote)
         if pending_close is not None:
             # Runs before the release transition below (issue #359 R1): a
             # close failure here -- a transient forge error, most often --
@@ -4981,6 +5020,263 @@ def _verify_merge_commit_authority(
         raise protocol.ClaimUnavailableError(
             f"merge commit {sha} of pull request #{pull_request} {defect}"
         )
+
+
+LAND_GITHUB_ONLY_REFUSAL = (
+    "aco land is a github command; storage = state-ref has no pull requests to land"
+)
+LAND_SELF_PACKAGE_NAME = "agent-coordination"
+LAND_REINSTALL_LINE = "reinstall: uv tool install --force --from . agent-coordination"
+
+
+def _land_not_open_refusal(number: int) -> str:
+    return f"pull request #{number} is not open; it cannot be landed"
+
+
+def _land_not_mergeable_refusal(number: int, state: str) -> str:
+    return f"pull request #{number} is not mergeable ({state})"
+
+
+def _land_pending_check_names(checks: tuple[forge.CheckRun, ...]) -> tuple[str, ...]:
+    return tuple(check.name for check in checks if check.conclusion is None)
+
+
+def _land_failed_check(checks: tuple[forge.CheckRun, ...]) -> forge.CheckRun | None:
+    return next(
+        (
+            check
+            for check in checks
+            if check.conclusion is not None and check.conclusion != forge.CHECK_CONCLUSION_SUCCESS
+        ),
+        None,
+    )
+
+
+def _land_checks_refusal(number: int, checks: tuple[forge.CheckRun, ...]) -> str | None:
+    """Why `aco land`'s preflight refuses on `checks` alone, or `None` when
+    every one of them proves green (issue #405): no checks at all, a check
+    still running, then a check that finished without success -- in that
+    order, since a still-running check is not yet a failure."""
+    if not checks:
+        return f"pull request #{number} exposes no CI checks; cannot verify green CI"
+    pending = _land_pending_check_names(checks)
+    if pending:
+        return (
+            f"pull request #{number} has checks still running: {', '.join(pending)}; "
+            "wait for every check to succeed"
+        )
+    failed = _land_failed_check(checks)
+    if failed is not None:
+        conclusion = failed.conclusion
+        assert conclusion is not None  # `_land_failed_check` only returns a completed check.
+        return (
+            f"pull request #{number} has non-successful checks: "
+            f"{failed.name} ({conclusion}); land only after every check succeeds"
+        )
+    return None
+
+
+def _refuse_land_readiness(readiness: forge.LandingReadiness) -> None:
+    if not readiness.open:
+        raise protocol.ClaimUnavailableError(_land_not_open_refusal(readiness.number))
+    if readiness.mergeable_state != forge.MERGEABLE_STATE_CLEAN:
+        raise protocol.ClaimUnavailableError(
+            _land_not_mergeable_refusal(readiness.number, readiness.mergeable_state)
+        )
+    checks_refusal = _land_checks_refusal(readiness.number, readiness.checks)
+    if checks_refusal is not None:
+        raise protocol.ClaimUnavailableError(checks_refusal)
+
+
+def _land_preflight(
+    client: github.GitHubForge,
+    claims: tuple[protocol.ActiveClaim, ...],
+    repository: str,
+    storage: board.Storage,
+    number: int,
+) -> tuple[forge.Landing, board.Classification, forge.LandingReadiness]:
+    """Every read-only precondition `aco land` proves before its first write
+    (issue #405): a green, open, mergeable pull request classifying exactly
+    one open item, or declaring itself issue-less -- reusing `check <pr>`'s
+    own classification/claim/parent/closing rules (`_checked_classification`)
+    rather than a second copy of them."""
+    readiness = client.landing_readiness(number)
+    _refuse_land_readiness(readiness)
+    detail = client.landing(number)
+    context = _LandingCheckContext(client, repository, storage)
+    classification = _checked_classification(context, claims, detail)
+    if isinstance(classification, board.ClassificationDefect):
+        raise protocol.ClaimUnavailableError(f"pull request #{number} {classification.message}")
+    if isinstance(classification, board.WorkItemClassification):
+        reference = _fetch_issue_reference(client, classification.item.number)
+        if reference.state is not forge.ItemState.OPEN:
+            raise protocol.ClaimUnavailableError(
+                f"work item #{classification.item.number} is not open; it cannot be landed"
+            )
+    return detail, classification, readiness
+
+
+def _land_trunk_trailer(classification: board.Classification) -> str:
+    """`classification` rendered as a trunk commit's own trailer grammar
+    (`board.trunk_commit_classification`'s counterpart), never the pull
+    request body's qualified `owner/repo#n` form `WorkItemClassification.__str__`
+    prints: a git trailer is always local to the repository whose history
+    it lands on (issue #405; see `board.parse_item_reference`'s own
+    docstring)."""
+    if isinstance(classification, board.WorkItemClassification):
+        return f"Work-Item: #{classification.item.number}"
+    return f"No-Item: {classification.kind.value}"
+
+
+def _land_merge_body(body: str, classification: board.Classification) -> str:
+    """The merge commit message `aco land` composes itself (issue #405,
+    Befund 42 on #310): the pull request's own body with its classification
+    line removed, then that classification, in the trunk's own trailer
+    grammar, as the message's own final paragraph -- so the trailer a later
+    trunk walk reads through git's own trailer parsing is never wherever
+    the pull request body happened to put it, always the message's own last
+    block."""
+    without_classification = board.CLASSIFICATION_LINE_PATTERN.sub("", body).strip()
+    trailer = _land_trunk_trailer(classification)
+    if not without_classification:
+        return f"{trailer}\n"
+    return f"{without_classification}\n\n{trailer}\n"
+
+
+def _land_merge(
+    client: github.GitHubForge,
+    detail: forge.Landing,
+    readiness: forge.LandingReadiness,
+    classification: board.Classification,
+) -> str:
+    title = f"Merge pull request #{detail.number}"
+    body = _land_merge_body(detail.body, classification)
+    try:
+        return client.merge_landing(
+            detail.number, head_sha=readiness.head_sha, title=title, body=body
+        )
+    except forge.ForgeMergeConflictError as error:
+        raise protocol.ClaimUnavailableError(
+            f"pull request #{detail.number} changed while it was checked; re-run land"
+        ) from error
+
+
+def _land_step(number: int, sha: str, step: str, action: Callable[[], None]) -> None:
+    """Every step `aco land` runs once its merge already landed (issue
+    #405): a failure here never means "not merged" -- the merge already
+    happened -- so it reports the one ruled recovery line instead of the
+    generic refusal an earlier precondition would print. A rerun starts
+    `_cmd_land` over from the top, finds the pull request already merged,
+    and resumes here without a second merge."""
+    try:
+        action()
+    except protocol.ClaimError as error:
+        raise protocol.ClaimUnavailableError(
+            f"MERGED pull request #{number} as {sha}; follow-up incomplete: {step}; "
+            f"re-run aco land {number}"
+        ) from error
+
+
+def _land_release_routing(detail: forge.Landing, repository: str) -> tuple[int | None, str]:
+    """The `issue`/`branch` pair `aco land`'s own delegated `release
+    --merged` call is dispatched to (issue #405): read from the pull
+    request's own body for routing only -- never this landing's actual
+    closing authority, which `_verify_merged_release`'s merge-commit-trailer
+    read (issue #397, Befund 41) still owns regardless of what this
+    classification says."""
+    classification = board.parse_pull_request_classification(detail.body, repository)
+    if isinstance(classification, board.ClassificationDefect):
+        raise protocol.ClaimUnavailableError(
+            f"pull request #{detail.number} {classification.message}"
+        )
+    if isinstance(classification, board.WorkItemClassification):
+        return classification.item.number, detail.source_branch
+    return None, detail.source_branch
+
+
+def _land_release(parsed: argparse.Namespace, issue: int | None, branch: str) -> None:
+    """`aco land`'s own delegated call into the existing `release --merged`
+    path (issue #405): never a second copy of its close/release/report/
+    cleanup -- `--branch` selects the lane by name without requiring this
+    checkout to be on it (`_release_branch_for`'s own documented case: "the
+    release may run from the coordinator's primary checkout"), exactly
+    where `land` runs from."""
+    release_parsed = argparse.Namespace(
+        issue=issue,
+        agent=parsed.agent,
+        role=parsed.role,
+        branch=branch,
+        merged=str(parsed.pull_request),
+        abandoned=None,
+        claim_id=None,
+        coordinator_override=parsed.coordinator_override,
+        keep_worktree=parsed.keep_worktree,
+        json=parsed.json,
+        repo=parsed.repo,
+    )
+    release_session = _WriteSession(forge=_LazyForge(parsed.repo), release_branch=branch)
+    _cmd_release(release_parsed, release_session)
+
+
+def _land_is_own_repository(toplevel: Path) -> bool:
+    """Whether `toplevel` is this very package's own repository (issue
+    #405): `land`'s own reinstall reminder applies only there -- landing in
+    any other repository this tool coordinates leaves nothing to
+    reinstall."""
+    try:
+        with (toplevel / "pyproject.toml").open("rb") as stream:
+            data = tomllib.load(stream)
+    except (OSError, tomllib.TOMLDecodeError):
+        return False
+    project = data.get("project")
+    return isinstance(project, dict) and project.get("name") == LAND_SELF_PACKAGE_NAME
+
+
+def _cmd_land(parsed: argparse.Namespace, session: _WriteSession) -> None:
+    """`aco land <pr>` (issue #405): preflight every ruled precondition
+    read-only, merge with a pinned head sha and a commit message this tool
+    composes itself, delete the merged branch, fast-forward this checkout's
+    own default branch, then run the existing `release --merged` path
+    unchanged. A pull request `landing` already finds merged -- a resumed
+    run after an earlier step failed -- skips preflight and the merge
+    itself entirely: `merge_landing` never runs twice for the same pull
+    request."""
+    toplevel = _resolve_toplevel()
+    config = _board_config(toplevel)
+    if config.storage is not board.Storage.GITHUB:
+        raise protocol.ClaimUnavailableError(LAND_GITHUB_ONLY_REFUSAL)
+    client = cast(github.GitHubForge, session.forge())
+    number = parsed.pull_request
+    repository = client.repository.path
+    detail = client.landing(number)
+    if detail.merged:
+        assert detail.merge_commit is not None  # `merged` is true; github.py guarantees this.
+        merge_sha = detail.merge_commit
+        default_branch = checkout.refuse_unclean_default_branch_checkout()
+    else:
+        _worktree, _canonical_remote, observed = _store_observation()
+        _require_state_ref(observed)
+        claims = tuple(observed.claims.values())
+        detail, classification, readiness = _land_preflight(
+            client, claims, repository, config.storage, number
+        )
+        default_branch = checkout.refuse_unclean_default_branch_checkout()
+        merge_sha = _land_merge(client, detail, readiness, classification)
+    issue, branch = _land_release_routing(detail, repository)
+    _land_step(
+        number, merge_sha, "delete-branch", lambda: client.delete_branch(detail.source_branch)
+    )
+    _land_step(
+        number,
+        merge_sha,
+        "fast-forward",
+        lambda: checkout.fast_forward_default_branch(
+            config.canonical_remote, default_branch, directory=toplevel
+        ),
+    )
+    _land_step(number, merge_sha, "release", lambda: _land_release(parsed, issue, branch))
+    if _land_is_own_repository(toplevel):
+        print(LAND_REINSTALL_LINE)
 
 
 def _landed_commit(landings: tuple[checkout.TrunkLanding, ...], number: int, requested: str) -> str:
@@ -6116,6 +6412,7 @@ _COMMAND_TABLE: dict[str, _CommandEntry] = {
     "start": _CommandEntry(_add_start_parser, _CommandSession.WRITE, _cmd_start),
     "claim": _CommandEntry(_add_claim_parser, _CommandSession.WRITE, _cmd_claim),
     "release": _CommandEntry(_add_release_parser, _CommandSession.WRITE, _cmd_release),
+    "land": _CommandEntry(_add_land_parser, _CommandSession.WRITE, _cmd_land),
     "rescope": _CommandEntry(_add_rescope_parser, _CommandSession.WRITE, _cmd_rescope),
     "cut": _CommandEntry(_add_cut_parser, _CommandSession.WRITE, _cmd_cut),
     "ask": _CommandEntry(_add_ask_parser, _CommandSession.WRITE, _cmd_ask),
@@ -6139,7 +6436,7 @@ def _dispatch_item(parsed: argparse.Namespace) -> int:
 
 
 def _dispatch(parsed: argparse.Namespace) -> int:
-    if parsed.command in {"claim", "release", "rescope"}:
+    if parsed.command in {"claim", "release", "rescope", "land"}:
         parsed.agent = checkout.resolved_agent(parsed.agent)
     if parsed.command == "item":
         return _dispatch_item(parsed)
