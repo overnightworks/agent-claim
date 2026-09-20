@@ -45,6 +45,13 @@ class ForgeMalformedResponseError(ForgeError):
     """The forge's response could not be parsed into the expected shape."""
 
 
+class ForgeMergeConflictError(ForgeError):
+    """`merge_landing` refused a pinned merge because the pull request
+    changed since its head sha was read (HTTP 405/409): `aco land`'s own
+    preflight already proved every other precondition, so a caller re-reads
+    and re-runs rather than merging a commit it never actually validated."""
+
+
 class ForgePartialChildCreationError(ForgeError):
     """`cut` created `child` under `parent`, but `step` failed to finish
     recording it there.
@@ -133,6 +140,42 @@ class Landing:
     target_branch: str
     merged: bool
     merge_commit: str | None
+
+
+# GitHub's own open vocabularies for a pull request's `mergeable_state` and a
+# completed check run's `conclusion` (`aco land`'s preflight, issue #405):
+# each is owned by GitHub, can grow a new value without this tool's notice,
+# and every value but the one this tool branches on is only ever echoed
+# verbatim into a refusal -- never enumerated as a closed `StrEnum`, which
+# would refuse a legitimate answer this tool has simply never seen before.
+MERGEABLE_STATE_CLEAN = "clean"
+CHECK_CONCLUSION_SUCCESS = "success"
+
+
+@dataclass(frozen=True)
+class CheckRun:
+    """One CI check GitHub reports against a pull request's pinned head
+    commit (`landing_readiness`, issue #405): `conclusion` is `None` while
+    the check has not reached `status: "completed"`, GitHub's own
+    conclusion string (`CHECK_CONCLUSION_SUCCESS` or another) once it has."""
+
+    name: str
+    conclusion: str | None
+
+
+@dataclass(frozen=True)
+class LandingReadiness:
+    """Every fact `aco land`'s preflight judges before its first write
+    (issue #405), read once so a race between this read and the merge
+    itself is caught by the pinned `head_sha` rather than assumed away.
+    `mergeable_state` is GitHub's own string (compare against
+    `MERGEABLE_STATE_CLEAN`)."""
+
+    number: int
+    open: bool
+    head_sha: str
+    mergeable_state: str
+    checks: tuple[CheckRun, ...]
 
 
 class Capability(StrEnum):

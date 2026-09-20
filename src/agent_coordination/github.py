@@ -58,10 +58,37 @@ _ITEM_KIND_TYPE_NAMES: dict[board.ItemKind, str] = {
 # snapshot a concurrent open/close cannot have shifted an issue across.
 ISSUES_PER_PAGE = 100
 MALFORMED_PULL_REQUEST = "GitHub returned a malformed pull request"
+# The combined-status endpoint's own aggregate `state` can be `pending`,
+# `failure`, or `error` with a `statuses` page that, this instant, names no
+# context at all -- a status posted after this read, say (issue #405
+# review/gate finding). A refusal still needs one name to print, so an
+# unnamed non-passing verdict prints this stand-in rather than reading as
+# "no checks" and passing silently.
+EXTERNAL_STATUS_FALLBACK_NAME = "external status checks"
 # `HTTP 5xx` in #4.2's signal table: gh's combined output names the status
 # code but never its class, so any 5xx is matched by digit rather than by an
 # enumerated list of codes that would need to grow with the API.
 _HTTP_SERVER_ERROR_PATTERN = re.compile(r"HTTP 5\d\d")
+# `merge_landing`'s own conflict signal (issue #405): GitHub answers a
+# pinned merge whose `sha` no longer names the pull request's real head with
+# HTTP 405 (closed/not mergeable) or 409 (head moved) -- neither is a 4xx
+# `_nonzero_exit_failure` above already classifies, so `merge_landing`
+# matches this pattern itself and raises `ForgeMergeConflictError`.
+_MERGE_CONFLICT_PATTERN = re.compile(r"HTTP 40[59]")
+
+
+def _branch_already_absent(error_text: str) -> bool:
+    """`delete_branch`'s own idempotent-absence signal (issue #405 review
+    finding; S8786): `gh api`'s own error text puts the message before the
+    code -- "Reference does not exist (HTTP 422)" -- so this checks both
+    substrings independent of order, rather than the two-lookahead regex
+    that made an order-agnostic match super-linear to backtrack; any other
+    422 (a protected branch, a malformed ref name) is a real failure this
+    adapter must still surface."""
+    lowered = error_text.casefold()
+    return "reference does not exist" in lowered and "http 422" in lowered
+
+
 GITHUB_HOST = "github.com"
 # Accepts both pinned remote forms, the SCP one included.
 GITHUB_REMOTE_PATTERN = re.compile(r"github\.com[:/]([^/\s]+)/([^/\s]+?)(?:\.git)?$")
@@ -553,6 +580,230 @@ class GitHubForge:
         if landing.number != number:
             raise ClaimError(f"GitHub answered for pull request #{landing.number}, not #{number}")
         return landing
+
+    def _check_run(self, value: object) -> forge.CheckRun:
+        if not isinstance(value, dict):
+            raise forge.ForgeMalformedResponseError("GitHub returned a malformed check run")
+        name = value.get("name")
+        conclusion = value.get("conclusion")
+        if (
+            not isinstance(name, str)
+            or not name
+            or (conclusion is not None and (not isinstance(conclusion, str) or not conclusion))
+        ):
+            raise forge.ForgeMalformedResponseError("GitHub returned a malformed check run")
+        return forge.CheckRun(name, conclusion)
+
+    def _check_run_page(self, sha: str, page: int) -> tuple[object, ...]:
+        raw = self._run(
+            [
+                "api",
+                f"repos/{self.repository}/commits/{sha}/check-runs"
+                f"?per_page={ISSUES_PER_PAGE}&page={page}",
+                "--jq",
+                '.check_runs[] | {name,conclusion:(if .status == "completed" '
+                "then .conclusion else null end)}",
+            ]
+        )
+        return self._json_lines(raw, "check run")
+
+    def _check_runs(self, sha: str) -> tuple[forge.CheckRun, ...]:
+        """Every check run against `sha`, not merely its first page (issue
+        #405 review finding): GitHub's own `check-runs` listing paginates
+        like every other collection this adapter reads, so a run reported
+        only on a later page must count toward readiness exactly as one on
+        the first page does."""
+        values = self._fetch_pages(
+            lambda page: self._check_run_page(sha, page), per_page=ISSUES_PER_PAGE
+        )
+        return tuple(self._check_run(value) for value in values)
+
+    def _combined_status_summary(self, sha: str) -> tuple[str, int]:
+        """`sha`'s combined-status verdict and true total (issue #405
+        review/gate finding): GitHub computes `state` -- `success`,
+        `pending`, `failure`, or `error` -- as the aggregate over every
+        status context on `sha`, and `total_count` as their true count,
+        both independent of pagination; one cheap call answers both,
+        without ever paging `statuses` for a verdict a per-context
+        reconstruction could get wrong."""
+        raw = self._run(
+            [
+                "api",
+                f"repos/{self.repository}/commits/{sha}/status",
+                "--jq",
+                "{state:.state,total:.total_count}",
+            ]
+        )
+        values = self._json_lines(raw, "commit status summary")
+        if len(values) != 1 or not isinstance(values[0], dict):
+            raise forge.ForgeMalformedResponseError(
+                "GitHub returned a malformed commit status summary"
+            )
+        value = values[0]
+        state = value.get("state")
+        total = value.get("total")
+        if (
+            not isinstance(state, str)
+            or not state
+            or isinstance(total, bool)
+            or not isinstance(total, int)
+            or total < 0
+        ):
+            raise forge.ForgeMalformedResponseError(
+                "GitHub returned a malformed commit status summary"
+            )
+        return state, total
+
+    def _combined_status_name_page(self, sha: str, page: int) -> tuple[object, ...]:
+        raw = self._run(
+            [
+                "api",
+                f"repos/{self.repository}/commits/{sha}/status"
+                f"?per_page={ISSUES_PER_PAGE}&page={page}",
+                "--jq",
+                ".statuses[] | {name:.context}",
+            ]
+        )
+        return self._json_lines(raw, "commit status")
+
+    def _combined_status_names(self, sha: str) -> tuple[str, ...]:
+        """Every combined-status context's own name, paginated (issue #405
+        gate finding, round-4 finding 2): named to report each context as a
+        successful check once `_combined_status_summary` reads `success`, or
+        to fill in a refusal sentence once it reads anything else -- only
+        `total_count` zero (no statuses at all) never pays for this
+        pagination at all."""
+        values = self._fetch_pages(
+            lambda page: self._combined_status_name_page(sha, page), per_page=ISSUES_PER_PAGE
+        )
+        names: list[str] = []
+        for value in values:
+            name = value.get("name") if isinstance(value, dict) else None
+            if not isinstance(name, str) or not name:
+                raise forge.ForgeMalformedResponseError("GitHub returned a malformed commit status")
+            names.append(name)
+        return tuple(names)
+
+    def _combined_status_checks(self, sha: str) -> tuple[forge.CheckRun, ...]:
+        """`sha`'s combined commit status, read as one verdict (issue #405
+        review/gate finding, round-4 finding 2): the external checks
+        GitHub's own check-runs listing never carries -- a SonarCloud
+        quality gate, say -- posted through the separate legacy status API.
+        The endpoint's own aggregate `state` decides pending/failure/
+        error/success, GitHub's own semantics this tool never recomputes
+        from individual contexts; `total_count` zero passes regardless of
+        that `state` (GitHub's own default state for no statuses at all is
+        `pending`, which would otherwise misread a pull request with no
+        external checks as blocked). A `success` verdict with statuses
+        present is itself a named, successful check, not nothing: a pull
+        request whose only checks are combined statuses must still expose
+        them, or `landing_readiness` reads it as exposing no CI checks at
+        all and refuses a green pull request."""
+        state, total = self._combined_status_summary(sha)
+        if total == 0:
+            return ()
+        names = self._combined_status_names(sha) or (EXTERNAL_STATUS_FALLBACK_NAME,)
+        conclusion = None if state == "pending" else state
+        return tuple(forge.CheckRun(name, conclusion) for name in names)
+
+    def landing_readiness(self, number: int) -> forge.LandingReadiness:
+        """Whether pull request `number` is safe to merge with its own
+        pinned head sha (`aco land`'s preflight, issue #405): read from the
+        pull request itself (open state, head sha, mergeable state), every
+        page of the check-runs endpoint, and the combined commit status
+        (external contexts such as SonarCloud) against that same head sha --
+        GitHub answers all three from separate resources, and a merge is
+        safe only once every one of them agrees."""
+        raw = self._run(
+            [
+                "api",
+                f"repos/{self.repository}/pulls/{number}",
+                "--jq",
+                "{state,headSha:.head.sha,mergeableState:.mergeable_state}",
+            ]
+        )
+        values = self._json_lines(raw, "pull request readiness")
+        if len(values) != 1 or not isinstance(values[0], dict):
+            raise forge.ForgeMalformedResponseError(MALFORMED_PULL_REQUEST)
+        value = values[0]
+        state = value.get("state")
+        head_sha = value.get("headSha")
+        mergeable_state = value.get("mergeableState")
+        if (
+            state not in {"open", "closed"}
+            or not isinstance(head_sha, str)
+            or protocol.COMMIT_PATTERN.fullmatch(head_sha) is None
+            or not isinstance(mergeable_state, str)
+            or not mergeable_state
+        ):
+            raise forge.ForgeMalformedResponseError(MALFORMED_PULL_REQUEST)
+        checks = self._check_runs(head_sha) + self._combined_status_checks(head_sha)
+        return forge.LandingReadiness(number, state == "open", head_sha, mergeable_state, checks)
+
+    def merge_landing(self, number: int, *, head_sha: str, title: str, body: str) -> str:
+        """Merge pull request `number` with GitHub's real-merge-commit
+        strategy, pinned to `head_sha` (issue #405): never `gh pr merge`,
+        which re-reads the pull request's current head itself rather than
+        merging the exact commit `landing_readiness` already proved green.
+        A 405 or 409 means the pull request changed since that read --
+        translated to `ForgeMergeConflictError` so `aco land` can name the
+        one recovery that ever applies: re-run.
+        """
+        try:
+            raw = self._run(
+                [
+                    "api",
+                    "--method",
+                    "PUT",
+                    f"repos/{self.repository}/pulls/{number}/merge",
+                    "--input",
+                    "-",
+                ],
+                input_data=json.dumps(
+                    {
+                        "sha": head_sha,
+                        "merge_method": "merge",
+                        "commit_title": title,
+                        "commit_message": body,
+                    }
+                ).encode("utf-8"),
+            )
+        except forge.ForgeError as error:
+            if _MERGE_CONFLICT_PATTERN.search(str(error)) is not None:
+                raise forge.ForgeMergeConflictError(str(error)) from error
+            raise
+        values = self._json_lines(raw, "merge result")
+        if len(values) != 1 or not isinstance(values[0], dict):
+            raise forge.ForgeMalformedResponseError("GitHub returned a malformed merge result")
+        merged = values[0].get("merged")
+        sha = values[0].get("sha")
+        if (
+            merged is not True
+            or not isinstance(sha, str)
+            or protocol.COMMIT_PATTERN.fullmatch(sha) is None
+        ):
+            raise forge.ForgeMalformedResponseError("GitHub returned a malformed merge result")
+        return sha
+
+    def delete_branch(self, branch: str) -> None:
+        """Delete `branch` from this repository once its pull request has
+        merged (`aco land`, issue #405): idempotent -- GitHub answering that
+        the ref already does not exist (branch protection auto-deleted it,
+        or a previous `land` run already deleted it before a later step
+        failed) is success, not a failure to surface. Any other 422 -- a
+        protected branch refusing the delete, say -- is this adapter's
+        normal error family, not an absence to swallow (issue #405 review
+        finding)."""
+        try:
+            self._run(
+                ["api", "--method", "DELETE", f"repos/{self.repository}/git/refs/heads/{branch}"]
+            )
+        except forge.ForgeNotFoundError:
+            return
+        except forge.ForgeError as error:
+            if _branch_already_absent(str(error)):
+                return
+            raise
 
     def _issue_reference(self, value: object, description: str) -> board.IssueReference:
         if not isinstance(value, dict):

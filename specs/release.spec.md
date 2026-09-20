@@ -43,7 +43,7 @@ never storage-aware. A refusal reaching the shared collection point prints
 | `--coordinator-override --role coordinator` | REL-13 (CLAIM-40) | REL-13 | REL-13 |
 | `--role` omitted | REL-14 | REL-14 | REL-14 |
 | `refs/aco/state` not yet bootstrapped | REL-15 (CAS-03) | REL-15 | REL-15 |
-| pull request verification | — | LAND-29..39, 49, 50, 55, 62/63 | — |
+| pull request verification | — | LAND-29..39, 49, 50, 55, 62/63/64 | — |
 | `storage = "state-ref"` trunk verification | — | REL-17 (LAND-47, LAND-52, LAND-56, LAND-59) | — |
 | released item's own body contract | REL-23 | REL-23 | REL-23 |
 | successful release, text output | REL-18 | REL-18 | REL-18 |

@@ -63,7 +63,7 @@ matching line.
 | other open children, `Next` names work | — | LAND-25 | — | — |
 | malformed/wrong-kind/foreign parent | — | LAND-26, LAND-27, LAND-28 | — | — |
 | pull request not merged | — | — | LAND-30 | — |
-| PR names a different item / kind mismatch | — | — | LAND-35, LAND-62 | — |
+| PR names a different item / kind mismatch | — | — | LAND-62, LAND-64 | — |
 | work item still open | — | — | LAND-55, LAND-63 | — |
 | forge unreachable right after the release commits | — | — | LAND-38, LAND-50 | — |
 | `--abandoned` outcome | — | — | LAND-39 | — |
@@ -136,15 +136,16 @@ sentence>`, not restated.
 - [ ] [LAND-49] A successful `--merged` release prints `freed: <label>, <label>` (or `none`) and `next: <label> score <s>: <title>` (or `none`); `--json` carries `"freed": [n,...]` and `"next": n`/`null`.
 - [ ] [LAND-30] A pull request that is not merged refuses `pull request #<n> is not merged`, exit `2`, before anything is written.
 - [ ] [LAND-31] A pull request merged into a branch other than the default refuses `pull request #<n> merged into '<branch>', not the default branch '<default>'`, exit `2`.
-- [ ] [LAND-32] A pull request body's own classification defect (LAND-06..LAND-11) refuses `pull request #<n> <that same defect sentence>`, exit `2` -- read by `check` and an issue-less lane's own `release --merged`.
+- [ ] [LAND-32] A pull request body's own classification defect (LAND-06..LAND-11) refuses `pull request #<n> <that same defect sentence>`, exit `2` -- `check` only; a lane release reads its trailer (LAND-64).
 - LAND-33 (retired 20.09.2026, issue #397, Befund 41): "pull request #<n> names Work-Item: <ref>, not work item #<n>" no longer exists; the merge commit's own trailer decides instead (LAND-62), never the pull request's mutable body.
 - LAND-34 (retired 20.09.2026, issue #397, Befund 41): "pull request #<n> names No-Item: <kind>, not work item #<n>" no longer exists for a numbered item's own release; LAND-62 reads the merge commit instead.
-- [ ] [LAND-35] A pull request declaring `Work-Item:` while an issue-less lane is being released refuses `pull request #<n> names <ref>; an issue-less lane needs a No-Item line`, exit `2`.
+- LAND-35 (retired 20.09.2026, issue #405, #397 gate follow-up): "pull request #<n> names <ref>; an issue-less lane needs a No-Item line" no longer exists; the merge commit's own trailer decides instead (LAND-64), never the pull request's mutable body.
 - [ ] [LAND-62] A merge commit off the walked trunk, with no `Work-Item:` trailer, or naming another item refuses `merge commit <sha> of pull request #<n> <that LAND-52 defect sentence>`, exit `2`, before any write.
+- [ ] [LAND-64] For a lane release, a merge commit off the trunk, with no trailer, or with `Work-Item:` instead of `No-Item:` refuses `merge commit <sha> of pull request #<n> <that defect sentence>`, exit `2`.
 - [ ] [LAND-55] A still-open work item, once its landing pull request verifies, is closed by this release: a comment `landed by PR #<n>`, then the close — never a refusal (replaces retired LAND-36).
 - [ ] [LAND-63] A rerun of LAND-55's own close that finds its `landed by PR #<n>` comment already posted skips it and closes straight away, never posting it twice (issue #397).
 - LAND-36 (retired 19.09.2026, issue #359): "work item #<n> is open, not closed" no longer exists; a still-open item is closed instead (LAND-55).
-- [ ] [LAND-37] `release --merged <pr>` for an issue-less lane, against a body carrying only `No-Item: docs`, releases the claim without requiring or reading any closing reference.
+- [ ] [LAND-37] `release --merged <pr>` for a lane, against a merge commit trailer carrying only `No-Item: docs`, releases the claim without reading any closing reference or pull request body.
 - [ ] [LAND-38] A forge outage after the release committed prints `hint: could not read the board to report what this landing freed (<error>); run \`aco board\` once the forge is reachable`.
 - [ ] [LAND-50] The release LAND-38 reports on never undoes or fails on that hiccup: its claim stays released and its exit code stays `0`, exactly as a reachable forge would have produced.
 - [ ] [LAND-39] `--abandoned "<reason>"` never verifies a pull request or reads the board: it prints `RELEASED ...` alone, with no `freed`/`next` line and no `hint` line, ever.
@@ -176,6 +177,7 @@ sentence>`, not restated.
 - The last-child rule never reads a parent's stale `## Next` prose beside the block; only the block's own `next` field decides whether closing is required.
 - `release --abandoned` never verifies a pull request, never closes an item, and never reports `freed`/`next`.
 - Under `storage = github`, a numbered item's own `release --merged <pr>` never trusts the pull request's own `body` for which item it closes (issue #397, Befund 41): only its merge commit's own trailer, read after the fact, decides -- a body edited after the merge changes nothing this release verifies.
+- Under `storage = github`, an issue-less lane's own `release --merged <pr>` never trusts the pull request's own `body` for whether it declares `No-Item:` either (issue #405, #397 gate follow-up): only its merge commit's own trailer decides (LAND-64).
 
 ## Examples
 
@@ -267,6 +269,16 @@ Setup: bare-remote, fake `gh`, pull request `#57` merged into `main`, body `Work
 ```console
 $ aco release 42 --merged 57
 2> ERROR: merge commit <sha> of pull request #57 carries no `Work-Item:` trailer
+exit 2
+```
+
+### E-LAND-64 — a github merge commit naming a work item refuses an issue-less lane's release
+
+Setup: bare-remote, fake `gh`, pull request `#57` merged into `main` from a `docs/`-prefixed lane branch, body `No-Item: docs`, its own merge commit's trailer naming `Work-Item: #42` instead, a live issue-less lane claim on that branch
+
+```console
+$ aco release --merged 57
+2> ERROR: merge commit <sha> of pull request #57 carries a `Work-Item:` trailer; an issue-less lane needs a `No-Item:` trailer
 exit 2
 ```
 

@@ -112,7 +112,7 @@ runner's own values; `<agent>` and `<role>` are the claimant's.
 - [ ] [CLAIM-36] An omitted `--role` makes the record a `builder`, and `aco status` prints `<agent> (builder)`.
 - [ ] [CLAIM-37] A rescope by a different agent refuses `only the original claimant may rescope (holder='Ada (builder)', this session='Bob (builder)')`, exit `2`; `rescope` has no `--role` flag.
 - [ ] [CLAIM-38] A release by a different agent or role refuses `only the original claimant may release; use an explicit coordinator override`, exit `2`, naming holder and session.
-- [ ] [CLAIM-39] `--coordinator-override` without `--role coordinator` refuses `a coordinator override requires role coordinator`, exit `2`.
+- [ ] [CLAIM-39] `--coordinator-override` without `--role coordinator` refuses `a coordinator override requires --role coordinator`, exit `2`.
 - [ ] [CLAIM-40] `--coordinator-override --role coordinator` releases a foreign live claim and removes its record, so `aco status` prints `UNCLAIMED issue #42`, exit `0`.
 
 ## Resources

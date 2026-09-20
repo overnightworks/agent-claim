@@ -145,6 +145,12 @@ class FakeForge:
     fail_update_item_body: bool = False
     fail_create_child_relation: bool = False
     capability_overrides: dict[forge.ForgeOperation, forge.Capability] = field(default_factory=dict)
+    readiness_by_number: dict[int, forge.LandingReadiness] = field(default_factory=dict)
+    merge_calls: list[tuple[int, str, str, str]] = field(default_factory=list)
+    merge_sha: str = MERGE_COMMIT_SHA
+    merge_repository: Path | None = None
+    fail_merge: ClaimError | None = None
+    deleted_branches: list[str] = field(default_factory=list)
     requests: int = field(default=0, init=False)
     _requests_lock: threading.Lock = field(
         default_factory=threading.Lock, init=False, repr=False, compare=False
@@ -223,6 +229,47 @@ class FakeForge:
         self.landing_comments[number] = github.landing_comment(pull_request)
         self.closed_issues.add(number)
 
+    def landing_readiness(self, number: int) -> forge.LandingReadiness:
+        """This fake's mirror of `GitHubForge.landing_readiness` (issue
+        #405): a test seeds `readiness_by_number` directly, one
+        `forge.LandingReadiness` per scenario, rather than reconstructing it
+        from other fields."""
+        self._run()
+        readiness = self.readiness_by_number.get(number)
+        if readiness is None:
+            raise ClaimError(f"GitHub has no readiness for pull request #{number}")
+        return readiness
+
+    def merge_landing(self, number: int, *, head_sha: str, title: str, body: str) -> str:
+        """This fake's mirror of `GitHubForge.merge_landing` (issue #405):
+        records every call for an adapter-shaped assertion, and, when
+        `merge_repository` names a real checkout (`land`'s own end-to-end
+        tests), performs a real merge there so a later real fast-forward has
+        a fresh trunk tip to advance to."""
+        self._run()
+        self.merge_calls.append((number, head_sha, title, body))
+        if self.fail_merge is not None:
+            raise self.fail_merge
+        sha = self.merge_sha
+        landing = self.landings[number]
+        if self.merge_repository is not None:
+            _real_git(
+                self.merge_repository,
+                "merge",
+                "--no-ff",
+                "-m",
+                f"{title}\n\n{body}",
+                landing.source_branch,
+            )
+            sha = _real_git(self.merge_repository, "rev-parse", "HEAD").stdout.strip()
+            _real_git(self.merge_repository, "push", "-q", "origin", "main")
+        self.landings[number] = replace(landing, merged=True, merge_commit=sha)
+        return sha
+
+    def delete_branch(self, branch: str) -> None:
+        self._run()
+        self.deleted_branches.append(branch)
+
     def list_open_board_issues(self) -> tuple[board.Issue, ...]:
         self._run()
         return self.board_issues
@@ -292,6 +339,12 @@ class ReaderOnlyForge(FakeForge):
 
     def close_landed_item(self, number: int, *, pull_request: int) -> None:
         pytest.fail("a read-only command must never close a landed item")
+
+    def merge_landing(self, number: int, *, head_sha: str, title: str, body: str) -> str:
+        pytest.fail("a read-only command must never merge a pull request")
+
+    def delete_branch(self, branch: str) -> None:
+        pytest.fail("a read-only command must never delete a branch")
 
 
 @dataclass
@@ -2715,6 +2768,7 @@ def test_help_lists_commands_in_their_stable_registration_order() -> None:
         "start",
         "claim",
         "release",
+        "land",
         "rescope",
         "cut",
         "ask",
@@ -7625,6 +7679,13 @@ class _FakeStore:
     def fetch_state(self, *, worktree: Path, remote: str) -> protocol.ClaimState:
         return self.state
 
+    def peek_state(self, *, worktree: Path, remote: str) -> protocol.ClaimState:
+        # This fake never models the anchor/lineage-stamp side effect
+        # `fetch_state` alone carries against real git, so the same
+        # in-memory state answers both (issue #405): `land`'s claims
+        # observation is the one caller this fake needs it for.
+        return self.state
+
     def commit_transition(
         self,
         *,
@@ -7678,6 +7739,7 @@ def _patch_store_write(
         unparsed_lifecycle_commits=unparsed_lifecycle_commits,
     )
     monkeypatch.setattr(store, "fetch_state", fake.fetch_state)
+    monkeypatch.setattr(store, "peek_state", fake.peek_state)
     monkeypatch.setattr(store, "commit_transition", fake.commit_transition)
     monkeypatch.setattr(store, "claim_ages", fake.claim_ages)
     monkeypatch.setattr(store, "claim_lifecycle", fake.claim_lifecycle)
@@ -11666,12 +11728,13 @@ def merged_release_client(
 ) -> FakeForge:
     """A session whose one claim can be released against pull request #12.
 
-    `landings` stubs the walked first-parent trunk an issue release now
-    verifies its merge commit against (issue #397, Befund 41): `None` --
-    the default -- seeds the one trunk commit that authorizes closing
-    `WORK_ITEM_ISSUE` at `merge_commit`, matching this fixture's own happy
-    path; a lane release never reads it, and a test of a merge-commit
-    defect passes its own tuple instead.
+    `landings` stubs the walked first-parent trunk every release now
+    verifies its merge commit against (issue #397, Befund 41; issue #405
+    gate follow-up): `None` -- the default -- seeds the one trunk commit
+    that authorizes closing `WORK_ITEM_ISSUE` at `merge_commit` for an
+    issue release, or declaring the lane issue-less for a lane release,
+    matching this fixture's own happy path either way; a test of a
+    merge-commit defect passes its own tuple instead.
     """
     branch = LANE_BRANCH if lane else LANDING_BRANCH
     standing = request(
@@ -11690,15 +11753,17 @@ def merged_release_client(
         merge_commit=merge_commit if merged else None,
     )
     _patch_release_session(monkeypatch, client, standing, branch=branch)
-    if not lane:
-        resolved = (
-            landings
-            if landings is not None
-            else (
-                _trunk_landing(merge_commit, board.TrunkWorkItemClassification((WORK_ITEM_ISSUE,))),
-            )
-        )
-        monkeypatch.setattr(checkout, "trunk_landings", lambda *_args, **_kwargs: resolved)
+    default_classification = (
+        board.NoItemClassification(board.NoItemKind.DOCS)
+        if lane
+        else board.TrunkWorkItemClassification((WORK_ITEM_ISSUE,))
+    )
+    resolved = (
+        landings
+        if landings is not None
+        else (_trunk_landing(merge_commit, default_classification),)
+    )
+    monkeypatch.setattr(checkout, "trunk_landings", lambda *_args, **_kwargs: resolved)
     return client
 
 
@@ -11987,6 +12052,49 @@ def test_release_merged_accepts_an_issueless_lane_that_landed_without_an_item(
     assert store.fetch_state(worktree=Path("."), remote="origin").claims == {}
 
 
+def test_release_merged_refuses_an_issueless_lane_landing_off_trunk(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #405 CI coverage follow-up: `_trunk_no_item_landing_defect`'s
+    own off-trunk branch, the `LaneIdentity` counterpart to
+    `test_release_merged_refuses_a_landing_it_cannot_verify`'s `off-trunk`
+    case -- an issue-less lane's merge commit missing from the walked
+    trunk refuses exactly the same way."""
+    merged_release_client(monkeypatch, body="No-Item: docs", lane=True, landings=())
+
+    assert issue_claim.main(["--repo", REPOSITORY, "release", "--merged", "12"]) == 2
+
+    assert capsys.readouterr().err == (
+        f"ERROR: merge commit {MERGE_COMMIT_SHA} of pull request #12 "
+        "is not on the first-parent trunk\n"
+    )
+
+
+def test_release_merged_refuses_an_issueless_lane_landing_with_a_classification_defect(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #405 CI coverage follow-up: `_trunk_no_item_landing_defect`
+    surfaces the walked trunk's own `ClassificationDefect` message
+    verbatim when the merge commit's own trailer is malformed, never a
+    generic "no `No-Item:` trailer" refusal."""
+    merged_release_client(
+        monkeypatch,
+        body="No-Item: docs",
+        lane=True,
+        landings=(
+            _trunk_landing(
+                MERGE_COMMIT_SHA, board.ClassificationDefect("names two conflicting issues")
+            ),
+        ),
+    )
+
+    assert issue_claim.main(["--repo", REPOSITORY, "release", "--merged", "12"]) == 2
+
+    assert capsys.readouterr().err == (
+        f"ERROR: merge commit {MERGE_COMMIT_SHA} of pull request #12 names two conflicting issues\n"
+    )
+
+
 @pytest.mark.parametrize(
     ("scenario", "reason"),
     [
@@ -12100,29 +12208,45 @@ def test_release_merged_closes_the_still_open_work_item(
     assert store.fetch_state(worktree=Path("."), remote="origin").claims == {}
 
 
-def test_release_merged_refuses_a_lane_whose_pull_request_names_an_item(
+def test_release_merged_refuses_a_lane_whose_merge_commit_names_a_work_item(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    merged_release_client(monkeypatch, body="Work-Item: #72\n\nCloses #72", lane=True)
+    """Issue #405 gate follow-up: a lane release's authority is the merge
+    commit's own trailer block, not the pull request's mutable `body` --
+    ignored here even though it declares `No-Item:` -- so a trunk commit
+    that actually names a work item still refuses."""
+    merged_release_client(
+        monkeypatch,
+        body="No-Item: docs",
+        lane=True,
+        landings=(_trunk_landing(MERGE_COMMIT_SHA, board.TrunkWorkItemClassification((72,))),),
+    )
 
     assert issue_claim.main(["--repo", REPOSITORY, "release", "--merged", "12"]) == 2
     assert capsys.readouterr().err == (
-        f"ERROR: pull request #12 names {REPOSITORY}#72; an issue-less lane needs a No-Item line\n"
+        f"ERROR: merge commit {MERGE_COMMIT_SHA} of pull request #12 carries a "
+        "`Work-Item:` trailer; an issue-less lane needs a `No-Item:` trailer\n"
     )
 
 
-def test_release_merged_refuses_an_unclassified_lane_pull_request(
+def test_release_merged_refuses_an_unclassified_lane_merge_commit(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """An issue-less lane still reads the pull request's own body to
-    identify what it declares (issue #397): a body carrying neither
-    `Work-Item:` nor `No-Item:` refuses the same as `check` would, since a
-    lane closes no item a trunk trailer could authorize instead."""
-    merged_release_client(monkeypatch, body="Advances #72", lane=True)
+    """An issue-less lane's authority is its own merge commit's trailer
+    block (issue #405 gate follow-up): a trunk commit carrying neither
+    `Work-Item:` nor `No-Item:` refuses regardless of what the pull
+    request's own mutable body says."""
+    merged_release_client(
+        monkeypatch,
+        body="No-Item: docs",
+        lane=True,
+        landings=(_trunk_landing(MERGE_COMMIT_SHA, None),),
+    )
 
     assert issue_claim.main(["--repo", REPOSITORY, "release", "--merged", "12"]) == 2
     assert capsys.readouterr().err == (
-        "ERROR: pull request #12 carries no `Work-Item:` or `No-Item:` line\n"
+        f"ERROR: merge commit {MERGE_COMMIT_SHA} of pull request #12 carries no "
+        "`Work-Item:` or `No-Item:` trailer\n"
     )
 
 
@@ -12642,6 +12766,715 @@ def test_release_merged_keeps_the_worktree_for_every_reason(
         assert worktree.exists()
 
 
+def _land_readiness(
+    number: int = 12,
+    *,
+    checks: tuple[forge.CheckRun, ...] = (forge.CheckRun("ci", forge.CHECK_CONCLUSION_SUCCESS),),
+) -> forge.LandingReadiness:
+    return forge.LandingReadiness(
+        number, True, MERGE_COMMIT_SHA, forge.MERGEABLE_STATE_CLEAN, checks
+    )
+
+
+def _land_preflight_client(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    readiness: forge.LandingReadiness,
+    body: str = f"Work-Item: #{WORK_ITEM_ISSUE}\n\nCloses #{WORK_ITEM_ISSUE}",
+    item_closed: bool = False,
+    claimed: bool = True,
+    claim_agent: str = "Ada",
+) -> FakeForge:
+    """A session `aco land 12` can preflight-refuse against, with no real
+    git at all (issue #405): every scenario here fails before the checkout
+    is ever consulted, unlike `_land_scenario`'s real-git happy path.
+    `claimed=False` leaves the item with no live claim at all -- the other
+    half of LANDCMD-08's own ordering proof, alongside `item_closed`.
+    `claim_agent`, when it differs from `_patch_release_session`'s own
+    default session identity `Ada`, is the claim/parent/closing check's
+    existence proof standing beside a foreign claimant this session is not
+    authorized to land (issue #405 point 7)."""
+    standing = (
+        (
+            request(
+                "landing", claim_agent, issue=WORK_ITEM_ISSUE, branch=LANDING_BRANCH, scope=("src",)
+            ),
+        )
+        if claimed
+        else ()
+    )
+    client = FakeForge()
+    client.landings[12] = landing_pull_request(
+        body=body, merged=False, head_ref_name=LANDING_BRANCH
+    )
+    client.readiness_by_number[12] = readiness
+    if item_closed:
+        client.closed_issues.add(WORK_ITEM_ISSUE)
+    _patch_release_session(monkeypatch, client, *standing, branch=LANDING_BRANCH)
+    return client
+
+
+def _land_repository(
+    tmp_path: Path, *, set_head: bool = True, branch: str = LANDING_BRANCH
+) -> Path:
+    """A real bare-remote-backed repository (issue #405) with `branch`
+    diverged from `main` by one pushed commit and `main` itself checked out
+    clean -- `aco land`'s own merge, branch deletion, and fast-forward run
+    against real git here, the one proof a fake checkout cannot give.
+    `set_head=False` skips recording `origin/HEAD`, the one precondition a
+    test of the "default branch unknown" refusal needs missing. `branch`,
+    when it names a lane branch instead of the default `LANDING_BRANCH`,
+    stands the real checkout an issue-less (`No-Item:`) land proves against
+    (issue #405 CI coverage follow-up)."""
+    repo, _remote = _real_repository_with_bare_remote(tmp_path)
+    (repo / "base.txt").write_text("base\n")
+    _real_git(repo, "add", "base.txt")
+    _real_git(repo, "commit", "-q", "-m", "initial")
+    if set_head:
+        _push_repository_trunk(repo, "origin")
+    else:
+        _real_git(repo, "push", "-q", "origin", "main")
+    _real_git(repo, "checkout", "-q", "-b", branch)
+    (repo / "feature.txt").write_text("feature\n")
+    _real_git(repo, "add", "feature.txt")
+    _real_git(repo, "commit", "-q", "-m", "feature work")
+    _real_git(repo, "push", "-q", "origin", branch)
+    _real_git(repo, "checkout", "-q", "main")
+    return repo
+
+
+def _land_scenario(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    set_head: bool = True,
+    claim_agent: str = "Ada",
+    branch: str = LANDING_BRANCH,
+    issue: int | None = WORK_ITEM_ISSUE,
+    body: str | None = None,
+) -> tuple[Path, FakeForge]:
+    """`claim_agent`, when it differs from the `Ada` session identity set
+    below, stands the same foreign claim `_land_preflight_client`'s own
+    `claim_agent` proves against a fake reader (issue #405 round-4 finding
+    5), but here against `land`'s real merge/checkout path, so a
+    `--coordinator-override --role coordinator` land of it can be proven
+    reaching the merge, not just proven refused without those flags.
+    `branch`/`issue`/`body`, when they name an issue-less lane instead of
+    the default `Work-Item:` scenario, stand `_land_preflight`'s own
+    `LaneIdentity` branch (issue #405 CI coverage follow-up)."""
+    repo = _land_repository(tmp_path, set_head=set_head, branch=branch)
+    standing = request("landing", claim_agent, issue=issue, branch=branch, scope=("src",))
+    client = FakeForge()
+    client.landings[12] = landing_pull_request(
+        body=body or f"Work-Item: #{WORK_ITEM_ISSUE}\n\nCloses #{WORK_ITEM_ISSUE}",
+        merged=False,
+        head_ref_name=branch,
+    )
+    client.readiness_by_number[12] = _land_readiness()
+    client.merge_repository = repo
+    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
+    monkeypatch.setattr(checkout, "trunk_landings", _LIVE_TRUNK_LANDINGS)
+    _patch_store_write(monkeypatch, _store_claim_from_request(standing))
+    _set_agent_identity_env(monkeypatch, {checkout.ACO_AGENT_ENV: "Ada"})
+    _redirect_toplevel(monkeypatch, repo)
+    monkeypatch.chdir(repo)
+    return repo, client
+
+
+@pytest.mark.parametrize(
+    ("readiness", "reason"),
+    [
+        pytest.param(
+            forge.LandingReadiness(12, False, MERGE_COMMIT_SHA, forge.MERGEABLE_STATE_CLEAN, ()),
+            "pull request #12 is not open; it cannot be landed",
+            id="not-open",
+        ),
+        pytest.param(
+            forge.LandingReadiness(12, True, MERGE_COMMIT_SHA, "dirty", ()),
+            "pull request #12 is not mergeable (dirty)",
+            id="not-mergeable",
+        ),
+        pytest.param(
+            _land_readiness(checks=()),
+            "pull request #12 exposes no CI checks; cannot verify green CI",
+            id="no-checks",
+        ),
+        pytest.param(
+            _land_readiness(checks=(forge.CheckRun("build", None),)),
+            "pull request #12 has checks still running: build; wait for every check to succeed",
+            id="check-running",
+        ),
+        pytest.param(
+            _land_readiness(checks=(forge.CheckRun("build", "failure"),)),
+            "pull request #12 has non-successful checks: build (failure); "
+            "land only after every check succeeds",
+            id="check-failed",
+        ),
+        pytest.param(
+            _land_readiness(
+                checks=tuple(forge.CheckRun(f"check-{index}", None) for index in range(5))
+            ),
+            "pull request #12 has checks still running: check-0, check-1, check-2, and 2 more; "
+            "wait for every check to succeed",
+            id="check-running-name-list-capped",
+        ),
+        pytest.param(
+            _land_readiness(checks=(forge.CheckRun("x" * 300, None),)),
+            "pull request #12 has checks still running: "
+            + ("x" * 39 + "…")
+            + "; wait for every check to succeed",
+            id="check-running-name-truncated",
+        ),
+        pytest.param(
+            _land_readiness(checks=tuple(forge.CheckRun("x" * 300, None) for _ in range(5))),
+            "pull request #12 has checks still running: "
+            + ", ".join([("x" * 39 + "…")] * 3)
+            + ", and 2 more; wait for ev…",
+            id="check-running-many-long-names-bounded-with-error-prefix",
+        ),
+    ],
+)
+def test_land_refuses_every_readiness_defect_before_any_write(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    readiness: forge.LandingReadiness,
+    reason: str,
+) -> None:
+    """Issue #405 Beweis 1: every readiness-based preflight refusal merges
+    nothing, deletes no branch, and reaches no store write -- `aco land`'s
+    own read-only order. The printed line (issue #405 round-4 finding) never
+    exceeds 200 characters including `main`'s own `ERROR: ` prefix, not just
+    the sentence the refusal builds before that prefix is added."""
+    client = _land_preflight_client(monkeypatch, readiness=readiness)
+
+    assert issue_claim.main(["--repo", REPOSITORY, "land", "12"]) == 2
+
+    error_line = capsys.readouterr().err
+    assert error_line == f"ERROR: {reason}\n"
+    assert len(error_line.rstrip("\n")) <= issue_claim.LAND_REFUSAL_LINE_LENGTH_LIMIT
+    assert client.merge_calls == []
+    assert client.deleted_branches == []
+
+
+def test_land_refuses_a_classification_defect_reusing_checks_own_rules(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #405: once every check succeeds, `check <pr>`'s own
+    classification rules apply unchanged -- an unclassified body refuses
+    the same sentence `check` would, before any write."""
+    client = _land_preflight_client(monkeypatch, readiness=_land_readiness(), body="Advances #72")
+
+    assert issue_claim.main(["--repo", REPOSITORY, "land", "12"]) == 2
+
+    assert capsys.readouterr().err == (
+        "ERROR: pull request #12 carries no `Work-Item:` or `No-Item:` line\n"
+    )
+    assert client.merge_calls == []
+
+
+def test_land_refuses_a_closed_work_item(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #405: a classified work item that is not open refuses by name,
+    before any write -- distinct from `check`'s own rules, which never
+    verify the item's live state."""
+    monkeypatch.setattr(issue_claim, "_fetch_issue_reference", _LIVE_FETCH_ISSUE_REFERENCE)
+    client = _land_preflight_client(monkeypatch, readiness=_land_readiness(), item_closed=True)
+
+    assert issue_claim.main(["--repo", REPOSITORY, "land", "12"]) == 2
+
+    assert capsys.readouterr().err == (
+        f"ERROR: work item #{WORK_ITEM_ISSUE} is not open; it cannot be landed\n"
+    )
+    assert client.merge_calls == []
+
+
+def test_land_refuses_a_closed_work_item_before_its_own_missing_claim(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #405 review/gate finding: LANDCMD-08 (item not open) is checked
+    before claim validation -- a closed item with no live claim at all
+    refuses by its own closed state, never the claim it also lacks, and
+    never reads the store's claims to find out."""
+    monkeypatch.setattr(issue_claim, "_fetch_issue_reference", _LIVE_FETCH_ISSUE_REFERENCE)
+    client = _land_preflight_client(
+        monkeypatch, readiness=_land_readiness(), item_closed=True, claimed=False
+    )
+
+    assert issue_claim.main(["--repo", REPOSITORY, "land", "12"]) == 2
+
+    assert capsys.readouterr().err == (
+        f"ERROR: work item #{WORK_ITEM_ISSUE} is not open; it cannot be landed\n"
+    )
+    assert client.merge_calls == []
+
+
+def test_land_refuses_a_classification_defect_from_a_missing_claim(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #405 CI coverage follow-up: `_classification_defect`'s own
+    claim-check branch inside `_land_preflight` -- distinct from
+    `test_land_refuses_a_classification_defect_reusing_checks_own_rules`'s
+    shape defect and `test_land_refuses_a_closed_work_item_before_its_own_
+    missing_claim`'s LANDCMD-08-first ordering -- an *open* work item with
+    no live claim at all refuses by its own missing claim."""
+    client = _land_preflight_client(monkeypatch, readiness=_land_readiness(), claimed=False)
+
+    assert issue_claim.main(["--repo", REPOSITORY, "land", "12"]) == 2
+
+    assert capsys.readouterr().err == (
+        f"ERROR: pull request #12 has no active claim for #{WORK_ITEM_ISSUE} "
+        f"on branch {LANDING_BRANCH!r}\n"
+    )
+    assert client.merge_calls == []
+
+
+def test_land_refuses_a_foreign_claim_before_the_merge(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #405 point 7 review/gate finding: `_land_preflight` itself
+    authorizes this session against the live claim, reusing `release`'s own
+    claimant/coordinator-override check (`_resolve_release_claimant`) --
+    a claim held by another agent refuses before the merge, not only once
+    the delegated `release --merged` step runs after it."""
+    client = _land_preflight_client(monkeypatch, readiness=_land_readiness(), claim_agent="Grok")
+
+    assert issue_claim.main(["--repo", REPOSITORY, "land", "12"]) == 2
+
+    assert capsys.readouterr().err == (
+        "ERROR: only the original claimant may release; use an explicit coordinator "
+        "override (holder='Grok (builder)', this session='Ada (builder)')\n"
+    )
+    assert client.merge_calls == []
+
+
+def test_land_refuses_a_coordinator_override_with_no_role_before_the_merge(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #405 point 8 review finding (LANDCMD-19): `--coordinator-override`
+    with no `--role` refuses via `_land_preflight`'s own call to `release`'s
+    `protocol._require_coordinator_override`, before any merge."""
+    client = _land_preflight_client(monkeypatch, readiness=_land_readiness())
+
+    assert issue_claim.main(["--repo", REPOSITORY, "land", "12", "--coordinator-override"]) == 2
+
+    assert capsys.readouterr().err == "ERROR: a coordinator override requires --role coordinator\n"
+    assert client.merge_calls == []
+
+
+def test_land_refuses_a_coordinator_override_with_the_wrong_role_before_the_merge(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #405 point 8 review finding (LANDCMD-19): `--coordinator-override
+    --role builder` refuses the same way as an omitted `--role` -- only
+    `--role coordinator` behind the override authorizes it."""
+    client = _land_preflight_client(monkeypatch, readiness=_land_readiness())
+
+    assert (
+        issue_claim.main(
+            ["--repo", REPOSITORY, "land", "12", "--coordinator-override", "--role", "builder"]
+        )
+        == 2
+    )
+
+    assert capsys.readouterr().err == "ERROR: a coordinator override requires --role coordinator\n"
+    assert client.merge_calls == []
+
+
+def test_land_merges_a_green_pull_request_and_runs_the_release_path(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Issue #405 Beweis 1: a green pull request merges with a pinned head
+    sha and a self-composed commit message whose classification trailer is
+    its own last paragraph, the remote branch delete request is made, this
+    checkout's own `main` fast-forwards to the fresh merge commit, and the
+    existing `release --merged` path closes the item and frees the claim."""
+    repo, client = _land_scenario(monkeypatch, tmp_path)
+    trunk_before = _real_git(repo, "rev-parse", "main").stdout.strip()
+
+    assert issue_claim.main(["--repo", REPOSITORY, "land", "12"]) == 0
+
+    [(number, head_sha, _title, body)] = client.merge_calls
+    assert (number, head_sha) == (12, MERGE_COMMIT_SHA)
+    paragraphs = body.strip().split("\n\n")
+    assert paragraphs[-1] == f"Work-Item: #{WORK_ITEM_ISSUE}"
+    assert client.deleted_branches == [LANDING_BRANCH]
+    assert client.closed_issues == {WORK_ITEM_ISSUE}
+    trunk_after = _real_git(repo, "rev-parse", "main").stdout.strip()
+    assert trunk_after != trunk_before
+    assert client.landings[12].merge_commit == trunk_after
+    out = capsys.readouterr().out
+    assert "freed:" in out
+    assert "next:" in out
+
+
+def test_land_merges_an_issueless_lane_pull_request(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Issue #405 CI coverage follow-up: `_land_preflight`'s own
+    `LaneIdentity` branch -- an issue-less, `No-Item:` pull request -- merges
+    through `land`'s real path exactly as a `Work-Item:` one does
+    (`test_land_merges_a_green_pull_request_and_runs_the_release_path`
+    proves the work-item branch): no item to close, but the claim releases."""
+    _repo, client = _land_scenario(
+        monkeypatch, tmp_path, branch=LANE_BRANCH, issue=None, body="No-Item: docs"
+    )
+
+    assert issue_claim.main(["--repo", REPOSITORY, "land", "12"]) == 0
+
+    [(number, head_sha, _title, body)] = client.merge_calls
+    assert (number, head_sha) == (12, MERGE_COMMIT_SHA)
+    assert body.strip().split("\n\n")[-1] == "No-Item: docs"
+    assert client.deleted_branches == [LANE_BRANCH]
+    assert client.closed_issues == set()
+    assert store.fetch_state(worktree=Path("."), remote="origin").claims == {}
+
+
+def test_land_merges_a_foreign_claim_under_a_coordinator_override(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Issue #405 round-4 finding 5: `--coordinator-override --role
+    coordinator` against a claim held by another agent (`Grok`, not this
+    session's own `Ada`) reaches the merge and completes exactly like an
+    ordinary land -- `test_land_refuses_a_foreign_claim_before_the_merge`
+    proves the same claim refused without those flags."""
+    repo, client = _land_scenario(monkeypatch, tmp_path, claim_agent="Grok")
+
+    status = issue_claim.main(
+        ["--repo", REPOSITORY, "land", "12", "--coordinator-override", "--role", "coordinator"]
+    )
+
+    assert status == 0
+    [(number, head_sha, _title, _body)] = client.merge_calls
+    assert (number, head_sha) == (12, MERGE_COMMIT_SHA)
+    assert client.landings[12].merge_commit == _real_git(repo, "rev-parse", "main").stdout.strip()
+
+
+def _break_delete_branch(monkeypatch: pytest.MonkeyPatch, client: FakeForge) -> None:
+    def failing(branch: str) -> None:
+        raise ClaimError("delete branch failed (simulated)")
+
+    monkeypatch.setattr(client, "delete_branch", failing)
+
+
+def _break_fetch(monkeypatch: pytest.MonkeyPatch, _client: FakeForge) -> None:
+    _stub_one_git_call(monkeypatch, ["fetch", "origin"], exit_status=1, stderr="fatal: unreachable")
+
+
+def _break_fast_forward_merge(monkeypatch: pytest.MonkeyPatch, _client: FakeForge) -> None:
+    _stub_one_git_call(
+        monkeypatch,
+        ["merge", "--ff-only", "origin/main"],
+        exit_status=1,
+        stderr="fatal: Not possible to fast-forward, aborting.",
+    )
+
+
+@pytest.mark.parametrize(
+    ("arrange", "step"),
+    [
+        pytest.param(_break_delete_branch, "delete-branch", id="delete-branch"),
+        pytest.param(_break_fetch, "fast-forward", id="fetch-fails"),
+        pytest.param(_break_fast_forward_merge, "fast-forward", id="ff-only-fails"),
+    ],
+)
+def test_land_reports_incomplete_follow_up_for_every_post_merge_step(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    arrange: Callable[[pytest.MonkeyPatch, FakeForge], None],
+    step: str,
+) -> None:
+    """Issue #405: every step after a successful merge -- deleting the
+    branch, fetching, or fast-forwarding -- names its own step in the one
+    ruled recovery line, the merge itself never repeated."""
+    _repo, client = _land_scenario(monkeypatch, tmp_path)
+    arrange(monkeypatch, client)
+
+    status = issue_claim.main(["--repo", REPOSITORY, "land", "12"])
+
+    assert status == 2
+    merge_commit = client.landings[12].merge_commit
+    assert merge_commit is not None
+    assert capsys.readouterr().err == (
+        f"ERROR: MERGED pull request #12 as {merge_commit}; "
+        f"follow-up incomplete: {step}; re-run aco land 12\n"
+    )
+    assert len(client.merge_calls) == 1
+
+
+def _land_merged_pending_release(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> tuple[Path, FakeForge]:
+    """A pull request `aco land` already merged once, its own delegated
+    `release --merged` blocked by a failing close (issue #405 Beweis 2): the
+    shared rerun setup both the plain recovery proof and the release-routing
+    recovery proof resume from, `close_landed_item` restored to real once
+    this returns so the caller's own rerun can succeed."""
+    repo, client = _land_scenario(monkeypatch, tmp_path)
+    real_close = client.close_landed_item
+
+    def failing_close(number: int, *, pull_request: int) -> None:
+        raise ClaimError("forge unreachable (simulated)")
+
+    monkeypatch.setattr(client, "close_landed_item", failing_close)
+
+    status = issue_claim.main(["--repo", REPOSITORY, "land", "12"])
+
+    assert status == 2
+    merge_commit = client.landings[12].merge_commit
+    assert merge_commit is not None
+    assert capsys.readouterr().err == (
+        f"ERROR: MERGED pull request #12 as {merge_commit}; "
+        "follow-up incomplete: release; re-run aco land 12\n"
+    )
+    assert len(client.merge_calls) == 1
+    assert client.closed_issues == set()
+
+    monkeypatch.setattr(client, "close_landed_item", real_close)
+    return repo, client
+
+
+def test_land_reports_incomplete_follow_up_and_a_rerun_resumes_without_a_second_merge(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Issue #405 Beweis 2: a failure after the merge names the exact
+    recovery line, never a second merge on rerun, and the rerun still closes
+    the item and frees the claim."""
+    _repo, client = _land_merged_pending_release(monkeypatch, capsys, tmp_path)
+
+    assert issue_claim.main(["--repo", REPOSITORY, "land", "12"]) == 0
+
+    assert len(client.merge_calls) == 1
+    assert client.closed_issues == {WORK_ITEM_ISSUE}
+
+
+def _land_mark_already_merged(client: FakeForge) -> None:
+    """Simulate `land` having already merged pull request 12 in an earlier
+    run (issue #405 round-4 finding 1): the fake forge's own landing record
+    is the one signal `_cmd_land` reads to tell a rerun from a fresh run, so
+    a rerun test never needs to actually run the merge first."""
+    client.landings[12] = replace(client.landings[12], merged=True, merge_commit=MERGE_COMMIT_SHA)
+
+
+@pytest.mark.parametrize(
+    "override_arguments",
+    [
+        pytest.param(["--coordinator-override"], id="omitted-role"),
+        pytest.param(["--coordinator-override", "--role", "builder"], id="wrong-role"),
+    ],
+)
+def test_land_rerun_refuses_a_coordinator_override_with_no_valid_role_before_any_side_effect(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    override_arguments: list[str],
+) -> None:
+    """Issue #405 round-4 finding 1: an already-merged rerun skips
+    `_land_preflight` entirely, so a coordinator-override role check placed
+    only there would leave a rerun free to delete the branch, fast-forward,
+    and let the delegated `release --merged` step close the item on a bare
+    `--coordinator-override` with no coordinator role behind it.
+    `_cmd_land`'s own entry validates this before the fresh/rerun split, so
+    none of that runs."""
+    repo, client = _land_scenario(monkeypatch, tmp_path)
+    _land_mark_already_merged(client)
+    trunk_before = _real_git(repo, "rev-parse", "main").stdout.strip()
+
+    status = issue_claim.main(["--repo", REPOSITORY, "land", "12", *override_arguments])
+
+    assert status == 2
+    assert capsys.readouterr().err == "ERROR: a coordinator override requires --role coordinator\n"
+    assert client.merge_calls == []
+    assert client.deleted_branches == []
+    assert client.closed_issues == set()
+    assert _real_git(repo, "rev-parse", "main").stdout.strip() == trunk_before
+
+
+def test_land_refuses_under_the_state_ref_pin(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Issue #405: `aco land` is a github-only command; a repository pinned
+    to `storage = state-ref` has no pull requests to land, refused before
+    any forge or store read."""
+    _write_state_ref_pin(tmp_path)
+    _set_agent_identity_env(monkeypatch, {checkout.ACO_AGENT_ENV: "Ada"})
+
+    assert issue_claim.main(["land", "12"]) == 2
+
+    assert capsys.readouterr().err == (
+        "ERROR: aco land is a github command; storage = state-ref has no pull requests to land\n"
+    )
+
+
+def test_land_reports_a_merge_conflict_when_the_pull_request_changed(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Issue #405: a 405/409 from the merge endpoint means the pull request
+    changed since preflight read it -- refused by name, before any
+    follow-up step, with the one recovery this refusal ever names: re-run."""
+    _repo, client = _land_scenario(monkeypatch, tmp_path)
+    client.fail_merge = forge.ForgeMergeConflictError("HTTP 409 head changed")
+
+    assert issue_claim.main(["--repo", REPOSITORY, "land", "12"]) == 2
+
+    assert capsys.readouterr().err == (
+        "ERROR: pull request #12 changed while it was checked; re-run land\n"
+    )
+    assert len(client.merge_calls) == 1
+    assert client.deleted_branches == []
+
+
+def test_land_prints_the_reinstall_line_in_this_packages_own_repository(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Issue #405: a successful landing in this very package's own
+    repository ends with its own reinstall reminder; every other repository
+    prints nothing further."""
+    repo, _client = _land_scenario(monkeypatch, tmp_path)
+    (repo / "pyproject.toml").write_text('[project]\nname = "agent-coordination"\n')
+    _real_git(repo, "add", "pyproject.toml")
+    _real_git(repo, "commit", "-q", "-m", "add pyproject.toml")
+    _real_git(repo, "push", "-q", "origin", "main")
+
+    assert issue_claim.main(["--repo", REPOSITORY, "land", "12"]) == 0
+
+    assert capsys.readouterr().out.splitlines()[-1] == (
+        "reinstall: uv tool install --force --from . agent-coordination"
+    )
+
+
+def test_land_refuses_a_dirty_checkout_before_any_write(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Issue #405: `land` fast-forwards this exact checkout once it merges,
+    so an uncommitted change here refuses before any write, never merged
+    away or silently ignored."""
+    repo, client = _land_scenario(monkeypatch, tmp_path)
+    (repo / "untracked.txt").write_text("dirty\n")
+
+    assert issue_claim.main(["--repo", REPOSITORY, "land", "12"]) == 2
+
+    assert capsys.readouterr().err == (
+        "ERROR: land must run from a clean checkout of the default branch 'main'\n"
+    )
+    assert client.merge_calls == []
+
+
+def test_land_refuses_when_the_default_branch_is_unknown(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Issue #405: a checkout whose `origin/HEAD` was never recorded denies
+    outright rather than guessing, the same risk `rescope`'s own resolved
+    checkout precondition refuses (issue #314 gate G4)."""
+    _repo, client = _land_scenario(monkeypatch, tmp_path, set_head=False)
+
+    assert issue_claim.main(["--repo", REPOSITORY, "land", "12"]) == 2
+
+    assert capsys.readouterr().err == f"ERROR: {checkout.DEFAULT_BRANCH_UNKNOWN_REASON}\n"
+    assert client.merge_calls == []
+
+
+def test_land_trunk_trailer_renders_the_trunk_grammar_for_both_classifications() -> None:
+    """Issue #405: a trunk trailer is always local (`Work-Item: #<n>`,
+    never the pull request body's qualified `owner/repo#n` form); a
+    `No-Item:` classification renders unchanged either way."""
+    work_item = board.WorkItemClassification(board.IssueReference(REPOSITORY, 72))
+    no_item = board.NoItemClassification(board.NoItemKind.DOCS)
+
+    assert issue_claim._land_trunk_trailer(work_item) == "Work-Item: #72"
+    assert issue_claim._land_trunk_trailer(no_item) == "No-Item: docs"
+
+
+def test_land_merge_body_composes_the_trailer_as_its_own_last_paragraph() -> None:
+    """Issue #405, Befund 42 on #310: the classification line is removed
+    from wherever the body put it and reappears as the message's own final
+    paragraph; a body with nothing left over is the trailer alone."""
+    no_item = board.NoItemClassification(board.NoItemKind.FIX)
+
+    with_prose = issue_claim._land_merge_body("Tidies the README.\n\nNo-Item: fix\n", no_item)
+    assert with_prose == "Tidies the README.\n\nNo-Item: fix\n"
+
+    bare = issue_claim._land_merge_body("No-Item: fix\n", no_item)
+    assert bare == "No-Item: fix\n"
+
+
+def test_land_release_routing_reuses_the_verified_classification_for_a_fresh_merge() -> None:
+    """Issue #405 point 4: a fresh merge routes `release --merged` straight
+    from the classification this same run's own preflight already verified
+    -- never a read of anything, pull request body included."""
+    work_item = board.WorkItemClassification(board.IssueReference(REPOSITORY, 72))
+    no_item = board.NoItemClassification(board.NoItemKind.DOCS)
+
+    assert issue_claim._land_release_routing(work_item, MERGE_COMMIT_SHA, REPOSITORY) == 72
+    assert issue_claim._land_release_routing(no_item, MERGE_COMMIT_SHA, REPOSITORY) is None
+
+
+def test_land_release_routing_reads_the_merge_commit_trailer_for_a_rerun(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #405 point 4: `classification=None` (a rerun) reads the walked
+    trunk's own trailer instead, routing a `No-Item:` merge commit to no
+    issue -- the same recovery `test_land_rerun_recovers_release_routing_
+    after_the_body_changed` proves end to end for a `Work-Item:` one."""
+    landing = checkout.TrunkLanding(
+        MERGE_COMMIT_SHA, datetime.now(UTC), board.NoItemClassification(board.NoItemKind.FIX)
+    )
+    monkeypatch.setattr(checkout, "trunk_landings", lambda *_args, **_kwargs: (landing,))
+
+    assert issue_claim._land_release_routing(None, MERGE_COMMIT_SHA, REPOSITORY) is None
+
+
+def test_land_release_routing_refuses_a_rerun_with_no_usable_merge_commit_trailer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #405 point 4: a rerun's own merge-commit trailer read refuses
+    by name when the walked trunk carries the sha with neither a
+    `Work-Item:` nor a `No-Item:` trailer -- never a bare re-read of the
+    pull request's own body."""
+    monkeypatch.setattr(checkout, "trunk_landings", lambda *_args, **_kwargs: ())
+
+    with pytest.raises(ClaimError, match="carries no `Work-Item:` or `No-Item:` trailer"):
+        issue_claim._land_release_routing(None, MERGE_COMMIT_SHA, REPOSITORY)
+
+
+def test_land_rerun_recovers_release_routing_after_the_body_changed(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Issue #405 point 4 (Befund 42 on #310's own risk): once merged,
+    `_land_release_routing` never re-reads the pull request's own mutable
+    body -- a fixer editing it away after the merge still leaves a rerun
+    able to recover the exact item the merge commit's own trailer names,
+    read exactly as `_verify_merged_release` reads it (issue #397, Befund
+    41)."""
+    _repo, client = _land_merged_pending_release(monkeypatch, capsys, tmp_path)
+
+    # A fixer edits the merged pull request's own body afterward (Befund 41):
+    # its classification line is gone, but the merge commit's own trailer
+    # `aco land` composed at merge time is untouched.
+    client.landings[12] = replace(client.landings[12], body="Advances #72")
+
+    assert issue_claim.main(["--repo", REPOSITORY, "land", "12"]) == 0
+
+    assert len(client.merge_calls) == 1
+    assert client.closed_issues == {WORK_ITEM_ISSUE}
+
+
+@pytest.mark.parametrize(
+    ("project_toml", "expected"),
+    [
+        pytest.param('[project]\nname = "agent-coordination"\n', True, id="this-package"),
+        pytest.param('[project]\nname = "other-package"\n', False, id="another-package"),
+        pytest.param(None, False, id="no-pyproject-toml"),
+    ],
+)
+def test_land_is_own_repository(tmp_path: Path, project_toml: str | None, expected: bool) -> None:
+    if project_toml is not None:
+        (tmp_path / "pyproject.toml").write_text(project_toml)
+
+    assert issue_claim._land_is_own_repository(tmp_path) is expected
+
+
 def test_release_abandoned_records_why_the_lane_stopped(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -12688,6 +13521,13 @@ def test_release_branch_selects_a_lane_claim_without_checking_out_that_branch(
     if outcome_flags[0] == "--merged":
         client.landings[12] = landing_pull_request(
             body="No-Item: docs", merged=True, base_ref_name="main", head_ref_name=LANE_BRANCH
+        )
+        monkeypatch.setattr(
+            checkout,
+            "trunk_landings",
+            lambda *_args, **_kwargs: (
+                _trunk_landing(MERGE_COMMIT_SHA, board.NoItemClassification(board.NoItemKind.DOCS)),
+            ),
         )
     _patch_release_session(monkeypatch, client, standing, forbid_git=True)
 
@@ -14810,6 +15650,7 @@ def test_item_show_refuses_an_unknown_id(
 # before the file's own autouse `_stub_store_write` ever runs, so each
 # `reset` test can hand the real functions straight back to `store`.
 _REAL_STORE_FETCH_STATE = store.fetch_state
+_REAL_STORE_PEEK_STATE = store.peek_state
 _REAL_STORE_COMMIT_TRANSITION = store.commit_transition
 _REAL_STORE_CLAIM_AGES = store.claim_ages
 _REAL_STORE_CLAIM_LIFECYCLE = store.claim_lifecycle
@@ -14820,6 +15661,7 @@ def _use_real_store(monkeypatch: pytest.MonkeyPatch) -> None:
     `reset` proves real git behaviour end to end, never the fake's own
     agreement with itself."""
     monkeypatch.setattr(store, "fetch_state", _REAL_STORE_FETCH_STATE)
+    monkeypatch.setattr(store, "peek_state", _REAL_STORE_PEEK_STATE)
     monkeypatch.setattr(store, "commit_transition", _REAL_STORE_COMMIT_TRANSITION)
     monkeypatch.setattr(store, "claim_ages", _REAL_STORE_CLAIM_AGES)
     monkeypatch.setattr(store, "claim_lifecycle", _REAL_STORE_CLAIM_LIFECYCLE)
