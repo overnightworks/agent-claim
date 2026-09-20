@@ -103,7 +103,7 @@ to the clause each names below.
 | CLAIM-55 (item names no scope), CLAIM-54 (scope mismatch), CLAIM-68 (malformed body while deriving) | `body_invalid` |
 | CLM-25 (identity, claim id, or resource conflict) | `claim_conflict` |
 | CLM-26 (`--repo` under `storage = state-ref`) | `invalid_usage` |
-| a missing agent identity, before the handler runs (OUT-05) | `precondition_failed` |
+| a missing agent identity, before the command starts (OUT-05) | `precondition_failed` |
 
 ## Never
 

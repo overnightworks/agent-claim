@@ -10,8 +10,8 @@ may and may not carry -- and applies to every command whose own spec cites
 `specs/release.spec.md`, `specs/cut.spec.md`, `specs/item.spec.md`), each
 naming its own `reason` vocabulary with examples. Every `--json` command's
 own spec now cites this file (issue #425 finished the migration ask/rule/
-brief started), including the refusals that fire before a command's own
-handler ever runs (OUT-05).
+brief started), including the refusals that fire before the
+named command starts (OUT-05).
 
 ## Behavior table
 
@@ -19,14 +19,14 @@ handler ever runs (OUT-05).
 |---|---|
 | a migrated command's own success | OUT-01, OUT-02 |
 | a migrated command's own refusal | OUT-01, OUT-03 |
-| a refusal before the chosen command's own handler | OUT-01, OUT-05 |
+| a refusal before the named command starts | OUT-01, OUT-05 |
 
 ## The envelope
 
 - [ ] [OUT-01] Every migrated command's `--json` object prints `ok` first and `reason` second, in that order, before any of the command's own payload keys.
 - [ ] [OUT-02] `ok` is `true` only for that command's own success outcome; `reason` is always one stable token from that command's own enum, documented by its own spec, never a free sentence.
 - [ ] [OUT-03] A refusal's `reason` names its enum member, never an `error` object; an optional `message` -- the sentence stderr's `ERROR:` line already printed -- is always the envelope's last key, when given.
-- [ ] [OUT-05] A refusal before the chosen command's own handler runs -- a missing agent identity, `release`'s branch checks -- prints this envelope too, `reason` `precondition_failed` (see E-OUT-03).
+- [ ] [OUT-05] A refusal raised before the named command starts -- a missing identity, `release`'s branch checks -- prints this envelope, `reason` `precondition_failed`, its sentence as `message`.
 - OUT-04 (retired 20.09.2026, issue #425): the `{"ok": false, "error": "<sentence>"}` fallback it kept for a command whose own spec cited no `OUT-nn` no longer exists; every `--json` command cites this file now.
 
 ## Never
@@ -67,7 +67,7 @@ $ aco ask aco-000001 --text "New question?" --json
 exit 2
 ```
 
-### E-OUT-03 -- a refusal before the command's own handler
+### E-OUT-03 -- a refusal before the named command starts
 
 Setup: bare-remote, bootstrapped, `ACO_AGENT`, `GROK_SESSION_ID` and `CLAUDE_SESSION_ID` all unset
 
