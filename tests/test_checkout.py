@@ -1651,7 +1651,8 @@ def test_remove_linked_worktree_reports_the_worktree_removed_and_the_branch_kept
     assert not worktree.exists()
     assert outcome.worktree.removed is True
     assert outcome.branch.removed is False
-    assert outcome.branch.reason is not None and "not fully merged" in outcome.branch.reason
+    assert outcome.branch.reason is not None
+    assert "not fully merged" in outcome.branch.reason
 
 
 def test_branch_merged_into_default_fails_loud_when_the_fetch_itself_fails(
