@@ -1,0 +1,8 @@
+claim_id = "dd4e3067bc0e42d89b504717bb136c03"
+agent = "Claude head (coordinator)"
+role = "builder"
+base = "d70c4156e3fbeeb9a414c0e5baa3b830a17ea97a"
+branch = "claude/issue-395-ownership-bundle-3"
+scope = ["scripts/spec_coverage_ratchet.txt", "scripts/test_budget.py", "scripts/test_inventory.py", "src/agent_coordination/board.py", "src/agent_coordination/board_html.py", "src/agent_coordination/cli.py", "tests/test_board.py", "tests/test_board_html.py", "tests/test_cli.py"]
+opened_commit = "77a0343b233360d64aaa19320dc2661d58d8ad9f"
+whole_reason = "ownership bundle 3: four mechanical de-duplications across board, board_html, cli and scripts"
