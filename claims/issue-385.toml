@@ -1,8 +1,0 @@
-claim_id = "187b132f1fed4fd898beb70835a31240"
-agent = "Claude head (coordinator)"
-role = "builder"
-base = "87af698437d72fbc784218d5c4d0e4f05aeb8504"
-branch = "claude/issue-385-spec-lint"
-scope = [".github/workflows/ci.yml", "scripts/spec_lint.py", "scripts/spec_lint_exemptions.txt", "specs", "tests/test_spec_lint.py"]
-opened_commit = "7f36eaa4e601b20e390246016e09ddddf2035cd9"
-whole_reason = "gate script, its tests, CI step and the spec files it corrects"
