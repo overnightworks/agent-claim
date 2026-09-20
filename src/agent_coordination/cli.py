@@ -50,6 +50,10 @@ WHOLE_HELP = (
     "three paths, any directory, or, once the repository has at least twelve "
     "versioned files, more than a quarter of them"
 )
+ITEM_WHOLE_HELP = (
+    "one sentence justifying this item's own wide scope, stored in its body; "
+    "claim/start read it as --whole's own fallback when the call itself names none"
+)
 START_DESCRIPTION = (
     "Creates the item's linked worktree and branch from the canonical remote's own trunk "
     "when neither exists yet, then claims it exactly as aco claim would; a second call "
@@ -118,7 +122,7 @@ def _optional_whole_reason(arguments: argparse.Namespace) -> str | None:
     raw = getattr(arguments, "whole", None)
     if raw is None:
         return None
-    return protocol._outbound_text(raw, "whole reason", maximum=512)
+    return protocol._outbound_text(raw, _WHOLE_REASON_LABEL, maximum=512)
 
 
 def _wide_scope_condition(trip: protocol.WideScopeTrip) -> str:
@@ -135,8 +139,16 @@ def _wide_scope_condition(trip: protocol.WideScopeTrip) -> str:
     return f"{covered} {path_word} of {total} versioned files ({percent} %) exceeds a quarter"
 
 
-def _wide_scope_refusal(trip: protocol.WideScopeTrip) -> str:
-    return f"scope is wide: {_wide_scope_condition(trip)}; pass --whole REASON"
+_WHOLE_REASON_LABEL = "whole reason"
+"""`protocol._outbound_text`'s own field name for a `--whole`/body `whole` value
+(issue #399), named once here beside the width-gate refusal it justifies --
+`_optional_whole_reason`, `_cmd_item_edit_whole` and `_whole_from_item_body`
+all bound the same reason text and must refuse by the same name."""
+
+
+def _wide_scope_refusal(trip: protocol.WideScopeTrip, *, names_body_fallback: bool) -> str:
+    suffix = " or set whole in the body" if names_body_fallback else ""
+    return f"scope is wide: {_wide_scope_condition(trip)}; pass --whole REASON{suffix}"
 
 
 def _reject_wide_scope(
@@ -145,15 +157,31 @@ def _reject_wide_scope(
     whole_reason: str | None,
     *,
     directory: Path | None = None,
-) -> tuple[int, int, float]:
+    whole_from_body: Callable[[], str | None] | None = None,
+) -> tuple[int, int, float, str | None]:
+    """`scope`'s own width gate (issue #326), `whole_reason`'s own text
+    admitting a wide one exactly as before -- plus, for `claim`/`start`
+    (issue #399), the effective reason actually used: `whole_reason` itself
+    when given, else `whole_from_body()`, read only once the gate actually
+    trips and the caller named none, so a narrow scope or an explicit
+    `--whole` never costs the body read `whole_from_body` performs.
+    `rescope` passes no `whole_from_body` at all, and keeps the plain
+    refusal: it never reads an item's own body for this."""
     n, total, share = _scope_cost(versioned, scope)
     directories = checkout._scope_directories(scope, directory=directory)
     trip = protocol.wide_scope_trip(
         scope, directories=directories, covered_file_count=n, versioned_file_count=total
     )
-    if trip is not None and whole_reason is None:
-        raise protocol.ClaimError(_wide_scope_refusal(trip))
-    return n, total, share
+    if trip is None:
+        return n, total, share, whole_reason
+    effective = whole_reason
+    if effective is None and whole_from_body is not None:
+        effective = whole_from_body()
+    if effective is None:
+        raise protocol.ClaimError(
+            _wide_scope_refusal(trip, names_body_fallback=whole_from_body is not None)
+        )
+    return n, total, share, effective
 
 
 def _reject_ungrounded_comma_scope(
@@ -734,6 +762,7 @@ def _add_item_parser(commands: argparse._SubParsersAction) -> None:
         choices=tuple(metrics.Size),
         help="this item's size class, for the board's own measured estimate; default none",
     )
+    new.add_argument("--whole", metavar="REASON", help=ITEM_WHOLE_HELP)
     new.add_argument("--json", action="store_true", help=JSON_HELP)
     show = item_commands.add_parser(
         "show", help="print one item's header and its stored body byte-exact"
@@ -752,6 +781,11 @@ def _add_item_parser(commands: argparse._SubParsersAction) -> None:
         "--size",
         choices=tuple(metrics.Size),
         help="set only this item's size class (any storage); skips the stdin body read",
+    )
+    edit.add_argument(
+        "--whole",
+        metavar="REASON",
+        help="set only this item's whole reason (any storage); skips the stdin body read",
     )
     edit.add_argument("--json", action="store_true", help=JSON_HELP)
     close = item_commands.add_parser(
@@ -2817,6 +2851,7 @@ def _cmd_item_new(parsed: argparse.Namespace) -> int:
     )
     body = _block_body_with_scope(skeleton, _requested_body_scope(parsed.scope))
     body = _block_body_with_size(body, parsed.size)
+    body = _block_body_with_whole(body, _requested_whole_reason(parsed.whole))
     item_id = client.create_item(
         title=parsed.title, body=body, kind=kind, parent=parsed.parent, origin=parsed.origin
     )
@@ -2835,13 +2870,14 @@ ITEM_EDIT_GITHUB_REFUSAL = "forge issues are edited on the forge; aco never gove
 
 
 def _cmd_item_edit(parsed: argparse.Namespace) -> int:
-    """`aco item edit ITEM` (issue #287; `--size`, issue #357): with
-    `--size`, a narrow write of only this item's size class
-    (`_cmd_item_edit_size`, both storages); without it, the state-ref item's
-    own body, replaced from stdin only -- refused before any write when the
-    piped body carries no valid `agent-claim` block (`body --check`'s own
-    sentences, `_body_shape_defects`). The CAS `expected` oid is this
-    process's own already-read snapshot (`StateRefBoard.update_item_body`'s
+    """`aco item edit ITEM` (issue #287; `--size`, issue #357; `--whole`,
+    issue #399): with `--size` or `--whole`, a narrow write of only that one
+    top-level field (`_cmd_item_edit_size`/`_cmd_item_edit_whole`, both
+    storages); with neither, the state-ref item's own body, replaced from
+    stdin only -- refused before any write when the piped body carries no
+    valid `agent-claim` block (`body --check`'s own sentences,
+    `_body_shape_defects`). The CAS `expected` oid is this process's own
+    already-read snapshot (`StateRefBoard.update_item_body`'s
     `current.oid`, set once at `_state_ref_forge` construction): a second
     process writing from that same snapshot refuses with issue #279's own
     sentence, never merged, never silently overwritten. `parent`, `state`,
@@ -2856,6 +2892,8 @@ def _cmd_item_edit(parsed: argparse.Namespace) -> int:
     other write command narrows to)."""
     if parsed.size is not None:
         return _cmd_item_edit_size(parsed)
+    if parsed.whole is not None:
+        return _cmd_item_edit_whole(parsed)
     toplevel = _resolve_toplevel()
     config = _board_config(toplevel)
     if config.storage is not board.Storage.STATE_REF:
@@ -2905,6 +2943,37 @@ def _print_item_edit_size_result(number: int, size: str, *, as_json: bool) -> No
         print(json.dumps({"item": number, "size": size}))
     else:
         print(f"EDITED #{number} size={size}")
+
+
+ITEM_EDIT_WHOLE_COMMAND = "item edit --whole"
+
+
+def _cmd_item_edit_whole(parsed: argparse.Namespace) -> int:
+    """`aco item edit ITEM --whole REASON` (issue #399): the one item-whole
+    write, mirroring `_cmd_item_edit_size` over the same generic
+    `ForgeWriter.update_item_body` -- works under `storage = "github"` too,
+    since it patches only the block's own top-level `whole` key and leaves
+    every other byte untouched."""
+    client = _LazyForge(parsed.repo).writer()
+    _require_update_item_body(client, command=ITEM_EDIT_WHOLE_COMMAND)
+    number = parsed.item
+    body = _item_body_or_refuse(client, number, command=ITEM_EDIT_WHOLE_COMMAND)
+    storage = _board_config(_resolve_toplevel()).storage
+    located = _located_block_or_refuse(
+        number, body, command=ITEM_EDIT_WHOLE_COMMAND, storage=storage
+    )
+    reason = protocol._outbound_text(parsed.whole, _WHOLE_REASON_LABEL, maximum=512)
+    new_data = {**located.data, "whole": reason}
+    client.update_item_body(number, board.replace_agent_claim_block(body, located, new_data))
+    _print_item_edit_whole_result(number, reason, as_json=parsed.json)
+    return 0
+
+
+def _print_item_edit_whole_result(number: int, reason: str, *, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps({"item": number, "whole": reason}))
+    else:
+        print(f"EDITED #{number} whole={reason}")
 
 
 def _print_item_edit_result(
@@ -3958,6 +4027,58 @@ def _item_scope(
     return board.parse_body(body, storage=storage).scope
 
 
+def _item_whole(
+    client: forge.ForgeReader,
+    open_by_number: Mapping[int, board.Issue],
+    number: int,
+    *,
+    storage: board.Storage,
+) -> str | None:
+    """The item's own top-level `whole = "<reason>"` (issue #399), read the
+    same way `_item_scope` reads `scope`: from `open_by_number` when the
+    target is open, else the single-item fallback -- so this never costs a
+    second read when the caller already fetched the open board for its own
+    reason."""
+    issue = open_by_number.get(number)
+    body = (
+        issue.body if issue is not None else _item_body_or_refuse(client, number, command="claim")
+    )
+    return board.parse_body(body, storage=storage).whole
+
+
+def _whole_from_item_body(
+    session: _WriteSession,
+    identity: protocol.ClaimIdentity,
+    *,
+    directory: Path | None,
+    open_by_number: Mapping[int, board.Issue] | None,
+) -> Callable[[], str | None] | None:
+    """The wide-scope gate's own fallback for `claim`/`start` (issue #399):
+    `None` for a lane claim, which names no item to read one from; otherwise
+    a lazy resolver `_reject_wide_scope` calls only once the scope actually
+    trips the gate and neither call names `--whole` -- so a narrow scope, or
+    an explicit `--whole`, never costs this read. Reuses `open_by_number`
+    when the caller already fetched it (a derived scope, or the slice-rule
+    checks); resolves the repository's own storage pin itself, since a
+    trip's resolver runs before `_cmd_claim`'s own branch has necessarily
+    done so."""
+    if not isinstance(identity, protocol.IssueIdentity):
+        return None
+    number = identity.issue
+
+    def resolve() -> str | None:
+        client = session.forge()
+        storage = _board_config(_resolve_toplevel(directory=directory)).storage
+        listing = (
+            open_by_number
+            if open_by_number is not None
+            else {issue.number: issue for issue in client.list_open_board_issues()}
+        )
+        return _item_whole(client, listing, number, storage=storage)
+
+    return resolve
+
+
 def _resolved_claim_request(
     requested: protocol.ClaimRequest,
     observed: protocol.ClaimState,
@@ -4016,18 +4137,29 @@ def _reject_scope_mismatch(
 
 
 def _scope_versioning(
-    scope: tuple[str, ...], whole_reason: str | None, *, directory: Path | None = None
-) -> ScopeVersioning:
+    scope: tuple[str, ...],
+    whole_reason: str | None,
+    *,
+    directory: Path | None = None,
+    whole_from_body: Callable[[], str | None] | None = None,
+) -> tuple[ScopeVersioning, str | None]:
     """`claim`'s local, forge-free scope checks (issue #207's comma guard,
     the wide-scope width gate) against the real checkout, run once the
     requested scope is final -- whether it came from `--scope` or was
     derived from the item's own body. Read from `directory` via `-C` when
     given (issue #322: `start`'s own resolved worktree, never a
-    process-wide `os.chdir`) or the calling process's own cwd otherwise."""
+    process-wide `os.chdir`) or the calling process's own cwd otherwise.
+    The second element is the effective `whole_reason` the width gate
+    actually admitted the scope with (issue #399): `whole_reason` itself, or
+    `whole_from_body()`'s own result when the gate tripped and needed it --
+    the caller's own claim persists this, not the raw `whole_reason` it
+    passed in."""
     versioned = checkout.versioned_paths(directory=directory)
     _reject_ungrounded_comma_scope(scope, versioned, flag="--scope")
-    n, total, share = _reject_wide_scope(scope, versioned, whole_reason, directory=directory)
-    return ScopeVersioning(n, total, share)
+    n, total, share, effective_whole_reason = _reject_wide_scope(
+        scope, versioned, whole_reason, directory=directory, whole_from_body=whole_from_body
+    )
+    return ScopeVersioning(n, total, share), effective_whole_reason
 
 
 @dataclass(frozen=True)
@@ -4099,8 +4231,19 @@ def _cmd_claim(
         # Scope already final (given, or a lane's own required value): the
         # local shape checks run first, exactly as before this field
         # existed, so a comma or width refusal never touches the store or
-        # resolves the repository toplevel.
-        versioning = _scope_versioning(requested.scope, requested.whole_reason, directory=directory)
+        # resolves the repository toplevel -- unless the scope is actually
+        # wide and names no `--whole` of its own, in which case the width
+        # gate's own lazy fallback (issue #399) resolves the toplevel itself
+        # to read the item's body, never this branch.
+        versioning, effective_whole = _scope_versioning(
+            requested.scope,
+            requested.whole_reason,
+            directory=directory,
+            whole_from_body=_whole_from_item_body(
+                session, requested.identity, directory=directory, open_by_number=None
+            ),
+        )
+        requested = replace(requested, whole_reason=effective_whole)
         worktree, canonical_remote, observed = _store_observation(directory=directory)
         _require_state_ref(observed)
         storage = _board_config(_resolve_toplevel(directory=directory)).storage
@@ -4113,7 +4256,15 @@ def _cmd_claim(
         _require_state_ref(observed)
         storage = _board_config(_resolve_toplevel(directory=directory)).storage
         requested, open_by_number = _resolved_claim_request(requested, observed, session, storage)
-        versioning = _scope_versioning(requested.scope, requested.whole_reason, directory=directory)
+        versioning, effective_whole = _scope_versioning(
+            requested.scope,
+            requested.whole_reason,
+            directory=directory,
+            whole_from_body=_whole_from_item_body(
+                session, requested.identity, directory=directory, open_by_number=open_by_number
+            ),
+        )
+        requested = replace(requested, whole_reason=effective_whole)
     checks, target_issue, replayed = _claim_target_checks(
         session, requested, observed, _ClaimTargetContext(storage, worktree, open_by_number)
     )
@@ -4174,7 +4325,7 @@ def _print_start_resume(
     if parsed.scope is not None and protocol.valid_scope(parsed.scope) != live.scope:
         raise protocol.ClaimUnavailableError(RESUME_SCOPE_MISMATCH)
     print(f"CLAIMED {_claim_subject(live, storage)}: {live.claim_id}")
-    versioning = _scope_versioning(
+    versioning, _effective_whole = _scope_versioning(
         live.scope,
         parsed.whole if parsed.whole is not None else live.whole_reason,
         directory=directory,
@@ -4749,6 +4900,27 @@ def _block_body_with_size(body: str, size: str | None) -> str:
         return body
     located = board.locate_agent_claim_block(body)
     new_data = {**located.data, "size": size}
+    return board.replace_agent_claim_block(body, located, new_data)
+
+
+def _requested_whole_reason(raw: str | None) -> str | None:
+    """A `--whole` flag's own bounded text (issue #399), or `None` when it
+    was never given -- `item new`'s own entry point into the same
+    `protocol._outbound_text` bound `claim`'s own `--whole` already enforces
+    (`_optional_whole_reason`), so the two never drift on what a legal
+    reason looks like."""
+    return None if raw is None else protocol._outbound_text(raw, _WHOLE_REASON_LABEL, maximum=512)
+
+
+def _block_body_with_whole(body: str, whole: str | None) -> str:
+    """`body`'s `agent-claim` block, with a top-level `whole = "<reason>"`
+    written in (issue #399) -- the same write path `_block_body_with_size`
+    uses, so `item new --whole` never grows a second body writer. `body`
+    unchanged when `whole` is `None`."""
+    if whole is None:
+        return body
+    located = board.locate_agent_claim_block(body)
+    new_data = {**located.data, "whole": whole}
     return board.replace_agent_claim_block(body, located, new_data)
 
 

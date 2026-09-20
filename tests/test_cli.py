@@ -2513,7 +2513,9 @@ def test_claim_refuses_when_the_higher_priority_item_needs_refining(
         11,
         "Needs rulings",
         complete_contract(
-            "Claim #11.", expectation=[proposed_expectation("Name it.", default="yes")]
+            "Claim #11.",
+            scope=["src/needs-rulings.py"],
+            expectation=[proposed_expectation("Name it.", default="yes")],
         ),
     )
     waiting, waiting_dependencies = blocked_issue(
@@ -2717,7 +2719,7 @@ def test_claim_refuses_out_of_order_without_a_reason_before_mutating(
     client = FakeForge()
     issues = (
         board_issue(10, "Lower work", complete_contract("Claim #10.")),
-        board_issue(11, "Top work", complete_contract("Claim #11.")),
+        board_issue(11, "Top work", complete_contract("Claim #11.", scope=["src/top.py"])),
         board_issue(12, "Depends on top", complete_contract("Claim #12."), blocked_by_count=1),
     )
     client.board_dependencies = {12: (block_dependency(11),)}
@@ -2756,7 +2758,7 @@ def test_claim_allows_out_of_order_with_a_reason_and_records_it(
     client = FakeForge()
     issues = (
         board_issue(10, "Lower work", complete_contract("Claim #10.")),
-        board_issue(11, "Top work", complete_contract("Claim #11.")),
+        board_issue(11, "Top work", complete_contract("Claim #11.", scope=["src/top.py"])),
         board_issue(12, "Depends on top", complete_contract("Claim #12."), blocked_by_count=1),
     )
     client.board_dependencies = {12: (block_dependency(11),)}
@@ -2806,7 +2808,9 @@ def test_claim_refuses_for_a_higher_priority_item_even_at_a_lower_score(
     """
     client = FakeForge()
     blocker = board_issue(
-        50, "Prerequisite the operator prioritized", complete_contract("Unblock #52.")
+        50,
+        "Prerequisite the operator prioritized",
+        complete_contract("Unblock #52.", scope=["src/prerequisite.py"]),
     )
     dependent, dependent_blockers = blocked_issue(
         52, "Depends on the prerequisite", block_dependency(50), next_step="Ship it."
@@ -2853,7 +2857,7 @@ def test_claim_json_refusal_reports_out_of_order_without_mutating(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
     lower = board_issue(10, "Lower work", complete_contract("Claim #10."))
-    top = board_issue(11, "Top work", complete_contract("Claim #11."))
+    top = board_issue(11, "Top work", complete_contract("Claim #11.", scope=["src/top.py"]))
     dependent, dependent_blockers = blocked_issue(
         12, "Depends on top", block_dependency(11), next_step="Claim #12."
     )
@@ -5650,7 +5654,8 @@ def test_claim_treats_a_higher_ranked_configured_idea_as_out_of_order(
     idea = board_issue(
         11,
         "Higher-ranked vision",
-        idea_body("Improve claims."),
+        "## Wunsch\nImprove claims.\n\n"
+        + complete_contract("", now="", done_when="", scope=["src/idea.py"]),
         labels=("vision", "security"),
     )
     _configured_board_client(monkeypatch, tmp_path, open_issues=(lower, idea))
@@ -8147,7 +8152,7 @@ def _claim_argv(*flags: str) -> list[str]:
             ["a.py", "b.py", "c.py", "d.py"],
             (),
             2,
-            "scope is wide: 4 paths exceeds three; pass --whole REASON",
+            "scope is wide: 4 paths exceeds three; pass --whole REASON or set whole in the body",
             None,
             None,
             id="a-derived-wide-scope-refuses-without-whole",
@@ -8251,6 +8256,74 @@ def test_cli_claim_scope_derivation_against_the_items_own_body(
         return
     assert capsys.readouterr().err == f"ERROR: {expected_scope_or_error}\n"
     assert store.fetch_state(worktree=Path("."), remote="origin").claims == {}
+
+
+def test_cli_claim_derives_whole_from_the_items_own_body_when_wide(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #399 proof 1: `--whole` omitted, a target naming its own body
+    `whole` justifies a wide derived scope exactly as `--whole REASON`
+    would -- the item's own sentence lands on the claim itself."""
+    reason = "the four adapters share one lock"
+    client = _arranged_claim_client(monkeypatch)
+    client.board_issues = (
+        board_issue(
+            72,
+            "Work",
+            complete_contract("Ship it.", scope=["a.py", "b.py", "c.py", "d.py"], whole=reason),
+        ),
+    )
+
+    status = issue_claim.main(_claim_argv())
+
+    assert status == 0
+    assert "CLAIMED issue #72" in capsys.readouterr().out
+    assert _live_store_claim().whole_reason == reason
+
+
+def test_cli_claim_names_both_remedies_when_the_body_has_no_whole(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #399 proof 1: neither `--whole` nor the item's own body `whole`
+    present, the width gate's refusal names both remedies."""
+    client = _arranged_claim_client(monkeypatch)
+    client.board_issues = (
+        board_issue(
+            72, "Work", complete_contract("Ship it.", scope=["a.py", "b.py", "c.py", "d.py"])
+        ),
+    )
+
+    status = issue_claim.main(_claim_argv())
+
+    assert status == 2
+    assert capsys.readouterr().err == (
+        "ERROR: scope is wide: 4 paths exceeds three; "
+        "pass --whole REASON or set whole in the body\n"
+    )
+
+
+def test_cli_claim_explicit_whole_overrides_the_items_own_body(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #399 proof 1: an explicit `--whole` always wins over the
+    item's own body `whole`."""
+    body_reason = "the four adapters share one lock"
+    cli_reason = "urgent, splitting later"
+    client = _arranged_claim_client(monkeypatch)
+    client.board_issues = (
+        board_issue(
+            72,
+            "Work",
+            complete_contract(
+                "Ship it.", scope=["a.py", "b.py", "c.py", "d.py"], whole=body_reason
+            ),
+        ),
+    )
+
+    status = issue_claim.main(_claim_argv("--whole", cli_reason))
+
+    assert status == 0
+    assert _live_store_claim().whole_reason == cli_reason
 
 
 def test_cli_claim_replay_without_scope_takes_the_live_claims_own_stored_scope(
@@ -8475,7 +8548,7 @@ def test_cli_claim_replay_does_not_bypass_out_of_order_for_another_agent(
     client = FakeForge()
     client.board_issues = (
         board_issue(10, "Lower work", complete_contract("Claim #10.")),
-        board_issue(11, "Top work", complete_contract("Claim #11.")),
+        board_issue(11, "Top work", complete_contract("Claim #11.", scope=["src/top.py"])),
         board_issue(12, "Depends on top", complete_contract("Claim #12."), blocked_by_count=1),
     )
     client.board_dependencies = {12: (block_dependency(11),)}
@@ -9147,7 +9220,10 @@ _SCOPE_WIDTH_REFUSALS = (
         command="claim",
         argv_tail=("--scope", "docs", "--claim-id", "named-directory"),
         directories=frozenset({"docs"}),
-        exact_err="ERROR: scope is wide: 1 directory in scope (docs); pass --whole REASON\n",
+        exact_err=(
+            "ERROR: scope is wide: 1 directory in scope (docs); "
+            "pass --whole REASON or set whole in the body\n"
+        ),
     ),
     _ScopeWidthRefusal(
         id="directory-plus-child-scope",
@@ -9193,7 +9269,7 @@ _SCOPE_WIDTH_REFUSALS = (
         versioned=TWELVE_VERSIONED_FILES,
         exact_err=(
             "ERROR: scope is wide: 4 paths of 12 versioned files (33 %) exceeds a quarter; "
-            "pass --whole REASON\n"
+            "pass --whole REASON or set whole in the body\n"
         ),
     ),
     _ScopeWidthRefusal(
@@ -9280,7 +9356,10 @@ _SCOPE_WIDTH_REFUSALS = (
             "--claim-id",
             "named-path-count",
         ),
-        exact_err="ERROR: scope is wide: 4 paths exceeds three; pass --whole REASON\n",
+        exact_err=(
+            "ERROR: scope is wide: 4 paths exceeds three; "
+            "pass --whole REASON or set whole in the body\n"
+        ),
     ),
     _ScopeWidthRefusal(
         id="rescope-widening-to-four-paths",
@@ -14100,6 +14179,49 @@ def test_item_edit_size_refuses_an_invalid_value_before_any_write(
 
     assert exited.value.code == 2
     assert "invalid choice" in capsys.readouterr().err
+
+
+def test_item_edit_whole_writes_the_top_level_field_under_github_storage(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Issue #399: `item edit --whole REASON` writes through the same
+    generic `ForgeWriter.update_item_body` `--size` already uses, mirroring
+    `test_item_edit_size_writes_the_top_level_field_under_github_storage`."""
+    reason = "the four adapters share one lock"
+    client = _client_with_item(
+        monkeypatch, tmp_path, RULE_ITEM, agent_claim_body(MINIMAL_BLOCK_TOML)
+    )
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "item", "edit", str(RULE_ITEM), "--whole", reason]
+    )
+
+    assert exit_code == 0
+    assert capsys.readouterr().out == f"EDITED #{RULE_ITEM} whole={reason}\n"
+    assert board.locate_agent_claim_block(client.item_bodies[RULE_ITEM]).data["whole"] == reason
+
+
+def test_item_edit_whole_json_reports_the_item_and_reason(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    reason = "the four adapters share one lock"
+    _client_with_item(monkeypatch, tmp_path, RULE_ITEM, agent_claim_body(MINIMAL_BLOCK_TOML))
+
+    exit_code = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "item",
+            "edit",
+            str(RULE_ITEM),
+            "--whole",
+            reason,
+            "--json",
+        ]
+    )
+
+    assert exit_code == 0
+    assert json.loads(capsys.readouterr().out) == {"item": RULE_ITEM, "whole": reason}
 
 
 def test_item_close_refuses_under_github_storage(capsys: pytest.CaptureFixture[str]) -> None:

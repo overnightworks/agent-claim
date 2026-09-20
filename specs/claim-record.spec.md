@@ -91,8 +91,8 @@ runner's own values; `<agent>` and `<role>` are the claimant's.
 
 ## Width
 
-- [ ] [CLAIM-25] A scope of four paths refuses `scope is wide: 4 paths exceeds three; pass --whole REASON`, exit `2`.
-- [ ] [CLAIM-26] A scope naming a directory refuses `scope is wide: 1 directory in scope (docs); pass --whole REASON`, exit `2`, whatever the path count is.
+- [ ] [CLAIM-25] A scope of four paths refuses `scope is wide: 4 paths exceeds three; pass --whole REASON`, exit `2`, for a lane claim or rescope; issue-mode claim ends it `or set whole in the body` instead.
+- [ ] [CLAIM-26] A scope naming a directory refuses `scope is wide: 1 directory in scope (docs); pass --whole REASON`, exit `2` for a lane claim or rescope, any path count; issue-mode adds `or set whole in the body`.
 - CLAIM-27 (retired 19.09.2026, issue #326): described a share-based wide-scope refusal `aco claim` can never produce — the path-count refusal (CLAIM-25) always trips first, capping the covered file count at three, which can never exceed a quarter once the share floor is met.
 - [ ] [CLAIM-28] Under twelve versioned files a single named path is never wide on share: `aco claim 42 --scope README.md` prints its `CLAIMED` line, exit `0`.
 - [ ] [CLAIM-29] `--whole "<one sentence>"` admits a wide scope, lands in the record, and `aco status` prints it as an indented `whole: <one sentence>` line (see E-CLAIM-04).
@@ -204,7 +204,7 @@ Setup: bare-remote, bootstrapped, a linked worktree on `ada/issue-42`
 
 ```console
 $ aco claim 42 --scope docs
-2> ERROR: scope is wide: 1 directory in scope (docs); pass --whole REASON
+2> ERROR: scope is wide: 1 directory in scope (docs); pass --whole REASON or set whole in the body
 exit 2
 $ aco claim 42 --scope docs --whole "the guide and its pages move together"
 CLAIMED issue #42: <claim-id>

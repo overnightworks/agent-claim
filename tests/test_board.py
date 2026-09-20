@@ -945,7 +945,9 @@ def test_board_treats_an_item_with_no_dependency_as_unblocked() -> None:
 
 def test_frozen_item_leaves_actionable_and_thaws_when_the_marker_is_removed() -> None:
     frozen = board_issue(
-        301, "Highest scored", complete_contract("Claim #301.", frozen_until=FROZEN_UNTIL)
+        301,
+        "Highest scored",
+        complete_contract("Claim #301.", frozen_until=FROZEN_UNTIL, scope=["src/widget.py"]),
     )
     projected_while_frozen = projected_board(
         (frozen,),
@@ -963,7 +965,9 @@ def test_frozen_item_leaves_actionable_and_thaws_when_the_marker_is_removed() ->
     assert item not in projected_while_frozen.ready_now
     assert board.highest_scored_actionable(projected_while_frozen) is None
 
-    thawed = board_issue(301, "Highest scored", complete_contract("Claim #301."))
+    thawed = board_issue(
+        301, "Highest scored", complete_contract("Claim #301.", scope=["src/widget.py"])
+    )
     projected_after_thaw = projected_board(
         (thawed,),
         (),
@@ -1979,7 +1983,9 @@ def test_next_names_the_boards_top_row_even_when_it_is_not_the_highest_score() -
     now = datetime(2026, 8, 21, tzinfo=UTC)
     in_flight_unlabelled = board_issue(50, "In-flight, unlabelled", complete_contract("Ship it."))
     blocker = board_issue(
-        51, "Prerequisite the operator prioritized", complete_contract("Unblock #52.")
+        51,
+        "Prerequisite the operator prioritized",
+        complete_contract("Unblock #52.", scope=["src/widget.py"]),
     )
     dependent, dependent_blockers = blocked_issue(
         52, "Depends on the prerequisite", block_dependency(51), next_step="Ship it."
@@ -2704,6 +2710,62 @@ def test_render_block_places_size_before_expectation_and_slice_tables() -> None:
     assert 'size = "M"' in rendered
 
 
+def test_parse_body_reads_a_valid_whole() -> None:
+    """Issue #399: `whole` is a plain top-level block field -- `claim`/
+    `start`'s own fallback for `--whole` when the call itself names none."""
+    reason = "the four adapters share one lock"
+    parsed = board.parse_body(agent_claim_body(f'{MINIMAL_BLOCK_TOML}whole = "{reason}"\n'))
+
+    assert parsed.read_state is board.BodyReadState.VALID
+    assert parsed.whole == reason
+
+
+def test_parse_body_reads_no_whole_as_none() -> None:
+    parsed = board.parse_body(agent_claim_body(MINIMAL_BLOCK_TOML))
+
+    assert parsed.read_state is board.BodyReadState.VALID
+    assert parsed.whole is None
+
+
+def test_parse_body_refuses_a_blank_whole() -> None:
+    parsed = board.parse_body(agent_claim_body(f'{MINIMAL_BLOCK_TOML}whole = "   "\n'))
+
+    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert parsed.contract.defects[0] == board.ContractDefect(
+        "whole", "whole must be a non-empty string"
+    )
+
+
+def test_parse_body_refuses_a_non_string_whole_without_crashing() -> None:
+    """A list or table `whole` value must never reach `.strip()` unchecked
+    (mirrors issue #357 G1's own `size` guard): a type check ahead of it
+    reports the same defect sentence instead of raising `AttributeError`."""
+    parsed = board.parse_body(agent_claim_body(f"{MINIMAL_BLOCK_TOML}whole = [1]\n"))
+
+    assert parsed.read_state is board.BodyReadState.MALFORMED
+    assert parsed.contract.defects[0] == board.ContractDefect(
+        "whole", "whole must be a non-empty string"
+    )
+
+
+def test_render_block_places_whole_before_expectation_and_slice_tables() -> None:
+    data = {
+        "version": 1,
+        "now": "N",
+        "next": "X",
+        "done_when": "D",
+        "expectation": [{"text": "E", "default": "later"}],
+        "slice": [{"index": 1, "title": "Row"}],
+        "whole": "one lane owns every adapter",
+    }
+
+    rendered = board.render_block(data)
+
+    assert rendered.index("whole =") < rendered.index("[[expectation]]")
+    assert rendered.index("whole =") < rendered.index("[[slice]]")
+    assert 'whole = "one lane owns every adapter"' in rendered
+
+
 def test_parse_body_refuses_scope_as_an_unknown_expectation_key() -> None:
     """`scope` is a field of the block's top level and of `[[slice]]` rows
     only -- an `[[expectation]]` entry never grew it, so writing one there
@@ -3103,7 +3165,9 @@ def test_a_configured_idea_keeps_freeze_claim_and_blocker_reasons(
 
 
 def test_an_idea_without_a_priority_label_follows_the_regular_score_order() -> None:
-    regular_work = board_issue(10, "Regular work", complete_contract("Ship the change."))
+    regular_work = board_issue(
+        10, "Regular work", complete_contract("Ship the change.", scope=["src/widget.py"])
+    )
     idea = board_issue(11, "Operator idea", idea_body("Make the board clearer."), labels=("idea",))
 
     projected = projected_board(
@@ -3119,6 +3183,53 @@ def test_an_idea_without_a_priority_label_follows_the_regular_score_order() -> N
     assert [item.priority_bucket for item in projected.items] == ["unlabelled", "unlabelled"]
     assert [item.score for item in projected.items] == [-10, -20]
     assert board.highest_scored_actionable(projected) == projected.items[0]
+
+
+def test_highest_scored_actionable_skips_a_scopeless_sliceless_item() -> None:
+    """Issue #399 (finding 40 on #310): a higher-ranked, actionable item
+    naming neither `scope` nor a `[[slice]]` row is still `next`'s own top
+    action (`scope unknown` and all), but `claim`/`start`'s own precedence
+    check never stops on it -- it walks on to the highest-ranked *buildable*
+    row instead."""
+    unscoped_epic = board_issue(60, "Epic", complete_contract("Refine it."))
+    scoped_work = board_issue(61, "Lower work", complete_contract("Ship it.", scope=["src/x.py"]))
+
+    projected = projected_board(
+        (unscoped_epic, scoped_work),
+        (),
+        (),
+        (),
+        board.BoardConfig(),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+    )
+
+    assert [item.number for item in projected.items] == [unscoped_epic.number, scoped_work.number]
+    assert board.next_action(projected) == board.WorkItemAction(projected.items[0])
+    recommended = board.highest_scored_actionable(projected)
+    assert recommended is not None
+    assert recommended.number == scoped_work.number
+
+
+def test_highest_scored_actionable_accepts_a_scopeless_item_with_a_slice_row() -> None:
+    """Issue #399: an item naming no top-level `scope` but at least one
+    `[[slice]]` row still names a path to cut one from, so it is buildable
+    -- unlike a scopeless item with no rows at all."""
+    sliced = board_issue(
+        70, "Sliced work", complete_contract("Cut it.", slice=slice_entries("First slice"))
+    )
+
+    projected = projected_board(
+        (sliced,),
+        (),
+        (),
+        (),
+        board.BoardConfig(),
+        now=datetime(2026, 8, 21, tzinfo=UTC),
+    )
+
+    recommended = board.highest_scored_actionable(projected)
+    assert recommended is not None
+    assert recommended.number == sliced.number
 
 
 def test_claim_age_old_compares_real_age_against_the_threshold() -> None:

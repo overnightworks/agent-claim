@@ -109,7 +109,18 @@ _SLICE_TITLE_VON_PATTERN = re.compile(
 # fence's info string is ordinary documentation.
 AGENT_CLAIM_FENCE_INFO = "agent-claim"
 BLOCK_TOP_LEVEL_KEYS = frozenset(
-    {"version", "now", "next", "done_when", "frozen_until", "scope", "size", "expectation", "slice"}
+    {
+        "version",
+        "now",
+        "next",
+        "done_when",
+        "frozen_until",
+        "scope",
+        "size",
+        "whole",
+        "expectation",
+        "slice",
+    }
 )
 # A work item's own size class (issue #357), read straight from
 # `metrics.Size` -- the one owner of the three letters and their order --
@@ -597,6 +608,11 @@ class BoardItem:
     # "sized, but its class has no measured lane yet", which `estimate`
     # alone (`None` in both cases) cannot.
     size: metrics.Size | None
+    # Whether the body still carries any `[[slice]]` row (issue #399):
+    # `scope is None` alone cannot tell a truly unscoped item apart from one
+    # that names no top-level scope yet but still cuts one from a row, so
+    # `_buildable` reads both rather than `scope` alone.
+    has_slices: bool
     # This item's own size class's measured estimate (issue #357), or
     # `None` when the item names no size, or names one no measured lane has
     # reached yet -- an unmeasured class is exactly as unestimated as an
@@ -989,6 +1005,11 @@ class ParsedBody:
     # that names no size at all -- absent means "no estimate", never a
     # default class a reader would have to guess.
     size: metrics.Size | None = None
+    # The block's own top-level `whole` reason (issue #399), or `None` when
+    # the item names none -- `claim`/`start`'s own fallback for `--whole`
+    # when the call itself names none, read here rather than re-parsed at
+    # each call site.
+    whole: str | None = None
     # The validated `[record]` table (issue #248), or `None` for every body
     # parsed under `Storage.GITHUB` and every state-ref body without one --
     # `items.py` is the one reader that ever looks at this field.
@@ -1147,6 +1168,20 @@ def _block_size_defect(data: dict[str, object]) -> ContractDefect | None:
     if isinstance(value, str) and value in SIZE_VALUES:
         return None
     return ContractDefect("size", "size must be S, M, or L")
+
+
+def _block_whole_defect(data: dict[str, object]) -> ContractDefect | None:
+    """The block's own top-level `whole = "<reason>"` (issue #399), the
+    caller's own `--whole REASON` read from the item itself when a claim or
+    a start names none: absent means no stored reason, never a default;
+    present, it must be one non-blank sentence, the same bound `--whole`
+    itself already enforces at the CLI boundary."""
+    if "whole" not in data:
+        return None
+    value = data["whole"]
+    if isinstance(value, str) and value.strip():
+        return None
+    return ContractDefect("whole", "whole must be a non-empty string")
 
 
 def _canonical_scope(value: object) -> tuple[str, ...]:
@@ -1517,6 +1552,9 @@ def _block_schema_defects(data: dict[str, object], storage: Storage) -> tuple[Co
     size_defect = _block_size_defect(data)
     if size_defect is not None:
         defects.append(size_defect)
+    whole_defect = _block_whole_defect(data)
+    if whole_defect is not None:
+        defects.append(whole_defect)
     expectations, expectation_defect = _block_array_or_defect(data, "expectation")
     defects.append(expectation_defect) if expectation_defect else defects.extend(
         _block_expectation_defects(expectations)
@@ -1633,6 +1671,7 @@ def _valid_block_parsed_body(data: dict[str, object], storage: Storage) -> Parse
         slices=_block_slices(data),
         read_state=BodyReadState.VALID,
         size=metrics.Size(data["size"]) if "size" in data else None,
+        whole=cast(str, data["whole"]) if "whole" in data else None,
         record=cast("Mapping[str, object] | None", record),
     )
 
@@ -1768,6 +1807,12 @@ def _render_size(data: Mapping[str, object]) -> list[str]:
     return ["", f"size = {protocol.toml_string(data['size'])}"]
 
 
+def _render_whole(data: Mapping[str, object]) -> list[str]:
+    if "whole" not in data:
+        return []
+    return ["", f"whole = {protocol.toml_string(data['whole'])}"]
+
+
 def _render_expectations(data: Mapping[str, object]) -> list[str]:
     lines: list[str] = []
     for expectation in cast(_JsonRows, data.get("expectation", [])):
@@ -1855,6 +1900,7 @@ def render_block(data: Mapping[str, object], newline: str = "\n") -> str:
     lines.extend(_render_frozen_until(data))
     lines.extend(_render_scope(data))
     lines.extend(_render_size(data))
+    lines.extend(_render_whole(data))
     lines.extend(_render_expectations(data))
     lines.extend(_render_slices(data))
     lines.extend(_render_record(data))
@@ -2724,6 +2770,7 @@ def _board_item(
         actionable_reason=actionable_reason,
         read_state=parsed.read_state,
         size=parsed.size,
+        has_slices=bool(parsed.slices),
         estimate=context.estimate_by_number.get(issue.number),
     )
 
@@ -3002,17 +3049,33 @@ def build_board(inputs: BoardBuildInputs) -> Board:
     )
 
 
+def _buildable(item: BoardItem) -> bool:
+    """Whether `item` names a path `claim`/`start` could actually claim right
+    now (issue #399): actionable, and naming either a top-level `scope` or at
+    least one `[[slice]]` row to cut one from. `next`'s own top action still
+    picks a scopeless, sliceless item -- printed `scope unknown` rather than
+    refused (NEXT-03) -- so this predicate is asked only by the claim/start
+    precedence check (`highest_scored_actionable`), never folded into
+    `actionable`/`ready_now` themselves."""
+    return item.actionable and (item.scope is not None or item.has_slices)
+
+
 def highest_scored_actionable(board: Board) -> BoardItem | None:
-    """The one item `next` recommends — always `board`'s own top row.
+    """The highest-ranked buildable row `claim`/`start`'s own precedence
+    check (CLM-08) compares its target against -- `board`'s own top
+    *buildable* row, not necessarily `next`'s own top action: an actionable
+    item naming neither `scope` nor a slice row is one `next` still
+    recommends (`scope unknown`), but never one this walk stops on, since
+    claiming past it costs no `--out-of-order` (issue #399).
 
     `ready_now` is a filtered view of `items`, which `build_board` orders by
-    `board_rank`; filtering preserves that order, so its first element is
-    `board`'s own top-ranked actionable row. Two commands over one board must
-    not disagree, so this reads that order instead of maximizing score on its
-    own — an unlabelled item with a higher score must never outrank a human's
-    priority label.
+    `board_rank`; filtering preserves that order, so the first buildable
+    element is `board`'s own top-ranked buildable row. Two commands over one
+    board must not disagree on *order*, so this reads that order instead of
+    maximizing score on its own — an unlabelled item with a higher score
+    must never outrank a human's priority label.
     """
-    return next(iter(board.ready_now), None)
+    return next((item for item in board.ready_now if _buildable(item)), None)
 
 
 @dataclass(frozen=True)
