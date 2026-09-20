@@ -1,8 +1,0 @@
-claim_id = "90f5d61ed101417eb68230a05af92aca"
-agent = "Claude head (coordinator)"
-role = "builder"
-base = "21d1a07f8f97199ec928a0364625726e8fdcc0f8"
-branch = "claude/issue-324-brief-rules"
-scope = [".agent-claim/brief.toml", "specs/brief.spec.md", "src/agent_coordination/board.py", "src/agent_coordination/cli.py", "tests/test_board.py", "tests/test_cli.py"]
-opened_commit = "f3a77bf138a4d54926af655926f884e59f6303ed"
-whole_reason = "aco brief --step: rules file owner, printer, spec and tests"
