@@ -1,8 +1,0 @@
-claim_id = "2674c11c64414d73880434feab349bdd"
-agent = "Claude head (coordinator)"
-role = "builder"
-base = "21d1a07f8f97199ec928a0364625726e8fdcc0f8"
-branch = "claude/issue-322-start"
-scope = ["scripts/similar_methods_exemptions.txt", "scripts/test_budget_ratchet.txt", "specs/release.spec.md", "specs/start.spec.md", "src/agent_coordination/checkout.py", "src/agent_coordination/cli.py", "src/agent_coordination/github.py", "src/agent_coordination/protocol.py", "tests/cli_fixtures.py", "tests/conftest.py", "tests/test_checkout.py", "tests/test_cli.py", "tests/test_github.py", "tests/test_state_board.py"]
-opened_commit = "ce5a16babca424f771edd45921dc63b39635eab8"
-whole_reason = "aco start: one command, its spec, release cleanup and their tests"
