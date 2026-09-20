@@ -76,10 +76,14 @@ _HTTP_SERVER_ERROR_PATTERN = re.compile(r"HTTP 5\d\d")
 # matches this pattern itself and raises `ForgeMergeConflictError`.
 _MERGE_CONFLICT_PATTERN = re.compile(r"HTTP 40[59]")
 # `delete_branch`'s own idempotent-absence signal (issue #405 review
-# finding): GitHub answers deleting a ref that does not exist with HTTP 422
-# and this exact message -- any other 422 (a protected branch, a malformed
-# ref name) is a real failure this adapter must still surface.
-_BRANCH_ALREADY_ABSENT_PATTERN = re.compile(r"HTTP 422.*reference does not exist", re.IGNORECASE)
+# finding): `gh api`'s own error text puts the message before the code --
+# "Reference does not exist (HTTP 422)" -- so the two lookaheads match
+# either order rather than pinning the one this adapter never actually
+# receives; any other 422 (a protected branch, a malformed ref name) is a
+# real failure this adapter must still surface.
+_BRANCH_ALREADY_ABSENT_PATTERN = re.compile(
+    r"(?=.*\breference does not exist\b)(?=.*\bHTTP 422\b)", re.IGNORECASE | re.DOTALL
+)
 GITHUB_HOST = "github.com"
 # Accepts both pinned remote forms, the SCP one included.
 GITHUB_REMOTE_PATTERN = re.compile(r"github\.com[:/]([^/\s]+)/([^/\s]+?)(?:\.git)?$")
