@@ -10,7 +10,9 @@ may and may not carry -- and applies to every command whose own spec cites
 `specs/release.spec.md`, `specs/cut.spec.md`, `specs/item.spec.md`), each
 naming its own `reason` vocabulary with examples. Every `--json` command's
 own spec now cites this file (issue #425 finished the migration ask/rule/
-brief started), including the refusals that fire before the
+brief started; issue #435 brought `check <sha>`, the last printer that
+still built an object of its own, in), including the refusals that fire
+before the
 named command starts (OUT-05) and the ones the argument parser itself
 raises on the way into a command that declares `--json` (OUT-06,
 issue #432).
@@ -28,7 +30,7 @@ issue #432).
 
 - [ ] [OUT-01] Every migrated command's `--json` object prints `ok` first and `reason` second, in that order, before any of the command's own payload keys.
 - [ ] [OUT-02] `ok` is `true` only for that command's own success outcome; `reason` is always one stable token from that command's own enum, documented by its own spec, never a free sentence.
-- [ ] [OUT-03] A refusal's `reason` names its enum member, never an `error` object; an optional `message` -- the sentence stderr's `ERROR:` line already printed -- is always the envelope's last key, when given.
+- [ ] [OUT-03] A refusal's `reason` names its enum member, never an `error` object; an optional `message` -- the refusal's own sentence, as its text form prints it -- is always the last key.
 - [ ] [OUT-05] A refusal raised before the named command starts -- a missing identity, `release`'s branch checks -- prints this envelope, `reason` `precondition_failed`, its sentence as `message`.
 - [ ] [OUT-06] A parser refusal on a command declaring `--json` -- an unknown flag, a missing required one, an unreadable positional -- prints this envelope, `invalid_usage`, exit `2` (see E-OUT-04).
 - [ ] [OUT-07] The exit code answers before the object does: a refusal is never exit `0`, so a caller reads the code, then `ok` and `reason`, then the payload keys.
@@ -39,6 +41,7 @@ issue #432).
 - This file never lists a command's own vocabulary: `ask`, `rule`, and `brief` each document their own `reason` members, with examples, in their own spec.
 - `ok`/`reason` never reorder around a command's payload: `reason` is always the second key, never last, never interleaved with structured detail keys.
 - `message` never carries structured data: every structured detail (`item`, `index`, `claim`, `checks`, and the like) is its own sibling key, never packed into the prose.
+- `message` never promises a stderr line beside the object: `ask`'s refusal prints `ERROR: <sentence>` there (E-OUT-02), `check <sha> --json` prints the object alone (`specs/check.spec.md`).
 - A parser refusal without `--json` never changes shape (issue #432): stdout stays empty and stderr carries argparse's own usage block and sentence, exactly as it did before the envelope reached this refusal at all.
 - A command that declares no `--json` never answers in this envelope (issue #432): `aco bootstrap --json` stays argparse's own text; an abbreviation of a declared `--json` does ask for it.
 - A non-zero exit never means a refusal on its own: a command may name a further code for an answer it did give, and its own spec owns that code.

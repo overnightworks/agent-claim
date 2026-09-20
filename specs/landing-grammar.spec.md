@@ -75,11 +75,11 @@ matching line.
 
 - [ ] [LAND-01] A merge or squash commit whose own trailer block carries `Work-Item: #10` marks #10 `code-landed` in `aco board`'s STAGE column, whether or not any pull request body also names it.
 - [ ] [LAND-02] A trailer block repeating `Work-Item:` (a squash commit carrying `Work-Item: #11` and `Work-Item: #12`) marks every named item `code-landed`, unlike a pull request body, which allows only one.
-- [ ] [LAND-03] A control-byte trailer value (`#12\x1f#13`) reads as one literal value: a defect that lands nothing (LAND-42), `aco board` exit `0`; `check <sha>` refuses the defect sentence, exit `1`.
+- [ ] [LAND-03] A control-byte trailer value (`#12\x1f#13`) reads as one literal value: a defect that lands nothing (LAND-42), `aco board` exit `0`; `check <sha>` refuses the defect sentence, exit `2`.
 - [ ] [LAND-48] `aco check <sha>` reads `<sha>`'s own trailer: `Work-Item:` prints `<sha> declares Work-Item: #<n>`, `No-Item:` prints `<sha> declares No-Item: <kind>`, exit `0`.
-- [ ] [LAND-57] A `<sha>` outside the walked first-parent trunk refuses `<sha> is not on the first-parent trunk`, exit `1`.
-- [ ] [LAND-58] A trunk `<sha>` carrying neither trailer refuses `<sha> carries no \`Work-Item:\` or \`No-Item:\` trailer`, exit `1`.
-- [ ] [LAND-60] A trunk `<sha>` whose trailer block is contradictory -- both `Work-Item:` and `No-Item:`, or `No-Item:` repeated -- makes `check <sha>` refuse `REFUSED: <sha> <that defect sentence>`, exit `1`.
+- [ ] [LAND-57] A `<sha>` outside the walked first-parent trunk refuses `<sha> is not on the first-parent trunk`, exit `2`.
+- [ ] [LAND-58] A trunk `<sha>` carrying neither trailer refuses `<sha> carries no \`Work-Item:\` or \`No-Item:\` trailer`, exit `2`.
+- [ ] [LAND-60] A trunk `<sha>` whose trailer block is contradictory -- both `Work-Item:` and `No-Item:`, or `No-Item:` repeated -- makes `check <sha>` refuse `REFUSED: <sha> <that defect sentence>`, exit `2`.
 - [ ] [LAND-61] That same contradictory `<sha>` makes `release --merged <sha>` refuse `ERROR: <sha> <that defect sentence>`, exit `2`, before any write.
 
 ## The pull request body's own grammar
@@ -95,20 +95,20 @@ is read (`parse_pull_request_classification`).
 
 - [ ] [LAND-04] A body carrying `Work-Item: #10` and a closing reference for #10 makes `aco check <pr>` print `PR #<n> by <author> declares Work-Item: <owner>/<repo>#10`, exit `0`.
 - [ ] [LAND-05] A body carrying `No-Item: docs` with an active issue-less lane claim on the pull request's head branch prints `PR #<n> by <author> declares No-Item: docs`, exit `0`.
-- [ ] [LAND-06] A body carrying neither `Work-Item:` nor `No-Item:` makes `check` print `REFUSED: pull request #<n> carries no \`Work-Item:\` or \`No-Item:\` line`, exit `1`.
+- [ ] [LAND-06] A body carrying neither `Work-Item:` nor `No-Item:` makes `check` print `REFUSED: pull request #<n> carries no \`Work-Item:\` or \`No-Item:\` line`, exit `2`.
 - [ ] [LAND-07] A `Work-Item:`/`No-Item:` line inside a fenced code block is documentation, not a declaration: a body carrying one only there refuses the same as LAND-06.
-- [ ] [LAND-08] A body carrying two classification lines (a `Work-Item:` and a `No-Item:`, or two `No-Item:` lines) refuses `carries <n> classification lines; exactly one is required`, exit `1`.
-- [ ] [LAND-09] A body naming two `Work-Item:` lines refuses `names two work items, #a and #b; split it`, exit `1`.
-- [ ] [LAND-10] A `Work-Item:` value that is not `OWNER/REPO#n` or `#n` refuses `carries \`Work-Item: <value>\`; a work item reads OWNER/REPO#n or #n`, exit `1`.
-- [ ] [LAND-11] A `No-Item:` value that is not `docs` or `fix` refuses `carries \`No-Item: <value>\`; an issue-less pull request is docs or fix`, exit `1`.
-- [ ] [LAND-12] A pull request whose head branch lives in another repository refuses `proposes a branch of <repo>; cross-repository pull requests are not classified`, exit `1`, before the body is even read.
-- [ ] [LAND-13] A pull request that does not target the repository's default branch refuses `targets '<branch>', not the default branch '<default>'`, exit `1`.
-- [ ] [LAND-14] A `Work-Item:` naming another repository's issue refuses `names work item <ref> of another repository, which holds no claim here`, exit `1`.
-- [ ] [LAND-15] A `Work-Item:` item with no active claim on the pull request's own head branch refuses `has no active claim for #<n> on branch '<branch>'`, exit `1`.
-- [ ] [LAND-16] A `No-Item:` pull request with no active issue-less lane claim on its head branch refuses `has no active issue-less lane claim on branch '<branch>'`, exit `1`.
-- [ ] [LAND-17] A `No-Item:` body that also carries a closing reference refuses `declares no work item but closes <ref>; name it as the work item`, exit `1`.
-- [ ] [LAND-18] A `Work-Item:` body with no closing reference for that item refuses `carries no closing reference for its work item <item>`, exit `1`.
-- [ ] [LAND-19] A body closing anything besides its own work item (or an unpermitted parent, LAND-21) refuses `closes <ref> besides its work item <item>; a pull request lands one item`, exit `1`.
+- [ ] [LAND-08] A body carrying two classification lines (a `Work-Item:` and a `No-Item:`, or two `No-Item:` lines) refuses `carries <n> classification lines; exactly one is required`, exit `2`.
+- [ ] [LAND-09] A body naming two `Work-Item:` lines refuses `names two work items, #a and #b; split it`, exit `2`.
+- [ ] [LAND-10] A `Work-Item:` value that is not `OWNER/REPO#n` or `#n` refuses `carries \`Work-Item: <value>\`; a work item reads OWNER/REPO#n or #n`, exit `2`.
+- [ ] [LAND-11] A `No-Item:` value that is not `docs` or `fix` refuses `carries \`No-Item: <value>\`; an issue-less pull request is docs or fix`, exit `2`.
+- [ ] [LAND-12] A pull request whose head branch lives in another repository refuses `proposes a branch of <repo>; cross-repository pull requests are not classified`, exit `2`, before the body is even read.
+- [ ] [LAND-13] A pull request that does not target the repository's default branch refuses `targets '<branch>', not the default branch '<default>'`, exit `2`.
+- [ ] [LAND-14] A `Work-Item:` naming another repository's issue refuses `names work item <ref> of another repository, which holds no claim here`, exit `2`.
+- [ ] [LAND-15] A `Work-Item:` item with no active claim on the pull request's own head branch refuses `has no active claim for #<n> on branch '<branch>'`, exit `2`.
+- [ ] [LAND-16] A `No-Item:` pull request with no active issue-less lane claim on its head branch refuses `has no active issue-less lane claim on branch '<branch>'`, exit `2`.
+- [ ] [LAND-17] A `No-Item:` body that also carries a closing reference refuses `declares no work item but closes <ref>; name it as the work item`, exit `2`.
+- [ ] [LAND-18] A `Work-Item:` body with no closing reference for that item refuses `carries no closing reference for its work item <item>`, exit `2`.
+- [ ] [LAND-19] A body closing anything besides its own work item (or an unpermitted parent, LAND-21) refuses `closes <ref> besides its work item <item>; a pull request lands one item`, exit `2`.
 - [ ] [LAND-20] `Implements #n`/`Lands #n` name work a pull request touched, but GitHub closes on neither word: a body carrying one beside its own closing reference for the declared item still passes, exit `0`.
 
 ## Parent closing at the last open child
@@ -121,14 +121,14 @@ skeleton's `next = ""` also matches). A malformed body's own defect sentence
 is `specs/body-block.spec.md`'s own fact, cited here as `<body defect
 sentence>`, not restated.
 
-- [ ] [LAND-21] Closing a parent's last open child, its `Next` naming no further work, must also close the parent; not doing so refuses `closes the last open child of parent <ref>; close the parent too`, exit `1`.
+- [ ] [LAND-21] Closing a parent's last open child, its `Next` naming no further work, must also close the parent; not doing so refuses `closes the last open child of parent <ref>; close the parent too`, exit `2`.
 - [ ] [LAND-22] The same last-child landing, when the parent's `Next` line still names work, may pass without closing the parent: exit `0`.
 - [ ] [LAND-23] The same last-child landing may also close the completed parent in the same pull request: a body closing both the item and that parent passes, exit `0`.
-- [ ] [LAND-24] A landing leaving other open children behind, with no parent `Next` line, refuses `leaves parent <ref> open with <n> other open child/children, whose body carries no Next line`, exit `1`.
+- [ ] [LAND-24] A landing leaving other open children behind, with no parent `Next` line, refuses `leaves parent <ref> open with <n> other open child/children, whose body carries no Next line`, exit `2`.
 - [ ] [LAND-25] The same landing, when the parent's `Next` line names work, passes without closing the parent: exit `0`.
-- [ ] [LAND-26] A parent whose own body reads as malformed refuses `has parent <ref> with a <body defect sentence>`, exit `1`, before the last-child rule runs; a valid but incomplete parent proceeds to it.
-- [ ] [LAND-27] A recorded parent whose own kind is not `container` refuses `has parent <ref> of kind <kind>, which is not a container; only a container holds children`, exit `1`.
-- [ ] [LAND-28] A recorded parent living in another repository refuses `has parent <ref> in another repository, whose children this check cannot read`, exit `1`.
+- [ ] [LAND-26] A parent whose own body reads as malformed refuses `has parent <ref> with a <body defect sentence>`, exit `2`, before the last-child rule runs; a valid but incomplete parent proceeds to it.
+- [ ] [LAND-27] A recorded parent whose own kind is not `container` refuses `has parent <ref> of kind <kind>, which is not a container; only a container holds children`, exit `2`.
+- [ ] [LAND-28] A recorded parent living in another repository refuses `has parent <ref> in another repository, whose children this check cannot read`, exit `2`.
 
 ## What `release --merged` requires
 
@@ -215,7 +215,7 @@ Setup: bare-remote, fake `gh`, pull request `#58` whose body carries `Advances #
 ```console
 $ aco check 58
 2> REFUSED: pull request #58 carries no `Work-Item:` or `No-Item:` line
-exit 1
+exit 2
 ```
 
 ### E-LAND-04 — `release --merged` closes a still-open work item itself
@@ -237,7 +237,7 @@ Setup: bare-remote, fake `gh`, parent `#5` a container with one open child `#42`
 ```console
 $ aco check 57
 2> REFUSED: pull request #57 closes the last open child of parent <owner>/<repo>#5; close the parent too
-exit 1
+exit 2
 ```
 
 ### E-LAND-47 — a merge landing closes its item and releases the claim under state-ref
@@ -309,7 +309,7 @@ Setup: bare-remote, `main` carrying a commit whose trailer reads `Work-Item: #20
 ```console
 $ aco check <sha>
 2> REFUSED: <sha> carries both `Work-Item:` and `No-Item:` trailers; a landed commit is one or the other
-exit 1
+exit 2
 ```
 
 ### E-LAND-61 — the same contradictory trailer refuses `release --merged <sha>`
