@@ -636,7 +636,7 @@ def _parsed_trunk_landing(fields: tuple[str, str, str, str]) -> TrunkLanding:
     return TrunkLanding(sha, committed_at.astimezone(UTC), classification)
 
 
-def trunk_landings(remote: str, depth: int) -> tuple[TrunkLanding, ...]:
+def trunk_landings(remote: str, depth: int, *, fetch: bool = False) -> tuple[TrunkLanding, ...]:
     """The most recent `depth` first-parent landings on `remote`'s trunk,
     oldest first, each classified from its own trailer block alone
     (issue #304).
@@ -646,7 +646,19 @@ def trunk_landings(remote: str, depth: int) -> tuple[TrunkLanding, ...]:
     `remote` is the caller's own canonical remote, never a hardcoded
     `origin`, so a repository configured with a different canonical remote
     ages rulings against the trunk it actually lands on.
+
+    `fetch` refreshes `remote`'s own remote-tracking ref first (issue #397):
+    `release --merged <pr>`'s own merge-commit-trailer verification under
+    `storage = "github"` needs this walk to see a commit GitHub just
+    reported merged, which this checkout may never have fetched before --
+    unlike every other caller here, which already runs against a checkout
+    whose remote-tracking refs some earlier step in the same command already
+    refreshed.
     """
+    if fetch:
+        result = _git_run(["fetch", remote])
+        if result.exit_status != 0:
+            raise ClaimError(process.git_failure_detail(result))
     raw = _git_output(
         [
             "log",

@@ -868,6 +868,44 @@ def test_trunk_landings_read_the_named_remotes_trunk_not_the_work_branch(
     assert not any("origin" in argument for call in observed for argument in call)
 
 
+def test_trunk_landings_with_fetch_refreshes_the_remote_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #397: `fetch=True` -- `release --merged <pr>`'s own
+    merge-commit verification under `storage = github` -- refreshes
+    `remote`'s remote-tracking ref before the walk, so a commit GitHub just
+    reported merged is visible even when nothing else in this checkout
+    fetched it yet."""
+    repo = _bare_remote_repository_with_one_commit(tmp_path)
+    clone = tmp_path / "clone"
+    _real_git(tmp_path, "clone", "-q", str(tmp_path / "remote.git"), str(clone))
+    (repo / "feature.txt").write_text("feature\n")
+    _real_git(repo, "add", "feature.txt")
+    _real_git(repo, "commit", "-q", "-m", "later work", "-m", "Work-Item: #10")
+    _push_repository_trunk(repo, "origin")
+    monkeypatch.chdir(clone)
+
+    landings = _LIVE_TRUNK_LANDINGS("origin", 20, fetch=True)
+
+    assert [landing.classification for landing in landings] == [
+        None,
+        board.TrunkWorkItemClassification((10,)),
+    ]
+
+
+def test_trunk_landings_with_fetch_fails_loud_when_the_fetch_itself_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _bare_remote_repository_with_one_commit(tmp_path)
+    monkeypatch.chdir(repo)
+    _stub_one_git_call(
+        monkeypatch, ["fetch", "origin"], exit_status=1, stderr="fatal: could not read from remote"
+    )
+
+    with pytest.raises(ClaimError, match="could not read from remote"):
+        checkout.trunk_landings("origin", 20, fetch=True)
+
+
 def test_trunk_ref_fails_loud_when_no_candidate_branch_resolves(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
