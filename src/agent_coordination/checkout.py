@@ -13,9 +13,11 @@ from . import board, process
 from .protocol import (
     ClaimError,
     ClaimRequest,
+    InvalidClaimMarkerError,
     _outbound_text,
     is_safe_branch_name,
     named_with_overflow_count,
+    valid_scope,
 )
 
 ACO_AGENT_ENV = "ACO_AGENT"
@@ -338,6 +340,21 @@ class PathCheckout:
 
 NO_COMMIT_CHECKOUT_REASON = "no commit on this branch"
 NOT_IN_A_REPOSITORY_REASON = "not in a repository"
+RELATIVE_PAYLOAD_PATH_DENIAL = "relative payload path"
+
+
+def relative_scope_entry(absolute_path: str, *, toplevel: Path) -> str | None:
+    """`absolute_path` (already an absolute filesystem path -- a hook
+    payload path, or a `rescope --add`/`--drop` entry given that way) as a
+    canonical, repository-relative scope entry under `toplevel`, or `None`
+    when it resolves outside `toplevel` or is otherwise not a valid scope
+    entry. Shared by `protect.judge` (issue #314) and `cli`'s own
+    `rescope` absolute-path handling (issue #314 delta, finding R1)."""
+    try:
+        relative = Path(absolute_path).resolve().relative_to(toplevel).as_posix()
+        return valid_scope([relative])[0]
+    except (InvalidClaimMarkerError, OSError, ValueError):
+        return None
 
 
 def resolve_path_checkout(directory: Path) -> PathCheckout | None:
@@ -672,6 +689,18 @@ def _resolved_agent(explicit: str | None) -> str:
         "agent identity is required: pass --agent or set "
         f"{ACO_AGENT_ENV}, {GROK_SESSION_ID_ENV}, or {CLAUDE_SESSION_ID_ENV}"
     )
+
+
+def resolved_agent(explicit: str | None) -> str:
+    """Public re-export of `_resolved_agent` for `protect.judge` (issue #394,
+    ownership finding 10): a thin dynamically-dispatching wrapper, not a
+    bare `resolved_agent = _resolved_agent` alias, so `tests/cli_fixtures.py`'s
+    `monkeypatch.setattr(checkout, "_resolved_agent", ...)` fixtures --
+    outside this lane's own claim scope -- keep intercepting every call
+    made through this public name too; a bare alias would instead freeze
+    the original function object at import time and stop honouring that
+    patch silently."""
+    return _resolved_agent(explicit)
 
 
 # One owner for `start`'s own path/branch naming scheme (issue #322): the

@@ -288,7 +288,7 @@ def _scope_list_entries(scope: object) -> list[str]:
     return entries
 
 
-def _valid_scope(scope: object) -> tuple[str, ...]:
+def valid_scope(scope: object) -> tuple[str, ...]:
     """The one canonical scope form (issue #331): sorted, deduplicated,
     every entry a validated repository-relative path. Every claim's scope
     passes through here at creation (`cli._request`) and at rescope
@@ -319,6 +319,12 @@ def _valid_scope(scope: object) -> tuple[str, ...]:
     if len(set(result)) != len(result):
         raise InvalidClaimMarkerError("claim scope contains duplicate paths")
     return tuple(sorted(result))
+
+
+# `board.py` and several test modules outside this lane's own claim scope
+# (issue #394) still read this name; kept as a plain alias, never a second
+# implementation, until they move to the public name in their own lane.
+_valid_scope = valid_scope
 
 
 class WideScopeReason(StrEnum):
@@ -404,8 +410,13 @@ def scope_overlap_paths(left: tuple[str, ...], right: tuple[str, ...]) -> tuple[
     return tuple(sorted(meeting))
 
 
-def _scopes_overlap(left: tuple[str, ...], right: tuple[str, ...]) -> bool:
+def scopes_overlap(left: tuple[str, ...], right: tuple[str, ...]) -> bool:
     return bool(scope_overlap_paths(left, right))
+
+
+# `cli.py`'s own non-`protect` scope-mismatch check outside this lane's
+# claim scope (issue #394) still reads this name.
+_scopes_overlap = scopes_overlap
 
 
 def named_with_overflow_count(
@@ -472,12 +483,12 @@ def claims_conflict(left: ScopedClaim, right: ScopedClaim) -> bool:
 
 
 def claims_overlap(left: ScopedClaim, right: ScopedClaim) -> bool:
-    return _scopes_overlap(left.scope, right.scope)
+    return scopes_overlap(left.scope, right.scope)
 
 
 def claims_holding_path(claims: tuple[_ScopedClaimT, ...], path: str) -> tuple[_ScopedClaimT, ...]:
-    target = _valid_scope([path])
-    return tuple(claim for claim in claims if _scopes_overlap(claim.scope, target))
+    target = valid_scope([path])
+    return tuple(claim for claim in claims if scopes_overlap(claim.scope, target))
 
 
 _ScopedClaimT = TypeVar("_ScopedClaimT", bound=ScopedClaim)
@@ -607,7 +618,7 @@ def _combined_scope(
     combined = kept + added
     if combined == current:
         raise ClaimUnavailableError("rescope does not change the claim scope")
-    return _valid_scope(list(combined))
+    return valid_scope(list(combined))
 
 
 def _require_coordinator_override(role: str | None) -> None:
@@ -1316,13 +1327,13 @@ def _claim_toml_text(
 
 def _claim_toml_scope(data: Mapping[str, object], *, key: str, tip: ObjectId) -> tuple[str, ...]:
     """`data`'s `scope` field, projected through the one canonicalizer
-    (`_valid_scope`) every live claim's scope already passes through at
+    (`valid_scope`) every live claim's scope already passes through at
     creation and rescope (issue #331 REVISE finding 1): a claim file
     written before that canonical order existed can still carry its paths
     in typed order, so a read here must sort it rather than compare
     against it unsorted. Never rewrites the ref (this is a read), and
     never refuses a valid-but-unsorted legacy record -- only content
-    `_valid_scope` itself would refuse from a fresh request, such as a
+    `valid_scope` itself would refuse from a fresh request, such as a
     non-repository-relative or duplicated path."""
     raw = data.get("scope")
     if not isinstance(raw, list) or not raw or any(not isinstance(entry, str) for entry in raw):
@@ -1330,7 +1341,7 @@ def _claim_toml_scope(data: Mapping[str, object], *, key: str, tip: ObjectId) ->
             f"claim file {key}.toml at {tip} field 'scope' must be a non-empty list of text"
         )
     try:
-        return _valid_scope(raw)
+        return valid_scope(raw)
     except InvalidClaimMarkerError as error:
         raise MalformedStateTreeError(
             f"claim file {key}.toml at {tip} has an invalid scope: {error}"
