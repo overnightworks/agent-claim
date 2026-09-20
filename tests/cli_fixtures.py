@@ -217,4 +217,4 @@ def arrange_scope_width(
     )
     monkeypatch.setattr(checkout, "versioned_paths", lambda **_kwargs: versioned or ())
     if validate_checkout:
-        monkeypatch.setattr(checkout, "_validate_checkout", lambda request: None)
+        monkeypatch.setattr(checkout, "_validate_checkout", lambda request, directory=None: None)
