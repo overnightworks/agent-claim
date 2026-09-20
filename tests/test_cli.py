@@ -8392,8 +8392,10 @@ def test_cli_claim_and_release_accept_json_while_parent_and_bootstrap_reject_it(
     assert released.json is True
     assert omitted_claim.json is False
     assert omitted_release.json is False
-    for arguments in (["--json", "status"], ["bootstrap", "--json"]):
-        assert issue_claim.main(arguments) == 2
+    assert issue_claim.main(["--json", "status"]) == 2
+    with pytest.raises(SystemExit) as refused_bootstrap:
+        issue_claim.main(["bootstrap", "--json"])
+    assert refused_bootstrap.value.code == 2
 
 
 @pytest.mark.parametrize(

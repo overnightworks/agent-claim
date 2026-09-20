@@ -29,7 +29,7 @@ raises before a command is even chosen (OUT-06, issue #432).
 - [ ] [OUT-02] `ok` is `true` only for that command's own success outcome; `reason` is always one stable token from that command's own enum, documented by its own spec, never a free sentence.
 - [ ] [OUT-03] A refusal's `reason` names its enum member, never an `error` object; an optional `message` -- the sentence stderr's `ERROR:` line already printed -- is always the envelope's last key, when given.
 - [ ] [OUT-05] A refusal raised before the named command starts -- a missing identity, `release`'s branch checks -- prints this envelope, `reason` `precondition_failed`, its sentence as `message`.
-- [ ] [OUT-06] A refusal the argument parser raises -- an unknown flag, a missing required one, an unreadable positional -- prints this envelope, `reason` `invalid_usage`, exit `2` (see E-OUT-04).
+- [ ] [OUT-06] A parser refusal on a command declaring `--json` -- an unknown flag, a missing required one, an unreadable positional -- prints this envelope, `invalid_usage`, exit `2` (see E-OUT-04).
 - [ ] [OUT-07] The exit code answers before the object does: a refusal is never exit `0`, so a caller reads the code, then `ok` and `reason`, then the payload keys.
 - OUT-04 (retired 20.09.2026, issue #425): the `{"ok": false, "error": "<sentence>"}` fallback it kept for a command whose own spec cited no `OUT-nn` no longer exists; every `--json` command cites this file now.
 
@@ -39,7 +39,7 @@ raises before a command is even chosen (OUT-06, issue #432).
 - `ok`/`reason` never reorder around a command's payload: `reason` is always the second key, never last, never interleaved with structured detail keys.
 - `message` never carries structured data: every structured detail (`item`, `index`, `claim`, `checks`, and the like) is its own sibling key, never packed into the prose.
 - A parser refusal without `--json` never changes shape (issue #432): stdout stays empty and stderr carries argparse's own usage block and sentence, exactly as it did before the envelope reached this refusal at all.
-- `--json` is never read off a parsed command here: the flag is recognised in the raw arguments, so a command that never parsed still answers in the shape its caller asked for.
+- A command that declares no `--json` never answers in this envelope (issue #432): `aco bootstrap --json` stays argparse's own text; an abbreviation of a declared `--json` does ask for it.
 - A non-zero exit never means a refusal on its own: a command may name a further code for an answer it did give, and its own spec owns that code.
 - `protect` never joins this envelope, migrated or not: its hook protocol (`{"decision": …}`, exit `0`/`2`) is a permanent exception (`specs/protect.spec.md`).
 - `board --serve` never prints this file's own `--json` envelope either: its own request/response wire contract is permanently `specs/board.spec.md`'s own, not this file's.

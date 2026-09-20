@@ -8,13 +8,13 @@ import os
 import sys
 import tomllib
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, date, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import NoReturn, cast
+from typing import Any, NoReturn, cast
 
 from . import (
     __version__,
@@ -311,6 +311,7 @@ def _request(
 
 LANE_ISSUE_HELP = "omit for lane mode, derived from a docs/ or fix/ checkout branch"
 JSON_FLAG = "--json"
+LONG_OPTION_PREFIX = "--"
 JSON_HELP = "print the result as JSON instead of the human lines"
 # `--html` with no value: `argparse`'s `nargs="?"` const, distinct from the
 # `None` default (flag absent) -- `_cmd_board_html` treats it as "stdout".
@@ -354,9 +355,10 @@ def _add_reset_parser(commands: argparse._SubParsersAction) -> None:
 
 
 def _add_json_flag(container: argparse._ActionsContainer) -> None:
-    """The one place `--json` is declared (issue #432): `main` reads the same
-    flag straight off the raw arguments when argparse refuses before any
-    namespace exists, so the flag's own spelling needs a single owner."""
+    """The one place `--json` is declared (issue #432): a command that never
+    calls this has no JSON mode at all, and `main` matches this same
+    spelling when argparse refuses before any namespace is filled, so the
+    flag needs a single owner."""
     container.add_argument(JSON_FLAG, action="store_true", help=JSON_HELP)
 
 
@@ -750,7 +752,7 @@ def _add_item_parser(commands: argparse._SubParsersAction) -> None:
     item = commands.add_parser(
         "item", help="create or show one work item straight in refs/aco/state"
     )
-    item_commands = item.add_subparsers(dest="item_command", required=True)
+    item_commands = _add_subcommands(item, "item_command")
     new = item_commands.add_parser(
         "new", help="create a fresh item in refs/aco/state and print its id"
     )
@@ -860,7 +862,7 @@ def _add_login_parser(commands: argparse._SubParsersAction) -> None:
     login = commands.add_parser(
         "login", help="manage configured workspace recovery at desktop login"
     )
-    login_commands = login.add_subparsers(dest="login_command", required=True)
+    login_commands = _add_subcommands(login, "login_command")
     login_commands.add_parser("enable", help="install the owned desktop login launcher")
     login_commands.add_parser("disable", help="remove the owned desktop login launcher")
     login_commands.add_parser(
@@ -932,6 +934,28 @@ class _UsageError(protocol.ClaimError):
         self.parser = parser
 
 
+class _RecordingSubParsersAction(argparse._SubParsersAction):
+    """argparse's own subcommand action, remembering which subparser it
+    selected (issue #432). Python parses a subcommand into a throwaway
+    namespace and copies the values back only once that parse succeeds, so
+    a refused parse otherwise leaves no trace of the command whose flags
+    were in play -- and `--json` is exactly the flag the refusal's own shape
+    depends on."""
+
+    chosen: argparse.ArgumentParser | None = None
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: str | Sequence[Any],
+        option_string: str | None = None,
+    ) -> None:
+        name, *_ = cast(Sequence[str], values)
+        self.chosen = self._name_parser_map.get(name)
+        super().__call__(parser, namespace, values, option_string)
+
+
 class _UsageErrorParser(argparse.ArgumentParser):
     """Every `aco` parser and subparser -- argparse hands this class down to
     each subparser it builds. Its own refusal path prints usage and exits
@@ -942,11 +966,17 @@ class _UsageErrorParser(argparse.ArgumentParser):
         raise _UsageError(self, message)
 
 
+def _add_subcommands(parser: argparse.ArgumentParser, dest: str) -> argparse._SubParsersAction:
+    """Every subcommand level of `aco`, recorded while it is chosen so a
+    refused parse still names the command whose flags were in play."""
+    return parser.add_subparsers(dest=dest, required=True, action=_RecordingSubParsersAction)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = _UsageErrorParser(prog="aco", description=__doc__)
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--repo", help="GitHub repository as OWNER/REPO")
-    commands = parser.add_subparsers(dest="command", required=True)
+    commands = _add_subcommands(parser, "command")
     for add_subparser in _subparser_build_order():
         add_subparser(commands)
     return parser
@@ -6954,22 +6984,65 @@ def _read_status_body_or_dispatch(parsed: argparse.Namespace) -> int:
     return _dispatch(parsed)
 
 
+def _chosen_subparser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser | None:
+    """The subcommand parser this parse selected under `parser`, or `None`
+    when it never chose one."""
+    subcommands = next(
+        (action for action in parser._actions if isinstance(action, _RecordingSubParsersAction)),
+        None,
+    )
+    return None if subcommands is None else subcommands.chosen
+
+
+def _spells_json_flag(token: str, parser: argparse.ArgumentParser) -> bool:
+    """Whether `parser` itself would read `token` as its own `--json`: the
+    exact spelling, or the abbreviation argparse accepts for it -- a prefix
+    no other option of that parser shares, since a prefix two options share
+    is ambiguous and argparse refuses it rather than choosing."""
+    if not token.startswith(LONG_OPTION_PREFIX):
+        return False
+    spelling = token.split("=", 1)[0]
+    declared = [option for action in parser._actions for option in action.option_strings]
+    if spelling in declared:
+        return spelling == JSON_FLAG
+    return [option for option in declared if option.startswith(spelling)] == [JSON_FLAG]
+
+
+def _asked_for_json(root: argparse.ArgumentParser, given: list[str]) -> bool:
+    """Whether this invocation asked for JSON, answered by the parsers it
+    reached rather than by the raw tokens alone (issue #432): only a command
+    declaring `--json` can answer in the envelope, so `aco bootstrap --json`
+    stays argparse's own text, while `aco release --jso` -- an abbreviation
+    argparse accepts -- is JSON. A bare `--` ends argparse's options, so
+    nothing behind it is a flag."""
+    options = given[: given.index(LONG_OPTION_PREFIX)] if LONG_OPTION_PREFIX in given else given
+    parser: argparse.ArgumentParser | None = root
+    while parser is not None:
+        if any(_spells_json_flag(token, parser) for token in options):
+            return True
+        parser = _chosen_subparser(parser)
+    return False
+
+
 def main(arguments: list[str] | None = None) -> int:
-    # The `--json` mode is read off the raw arguments (issue #432) because
-    # every refusal the parse itself raises -- argparse's own usage errors,
+    # Every refusal the parse itself raises -- argparse's own usage errors,
     # and `board.parse_item_reference`, an argparse `type=` whose refusal is
-    # a `ClaimError` -- fires before any namespace carries the flag. Both
-    # report `invalid_usage` through the one envelope. Past the parse the
-    # plain sentence alone still stands: a refusal a command raises outside
-    # its own reported vocabulary must not be dressed as one (issue #425).
+    # a `ClaimError` -- fires before any namespace carries `--json`, so the
+    # mode is read back off the parsers this parse reached (issue #432).
+    # Both report `invalid_usage` through the one envelope. Past the parse
+    # the plain sentence alone still stands: a refusal a command raises
+    # outside its own reported vocabulary must not be dressed as one
+    # (issue #425).
     given = sys.argv[1:] if arguments is None else arguments
-    as_json = JSON_FLAG in given
+    parser = _parser()
     try:
-        parsed = _parser().parse_args(given)
+        parsed = parser.parse_args(given)
     except _UsageError as error:
-        return _refuse_usage(error, as_json=as_json)
+        return _refuse_usage(error, as_json=_asked_for_json(parser, given))
     except protocol.ClaimError as error:
-        return _refuse(PreDispatchReason.INVALID_USAGE, error, as_json=as_json)
+        return _refuse(
+            PreDispatchReason.INVALID_USAGE, error, as_json=_asked_for_json(parser, given)
+        )
     try:
         if parsed.command in {"_run-at-login", "register", "run", "login"}:
             return _local_operation(parsed)
