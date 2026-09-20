@@ -3,6 +3,6 @@ agent = "Claude head (coordinator)"
 role = "builder"
 base = "e60febe9c56157d6714f59354bd7b99459dbf071"
 branch = "claude/issue-388-serve-token"
-scope = ["README.md", "specs/board.spec.md", "src/agent_coordination/board_html.py", "src/agent_coordination/board_serve.py", "src/agent_coordination/cli.py", "src/agent_coordination/workspace.py", "tests/test_board_html.py", "tests/test_board_serve.py", "tests/test_cli.py"]
+scope = ["README.md", "scripts/test_budget_ratchet.txt", "specs/board.spec.md", "src/agent_coordination/board_html.py", "src/agent_coordination/board_serve.py", "src/agent_coordination/cli.py", "src/agent_coordination/workspace.py", "tests/board_html_golden.html", "tests/board_html_golden_ruled.html", "tests/test_board_html.py", "tests/test_board_serve.py", "tests/test_cli.py"]
 opened_commit = "abb10ed0a1b5ee9ee8aa1c4a8a9ab7b9f0de711f"
 whole_reason = "board serve token file and ruled-card rendering: server, renderer, spec, tests"
