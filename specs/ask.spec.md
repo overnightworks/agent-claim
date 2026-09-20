@@ -28,6 +28,7 @@ always the argument given; `<k>` the fresh line's 1-based index.
 | `--picture FILE.svg` unreadable | ASK-06 | ASK-09 | — |
 | `--picture` content refused | ASK-07 | ASK-09 | — |
 | `--text` blank or all whitespace | ASK-08 | ASK-09 | — |
+| `--question`/`--example` content refused | ASK-10 | ASK-09 | — |
 | item is a pull request | RULE-08 (cited) | ASK-09 | — |
 | item does not exist | RULE-07 (cited) | ASK-09 | — |
 | this forge cannot write the body | RULE-06 (cited) | ASK-09 | — |
@@ -48,7 +49,8 @@ text (BODY-01..BODY-50); a picture's own content rules are BODY-37..BODY-42.
 - [ ] [ASK-06] `--picture FILE.svg` naming an unreadable file refuses `--picture <path> could not be read: <error>`, exit `2`, before the forge or the item body are touched (see E-ASK-04).
 - [ ] [ASK-07] A `--picture` failing a BODY-37..42 rule refuses `picture <reason>` (no `expectation[0].` prefix), exit `2`, before any write; `<reason>` is the first-matching row below.
 - [ ] [ASK-08] `--text` that is blank or all whitespace refuses `expectation text must be a non-empty string`, exit `2`, before any write.
-- [ ] [ASK-09] `--json` on a dispatched refusal (ASK-05..ASK-08, RULE-06..RULE-08) prints `specs/output.spec.md`'s envelope with the sentence as `message` and `reason` from the table below, exit `2` (see E-ASK-05).
+- [ ] [ASK-09] `--json` on a dispatched refusal (ASK-05..ASK-08, ASK-10, RULE-06..RULE-08) prints the envelope with `reason` from the table below and the sentence as `message`, exit `2` (see E-ASK-05).
+- [ ] [ASK-10] A `--question`/`--example` failing BODY-34..36 refuses `<field> <reason>`, exit `2`, before any write; `<field>` is `question` or `example`, `<reason>` from the table below (see E-ASK-06).
 
 `reason`, by which refusal fired:
 
@@ -56,8 +58,15 @@ text (BODY-01..BODY-50); a picture's own content rules are BODY-37..BODY-42.
 |---|---|
 | ASK-05 (malformed body), RULE-07 (missing item, cited), RULE-08 (pull-request target, cited) | `invalid_item` |
 | ASK-06 (`--picture` unreadable), ASK-07 (`--picture` content refused) | `invalid_picture` |
-| ASK-08 (blank `--text`) | `invalid_expectation` |
+| ASK-08 (blank `--text`), ASK-10 (`--question`/`--example` content refused) | `invalid_expectation` |
 | RULE-06 (forge cannot write, cited) | `unavailable` |
+
+`<reason>` for ASK-10, checked in this fixed order:
+
+| `--question`/`--example` content | `<reason>` |
+|---|---|
+| blank or all whitespace | `must be a non-empty string` |
+| `--question` over 160 characters | `must be at most 160 characters` |
 
 `<reason>`, checked in this fixed order:
 
@@ -153,5 +162,16 @@ Setup: bare-remote, bootstrapped, `storage = "state-ref"` tracked, `items/aco-00
 $ aco ask aco-000001 --text "New question?" --json
 2> ERROR: #<n> body malformed: agent-claim: no agent-claim block; ask needs a valid agent-claim block
 {"ok": false, "reason": "invalid_item", "message": "#<n> body malformed: agent-claim: no agent-claim block; ask needs a valid agent-claim block"}
+exit 2
+```
+
+### E-ASK-06 — a refused `--question` gets `invalid_expectation`, not `invalid_picture`
+
+Setup: bare-remote, bootstrapped, `storage = "state-ref"` tracked, `<item-id>` open
+
+```console
+$ aco ask <item-id> --text "New question?" --question "   " --json
+2> ERROR: question must be a non-empty string
+{"ok": false, "reason": "invalid_expectation", "message": "question must be a non-empty string"}
 exit 2
 ```

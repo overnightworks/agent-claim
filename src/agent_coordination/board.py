@@ -2013,9 +2013,14 @@ class ExpectationTextError(protocol.ClaimError):
 
 class ExpectationFieldError(protocol.ClaimError):
     """`append_expectation`'s own optional-card-field refusal -- `question`,
-    `example`, or `picture` failing its own content rule (issue #396) -- so
-    a `--json`-emitting caller can choose `invalid_picture` without parsing
-    the refusal prose."""
+    `example`, or `picture` failing its own content rule (issue #396) --
+    carrying the failing `field` by name so a `--json`-emitting caller can
+    choose `invalid_expectation` (`question`, `example`) or `invalid_picture`
+    (`picture`) without parsing the refusal prose."""
+
+    def __init__(self, field: str, message: str) -> None:
+        super().__init__(message)
+        self.field = field
 
 
 def append_expectation(
@@ -2042,7 +2047,7 @@ def append_expectation(
             continue
         reason = check(value)
         if reason is not None:
-            raise ExpectationFieldError(f"{key} {reason}")
+            raise ExpectationFieldError(key, f"{key} {reason}")
         entry[key] = value
     located = locate_agent_claim_block(body)
     entries = _block_expectation_dicts(located.data)

@@ -5236,6 +5236,20 @@ def _read_picture_file(path: str) -> str:
         raise _PictureFileError(f"--picture {path} could not be read: {error}") from error
 
 
+def _ask_expectation_reason(
+    error: board.ExpectationTextError | board.ExpectationFieldError,
+) -> AskReason:
+    """`_cmd_ask`'s own mapping from `append_expectation`'s two card-content
+    refusals (issue #396) to their `--json` `reason`: a blank `--text`
+    (`ExpectationTextError`) and a `--question`/`--example` failing its own
+    rule both name `invalid_expectation`; only a refused `--picture`
+    (`ExpectationFieldError` whose `field` is `picture`) names
+    `invalid_picture`, per `specs/ask.spec.md`'s ASK-07/ASK-10 split."""
+    if isinstance(error, board.ExpectationFieldError) and error.field == "picture":
+        return AskReason.INVALID_PICTURE
+    return AskReason.INVALID_EXPECTATION
+
+
 def _cmd_ask(parsed: argparse.Namespace, session: _WriteSession) -> int:
     json_mode = parsed.json
     try:
@@ -5258,10 +5272,8 @@ def _cmd_ask(parsed: argparse.Namespace, session: _WriteSession) -> int:
         return _refuse(AskReason.INVALID_ITEM, error, json_mode=json_mode)
     try:
         new_body = board.append_expectation(body, parsed.text, parsed.default, card=card)
-    except board.ExpectationTextError as error:
-        return _refuse(AskReason.INVALID_EXPECTATION, error, json_mode=json_mode)
-    except board.ExpectationFieldError as error:
-        return _refuse(AskReason.INVALID_PICTURE, error, json_mode=json_mode)
+    except (board.ExpectationTextError, board.ExpectationFieldError) as error:
+        return _refuse(_ask_expectation_reason(error), error, json_mode=json_mode)
     index = len(board.expectation_lines(new_body, storage=config.storage))
     client.update_item_body(number, new_body)
     asked = _AskedLine(

@@ -4245,6 +4245,38 @@ def test_ask_refuses_an_invalid_picture_file_before_any_write(
     _assert_json_refusal_object(captured.err, captured.out, reason="invalid_picture")
 
 
+def test_ask_refuses_a_blank_question_with_invalid_expectation_not_invalid_picture(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """`ExpectationFieldError` covers `question`, `example`, and `picture`
+    alike (issue #396 review finding): only a refused `picture` names
+    `invalid_picture`, per `specs/ask.spec.md`'s ASK-10 -- a refused
+    `--question`/`--example` names `invalid_expectation` instead."""
+    client = _client_with_item(
+        monkeypatch, tmp_path, RULE_ITEM, agent_claim_body(MINIMAL_BLOCK_TOML)
+    )
+
+    exit_code = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "ask",
+            str(RULE_ITEM),
+            "--text",
+            "New question?",
+            "--question",
+            "   ",
+            "--json",
+        ]
+    )
+
+    assert exit_code == 2
+    captured = capsys.readouterr()
+    assert "question must be a non-empty string" in captured.err
+    assert client.item_bodies == {}
+    _assert_json_refusal_object(captured.err, captured.out, reason="invalid_expectation")
+
+
 def test_ask_refuses_a_missing_picture_file_before_any_write(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
