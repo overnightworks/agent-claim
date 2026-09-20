@@ -2850,9 +2850,7 @@ def _cmd_item_edit(parsed: argparse.Namespace) -> int:
     client = _state_ref_forge(parsed.repo, config.canonical_remote)
     number = parsed.item
     if client.item_reference(number).state is forge.ItemState.MISSING:
-        raise protocol.ClaimUnavailableError(
-            f"#{number} does not exist in {client.repository.path}"
-        )
+        raise protocol.ClaimUnavailableError(_missing_item_refusal(number, client))
     client.update_item_body(number, body)
     _print_item_edit_result(
         items.format_item_id(number), number, client.item_oid(number), as_json=parsed.json
@@ -2941,9 +2939,7 @@ def _cmd_item_close(parsed: argparse.Namespace) -> int:
         )
     client = _state_ref_forge(parsed.repo, config.canonical_remote)
     if client.item_reference(number).state is forge.ItemState.MISSING:
-        raise protocol.ClaimUnavailableError(
-            f"#{number} does not exist in {client.repository.path}"
-        )
+        raise protocol.ClaimUnavailableError(_missing_item_refusal(number, client))
     closed_at = client.close_item(number)
     result = _ItemCloseResult(
         item_id=items.format_item_id(number),
@@ -3039,9 +3035,7 @@ def _cmd_item_show(parsed: argparse.Namespace, session: _ReadSession) -> int:
     number = parsed.item
     reference = client.item_reference(number)
     if reference.state is forge.ItemState.MISSING:
-        raise protocol.ClaimUnavailableError(
-            f"#{number} does not exist in {client.repository.path}"
-        )
+        raise protocol.ClaimUnavailableError(_missing_item_refusal(number, client))
     parent = client.parent_issue(number)
     body = reference.body or ""
     if parsed.json:
@@ -4975,9 +4969,7 @@ def _cmd_release_landed(
     commit = _landed_commit(landings, identity.issue, cast(str, parsed.merged))
     client = _state_ref_forge(parsed.repo, canonical_remote)
     if client.item_reference(identity.issue).state is forge.ItemState.MISSING:
-        raise protocol.ClaimUnavailableError(
-            f"#{identity.issue} does not exist in {client.repository.path}"
-        )
+        raise protocol.ClaimUnavailableError(_missing_item_refusal(identity.issue, client))
     write = client.prepare_landing(identity.issue)
     worktree, _remote, observed = _store_observation()
     _require_state_ref(observed)
@@ -5430,6 +5422,14 @@ def _cmd_cut(parsed: argparse.Namespace, session: _WriteSession) -> int:
     return _cut_slice(
         client, _cut_target(client, number), parsed, config.idea_label, config.storage
     )
+
+
+def _missing_item_refusal(number: int, client: forge.ForgeReader) -> str:
+    """The refusal sentence for a missing item number -- every forge-backed
+    command that checks `client.item_reference(number).state is
+    forge.ItemState.MISSING` before acting shares this one sentence rather
+    than typing it out again."""
+    return f"#{number} does not exist in {client.repository.path}"
 
 
 def _item_body_or_refuse(client: forge.ForgeReader, number: int, *, command: str) -> str:
