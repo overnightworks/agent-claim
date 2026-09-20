@@ -345,6 +345,14 @@ def _add_board_parser(commands: argparse._SubParsersAction) -> None:
         metavar="PORT",
         help="loopback port for --serve; 0 (default) picks an ephemeral one",
     )
+    board_command.add_argument(
+        "--new-token",
+        action="store_true",
+        help=(
+            "mint a fresh persistent loopback token for --serve (issue #388), "
+            "replacing the one at ${XDG_CONFIG_HOME:-~/.config}/aco/board-token"
+        ),
+    )
 
 
 def _add_rulings_parser(commands: argparse._SubParsersAction) -> None:
@@ -4034,6 +4042,12 @@ def _cmd_board_html(parsed: argparse.Namespace, session: _ReadSession) -> None:
 
 
 def _cmd_board(parsed: argparse.Namespace, session: _ReadSession) -> None:
+    if parsed.new_token:
+        # `--new-token` only ever mints through `--serve`'s own writer
+        # session (issue #388): reaching here means `--serve` was not
+        # given, so minting here would be a silent no-op the caller cannot
+        # observe rather than a refusal by name.
+        raise protocol.ClaimError("--new-token requires --serve")
     if parsed.html is not None:
         _cmd_board_html(parsed, session)
         return
@@ -5046,20 +5060,34 @@ def _cmd_rule(parsed: argparse.Namespace, session: _WriteSession) -> int:
     return 0
 
 
+def _board_token_path() -> Path:
+    return workspace.default_board_token_path(os.environ)
+
+
 def _board_server(parsed: argparse.Namespace, session: _WriteSession) -> board_serve.BoardServer:
     """`board --serve`'s bound, listening server (issue #280), built but not
     yet run: a loopback page that reads through `_board_html_page` and
     writes through `rule_item`, exactly like `--html` and `aco rule` do
     apart -- `board_serve.py` is transport only, so this function is still
-    the one place that resolves the forge, renders a page, and rules a
-    line. Split from `_cmd_board_serve`'s own `serve_forever` loop so a test
-    can bind a real ephemeral port and drive it without blocking."""
+    the one place that resolves the forge, the persistent token (issue
+    #388: `workspace.board_token`, `--new-token` mints a fresh one), renders
+    a page, and rules a line. `resolve_token` is only called by `start`
+    itself once the socket is already bound, so `render_page`'s own closure
+    reads the resolved value back out of `token_holder` -- never a token
+    read before the busy-port check that could bind. Split from
+    `_cmd_board_serve`'s own `serve_forever` loop so a test can bind a real
+    ephemeral port and drive it without blocking."""
     client = session.forge.writer()
     read_session = _ReadSession(forge=session.forge)
-    server: board_serve.BoardServer
+    token_holder: list[str] = []
+
+    def resolve_token() -> str:
+        token = workspace.board_token(_board_token_path(), mint_new=parsed.new_token)
+        token_holder.append(token)
+        return token
 
     def render_page(refused: str | None) -> str:
-        served = board_html.ServedRuleForm(token=server.token, refused=refused)
+        served = board_html.ServedRuleForm(token=token_holder[0], refused=refused)
         return _board_html_page(read_session, served=served)
 
     def post_rule(item: int, line: int, ruling: str, note: str | None) -> board_serve.RuleOutcome:
@@ -5069,8 +5097,9 @@ def _board_server(parsed: argparse.Namespace, session: _WriteSession) -> board_s
             return board_serve.RuleOutcome(refusal=str(error))
         return board_serve.RuleOutcome(refusal=None)
 
-    server = board_serve.start(port=parsed.port, render_page=render_page, rule_item=post_rule)
-    return server
+    return board_serve.start(
+        port=parsed.port, resolve_token=resolve_token, render_page=render_page, rule_item=post_rule
+    )
 
 
 def _cmd_board_serve(parsed: argparse.Namespace, session: _WriteSession) -> int:

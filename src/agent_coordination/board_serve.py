@@ -1,10 +1,13 @@
 """The loopback HTTP transport for `aco board --serve` (issue #280).
 
-This module owns bytes on the wire only: binding `127.0.0.1`, minting the
-per-start token, routing exactly the two paths the ruled form names, and
-turning a caller-supplied page renderer and rule writer into HTTP responses.
-It never reads or writes board state itself -- `cli.py` stays the one owner
-of "state -> page" (`board_html.render`) and "click -> ruled line"
+This module owns bytes on the wire only: binding `127.0.0.1`, then resolving
+a caller-supplied persistent token (issue #388: `workspace.board_token`
+mints or reads it, `cli.py`'s `_board_server` is the one caller that
+resolves it -- only after the bind, so a busy port never touches the token
+file), routing exactly the two paths the ruled form names, and turning a
+caller-supplied page renderer and rule writer into HTTP responses. It never
+reads or writes board state itself -- `cli.py` stays the one owner of
+"state -> page" (`board_html.render`) and "click -> ruled line"
 (`board.rule_expectation` through the store); this module only carries their
 calls over the socket, so it is also the one place in this package allowed
 to touch `http.server` at all.
@@ -13,13 +16,17 @@ to touch `http.server` at all.
 from __future__ import annotations
 
 import hmac
-import secrets
+import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from errno import EADDRINUSE
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import cast
 from urllib.parse import parse_qs, quote, urlsplit
+
+from . import protocol
 
 LOOPBACK_HOST = "127.0.0.1"
 TOKEN_FIELD = "t"
@@ -214,13 +221,111 @@ class BoardServer:
     token: str
 
 
-def start(*, port: int, render_page: RenderPage, rule_item: RuleItem) -> BoardServer:
+ResolveToken = Callable[[], str]
+"""`start`'s own token source (issue #388): called only after the socket is
+already bound, so a busy port refuses before `cli._board_server`'s
+`workspace.board_token` ever reads or mints the persistent token file --
+`--new-token` against a busy port therefore changes nothing on disk."""
+
+
+def start(
+    *, port: int, resolve_token: ResolveToken, render_page: RenderPage, rule_item: RuleItem
+) -> BoardServer:
     """Bind `127.0.0.1:port` (`port=0` picks an ephemeral one) and return the
-    running server, already listening. A fresh `secrets.token_urlsafe(32)`
-    token per start (issue #280's ruled form) is the server's only state
-    besides the bound port."""
-    token = secrets.token_urlsafe(32)
-    httpd = _BoardHTTPServer((LOOPBACK_HOST, port), token, render_page, rule_item)
+    running server, already listening, authenticating every request against
+    `resolve_token`'s result. A port already held by another process refuses
+    by name, naming its PID when `/proc` can identify it, instead of a raw
+    `OSError` -- `--restart` was considered and dropped in favor of this
+    refusal plus an ordinary `kill`, since the token no longer changes on a
+    fresh start anyway. Binding first, before `resolve_token` ever runs,
+    means that refusal happens before any token file read or mint: a busy
+    port is left exactly as it was."""
+    try:
+        httpd = _BoardHTTPServer((LOOPBACK_HOST, port), "", render_page, rule_item)
+    except OSError as error:
+        if error.errno != EADDRINUSE:
+            raise
+        raise protocol.ClaimError(_busy_port_refusal(port)) from error
+    token = resolve_token()
+    httpd.token = token
     bound_port = httpd.server_address[1]
     url = f"http://{LOOPBACK_HOST}:{bound_port}{_ROOT_PATH}?{TOKEN_FIELD}={token}"
     return BoardServer(httpd=httpd, url=url, token=token)
+
+
+def _busy_port_refusal(port: int) -> str:
+    pid = _pid_holding_loopback_port(port)
+    if pid is None:
+        return f"port {port} is already in use; the owning process could not be identified"
+    return f"port {port} is already in use by PID {pid}"
+
+
+def _pid_holding_loopback_port(port: int) -> int | None:
+    """Best-effort: `board --serve` only ever binds `127.0.0.1`, so the
+    occupant's own listening socket is one `/proc/net/tcp` row away, and its
+    owning process one `/proc/<pid>/fd` symlink away -- `None` on anything
+    that leaves either unreadable (a non-Linux kernel, a sandboxed `/proc`,
+    a race where the occupant already exited), since a refusal that cannot
+    back a PID names none rather than guessing one."""
+    inode = _loopback_socket_inode(port)
+    return None if inode is None else _pid_owning_socket_inode(inode)
+
+
+_PROC_NET_TCP_LOCAL_ADDRESS_FIELD = 1
+_PROC_NET_TCP_STATE_FIELD = 3
+_PROC_NET_TCP_INODE_FIELD = 9
+"""`/proc/net/tcp`'s own column layout: `sl local_address rem_address st
+tx_queue:rx_queue tr:tm->when retrnsmt uid timeout inode`, 0-indexed after
+`str.split()` -- the inode is the tenth column."""
+_LOOPBACK_ADDRESS_HEX = "0100007F"
+"""`/proc/net/tcp`'s own little-endian hex encoding of `127.0.0.1` --
+`board --serve` only ever binds that address, so a row naming a different
+local address, however matching the port, is never this process's own
+listener."""
+_TCP_LISTEN_STATE = "0A"
+"""`/proc/net/tcp`'s own `st` code for `TCP_LISTEN` -- the state a bound,
+listening server always carries; any other state on a matching port/address
+is a stale or unrelated row, not the process actually holding the bind."""
+
+
+def _loopback_socket_inode(port: int) -> str | None:
+    local_address = f"{_LOOPBACK_ADDRESS_HEX}:{format(port, '04X')}"
+    try:
+        rows = Path("/proc/net/tcp").read_text(encoding="utf-8").splitlines()[1:]
+    except OSError:
+        return None
+    for row in rows:
+        fields = row.split()
+        if (
+            len(fields) > _PROC_NET_TCP_INODE_FIELD
+            and fields[_PROC_NET_TCP_LOCAL_ADDRESS_FIELD] == local_address
+            and fields[_PROC_NET_TCP_STATE_FIELD] == _TCP_LISTEN_STATE
+        ):
+            return fields[_PROC_NET_TCP_INODE_FIELD]
+    return None
+
+
+def _pid_owning_socket_inode(inode: str) -> int | None:
+    target = f"socket:[{inode}]"
+    try:
+        candidates = tuple(entry for entry in os.listdir("/proc") if _is_plain_digit_string(entry))
+    except OSError:
+        return None
+    for pid in candidates:
+        if _process_owns_socket(pid, target):
+            return int(pid)
+    return None
+
+
+def _process_owns_socket(pid: str, target: str) -> bool:
+    try:
+        descriptors = os.listdir(f"/proc/{pid}/fd")
+    except OSError:
+        return False
+    for descriptor in descriptors:
+        try:
+            if os.readlink(f"/proc/{pid}/fd/{descriptor}") == target:
+                return True
+        except OSError:
+            continue
+    return False

@@ -1,0 +1,333 @@
+<title>agent-claim Board</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+:root {
+  --ground: #EDF0F3; --surface: #FBFCFD; --sunk: #E2E7EC; --ink: #16202A; --muted: #566271;
+  --rule: #D3DAE1; --accent: #2B59C3; --accent-soft: #DCE5F8;
+  --done: #2F7D4F; --done-soft: #DCEFE3; --work: #A86A12; --work-soft: #F6E7CC;
+  --you: #6E45B0; --you-soft: #EEE6F9; --open: #7A8694; --open-soft: #E6EAEE;
+  --display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+  --body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground: #0F151B; --surface: #161E26; --sunk: #1E2832; --ink: #E4EAF0; --muted: #97A3B1;
+    --rule: #2A3541; --accent: #88A8F3; --accent-soft: #1F2C47;
+    --done: #62BF88; --done-soft: #17301F; --work: #E2AA4C; --work-soft: #3A2A10;
+    --you: #BA9DEC; --you-soft: #2A2140; --open: #8491A0; --open-soft: #222C36;
+  }
+}
+:root[data-theme="dark"] {
+  --ground: #0F151B; --surface: #161E26; --sunk: #1E2832; --ink: #E4EAF0; --muted: #97A3B1;
+  --rule: #2A3541; --accent: #88A8F3; --accent-soft: #1F2C47;
+  --done: #62BF88; --done-soft: #17301F; --work: #E2AA4C; --work-soft: #3A2A10;
+  --you: #BA9DEC; --you-soft: #2A2140; --open: #8491A0; --open-soft: #222C36;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--ground); color: var(--ink); font: 15px/1.55 var(--body);
+}
+.wrap {
+  max-width: 1120px; margin: 0 auto; padding-inline: clamp(16px, 4vw, 40px);
+  padding-block: 28px 72px; display: grid; gap: 44px;
+}
+code {
+  font: 0.86em/1.3 var(--mono); background: var(--sunk); padding: 0.08em 0.35em;
+  border-radius: 4px; overflow-wrap: anywhere;
+}
+h1, h2, h3 { font-family: var(--display); text-wrap: balance; margin: 0; }
+h2 {
+  font-size: 1.4rem; font-weight: 700; letter-spacing: -0.01em; display: flex;
+  flex-wrap: wrap; align-items: baseline; gap: 4px 12px;
+}
+h2 small { font: 500 0.82rem var(--body); color: var(--muted); letter-spacing: 0.01em; }
+section { display: grid; gap: 16px; }
+summary { cursor: pointer; }
+summary:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 6px;
+}
+.eyebrow {
+  margin: 0; font-size: 0.75rem; font-weight: 600; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--accent);
+}
+.mast { display: grid; gap: 18px; padding-bottom: 24px; border-bottom: 1px solid var(--rule); }
+.mast h1 {
+  font-size: clamp(2.2rem, 5vw, 3.3rem); font-weight: 700; letter-spacing: -0.03em;
+  line-height: 1;
+}
+.mast-facts { display: flex; flex-wrap: wrap; gap: 14px 32px; margin: 0; }
+.mast-facts div { display: grid; gap: 2px; }
+.mast-facts dt {
+  font-size: 0.72rem; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase;
+  color: var(--muted);
+}
+.mast-facts dd { margin: 0; font: 500 1.1rem/1.2 var(--body); }
+.mast-facts dd code { font-size: 1rem; background: var(--accent-soft); color: var(--accent); }
+.empty { margin: 0; color: var(--muted); }
+
+.you h2 { color: var(--you); }
+.cards {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 330px), 1fr));
+  gap: 14px;
+}
+.card {
+  background: var(--surface); border: 1px solid color-mix(in srgb, var(--you) 40%, var(--rule));
+  border-radius: 12px; padding: 18px 20px; display: grid; gap: 12px; align-content: start;
+}
+.card .item-tag {
+  font-size: 0.75rem; font-weight: 600; letter-spacing: 0.04em; color: var(--muted);
+}
+.card h3 { font-size: 1.05rem; font-weight: 600; line-height: 1.3; }
+.card figure { margin: 0; }
+.card figure svg { display: block; max-width: 100%; height: auto; }
+.card details { font-size: 0.88rem; color: var(--muted); }
+.card details summary { color: var(--accent); font-weight: 500; }
+.card details p { margin: 6px 0 0; }
+.example {
+  margin: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px;
+  padding: 8px 10px; border-radius: 8px; background: var(--sunk); font-size: 0.92rem;
+}
+.rule-lines { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.rule-lines li {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 10px;
+  border-radius: 8px; background: var(--sunk);
+}
+.rule-lines li.rec { background: var(--you-soft); outline: 1.5px solid var(--you); }
+.example .tag, .rule-lines .tag, .rule-actions .tag {
+  font-size: 0.7rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--you);
+}
+.rule-lines .tag { margin-left: auto; }
+.copy {
+  font: 600 0.78rem var(--body); color: var(--you); background: var(--surface);
+  border: 1.5px solid var(--you); border-radius: 999px; padding: 3px 12px; cursor: pointer;
+}
+.copy:hover { background: var(--you); color: var(--surface); }
+.copy:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.copy.copied { background: var(--done); border-color: var(--done); color: var(--surface); }
+.rule-form {
+  display: grid; gap: 6px; padding: 10px 12px; border-radius: 8px; background: var(--sunk);
+}
+.rule-form textarea {
+  font: inherit; resize: vertical; min-height: 2.4em; padding: 6px 8px; border-radius: 6px;
+  border: 1px solid var(--rule); background: var(--surface); color: inherit;
+}
+.rule-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.rule-form button {
+  font: 600 0.82rem var(--body); color: var(--surface); background: var(--accent); border: none;
+  border-radius: 999px; padding: 5px 16px; cursor: pointer;
+}
+.rule-form button.rec { background: var(--you); }
+.refused {
+  margin: 0; padding: 10px 14px; border-radius: 8px; background: var(--work-soft);
+  color: var(--work); font-weight: 600;
+}
+
+.topics { list-style: none; margin: 0; padding: 0; display: grid; }
+.topics > li { border-top: 1px solid var(--rule); }
+.topics > li:last-child { border-bottom: 1px solid var(--rule); }
+.topics summary {
+  list-style: none; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 16rem);
+  gap: 8px 28px; align-items: center; padding: 13px 0;
+}
+.topics summary::-webkit-details-marker { display: none; }
+.topics summary:hover .t-name strong { color: var(--accent); }
+.t-name strong::after { content: " +"; color: var(--muted); font-weight: 400; }
+.t-estimate { color: var(--muted); font: 0.82rem var(--mono); margin-left: 0.4em; }
+.topics details[open] .t-name strong::after { content: " \2212"; }
+.t-progress {
+  display: grid; grid-template-columns: minmax(0, 1fr) 3.4em; gap: 12px; align-items: center;
+}
+.bar {
+  display: block; height: 8px; border-radius: 4px; background: var(--sunk); overflow: hidden;
+}
+.bar i { display: block; height: 100%; background: var(--accent); border-radius: 4px; }
+.t-count { font: 500 0.85rem var(--mono); text-align: right; }
+.parts {
+  list-style: none; margin: 0 0 16px; padding: 12px 16px; display: grid; gap: 7px;
+  background: var(--surface); border-radius: 10px;
+}
+.parts li {
+  display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; gap: 12px;
+  align-items: baseline; font-size: 0.92rem;
+}
+.dot {
+  width: 10px; height: 10px; border-radius: 50%; background: var(--open-soft);
+  border: 2px solid var(--open); align-self: center;
+}
+.parts .running .dot { background: var(--work); border-color: var(--work); }
+.parts .you .dot { background: var(--you); border-color: var(--you); }
+.p-state {
+  font-size: 0.74rem; font-weight: 600; letter-spacing: 0.03em; color: var(--muted);
+  white-space: nowrap;
+}
+.parts .running .p-state { color: var(--work); }
+.parts .you .p-state { color: var(--you); }
+
+.ruled-history {
+  list-style: none; margin: 0 0 8px; padding: 12px 16px; display: grid; gap: 7px;
+  background: var(--sunk); border-radius: 10px;
+}
+.ruled-history li {
+  display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between;
+  gap: 8px; font-size: 0.92rem;
+}
+.ruled-state {
+  font: 600 0.74rem var(--mono); letter-spacing: 0.03em; color: var(--muted); white-space: nowrap;
+}
+.ruled-hint { margin: 0 0 16px; color: var(--muted); font-size: 0.86rem; }
+.part-ruled { grid-column: 1 / -1; margin-top: 6px; font-size: 0.84rem; }
+.part-ruled summary { color: var(--accent); font-weight: 500; cursor: pointer; }
+.part-ruled .ruled-history { margin: 6px 0 0; }
+.part-ruled .ruled-hint { margin: 6px 0 0; }
+.lanes { display: grid; gap: 12px; }
+.lane {
+  background: var(--surface); border: 1px solid var(--rule); border-radius: 12px;
+  padding: 18px 20px; display: grid; gap: 10px;
+}
+.lane h3 { font-size: 1.05rem; font-weight: 600; line-height: 1.3; }
+.facts { margin: 0; display: grid; gap: 8px; }
+.facts div { display: grid; grid-template-columns: 7.5em minmax(0, 1fr); gap: 12px; }
+.facts dt {
+  font-size: 0.7rem; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase;
+  color: var(--muted); padding-top: 0.25em;
+}
+.facts dd { margin: 0; }
+
+.landed { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.landed li { padding: 8px 0; border-top: 1px solid var(--rule); font-size: 0.92rem; }
+.landed li:last-child { border-bottom: 1px solid var(--rule); }
+
+.measurements { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.measurements li {
+  padding: 8px 0; border-top: 1px solid var(--rule); font: 0.86rem var(--mono);
+}
+.measurements li:last-child { border-bottom: 1px solid var(--rule); }
+
+@media (max-width: 560px) {
+  .facts div { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .parts li { grid-template-columns: 10px minmax(0, 1fr); }
+  .p-state { grid-column: 2; }
+  .topics summary { grid-template-columns: minmax(0, 1fr); }
+}
+</style>
+<main class="wrap">
+  <header class="mast">
+    <p class="eyebrow">agent-claim &middot; the aco coordination tool</p>
+    <h1>Board</h1>
+    <dl class="mast-facts"><div><dt>repository</dt><dd><code>example/agent-claim</code></dd></div><div><dt>state tip</dt><dd><code>deadbeefdeadbeefdeadbeefdeadbeefdeadbeef</code></dd></div></dl>
+  </header>
+
+  <section class="you" aria-labelledby="you">
+    <h2 id="you">Wartet auf dich <small>1</small></h2>
+    <div class="cards">
+    <article class="card">
+      <span class="item-tag">#101 Zugang klären</span>
+      <h3>Brauchen wir Admin-Rechte?</h3>
+      <ul class="rule-lines"><li class="rec"><code>aco rule 101 --line 1 --yes</code><button type="button" class="copy" data-copy="aco rule 101 --line 1 --yes">Kopieren</button><span class="tag">Vorgabe</span></li><li class=""><code>aco rule 101 --line 1 --no</code><button type="button" class="copy" data-copy="aco rule 101 --line 1 --no">Kopieren</button></li><li class=""><code>aco rule 101 --line 1 --later</code><button type="button" class="copy" data-copy="aco rule 101 --line 1 --later">Kopieren</button></li></ul>
+    </article></div>
+  </section>
+
+  <section aria-labelledby="lanes">
+    <h2 id="lanes">Lanes <small>1</small></h2>
+    <div class="lanes">
+    <article class="lane">
+      <h3>#102 Laufende Lane</h3>
+      <dl class="facts"><div><dt>Agent</dt><dd>Codex Sol (builder)</dd></div><div><dt>Branch</dt><dd><code>codex/issue-102-claims</code></dd></div><div><dt>Alter</dt><dd>0h 0m</dd></div><div><dt>Now</dt><dd>Am Bauen.</dd></div><div><dt>Next</dt><dd>Fertigstellen.</dd></div><div><dt>Done when</dt><dd>Gemergt.</dd></div></dl>
+    </article></div>
+  </section>
+
+  <section aria-labelledby="topics">
+    <h2 id="topics">Themen</h2>
+    <ul class="topics">
+      <li>
+        <details>
+          <summary>
+            <span class="t-name">
+              <strong>#103 Kleine Verbesserung</strong>
+              <span class="t-estimate">keine Größe</span>
+            </span>
+            <span class="t-progress">
+              <span class="bar" role="img" aria-label="0 of 1 done">
+                <i style="width:0%"></i>
+              </span>
+              <span class="t-count">0/1</span>
+            </span>
+          </summary>
+          <ul class="parts"><li class="open"><span class="dot" aria-hidden="true"></span><span>#103 Kleine Verbesserung</span><span class="p-state">offen</span></li></ul>
+        </details>
+      </li>
+      <li>
+        <details>
+          <summary>
+            <span class="t-name">
+              <strong>#104 Randfall</strong>
+              <span class="t-estimate">keine Größe</span>
+            </span>
+            <span class="t-progress">
+              <span class="bar" role="img" aria-label="0 of 1 done">
+                <i style="width:0%"></i>
+              </span>
+              <span class="t-count">0/1</span>
+            </span>
+          </summary>
+          <ul class="parts"><li class="open"><span class="dot" aria-hidden="true"></span><span>#104 Randfall</span><span class="p-state">offen</span></li></ul>
+        </details>
+      </li>
+      <li>
+        <details>
+          <summary>
+            <span class="t-name">
+              <strong>#100 Sammelitem</strong>
+              <span class="t-estimate">~5h (M, n=3)</span>
+            </span>
+            <span class="t-progress">
+              <span class="bar" role="img" aria-label="1 of 2 done">
+                <i style="width:50%"></i>
+              </span>
+              <span class="t-count">1/2</span>
+            </span>
+          </summary>
+          <ul class="parts"><li class="you"><span class="dot" aria-hidden="true"></span><span>#101 Zugang klären (blocked by #50)</span><span class="p-state">wartet auf dich</span><details class="part-ruled"><summary>Verlauf</summary><ul class="ruled-history"><li class="ruled"><span>Ist das Onboarding-Ticket schon offen? Anmerkung: Ja, erledigt.</span><span class="ruled-state">ruled yes 2026-08-28</span></li></ul><p class="ruled-hint">Eine gerulte Zeile ist unveränderlich. Für eine neue Entscheidung: <code>aco ask 101 --text "…"</code>, dann rulen.</p></details></li></ul>
+        </details>
+      </li>
+      <li>
+        <details>
+          <summary>
+            <span class="t-name">
+              <strong>#102 Laufende Lane</strong>
+              <span class="t-estimate">keine Größe</span>
+            </span>
+            <span class="t-progress">
+              <span class="bar" role="img" aria-label="0 of 1 done">
+                <i style="width:0%"></i>
+              </span>
+              <span class="t-count">0/1</span>
+            </span>
+          </summary>
+          <ul class="parts"><li class="running"><span class="dot" aria-hidden="true"></span><span>#102 Laufende Lane</span><span class="p-state">läuft</span></li></ul><ul class="ruled-history"><li class="ruled"><span>Ist das Feature-Flag schon aktiv? Anmerkung: Ja, seit Montag.</span><span class="ruled-state">ruled yes 2026-08-28</span></li></ul><p class="ruled-hint">Eine gerulte Zeile ist unveränderlich. Für eine neue Entscheidung: <code>aco ask 102 --text "…"</code>, dann rulen.</p>
+        </details>
+      </li></ul>
+  </section>
+
+  <section aria-labelledby="landed">
+    <h2 id="landed">Landungen <small>2</small></h2>
+    <ul class="landed"><li>#103 2026-08-19 PR #555</li><li>#104 2026-08-19 PR #556</li></ul>
+  </section>
+
+  <section aria-labelledby="measurements">
+    <h2 id="measurements">Messungen</h2>
+    <p>Messungen (Stand 2026-08-21, seit 2026-08-10)</p><ul class="measurements"><li>M: n=3, median 5h, p80 6h, 2026-08-10..2026-08-14</li><li>1 Lanes ohne Ende</li></ul>
+  </section>
+</main>
+<script>
+document.querySelectorAll("[data-copy]").forEach((button) => {
+  button.addEventListener("click", () => {
+    navigator.clipboard.writeText(button.dataset.copy || "");
+    button.classList.add("copied");
+  });
+});
+</script>
