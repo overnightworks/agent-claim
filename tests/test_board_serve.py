@@ -21,6 +21,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 import pytest
@@ -587,13 +588,51 @@ def test_a_symlinked_board_token_directory_refuses(
     assert "must be private and owned by this user" in capsys.readouterr().err
 
 
+def test_read_board_token_refuses_a_file_not_owned_by_this_user(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Issue #388: `_read_board_token`'s own `fstat` check refuses a file
+    that opened fine but is not a regular file, caught on the open
+    descriptor rather than a separate, racy `lstat`."""
+    token_path = tmp_path / "board-token"
+    token_path.write_text("x" * 43 + "\n", encoding="utf-8")
+    token_path.chmod(0o600)
+
+    def _fstat_not_regular(_fd: int) -> object:
+        return SimpleNamespace(st_mode=stat.S_IFCHR | 0o600, st_uid=os.getuid())
+
+    monkeypatch.setattr(os, "fstat", _fstat_not_regular)
+
+    with pytest.raises(workspace.WorkspaceError, match="is not a valid token"):
+        workspace._read_board_token(token_path)
+
+
+def test_ensure_board_token_directory_refuses_when_mkdir_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Issue #388: a directory that cannot be created (permission denied,
+    read-only filesystem) refuses by name instead of raising a raw
+    `OSError`."""
+    target = tmp_path / "aco"
+
+    def _raise(*_args: object, **_kwargs: object) -> None:
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(Path, "mkdir", _raise)
+
+    with pytest.raises(workspace.WorkspaceError) as excinfo:
+        workspace._ensure_board_token_directory(target)
+    assert str(excinfo.value) == f"cannot create board token directory {target}"
+
+
 def test_new_token_without_serve_refuses(capsys: pytest.CaptureFixture[str]) -> None:
     """Issue #388: `--new-token` outside `--serve` refuses instead of
     silently doing nothing -- there is no writer session to mint through."""
     exit_code = issue_claim.main(["--repo", "example/agent-claim", "board", "--new-token"])
+    captured = capsys.readouterr()
 
     assert exit_code == 2
-    assert "--new-token requires --serve" in capsys.readouterr().err
+    assert "--new-token requires --serve" in captured.err
 
 
 def _noop_render_page(_refused: str | None) -> str:
@@ -704,6 +743,16 @@ def test_busy_port_refusal_names_no_pid_when_proc_is_unreadable(
 def test_pid_owning_socket_inode_returns_none_for_an_orphan_inode() -> None:
     """No live process owns an inode nobody's `/proc/<pid>/fd` links to."""
     assert board_serve._pid_owning_socket_inode("999999999999") is None
+
+
+def test_loopback_socket_inode_returns_none_when_no_row_matches() -> None:
+    """A readable `/proc/net/tcp` with no `LISTEN` row for the port names no
+    inode -- the port is simply free, not merely unreadable."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind((board_serve.LOOPBACK_HOST, 0))
+        free_port = probe.getsockname()[1]
+
+    assert board_serve._loopback_socket_inode(free_port) is None
 
 
 def test_loopback_socket_inode_returns_none_when_proc_net_tcp_is_unreadable(
