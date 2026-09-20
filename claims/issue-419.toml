@@ -1,0 +1,8 @@
+claim_id = "9982fbfa74554de9a9b6a2f1faacdc95"
+agent = "Claude head (coordinator)"
+role = "builder"
+base = "653c9e8a49522ef60a8e54a83f3efb92f0f9463e"
+branch = "claude/issue-419-body-codec"
+scope = ["pyproject.toml", "src/agent_coordination/board.py", "src/agent_coordination/board_html.py", "src/agent_coordination/body.py", "src/agent_coordination/items.py", "src/agent_coordination/protect.py", "src/agent_coordination/state_board.py", "tests/board_fixtures.py", "tests/test_board.py", "tests/test_board_html.py", "tests/test_items.py", "tests/test_state_board.py"]
+opened_commit = "d0e01050f3f85a46801325236ba3d1d44416ab59"
+whole_reason = "body.py extraction: the body-block codec moves out of board.py; its readers and the layer rule follow"
