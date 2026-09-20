@@ -4614,11 +4614,14 @@ def _start_worktree_path(toplevel: Path, *, number: int, slug: str) -> Path:
     return toplevel.parent / f"{toplevel.name}-worktrees" / f"issue-{number}-{slug}"
 
 
+RESUME_SCOPE_MISMATCH = "live claim scope differs; release it first"
+
+
 def _print_start_resume(
     live: protocol.ActiveClaim,
     observed: protocol.ClaimState,
     storage: board.Storage,
-    whole_reason: str | None,
+    parsed: argparse.Namespace,
     *,
     directory: Path,
 ) -> None:
@@ -4626,9 +4629,19 @@ def _print_start_resume(
     same `CLAIMED ...`/cost-line grammar a fresh claim prints, for the live
     claim `_cmd_start` already found in the store -- the same
     `observed.claims` lookup `status`/`release` use -- rather than minting a
-    second, fresh id for an item that already has one."""
+    second, fresh id for an item that already has one. An explicit `--scope`
+    that disagrees with the live claim's own stored scope is refused
+    (review/gate finding: resume must not silently ignore it); `--whole` is
+    never required here even when the live scope is wide, since the stored
+    claim's own `whole_reason` already justified it once."""
+    if parsed.scope is not None and protocol._valid_scope(parsed.scope) != live.scope:
+        raise protocol.ClaimUnavailableError(RESUME_SCOPE_MISMATCH)
     print(f"CLAIMED {_claim_subject(live, storage)}: {live.claim_id}")
-    versioning = _scope_versioning(live.scope, whole_reason, directory=directory)
+    versioning = _scope_versioning(
+        live.scope,
+        parsed.whole if parsed.whole is not None else live.whole_reason,
+        directory=directory,
+    )
     touches = protocol.conflicting_claims(tuple(observed.claims.values()), live)
     print(
         _claim_cost_line(
@@ -4663,9 +4676,17 @@ def _cmd_start(parsed: argparse.Namespace, session: _WriteSession) -> int:
     _worktree, _remote, observed = _store_observation(directory=worktree_path)
     _require_state_ref(observed)
     storage = _board_config(_resolve_toplevel(directory=worktree_path)).storage
+    # `claim_key` alone is an issue-only key for an `IssueIdentity` (it never
+    # folds `branch` into the key at all): a live record found under it may
+    # belong to a different agent or a different branch entirely, so resume
+    # requires this session's own agent and the expected lane branch too --
+    # the same two facts `release`'s own claimant/branch checks require
+    # (review/gate finding). A mismatch falls through to the fresh-claim path
+    # below, which raises the store's own "is claimed by ..." conflict.
     live = observed.claims.get(protocol.claim_key(identity, branch))
-    if live is not None:
-        _print_start_resume(live, observed, storage, parsed.whole, directory=worktree_path)
+    agent = checkout._resolved_agent(None)
+    if live is not None and live.agent == agent and live.branch == branch:
+        _print_start_resume(live, observed, storage, parsed, directory=worktree_path)
         return 0
     claim_parsed = argparse.Namespace(
         issue=number,

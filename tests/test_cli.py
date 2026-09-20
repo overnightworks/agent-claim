@@ -1804,6 +1804,88 @@ def test_start_refuses_an_unsafe_identity_prefix_before_any_git_write(
     assert not (repo.parent / f"{repo.name}-worktrees").exists()
 
 
+def test_start_refuses_to_resume_a_live_claim_held_by_another_agent(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Issue #322 review/gate: `claim_key` is an issue-only key for an
+    `IssueIdentity` (it never folds in `branch`), so a live claim on #314
+    held by a different agent on a different branch must never be silently
+    resumed as this session's own -- it falls through to the store's own
+    "is claimed by ..." conflict instead."""
+    repo = _start_scenario(monkeypatch, tmp_path)
+    foreign = _store_claim_from_request(
+        request(
+            "other-claim",
+            "Grok sess-9",
+            issue=314,
+            branch="grok/issue-314-other",
+            scope=("src/x.py",),
+        )
+    )
+    _patch_store_write(monkeypatch, foreign)
+    monkeypatch.chdir(repo)
+
+    status = issue_claim.main(["--repo", REPOSITORY, "start", "314"])
+
+    assert status == 2
+    assert "is claimed by Grok sess-9" in capsys.readouterr().err
+
+
+def test_start_resume_refuses_a_scope_that_differs_from_the_live_claim(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Issue #322 review/gate: an explicit `--scope` on resume that disagrees
+    with the live claim's own stored scope is refused rather than silently
+    ignored; the identical scope is accepted (covered by
+    `test_start_resumes_an_existing_worktree_by_only_claiming`'s bare
+    resume, which passes no `--scope` at all)."""
+    repo = _start_scenario(monkeypatch, tmp_path)
+    monkeypatch.chdir(repo)
+    assert issue_claim.main(["--repo", REPOSITORY, "start", "314"]) == 0
+    capsys.readouterr()
+
+    status = issue_claim.main(["--repo", REPOSITORY, "start", "314", "--scope", "src/other.py"])
+
+    assert status == 2
+    assert capsys.readouterr().err == f"ERROR: {issue_claim.RESUME_SCOPE_MISMATCH}\n"
+
+
+def test_start_resumes_a_wide_claim_without_repeating_whole(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Issue #322 review/gate: the stored claim's own `whole_reason` already
+    justifies a wide scope once; resuming it must not re-demand `--whole`."""
+    repo, _remote = _real_repository_with_bare_remote(tmp_path)
+    for name in ("a.py", "b.py", "c.py", "d.py"):
+        (repo / name).write_text("x\n")
+    _real_git(repo, "add", *("a.py", "b.py", "c.py", "d.py"))
+    _real_git(repo, "commit", "-q", "-m", "initial")
+    _push_repository_trunk(repo, "origin")
+    issue = board_issue(
+        314,
+        "Fresh Slug Title",
+        complete_contract("Build it.", scope=["a.py", "b.py", "c.py", "d.py"]),
+    )
+    client = FakeForge(board_issues=(issue,))
+    client.issue_references[314] = forge.ItemReference(
+        forge.ItemState.OPEN, issue.title, issue.body
+    )
+    monkeypatch.setattr(github, "GitHubForge", lambda _repository: client)
+    _patch_store_write(monkeypatch)
+    _set_agent_identity_env(monkeypatch, {checkout.ACO_AGENT_ENV: "Codex Sol"})
+    _redirect_toplevel(monkeypatch, repo)
+    monkeypatch.chdir(repo)
+    assert (
+        issue_claim.main(["--repo", REPOSITORY, "start", "314", "--whole", "the whole thing"]) == 0
+    )
+    capsys.readouterr()
+
+    status = issue_claim.main(["--repo", REPOSITORY, "start", "314"])
+
+    assert status == 0
+    assert "CLAIMED issue #314" in capsys.readouterr().out
+
+
 def test_start_mints_a_fresh_id_after_an_abandoned_release(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
