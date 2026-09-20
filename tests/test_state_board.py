@@ -1479,6 +1479,7 @@ class TestCliStateRefForge:
             asked_text,
             None,
             None,
+            default="yes",
             question="Admin-Rechte nötig?",
             example="Wie beim letzten Import.",
             picture=picture_svg,

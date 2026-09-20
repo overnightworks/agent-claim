@@ -181,35 +181,16 @@ class BoardPage:
     storage: board.Storage = board.Storage.GITHUB
 
 
-def _open_expectation_defaults(body: str) -> dict[int, str]:
-    """`index -> default` for `body`'s still-open `[[expectation]]` entries --
-    the one field `board.expectation_lines` (#240) does not carry (`ruling`/
-    `ruled_on` replace `default` the moment a line is ruled, never both at
-    once -- `board.rule_expectation`). Called only for a body `board.py`
-    already parsed valid: `build_page` filters to items with
-    `expectation_progress.open > 0`, which a malformed body can never carry
-    (`board._malformed_parsed_body` always reports `ExpectationProgress(0,
-    0)`) -- so this reads the block straight rather than re-validating an
-    invariant its one caller already guarantees."""
-    entries = board.locate_agent_claim_block(body).data.get("expectation", [])
-    return {
-        position: cast(str, entry["default"])
-        for position, entry in enumerate(cast(list[object], entries), start=1)
-        if isinstance(entry, dict) and "default" in entry
-    }
-
-
 def _expectation_cards(
     item: board.BoardItem, body: str, *, storage: board.Storage
 ) -> tuple[ExpectationCard, ...]:
-    defaults = _open_expectation_defaults(body)
     return tuple(
         ExpectationCard(
             item.number,
             item.title,
             line.index,
             line.text,
-            defaults[line.index],
+            cast(str, line.default),
             question=line.question,
             example=line.example,
             picture=line.picture,

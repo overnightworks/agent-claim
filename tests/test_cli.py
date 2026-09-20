@@ -3797,7 +3797,7 @@ def test_rule_writes_a_ruling_and_reports_remaining_open_lines(
     assert capsys.readouterr().out == f"RULED #{RULE_ITEM} line 1 {ruling}; 1 line(s) still open\n"
     lines = board.expectation_lines(client.item_bodies[RULE_ITEM])
     assert lines[0] == board.ExpectationLine(1, "Ship it?", ruling, RULE_TODAY)
-    assert lines[1] == board.ExpectationLine(2, "Ship it too?", None, None)
+    assert lines[1] == board.ExpectationLine(2, "Ship it too?", None, None, default="later")
 
 
 def test_rule_json_reports_item_index_ruling_date_and_open(
@@ -4045,6 +4045,7 @@ def test_ask_writes_question_example_and_picture(
             "New question?",
             None,
             None,
+            default="yes",
             question="Ship it?",
             example="Release on Friday.",
             picture=ASK_PICTURE_SVG,

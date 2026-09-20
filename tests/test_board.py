@@ -159,7 +159,7 @@ def test_append_expectation_adds_a_proposed_line(default: str) -> None:
     new_body = board.append_expectation(body, "New question?", default)
 
     assert board.expectation_lines(new_body) == (
-        board.ExpectationLine(1, "New question?", None, None),
+        board.ExpectationLine(1, "New question?", None, None, default=default),
     )
     entries = board.locate_agent_claim_block(new_body).data["expectation"]
     assert entries == [{"text": "New question?", "default": default}]
@@ -174,8 +174,8 @@ def test_append_expectation_appends_after_existing_lines() -> None:
     new_body = board.append_expectation(body, "Second", "no")
 
     assert board.expectation_lines(new_body) == (
-        board.ExpectationLine(1, "First", None, None),
-        board.ExpectationLine(2, "Second", None, None),
+        board.ExpectationLine(1, "First", None, None, default="yes"),
+        board.ExpectationLine(2, "Second", None, None, default="no"),
     )
 
 
@@ -190,7 +190,7 @@ def test_append_expectation_preserves_every_byte_outside_the_appended_line(newli
     assert new_body.startswith(prefix)
     assert new_body.endswith(suffix)
     assert board.expectation_lines(new_body)[-1] == board.ExpectationLine(
-        2, "New question?", None, None
+        2, "New question?", None, None, default="yes"
     )
 
 
@@ -229,6 +229,7 @@ def test_append_expectation_writes_the_card_fields() -> None:
             "New question?",
             None,
             None,
+            default="yes",
             question="Ship it?",
             example="Release on Friday.",
             picture=VALID_SVG_PICTURE,
@@ -531,7 +532,7 @@ def test_expectation_lines_reports_index_text_ruling_and_ruled_on() -> None:
     )
 
     assert board.expectation_lines(body) == (
-        board.ExpectationLine(1, "Open one", None, None),
+        board.ExpectationLine(1, "Open one", None, None, default="later"),
         board.ExpectationLine(2, "Settled one", "no", date(2026, 9, 1)),
     )
 
@@ -562,6 +563,7 @@ def test_expectation_lines_reads_question_example_and_picture() -> None:
             "Ship it?",
             None,
             None,
+            default="later",
             question="Ship it?",
             example="Release on Friday.",
             picture=VALID_SVG_PICTURE,
