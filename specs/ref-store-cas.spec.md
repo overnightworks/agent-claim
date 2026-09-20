@@ -156,7 +156,8 @@ export, no silent data loss, and a live claim always refuses it outright,
 - A push against `refs/aco/state` is never `--force`/`--force-with-lease` outside the documented reset/recovery path (CAS-43): every ordinary transition is a plain fast-forward.
 - A worktree's own lineage stamp and fetch anchor are never shared with another linked worktree of the same checkout: each has its own git-dir.
 - A malformed fetched tree is never partially trusted: the whole read fails loud (CAS-22..38), never a single quarantined claim, resource, or item.
-- No read ever lands a local tag or `FETCH_HEAD`: every fetch aco runs carries `--no-tags --no-write-fetch-head`, so a dry run, a live-claim refusal, or a failed export (CAS-49) writes nothing at all (issue #298 finding 2), and an anchoring fetch (CAS-07) writes only its own anchor.
+- No state-store fetch ever lands a tag or `FETCH_HEAD`: each carries `--no-tags --no-write-fetch-head`, so it writes only objects and the ref its own refspec names (issue #298 finding 2).
+- A read that does not advance local state (CAS-49) never writes this worktree's fetch anchor or lineage stamp; only an anchoring fetch (CAS-07) moves `refs/worktree/aco/state` and that stamp.
 
 ## Examples
 
