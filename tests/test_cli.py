@@ -888,14 +888,18 @@ def test_board_dedupes_a_landing_between_the_trunk_trailer_and_a_squash_pull_req
     assert "<li>#11 2026-08-18 PR #90</li>" in rendered_html
 
 
-def test_board_html_prints_the_rendered_page_to_stdout(
+def test_board_html_prints_the_page_naming_its_repository_and_checkout_to_stdout(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
+    """Issue #431: the page `board --html` prints carries the repository it
+    was built for and the checkout the command ran in, so two boards open
+    side by side say which one an operator is ruling on."""
     _single_item_board_environment(monkeypatch, tmp_path)
 
     assert issue_claim.main(["--repo", "example/agent-claim", "board", "--html"]) == 0
     rendered = capsys.readouterr().out
-    assert "<title>agent-claim Board</title>" in rendered
+    assert f"<title>example/agent-claim &middot; {tmp_path} &middot; Board</title>" in rendered
+    assert f'<p class="eyebrow">example/agent-claim &middot; {tmp_path}</p>' in rendered
     assert "#10 Plain item" in rendered
 
 
