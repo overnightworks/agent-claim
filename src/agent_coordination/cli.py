@@ -4455,11 +4455,13 @@ def _cmd_claim(
 
 
 class _ClaimConflictError(protocol.ClaimError):
-    """`apply()`'s own single failure surface for a claim write -- identity
-    already claimed, claim id already consumed, or a resource conflict or
-    format issue -- wrapped around `store.commit_transition`'s one call
-    site in `_claim_write` (issue #406) so `--json` can choose
-    `claim_conflict` without splitting `apply`'s refusals further."""
+    """`apply()`'s own `protocol.ClaimConflictError` -- identity already
+    claimed, claim id already consumed, or a resource conflict -- rewrapped
+    around `store.commit_transition`'s one call site in `_claim_write`
+    (issue #406, CLM-25) so `--json` can choose `claim_conflict` by type.
+    A transport, git, lineage, or retry-exhaustion failure from the same
+    call site is a different `protocol.ClaimError` and passes through
+    unwrapped to `_cmd_claim`'s `unavailable` catch-all (CLM-27)."""
 
 
 def _claim_write(
@@ -4524,7 +4526,7 @@ def _claim_write(
                 subject=_transition_subject("claim", requested.identity, requested.branch),
                 intent=intent,
             )
-        except protocol.ClaimError as error:
+        except protocol.ClaimConflictError as error:
             raise _ClaimConflictError(str(error)) from error
         claimed = new_state.claims[protocol.claim_key(requested.identity, requested.branch)]
         live = tuple(new_state.claims.values())

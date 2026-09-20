@@ -10507,6 +10507,56 @@ def test_cli_claim_json_conflict_prints_the_stdout_error_object_not_a_success_sh
     _assert_json_refusal_object(captured.err, captured.out, reason="claim_conflict")
 
 
+def test_cli_claim_json_transport_failure_reports_unavailable_not_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A transport/CAS failure surfacing from `store.commit_transition` is a
+    plain `protocol.ClaimError`, never `protocol.ClaimConflictError` (issue
+    #406, CLM-27): `claim --json` reports `unavailable`, not
+    `claim_conflict`, exactly as `release`'s own retry-exhaustion refusal
+    does."""
+    client = FakeForge()
+    monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
+    monkeypatch.setattr(checkout, "_validate_checkout", lambda request, directory=None: None)
+    monkeypatch.setattr(checkout, "_scope_directories", lambda paths, **_kwargs: ())
+    _patch_store_write(monkeypatch)
+
+    def failing_commit_transition(*args: object, **kwargs: object) -> protocol.ClaimState:
+        raise protocol.ClaimUnavailableError(
+            f"{store.STATE_REF} moved 5 times while retrying: another writer on "
+            "origin keeps landing first; retry the command"
+        )
+
+    monkeypatch.setattr(store, "commit_transition", failing_commit_transition)
+
+    claimed = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "claim",
+            "72",
+            "--agent",
+            "Grok 4.6",
+            "--role",
+            "builder",
+            "--base",
+            BASE,
+            "--branch",
+            "codex/issue-72",
+            "--scope",
+            "docs",
+            "--claim-id",
+            "challenger",
+            "--json",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert claimed == 2
+    _assert_json_refusal_object(captured.err, captured.out, reason="unavailable")
+
+
 def test_cli_module_entry_point_exits_with_mains_return_code(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
