@@ -242,6 +242,7 @@ $ aco release 42 --merged 57
 RELEASED issue #42: <claim-id>
 freed: none
 next: none
+worktree: removed
 exit 0
 ```
 
