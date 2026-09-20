@@ -70,6 +70,7 @@ owns only the CLI-level framing around it.
 - `aco body --check` never reads a file path, a live issue, or a dependency: a body is always piped in, never named by number (`specs/body-block.spec.md`'s own Never line).
 - `aco body --template`'s printed skeleton never carries a `[record]` table, `scope`, or any other optional key: it is always the same four projection lines, whatever `--kind` or `--parent` add around them.
 - No `--check` outcome exits `1` any more: `valid` is exit `0`; `malformed`, `incomplete`, `invalid_usage`, and `unavailable` are all exit `2`.
+- `aco body --template` never gains a `--json` mode of its own (BDY-02): a composed skeleton is text for a person to paste, not a machine-read payload; only `--check` ever carries `--json`.
 
 ## Examples
 
