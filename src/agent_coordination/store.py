@@ -169,8 +169,8 @@ _LINEAGE_STAMP_DIRECTORY = "aco"
 _LINEAGE_STAMP_FILENAME = "last-oid"
 
 # `fetch_state` fetches `STATE_REF` straight into this ref through the
-# fetch's own destination refspec, instead of leaving the tip in
-# `FETCH_HEAD` alone. One mechanism now settles two separate problems:
+# fetch's own destination refspec, instead of reading the tip back from
+# `FETCH_HEAD`. One mechanism now settles two separate problems:
 # - it roots the fetched commits so they survive a `git gc --prune=now` run
 #   against this checkout right after the fetch (issue #237 finding 25,
 #   reproduced in the audit, and again by
@@ -178,13 +178,15 @@ _LINEAGE_STAMP_FILENAME = "last-oid"
 # - it decouples the read from `FETCH_HEAD`, so a concurrent `git fetch`
 #   anywhere else in this same worktree -- which overwrites the one shared
 #   `FETCH_HEAD` file regardless of what it fetches -- can never be read as
-#   this fetch's own result (issue #310 finding 48: `aco rescope` once read
-#   a fixer agent's own concurrent `git fetch origin` as the state tip
-#   because both shared this worktree's `FETCH_HEAD`). The fetch itself
-#   lands the anchor in one atomic git ref update, but the read-back that
-#   follows, the lineage check against this worktree's stamp, and the
-#   stamp write are three separate steps: two concurrent `aco` processes in
-#   this same worktree are not serialised across them (owner: issue #418).
+#   this fetch's own result, and `--no-write-fetch-head` keeps aco's own
+#   fetch out of that shared file in turn (issue #310 finding 48: `aco
+#   rescope` once read a fixer agent's own concurrent `git fetch origin`
+#   as the state tip because both shared this worktree's `FETCH_HEAD`).
+#   The fetch itself lands the anchor in one atomic git ref update, but
+#   the read-back that follows, the lineage check against this worktree's
+#   stamp, and the stamp write are three separate steps: two concurrent
+#   `aco` processes in this same worktree are not serialised across them
+#   (owner: issue #418).
 # `refs/worktree/*` is git's own per-worktree ref namespace (never shared
 # across linked worktrees), the same worktree-private guarantee
 # `_lineage_stamp_path` already relies on, so anchoring here never touches
@@ -691,9 +693,14 @@ def _fetch_into_anchor(worktree: Path, remote: str) -> ObjectId:
     writer of that ref, and why the destination refspec replaces a separate
     anchoring step. `--no-tags` keeps a reachable tag on `STATE_REF`'s own
     history from auto-following into the shared local `refs/tags/*`
-    namespace, which aco never wants as a side effect of this fetch.
+    namespace, and `--no-write-fetch-head` keeps the tip out of
+    `FETCH_HEAD`, the one file every `git fetch` in this worktree shares:
+    the anchor is the sole readback source, so that write would only be a
+    side effect on a name concurrent processes here rely on. Neither is a
+    side effect aco wants from this fetch.
     """
-    result = _run_git(worktree, ["fetch", "--no-tags", remote, f"+{STATE_REF}:{_FETCH_ANCHOR_REF}"])
+    refspec = f"+{STATE_REF}:{_FETCH_ANCHOR_REF}"
+    result = _run_git(worktree, ["fetch", "--no-tags", "--no-write-fetch-head", remote, refspec])
     if result.exit_status != 0:
         detail = process.git_failure_detail_from_stderr(result)
         raise ClaimError(f"cannot fetch {remote} {STATE_REF}: {detail}")
@@ -1001,8 +1008,8 @@ def fetch_state(*, worktree: Path, remote: str = DEFAULT_CANONICAL_REMOTE) -> Cl
 
     `EmptyState` only for a proven-absent ref (`ls-remote` exit 2). A present
     ref is fetched straight into this worktree's own per-worktree anchor
-    (never the shared `STATE_REF` name locally, never read back from
-    `FETCH_HEAD` -- `_fetch_into_anchor`), parsed via plumbing,
+    (never the shared `STATE_REF` name locally, never written to or read
+    back from `FETCH_HEAD` -- `_fetch_into_anchor`), parsed via plumbing,
     lineage-checked against this worktree's own last observation, and
     re-stamped.
     """
@@ -1034,10 +1041,10 @@ def peek_state(*, worktree: Path, remote: str = DEFAULT_CANONICAL_REMOTE) -> Cla
     writes no destination ref, and `--no-write-fetch-head` keeps it from
     even landing the tip in `FETCH_HEAD`, so a concurrent `git fetch`
     anywhere else in this same worktree can race it however it likes: this
-    read never looks at `FETCH_HEAD`, unlike `fetch_state`'s own read, which
-    is anchored instead. `--no-tags` keeps a reachable tag on `STATE_REF`'s
-    own history from auto-following into the shared local `refs/tags/*`
-    namespace during this read.
+    read never looks at `FETCH_HEAD`, and `fetch_state`'s own fetch keeps
+    out of it the same way, reading its anchor instead. `--no-tags` keeps a
+    reachable tag on `STATE_REF`'s own history from auto-following into the
+    shared local `refs/tags/*` namespace during this read.
 
     `reset` uses this to recover from exactly what `_check_lineage` refuses
     -- a rewritten or deleted ref this worktree's own stamp disagrees with --
@@ -1665,8 +1672,8 @@ _SHOW_REF_EXIT_MISSING = 1
 def local_state_ref_exists(worktree: Path) -> bool:
     """Whether *this* worktree happens to hold a local `STATE_REF` (issue
     #298): production never creates one on an ordinary read (`fetch_state`
-    lands fetched objects in its own per-worktree anchor, `peek_state` in an
-    unread `FETCH_HEAD` byproduct), nor does `export_state_bundle` below,
+    lands fetched objects in its own per-worktree anchor, `peek_state` in
+    this worktree's object store alone), nor does `export_state_bundle` below,
     which bundles its own private
     `EXPORT_BUNDLE_REF` instead of `STATE_REF` (19.09.2026 REVISE findings
     1+2) -- but a foreign tool might still leave a local `STATE_REF`, and

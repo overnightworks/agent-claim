@@ -425,12 +425,18 @@ def test_fetch_state_anchors_the_tip_without_creating_the_shared_state_ref(
     """`fetch_state` never creates `STATE_REF` itself in the local, shared
     ref namespace -- it fetches straight into its own per-worktree anchor
     instead (`_fetch_into_anchor`, issue #237 finding 25), git's own
-    per-worktree namespace, never the one `STATE_REF` reserves, and never
-    read back from `FETCH_HEAD`."""
+    per-worktree namespace, never the one `STATE_REF` reserves. It leaves
+    `FETCH_HEAD` alone too (issue #426 gate finding): the anchor is the one
+    name it reads back, so writing the shared file every `git fetch` in this
+    worktree overwrites would be a side effect on a name concurrent
+    processes here rely on."""
     created = store.bootstrap(worktree=worktree, remote=str(bare_remote))
     reader = tmp_path / "reader"
     reader.mkdir()
     _git("init", "-b", "main", cwd=reader)
+    fetch_head = (
+        Path(_git("rev-parse", "--absolute-git-dir", cwd=reader).stdout.strip()) / "FETCH_HEAD"
+    )
 
     state = store.fetch_state(worktree=reader, remote=str(bare_remote))
 
@@ -438,6 +444,7 @@ def test_fetch_state_anchors_the_tip_without_creating_the_shared_state_ref(
     assert _git("for-each-ref", store.STATE_REF, cwd=reader).stdout == ""
     anchor = _git("rev-parse", store._FETCH_ANCHOR_REF, cwd=reader).stdout.strip()
     assert anchor == created
+    assert not fetch_head.exists()
 
 
 def test_peek_state_reads_the_current_tip_without_touching_the_anchor_or_lineage_stamp(
