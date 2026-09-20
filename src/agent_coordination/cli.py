@@ -3764,7 +3764,7 @@ def _cmd_check(parsed: argparse.Namespace, session: _ReadSession) -> int:
         # further forge read (the reference itself, the PR/issue body it
         # dispatches to) stays inside this handler too, so a forge failure
         # anywhere on the check path reports `unavailable` through the
-        # shared envelope rather than escaping to `main`'s legacy sink.
+        # shared envelope rather than the plain sentence alone.
         config = _load_board_config(client, _resolve_toplevel())
         repository = client.repository.path
         reference = client.item_reference(number)
@@ -4981,9 +4981,9 @@ def _resolve_release_claimant(
 def _cmd_release(parsed: argparse.Namespace, session: _WriteSession) -> int:
     """`release`'s own `--json` envelope (issue #425): every refusal this
     function or `_cmd_release_landed` raises -- REL-01's own usage errors
-    excepted, which argparse itself reports before either ever runs -- is
-    caught here and reported as `precondition_failed`, rather than
-    escaping to `main`'s legacy `{"ok": false, "error": ...}` sink."""
+    excepted, which the parser reports as `invalid_usage` before either ever
+    runs (issue #432) -- is caught here and reported as
+    `precondition_failed`, rather than escaping the envelope entirely."""
     as_json = parsed.json
     try:
         return _release_transition(parsed, session)
