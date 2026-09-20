@@ -12955,6 +12955,39 @@ def test_land_refuses_a_foreign_claim_before_the_merge(
     assert client.merge_calls == []
 
 
+def test_land_refuses_a_coordinator_override_with_no_role_before_the_merge(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #405 point 8 review finding (LANDCMD-19): `--coordinator-override`
+    with no `--role` refuses via `_land_preflight`'s own call to `release`'s
+    `protocol._require_coordinator_override`, before any merge."""
+    client = _land_preflight_client(monkeypatch, readiness=_land_readiness())
+
+    assert issue_claim.main(["--repo", REPOSITORY, "land", "12", "--coordinator-override"]) == 2
+
+    assert capsys.readouterr().err == "ERROR: a coordinator override requires --role coordinator\n"
+    assert client.merge_calls == []
+
+
+def test_land_refuses_a_coordinator_override_with_the_wrong_role_before_the_merge(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #405 point 8 review finding (LANDCMD-19): `--coordinator-override
+    --role builder` refuses the same way as an omitted `--role` -- only
+    `--role coordinator` behind the override authorizes it."""
+    client = _land_preflight_client(monkeypatch, readiness=_land_readiness())
+
+    assert (
+        issue_claim.main(
+            ["--repo", REPOSITORY, "land", "12", "--coordinator-override", "--role", "builder"]
+        )
+        == 2
+    )
+
+    assert capsys.readouterr().err == "ERROR: a coordinator override requires --role coordinator\n"
+    assert client.merge_calls == []
+
+
 def test_land_merges_a_green_pull_request_and_runs_the_release_path(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
