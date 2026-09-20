@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import io
 import json
@@ -944,8 +945,10 @@ def test_board_html_and_json_are_mutually_exclusive(
 ) -> None:
     _single_item_board_environment(monkeypatch, tmp_path)
 
-    with pytest.raises(SystemExit):
-        issue_claim.main(["--repo", "example/agent-claim", "board", "--html", "--json"])
+    status = issue_claim.main(["--repo", "example/agent-claim", "board", "--html", "--json"])
+
+    assert status == 2
+    assert json.loads(capsys.readouterr().out)["reason"] == "invalid_usage"
 
 
 def test_board_naming_no_output_mode_refuses_before_any_read(
@@ -4274,6 +4277,39 @@ def test_ask_appends_a_proposed_line_and_rulings_shows_it_as_open(
         "  1 ruled yes 2026-08-01: Ship it?\n"
         "  2 open: New question?\n"
     )
+
+
+FAILING_BODY_WRITES = [
+    pytest.param(["ask", str(RULE_ITEM), "--text", "New question?"], id="ask"),
+    pytest.param(["rule", str(RULE_ITEM), "--line", "1", "--yes"], id="rule"),
+]
+
+
+@pytest.mark.parametrize("arguments", FAILING_BODY_WRITES)
+def test_a_failing_body_write_names_the_command_own_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    arguments: list[str],
+) -> None:
+    """ASK-12 and RULE-11 (issue #432): the write both commands end with can
+    fail like any other forge call, and used to escape the handler with the
+    bare sentence alone, leaving a `--json` caller nothing on stdout."""
+    toml_text = f'{MINIMAL_BLOCK_TOML}[[expectation]]\ntext = "Ship it?"\ndefault = "later"\n'
+    client = _client_with_item(monkeypatch, tmp_path, RULE_ITEM, agent_claim_body(toml_text))
+    client.fail_update_item_body = True
+    refusal = "update item body failed (simulated)"
+
+    status = issue_claim.main(["--repo", "example/agent-claim", *arguments, "--json"])
+
+    captured = capsys.readouterr()
+    assert status == 2
+    assert captured.err == f"ERROR: {refusal}\n"
+    assert json.loads(captured.out) == {
+        "ok": False,
+        "reason": "unavailable",
+        "message": refusal,
+    }
 
 
 def test_ask_json_reports_item_index_text_and_default(
@@ -8357,11 +8393,12 @@ def test_cli_claim_and_release_accept_json_while_parent_and_bootstrap_reject_it(
     assert released.json is True
     assert omitted_claim.json is False
     assert omitted_release.json is False
-    for arguments in (["--json", "status"], ["bootstrap", "--json"]):
-        parser = issue_claim._parser()
-        with pytest.raises(SystemExit) as exited:
-            parser.parse_args(arguments)
-        assert exited.value.code == 2
+    with pytest.raises(SystemExit) as refused_parent:
+        issue_claim.main(["--json", "status"])
+    assert refused_parent.value.code == 2
+    with pytest.raises(SystemExit) as refused_bootstrap:
+        issue_claim.main(["bootstrap", "--json"])
+    assert refused_bootstrap.value.code == 2
 
 
 @pytest.mark.parametrize(
@@ -13714,11 +13751,203 @@ def test_release_refuses_a_branch_and_claim_id_naming_different_claims(
     ],
 )
 def test_release_requires_exactly_one_landing_outcome(arguments: list[str]) -> None:
-    parser = issue_claim._parser()
     with pytest.raises(SystemExit) as exited:
-        parser.parse_args(arguments)
+        issue_claim.main(arguments)
 
     assert exited.value.code == 2
+
+
+ARGPARSE_USAGE_REFUSALS = [
+    pytest.param(
+        ["release", "42"],
+        "one of the arguments --merged --abandoned is required",
+        id="release-naming-no-outcome",
+    ),
+    pytest.param(
+        ["claim", "42", "--scope", "src", "--nope"],
+        "unrecognized arguments: --nope",
+        id="claim-carrying-an-unknown-flag",
+    ),
+    pytest.param(
+        ["item", "new"],
+        "the following arguments are required: --title",
+        id="item-new-missing-its-own-required-flag",
+    ),
+]
+UNREADABLE_ITEM_REFERENCE_REFUSAL = pytest.param(
+    ["status", "notanumber"],
+    "'notanumber' is not an item reference; use aco-xxxxxx, #n, or the bare number n",
+    id="status-naming-an-unreadable-item-reference",
+)
+
+
+@pytest.mark.parametrize(
+    ("arguments", "message"), [*ARGPARSE_USAGE_REFUSALS, UNREADABLE_ITEM_REFERENCE_REFUSAL]
+)
+def test_a_refused_parse_under_json_prints_the_invalid_usage_envelope(
+    arguments: list[str], message: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """OUT-06 (issue #432): a `--json` caller reads one object for every
+    refusal its command's own parse raises before that command ever runs --
+    an outcome flag it requires, a flag it does not know, and a positional
+    value its own reader refuses."""
+    status = issue_claim.main([*arguments, "--json"])
+
+    captured = capsys.readouterr()
+    assert status == 2
+    assert json.loads(captured.out) == {
+        "ok": False,
+        "reason": "invalid_usage",
+        "message": message,
+    }
+    assert captured.err == f"ERROR: {message}\n"
+
+
+@pytest.mark.parametrize(("arguments", "message"), ARGPARSE_USAGE_REFUSALS)
+def test_a_refused_parse_without_json_keeps_the_usage_text(
+    arguments: list[str], message: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """OUT-06's own Never clause: without `--json` the parser's refusal is
+    still argparse's own usage block and sentence on stderr, exit `2`, with
+    stdout untouched."""
+    with pytest.raises(SystemExit) as exited:
+        issue_claim.main(arguments)
+
+    captured = capsys.readouterr()
+    assert exited.value.code == 2
+    assert captured.out == ""
+    assert captured.err.startswith("usage: aco")
+    assert captured.err.endswith(f"error: {message}\n")
+
+
+def test_a_bad_choice_on_a_json_command_prints_the_invalid_usage_envelope(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A value outside an option's own `choices` is one more refusal the
+    parser raises (issue #432), and `brief` declares `--json`, so it reports
+    through OUT-06 like every other one. The sentence is argparse's own,
+    read back off stderr rather than spelled out here: its choice list is
+    argparse's wording, not this contract's."""
+    status = issue_claim.main(["brief", "42", "--step", "nope", "--json"])
+
+    captured = capsys.readouterr()
+    assert status == 2
+    assert "argument --step: invalid choice:" in captured.err
+    _assert_json_refusal_object(captured.err, captured.out, reason="invalid_usage")
+
+
+def test_an_abbreviated_json_flag_asks_for_the_envelope_too(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`--jso` is `--json` wherever no other option of that command shares
+    the prefix, so argparse accepts it and the refusal answers in the shape
+    that caller asked for (issue #432)."""
+    status = issue_claim.main(["release", "42", "--jso"])
+
+    captured = capsys.readouterr()
+    assert status == 2
+    _assert_json_refusal_object(captured.err, captured.out, reason="invalid_usage")
+
+
+@pytest.mark.parametrize(
+    ("arguments", "envelope"),
+    [
+        pytest.param(
+            ["status", "--json", "--", "--nope"], True, id="json-before-the-commands-own-dash-dash"
+        ),
+        pytest.param(
+            ["status", "--", "--json"], False, id="json-behind-the-commands-own-dash-dash"
+        ),
+    ],
+)
+def test_a_dash_dash_ends_the_options_of_its_own_level_only(
+    arguments: list[str], envelope: bool, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A `--` ends the options of the parser level that reads it and of no
+    other (issue #432): `status --json -- --nope` still asked for the
+    envelope, while behind `status`'s own `--` the very same spelling is
+    just the item reference `status` refuses. Both refusals are `status`'s
+    own item reader, so the tokens alone never decide the shape."""
+    status = issue_claim.main(arguments)
+
+    captured = capsys.readouterr()
+    assert status == 2
+    assert captured.err.startswith("ERROR: ")
+    if envelope:
+        _assert_json_refusal_object(captured.err, captured.out, reason="invalid_usage")
+    else:
+        assert captured.out == ""
+
+
+def _stock_argparse_reads_a_dash_dash_as_the_command_name() -> bool:
+    """Ask this interpreter's own argparse what a leading `--` becomes before
+    a subcommand action: the command name, or nothing at all. CPython changed
+    that within a release series, so the answer is measured rather than read
+    off a version number."""
+    parser = argparse.ArgumentParser(prog="oracle", add_help=False)
+    parser.add_subparsers(dest="command", required=True).add_parser("status")
+
+    with contextlib.redirect_stderr(io.StringIO()):
+        try:
+            parser.parse_args(["--", "status"])
+        except SystemExit:
+            return True
+    return False
+
+
+def test_a_dash_dash_before_the_command_follows_the_parse_argparse_made(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The mode follows the parse argparse actually made, never the raw
+    tokens (issue #432). Where this interpreter's argparse drops a leading
+    `--` before the subcommand action, `status` is chosen and reads the
+    `--json` behind it -- the envelope; where that `--` reaches the action it
+    is the command name nobody declares, so no command was ever chosen that
+    could declare the flag. Which of the two a CPython release does is a
+    change in argparse itself, so the oracle above measures it here."""
+    arguments = ["--", "status", "--json", "--nope"]
+
+    if _stock_argparse_reads_a_dash_dash_as_the_command_name():
+        with pytest.raises(SystemExit) as refused:
+            issue_claim.main(arguments)
+        assert refused.value.code == 2
+        assert capsys.readouterr().out == ""
+        return
+
+    status = issue_claim.main(arguments)
+
+    captured = capsys.readouterr()
+    assert status == 2
+    _assert_json_refusal_object(captured.err, captured.out, reason="invalid_usage")
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        pytest.param(["bootstrap", "--json"], id="bootstrap-declaring-no-json-mode"),
+        pytest.param(
+            ["register", "--provider", "nope", "--json"], id="register-naming-an-unknown-provider"
+        ),
+        pytest.param(["item", "--json"], id="item-naming-no-subcommand"),
+        pytest.param(["nope", "--json"], id="a-command-name-the-parser-does-not-know"),
+        pytest.param(["--json"], id="no-command-at-all"),
+    ],
+)
+def test_a_json_flag_no_command_declares_never_reaches_the_envelope(
+    arguments: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """OUT-06's envelope belongs to the commands that declare `--json`
+    (issue #432): `bootstrap` and `register` never offered the mode, and a
+    missing subcommand, an unknown command name, or no command at all never
+    chose one, so each keeps argparse's own usage block with stdout empty --
+    no object a script could mistake for an answer."""
+    with pytest.raises(SystemExit) as exited:
+        issue_claim.main(arguments)
+
+    captured = capsys.readouterr()
+    assert exited.value.code == 2
+    assert captured.out == ""
+    assert captured.err.startswith("usage: aco")
 
 
 PARENT_ISSUE = 79
@@ -14741,7 +14970,7 @@ def test_cli_bootstrap_takes_no_ledger_argument() -> None:
     assert parser.prog == "aco"
     assert all("--ledger" not in action.option_strings for action in bootstrap._actions)
     with pytest.raises(SystemExit):
-        parser.parse_args(["bootstrap", "--ledger", "5"])
+        issue_claim.main(["bootstrap", "--ledger", "5"])
 
 
 def test_cli_bootstrap_ignores_repo_and_a_non_github_remote(
@@ -15140,13 +15369,12 @@ def test_cli_brief_refuses_when_the_lane_tip_read_fails_outright(
     assert capsys.readouterr().err == "ERROR: simulated git failure\n"
 
 
-def test_cli_brief_json_leaves_an_unspecified_forge_failure_as_the_bare_sentence(
+def test_cli_brief_json_names_a_failing_item_read_unavailable(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
-    """Issue #425 review: the shared `precondition_failed` envelope covers
-    only what runs before a command starts. A failure `brief` itself does not
-    name keeps the plain `ERROR:` sentence and exit `2`, never a `reason`
-    outside BRIEF's own vocabulary."""
+    """BRIEF-19 (issue #432): the item read is a forge call like any other,
+    so a failure there is this command's own `unavailable`. It used to escape
+    the handler and leave a `--json` caller with an empty stdout."""
     repository, base, _tip = _scratch_lane_repository(tmp_path)
     client = FakeForge()
     monkeypatch.setattr(github, "GitHubForge", lambda _repository: client)
@@ -15160,7 +15388,11 @@ def test_cli_brief_json_leaves_an_unspecified_forge_failure_as_the_bare_sentence
     captured = capsys.readouterr()
     assert status == 2
     assert captured.err == "ERROR: simulated forge read failure\n"
-    assert captured.out == ""
+    assert json.loads(captured.out) == {
+        "ok": False,
+        "reason": "unavailable",
+        "message": "simulated forge read failure",
+    }
 
 
 def test_cli_brief_json_prints_one_object_with_body_claim_tip_and_touched(

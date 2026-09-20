@@ -31,6 +31,7 @@ own number; `<k>` the 1-based line index `--line` names, the same index
 | item is a pull request | RULE-08 | RULE-09 | — |
 | item body malformed | ASK-05 (cited) | RULE-09 | — |
 | `--repo` given, `storage = "state-ref"` | RULE-10 | RULE-09 | — |
+| the body write itself fails | RULE-11 | RULE-11 | — |
 
 ## Ruling a line
 
@@ -50,6 +51,7 @@ the same sentence; RULE-07's sentence is identical for both commands.
 - [ ] [RULE-08] An item that is a pull request refuses `#<n> is a pull request, not an issue; rule needs an issue`, exit `2`, before any write.
 - [ ] [RULE-09] `--json` on a dispatched refusal (RULE-04..RULE-08, RULE-10, ASK-05) prints the envelope with `reason` from the table below and the sentence as `message`, exit `2` (see E-RULE-05).
 - [ ] [RULE-10] Under `storage = "state-ref"`, `aco rule` resolves the state-ref forge like `aco ask`; `--repo` there refuses the same as PIN-04 (see E-RULE-06).
+- [ ] [RULE-11] A forge failure ruling the line -- the body write itself included -- refuses `ERROR: <sentence>`, exit `2`, `--json` `reason: "unavailable"` (see E-RULE-07).
 
 `reason`, by which refusal fired:
 
@@ -59,7 +61,7 @@ the same sentence; RULE-07's sentence is identical for both commands.
 | RULE-05 (out of range) | `line_out_of_range` |
 | RULE-07 (missing item), RULE-08 (pull-request target), ASK-05 (malformed body, cited) | `invalid_item` |
 | RULE-10 (`--repo` under `storage = state-ref`, cites PIN-04) | `invalid_usage` |
-| RULE-06 (forge cannot write) | `unavailable` |
+| RULE-06 (forge cannot write), RULE-11 (the write itself fails) | `unavailable` |
 
 ## Never
 
@@ -143,5 +145,16 @@ Setup: bare-remote, bootstrapped, `storage = "state-ref"` tracked
 $ aco rule <item-id> --line 1 --yes --repo acme/items --json
 2> ERROR: --repo is meaningless under storage = state-ref
 {"ok": false, "reason": "invalid_usage", "message": "--repo is meaningless under storage = state-ref"}
+exit 2
+```
+
+### E-RULE-07 — the body write itself fails
+
+Setup: bare-remote, bootstrapped, `storage = "state-ref"` tracked, `<item-id>` open with one still-open line, the forge failing the body write with `<detail>`
+
+```console
+$ aco rule <item-id> --line 1 --yes --json
+2> ERROR: <detail>
+{"ok": false, "reason": "unavailable", "message": "<detail>"}
 exit 2
 ```

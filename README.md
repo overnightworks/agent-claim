@@ -243,11 +243,28 @@ for them. aco does not allocate work, merge code, or operate a lease server;
 it never writes provider configuration, and never touches `~/.claude`,
 `~/.codex`, or `~/.grok` except the one workspace mapping described above.
 
-Most commands accept `--json` for a machine-readable form; the refusal
-object a command's own error path prints on stderr, and the one exception --
-`next`, which exits non-zero without ever refusing anything -- are each
-command's own spec's fact (e.g. `specs/release.spec.md` and
-`specs/next.spec.md`), cited rather than repeated here.
+Most commands accept `--json` for a machine-readable form: one object on
+stdout, refusals included. Read it in that order -- the exit code, then
+`ok` and `reason`, then the payload. The exit code decides first: a refusal
+is never `0`, so a script that reads stdout without it eventually parses a
+refusal as an answer (one did, 08.09.2026). `ok` and `reason` are always the
+object's first two keys, and `reason` is the token to branch on: a stable
+word from that command's own vocabulary, never a sentence to match against,
+and never a payload key whose presence you test -- a success may carry `ok`
+and `reason` alone. A closing `message` is prose for a person, the sentence
+stderr's `ERROR:` line carries -- optional even on a refusal, because not
+every refusal writes a sentence beside the object. A usage
+error the parser itself raises joins the same object, but only for a
+command that declares `--json`: `aco bootstrap --json` stays argparse's own
+text on stderr, stdout empty. A non-zero exit is not always a refusal --
+`next` exits non-zero on an empty board without refusing anything
+(`specs/next.spec.md`). `aco check <sha>` is the one carve-out left: it
+answers in `ok` and `sha` where every other command answers in `ok` and
+`reason`, adds the defect sentence as `refused` only when it refuses, and
+writes nothing on stderr beside the object -- exit `0` when the commit is
+sound, `1` when it is not — issue #435 owns that shape until it moves.
+`specs/output.spec.md` owns the envelope; each command's spec owns its own
+`reason` values.
 
 ## Commands and their specs
 

@@ -8,13 +8,13 @@ import os
 import sys
 import tomllib
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, date, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import cast
+from typing import Any, NoReturn, cast
 
 from . import (
     __version__,
@@ -310,6 +310,8 @@ def _request(
 
 
 LANE_ISSUE_HELP = "omit for lane mode, derived from a docs/ or fix/ checkout branch"
+JSON_FLAG = "--json"
+LONG_OPTION_PREFIX = "--"
 JSON_HELP = "print the result as JSON instead of the human lines"
 # `--html` with no value: `argparse`'s `nargs="?"` const, distinct from the
 # `None` default (flag absent) -- `_cmd_board_html` treats it as "stdout".
@@ -352,6 +354,14 @@ def _add_reset_parser(commands: argparse._SubParsersAction) -> None:
     )
 
 
+def _add_json_flag(container: argparse._ActionsContainer) -> None:
+    """The one place `--json` is declared (issue #432): a command that never
+    calls this has no JSON mode at all, and `main` matches this same
+    spelling when argparse refuses before any namespace is filled, so the
+    flag needs a single owner."""
+    container.add_argument(JSON_FLAG, action="store_true", help=JSON_HELP)
+
+
 def _add_status_parser(commands: argparse._SubParsersAction) -> None:
     status = commands.add_parser("status", help="show repository-wide build claims")
     status.add_argument(
@@ -363,7 +373,7 @@ def _add_status_parser(commands: argparse._SubParsersAction) -> None:
     status.add_argument(
         "--path", metavar="PATH", help="list holders of this path instead of by issue"
     )
-    status.add_argument("--json", action="store_true", help=JSON_HELP)
+    _add_json_flag(status)
 
 
 def _add_board_parser(commands: argparse._SubParsersAction) -> None:
@@ -371,7 +381,7 @@ def _add_board_parser(commands: argparse._SubParsersAction) -> None:
         "board", help="project the open work board; only --serve writes"
     )
     output = board_command.add_mutually_exclusive_group()
-    output.add_argument("--json", action="store_true", help=JSON_HELP)
+    _add_json_flag(output)
     output.add_argument(
         "--html",
         nargs="?",
@@ -410,7 +420,7 @@ def _add_rulings_parser(commands: argparse._SubParsersAction) -> None:
     rulings_command = commands.add_parser(
         "rulings", help="list expectation lines, open and ruled, without writes"
     )
-    rulings_command.add_argument("--json", action="store_true", help=JSON_HELP)
+    _add_json_flag(rulings_command)
 
 
 def _add_next_parser(commands: argparse._SubParsersAction) -> None:
@@ -419,7 +429,7 @@ def _add_next_parser(commands: argparse._SubParsersAction) -> None:
         help="name the board's top-priority item to pull",
         description=NEXT_PULL_DESCRIPTION,
     )
-    next_command.add_argument("--json", action="store_true", help=JSON_HELP)
+    _add_json_flag(next_command)
 
 
 def _add_start_parser(commands: argparse._SubParsersAction) -> None:
@@ -500,7 +510,7 @@ def _add_claim_parser(commands: argparse._SubParsersAction) -> None:
         metavar="NAME",
         help="allocate the next free value of this named scarce resource and hold it",
     )
-    claim.add_argument("--json", action="store_true", help=JSON_HELP)
+    _add_json_flag(claim)
 
 
 def _add_release_parser(commands: argparse._SubParsersAction) -> None:
@@ -552,7 +562,7 @@ def _add_release_parser(commands: argparse._SubParsersAction) -> None:
             "clean worktree whose branch is already merged is removed"
         ),
     )
-    release.add_argument("--json", action="store_true", help=JSON_HELP)
+    _add_json_flag(release)
 
 
 def _add_land_parser(commands: argparse._SubParsersAction) -> None:
@@ -605,7 +615,7 @@ def _add_rescope_parser(commands: argparse._SubParsersAction) -> None:
         metavar="REASON",
         help=WHOLE_HELP,
     )
-    rescope.add_argument("--json", action="store_true", help=JSON_HELP)
+    _add_json_flag(rescope)
 
 
 def _add_cut_parser(commands: argparse._SubParsersAction) -> None:
@@ -626,7 +636,7 @@ def _add_cut_parser(commands: argparse._SubParsersAction) -> None:
             "cut slice's own row scope when it has none, and becomes the child's scope"
         ),
     )
-    cut.add_argument("--json", action="store_true", help=JSON_HELP)
+    _add_json_flag(cut)
 
 
 def _add_ask_parser(commands: argparse._SubParsersAction) -> None:
@@ -657,7 +667,7 @@ def _add_ask_parser(commands: argparse._SubParsersAction) -> None:
             f"href, at most {body.EXPECTATION_PICTURE_MAXIMUM_BYTES} bytes) the card shows"
         ),
     )
-    ask.add_argument("--json", action="store_true", help=JSON_HELP)
+    _add_json_flag(ask)
 
 
 def _add_rule_parser(commands: argparse._SubParsersAction) -> None:
@@ -679,7 +689,7 @@ def _add_rule_parser(commands: argparse._SubParsersAction) -> None:
     outcome.add_argument("--no", action="store_const", dest="ruling", const="no")
     outcome.add_argument("--later", action="store_const", dest="ruling", const="later")
     rule.add_argument("--note", help="appended to the line's own text as ' Anmerkung: TEXT'")
-    rule.add_argument("--json", action="store_true", help=JSON_HELP)
+    _add_json_flag(rule)
 
 
 def _parse_check_subject(value: str) -> int | str:
@@ -707,7 +717,7 @@ def _add_check_parser(commands: argparse._SubParsersAction) -> None:
         type=_parse_check_subject,
         help="the pull request, issue, or trunk commit to read",
     )
-    check.add_argument("--json", action="store_true", help=JSON_HELP)
+    _add_json_flag(check)
 
 
 def _add_body_parser(commands: argparse._SubParsersAction) -> None:
@@ -720,7 +730,7 @@ def _add_body_parser(commands: argparse._SubParsersAction) -> None:
         required=True,
         help="read a body from stdin and report its defects",
     )
-    body.add_argument("--json", action="store_true", help=JSON_HELP)
+    _add_json_flag(body)
 
 
 def _add_brief_parser(commands: argparse._SubParsersAction) -> None:
@@ -735,14 +745,14 @@ def _add_brief_parser(commands: argparse._SubParsersAction) -> None:
         default=None,
         help="also print this lane step's own rules and checks from .agent-claim/brief.toml",
     )
-    brief.add_argument("--json", action="store_true", help=JSON_HELP)
+    _add_json_flag(brief)
 
 
 def _add_item_parser(commands: argparse._SubParsersAction) -> None:
     item = commands.add_parser(
         "item", help="create or show one work item straight in refs/aco/state"
     )
-    item_commands = item.add_subparsers(dest="item_command", required=True)
+    item_commands = _add_subcommands(item, "item_command")
     new = item_commands.add_parser(
         "new", help="create a fresh item in refs/aco/state and print its id"
     )
@@ -776,14 +786,14 @@ def _add_item_parser(commands: argparse._SubParsersAction) -> None:
         help="this item's size class, for the board's own measured estimate; default none",
     )
     new.add_argument("--whole", metavar="REASON", help=ITEM_WHOLE_HELP)
-    new.add_argument("--json", action="store_true", help=JSON_HELP)
+    _add_json_flag(new)
     show = item_commands.add_parser(
         "show", help="print one item's header and its stored body byte-exact"
     )
     show.add_argument(
         "item", type=board.parse_item_reference, help=f"the item to show, {ITEM_REF_HELP}"
     )
-    show.add_argument("--json", action="store_true", help=JSON_HELP)
+    _add_json_flag(show)
     edit = item_commands.add_parser(
         "edit", help="replace one item's body from stdin, aco keeping its own record fields"
     )
@@ -800,14 +810,14 @@ def _add_item_parser(commands: argparse._SubParsersAction) -> None:
         metavar="REASON",
         help="set only this item's whole reason (any storage); skips the stdin body read",
     )
-    edit.add_argument("--json", action="store_true", help=JSON_HELP)
+    _add_json_flag(edit)
     close = item_commands.add_parser(
         "close", help="close a state-ref item; the file stays, next and board let it go"
     )
     close.add_argument(
         "item", type=board.parse_item_reference, help=f"the item to close, {ITEM_REF_HELP}"
     )
-    close.add_argument("--json", action="store_true", help=JSON_HELP)
+    _add_json_flag(close)
 
 
 def _add_protect_parser(commands: argparse._SubParsersAction) -> None:
@@ -852,7 +862,7 @@ def _add_login_parser(commands: argparse._SubParsersAction) -> None:
     login = commands.add_parser(
         "login", help="manage configured workspace recovery at desktop login"
     )
-    login_commands = login.add_subparsers(dest="login_command", required=True)
+    login_commands = _add_subcommands(login, "login_command")
     login_commands.add_parser("enable", help="install the owned desktop login launcher")
     login_commands.add_parser("disable", help="remove the owned desktop login launcher")
     login_commands.add_parser(
@@ -911,11 +921,64 @@ def _subparser_build_order() -> tuple[Callable[[argparse._SubParsersAction], Non
     )
 
 
+class _UsageError(protocol.ClaimError):
+    """One refusal the argument parser itself raises -- an unknown flag, a
+    missing required option, a mutually exclusive pair -- carried out of the
+    parse instead of exiting inside it (issue #432), so a `--json` caller
+    still gets the shared envelope. `parser` is the one that refused, a
+    subcommand's own rather than the root's, because only it can print the
+    usage block the plain-text path still prints byte for byte."""
+
+    def __init__(self, parser: argparse.ArgumentParser, message: str) -> None:
+        super().__init__(message)
+        self.parser = parser
+
+
+class _RecordingSubParsersAction(argparse._SubParsersAction):
+    """argparse's own subcommand action, remembering which subparser it
+    selected (issue #432). Python parses a subcommand into a throwaway
+    namespace and copies the values back only once that parse succeeds, so
+    a refused parse otherwise leaves no trace of the command whose flags
+    were in play -- and `--json` is exactly the flag the refusal's own shape
+    depends on."""
+
+    chosen: argparse.ArgumentParser | None = None
+    handed_down: tuple[str, ...] = ()
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: str | Sequence[Any] | None,
+        option_string: str | None = None,
+    ) -> None:
+        name, *handed_down = cast(Sequence[str], values)
+        self.chosen = self._name_parser_map.get(name)
+        self.handed_down = tuple(handed_down)
+        super().__call__(parser, namespace, values, option_string)
+
+
+class _UsageErrorParser(argparse.ArgumentParser):
+    """Every `aco` parser and subparser -- argparse hands this class down to
+    each subparser it builds. Its own refusal path prints usage and exits
+    inside the parse, before `--json` was ever read off a namespace, so this
+    raises instead and lets one place decide the refusal's shape."""
+
+    def error(self, message: str) -> NoReturn:
+        raise _UsageError(self, message)
+
+
+def _add_subcommands(parser: argparse.ArgumentParser, dest: str) -> argparse._SubParsersAction:
+    """Every subcommand level of `aco`, recorded while it is chosen so a
+    refused parse still names the command whose flags were in play."""
+    return parser.add_subparsers(dest=dest, required=True, action=_RecordingSubParsersAction)
+
+
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="aco", description=__doc__)
+    parser = _UsageErrorParser(prog="aco", description=__doc__)
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--repo", help="GitHub repository as OWNER/REPO")
-    commands = parser.add_subparsers(dest="command", required=True)
+    commands = _add_subcommands(parser, "command")
     for add_subparser in _subparser_build_order():
         add_subparser(commands)
     return parser
@@ -3721,11 +3784,11 @@ def _cmd_check(parsed: argparse.Namespace, session: _ReadSession) -> int:
     #359, LAND-48), or a number that is in neither number space. Only the
     pull-request side needs the live claims, so the issue side never
     fetches the state ref."""
-    if isinstance(parsed.number, str):
-        return _check_trunk_commit(parsed)
     as_json = parsed.json
-    number = int(parsed.number)
     try:
+        if isinstance(parsed.number, str):
+            return _check_trunk_commit(parsed)
+        number = int(parsed.number)
         client = session.forge()
         # Read for its refusals only: a repository pinned to a grammar this
         # tool no longer reads, or a forge that cannot answer `blocked_by`,
@@ -3733,7 +3796,7 @@ def _cmd_check(parsed: argparse.Namespace, session: _ReadSession) -> int:
         # further forge read (the reference itself, the PR/issue body it
         # dispatches to) stays inside this handler too, so a forge failure
         # anywhere on the check path reports `unavailable` through the
-        # shared envelope rather than escaping to `main`'s legacy sink.
+        # shared envelope rather than the plain sentence alone.
         config = _load_board_config(client, _resolve_toplevel())
         repository = client.repository.path
         reference = client.item_reference(number)
@@ -3946,8 +4009,10 @@ class PreDispatchReason(StrEnum):
     `release`'s own branch and override checks, refuse before any command
     runs, so `_dispatch` owns their envelope here instead of each command
     carrying a second `precondition_failed` member for a refusal it never
-    sees itself."""
+    sees itself. `invalid_usage` is the parser's own refusal (issue #432),
+    raised before any command is even chosen."""
 
+    INVALID_USAGE = "invalid_usage"
     PRECONDITION_FAILED = "precondition_failed"
 
 
@@ -3962,6 +4027,17 @@ def _refuse(reason: StrEnum, error: protocol.ClaimError, *, as_json: bool) -> in
     if as_json:
         _emit_json(False, reason, message=str(error))
     return 2
+
+
+def _refuse_usage(error: _UsageError, *, as_json: bool) -> int:
+    """The argument parser's own refusal, in the shape this invocation asked
+    for (issue #432): without `--json` argparse's own usage block and
+    sentence, printed by the implementation `_UsageErrorParser` overrode, so
+    the bytes stay exactly what they were; with `--json` the shared envelope
+    instead, `invalid_usage`, argparse's own sentence as `message`."""
+    if not as_json:
+        argparse.ArgumentParser.error(error.parser, str(error))
+    return _refuse(PreDispatchReason.INVALID_USAGE, error, as_json=True)
 
 
 class BriefReason(StrEnum):
@@ -4035,37 +4111,37 @@ def _cmd_brief(parsed: argparse.Namespace, session: _ReadSession) -> int:
     names the body, the lane tip ... and the commands"): the item's body from
     the forge, its live claim from the store, the claim branch's current tip,
     and the files the lane touches against its base. Never a new data
-    source, and never a write. Every refusal this function itself can name
-    (BRIEF-07, BRIEF-09's PIN-04/PIN-05, BRIEF-15, BRIEF-18's lane-tip read)
-    reports through `_refuse`; anything else -- an unspecified forge read
-    failure -- still reaches `main`'s own generic handler untouched."""
+    source, and never a write. Every refusal on this path -- BRIEF-07,
+    BRIEF-09's PIN-04/PIN-05, BRIEF-15, BRIEF-18's lane-tip read, and the
+    item read itself, which is a forge call like any other (issue #432) --
+    reports through `_refuse` under this command's own vocabulary."""
     as_json = parsed.json
     try:
-        step_rules = _brief_step_rules_or_refusal(parsed.step)
-    except protocol.ClaimError as error:
-        return _refuse(BriefReason.UNAVAILABLE, error, as_json=as_json)
-    item = int(parsed.item)
-    try:
-        client = session.forge()
+        return _brief_report(parsed, session)
     except RepoMeaninglessUnderStateRefError as error:
         return _refuse(BriefReason.INVALID_USAGE, error, as_json=as_json)
     except protocol.ClaimError as error:
         return _refuse(BriefReason.UNAVAILABLE, error, as_json=as_json)
-    body = client.item_reference(item).body or ""
+
+
+def _brief_report(parsed: argparse.Namespace, session: _ReadSession) -> int:
+    """`brief`'s own composition and printing, every refusal raised by name
+    for `_cmd_brief` to report."""
+    step_rules = _brief_step_rules_or_refusal(parsed.step)
+    item = int(parsed.item)
+    client = session.forge()
+    item_body = client.item_reference(item).body or ""
     worktree, _remote, state = _store_observation()
     live = _brief_live_claim(worktree, state, item)
     if live is None:
         tip: str | None = None
         touched: tuple[str, ...] = ()
     else:
-        try:
-            tip = _lane_tip(live.claim.branch)
-        except protocol.ClaimError as error:
-            return _refuse(BriefReason.UNAVAILABLE, error, as_json=as_json)
+        tip = _lane_tip(live.claim.branch)
         touched = _touched_files(live.claim.base, tip) if tip is not None else ()
     observed_at = datetime.now(UTC)
-    composition = _BriefComposition(body, live, observed_at, tip, touched, step_rules)
-    if as_json:
+    composition = _BriefComposition(item_body, live, observed_at, tip, touched, step_rules)
+    if parsed.json:
         return _brief_json(composition)
     _print_brief(composition)
     return 0
@@ -4268,12 +4344,12 @@ def _cmd_rulings(parsed: argparse.Namespace, session: _ReadSession) -> int:
     try:
         issues = session.forge().list_open_board_issues()
         projected = _observed_board(session, issues=issues).board
+        bodies = {issue.number: issue.body for issue in issues}
+        storage = _board_config(_resolve_toplevel()).storage
     except RepoMeaninglessUnderStateRefError as error:
         return _refuse(RulingsReason.INVALID_USAGE, error, as_json=as_json)
     except protocol.ClaimError as error:
         return _refuse(RulingsReason.UNAVAILABLE, error, as_json=as_json)
-    bodies = {issue.number: issue.body for issue in issues}
-    storage = _board_config(_resolve_toplevel()).storage
     _rulings(projected, bodies, as_json=as_json, storage=storage)
     return 0
 
@@ -4290,6 +4366,7 @@ def _cmd_next(parsed: argparse.Namespace, session: _ReadSession) -> int:
     as_json = parsed.json
     try:
         observed = _observed_board(session)
+        storage = _board_config(_resolve_toplevel()).storage
     except RepoMeaninglessUnderStateRefError as error:
         return _refuse(NextReason.INVALID_USAGE, error, as_json=as_json)
     except protocol.ClaimError as error:
@@ -4305,7 +4382,6 @@ def _cmd_next(parsed: argparse.Namespace, session: _ReadSession) -> int:
         parallel=board.parallel_set(projected, observed.live_claims, action),
         close=board.zero_cost_closes(projected),
     )
-    storage = _board_config(_resolve_toplevel()).storage
     if as_json:
         _next_json(report, storage)
     else:
@@ -4937,9 +5013,9 @@ def _resolve_release_claimant(
 def _cmd_release(parsed: argparse.Namespace, session: _WriteSession) -> int:
     """`release`'s own `--json` envelope (issue #425): every refusal this
     function or `_cmd_release_landed` raises -- REL-01's own usage errors
-    excepted, which argparse itself reports before either ever runs -- is
-    caught here and reported as `precondition_failed`, rather than
-    escaping to `main`'s legacy `{"ok": false, "error": ...}` sink."""
+    excepted, which the parser reports as `invalid_usage` before either ever
+    runs (issue #432) -- is caught here and reported as
+    `precondition_failed`, rather than escaping the envelope entirely."""
     as_json = parsed.json
     try:
         return _release_transition(parsed, session)
@@ -6221,19 +6297,24 @@ def _rule_item_reason(error: _RuleItemError) -> RuleReason:
     return RuleReason.LINE_OUT_OF_RANGE
 
 
+def _rule_expectation_line(parsed: argparse.Namespace, session: _WriteSession) -> int:
+    """`rule`'s own work, every refusal raised by name for `_cmd_rule` to
+    report."""
+    client = session.forge.writer()
+    number = int(parsed.item)
+    ruled_line, open_remaining = rule_item(client, number, parsed.line, parsed.ruling, parsed.note)
+    _emit_rule_result(number, ruled_line, open_remaining, as_json=parsed.json)
+    return 0
+
+
 def _cmd_rule(parsed: argparse.Namespace, session: _WriteSession) -> int:
+    """`rule`'s own `--json` refusals (issue #396), for the whole command and
+    not only its first steps (issue #432): the body write inside the shared
+    ruling path can fail like any other forge call, and a failure there names
+    this command's own `unavailable` rather than escaping the envelope."""
     as_json = parsed.json
     try:
-        client = session.forge.writer()
-    except RepoMeaninglessUnderStateRefError as error:
-        return _refuse(RuleReason.INVALID_USAGE, error, as_json=as_json)
-    except protocol.ClaimError as error:
-        return _refuse(RuleReason.UNAVAILABLE, error, as_json=as_json)
-    number = int(parsed.item)
-    try:
-        ruled_line, open_remaining = rule_item(
-            client, number, parsed.line, parsed.ruling, parsed.note
-        )
+        return _rule_expectation_line(parsed, session)
     except (
         _TargetUnavailableError,
         _InvalidTargetError,
@@ -6241,8 +6322,10 @@ def _cmd_rule(parsed: argparse.Namespace, session: _WriteSession) -> int:
         body.ExpectationOutOfRangeError,
     ) as error:
         return _refuse(_rule_item_reason(error), error, as_json=as_json)
-    _emit_rule_result(number, ruled_line, open_remaining, as_json=as_json)
-    return 0
+    except RepoMeaninglessUnderStateRefError as error:
+        return _refuse(RuleReason.INVALID_USAGE, error, as_json=as_json)
+    except protocol.ClaimError as error:
+        return _refuse(RuleReason.UNAVAILABLE, error, as_json=as_json)
 
 
 def _board_token_location(repository: forge.RepositoryId) -> workspace.BoardTokenLocation:
@@ -6386,37 +6469,45 @@ def _ask_expectation_reason(
     return AskReason.INVALID_EXPECTATION
 
 
-def _cmd_ask(parsed: argparse.Namespace, session: _WriteSession) -> int:
-    as_json = parsed.json
-    try:
-        picture = _read_picture_file(parsed.picture) if parsed.picture else None
-    except _PictureFileError as error:
-        return _refuse(AskReason.INVALID_PICTURE, error, as_json=as_json)
+def _append_expectation_card(parsed: argparse.Namespace, session: _WriteSession) -> int:
+    """`ask`'s own work, every refusal raised by name for `_cmd_ask` to
+    report: the picture file is read before the forge is ever resolved, so a
+    missing one refuses before the item body is fetched."""
+    picture = _read_picture_file(parsed.picture) if parsed.picture else None
     card = body.ExpectationCardFields(
         question=parsed.question, example=parsed.example, picture=picture
     )
-    try:
-        client = session.forge.writer()
-    except RepoMeaninglessUnderStateRefError as error:
-        return _refuse(AskReason.INVALID_USAGE, error, as_json=as_json)
-    except protocol.ClaimError as error:
-        return _refuse(AskReason.UNAVAILABLE, error, as_json=as_json)
+    client = session.forge.writer()
     number = int(parsed.item)
-    try:
-        current_body, config = _require_writable_target(client, number, command="ask")
-    except (_TargetUnavailableError, _InvalidTargetError) as error:
-        return _refuse(_ask_target_reason(error), error, as_json=as_json)
-    try:
-        new_body = body.append_expectation(current_body, parsed.text, parsed.default, card=card)
-    except (body.ExpectationTextError, body.ExpectationFieldError) as error:
-        return _refuse(_ask_expectation_reason(error), error, as_json=as_json)
+    current_body, config = _require_writable_target(client, number, command="ask")
+    new_body = body.append_expectation(current_body, parsed.text, parsed.default, card=card)
     index = len(body.expectation_lines(new_body, storage=config.storage))
     client.update_item_body(number, new_body)
     asked = _AskedLine(
         item=number, index=index, text=parsed.text, default=parsed.default, card=card
     )
-    _emit_ask_result(asked, as_json=as_json)
+    _emit_ask_result(asked, as_json=parsed.json)
     return 0
+
+
+def _cmd_ask(parsed: argparse.Namespace, session: _WriteSession) -> int:
+    """`ask`'s own `--json` refusals (issue #396), for the whole command and
+    not only its first steps (issue #432): the body write this command ends
+    with can fail like any other forge call, and a failure there names this
+    command's own `unavailable` rather than escaping the envelope."""
+    as_json = parsed.json
+    try:
+        return _append_expectation_card(parsed, session)
+    except _PictureFileError as error:
+        return _refuse(AskReason.INVALID_PICTURE, error, as_json=as_json)
+    except (_TargetUnavailableError, _InvalidTargetError) as error:
+        return _refuse(_ask_target_reason(error), error, as_json=as_json)
+    except (body.ExpectationTextError, body.ExpectationFieldError) as error:
+        return _refuse(_ask_expectation_reason(error), error, as_json=as_json)
+    except RepoMeaninglessUnderStateRefError as error:
+        return _refuse(AskReason.INVALID_USAGE, error, as_json=as_json)
+    except protocol.ClaimError as error:
+        return _refuse(AskReason.UNAVAILABLE, error, as_json=as_json)
 
 
 def _release_branch_for(parsed: argparse.Namespace) -> str | None:
@@ -6895,15 +6986,73 @@ def _read_status_body_or_dispatch(parsed: argparse.Namespace) -> int:
     return _dispatch(parsed)
 
 
+def _subcommands(parser: argparse.ArgumentParser) -> _RecordingSubParsersAction | None:
+    """`parser`'s own subcommand action, or `None` for a leaf command."""
+    return next(
+        (action for action in parser._actions if isinstance(action, _RecordingSubParsersAction)),
+        None,
+    )
+
+
+def _spells_json_flag(token: str, parser: argparse.ArgumentParser) -> bool:
+    """Whether `parser` itself would read `token` as its own `--json`: the
+    exact spelling, or the abbreviation argparse accepts for it -- a prefix
+    no other option of that parser shares, since a prefix two options share
+    is ambiguous and argparse refuses it rather than choosing."""
+    if not token.startswith(LONG_OPTION_PREFIX):
+        return False
+    spelling = token.split("=", 1)[0]
+    declared = [option for action in parser._actions for option in action.option_strings]
+    if spelling in declared:
+        return spelling == JSON_FLAG
+    return [option for option in declared if option.startswith(spelling)] == [JSON_FLAG]
+
+
+def _level_options(tokens: tuple[str, ...]) -> tuple[str, ...]:
+    """The tokens one parser level still reads as options. A bare `--` ends
+    that level's options and nothing else's: argparse marks the rest of this
+    level's tokens as non-options, then hands what follows the command name
+    down untouched, and the next level scans it for a `--` of its own."""
+    return tokens[: tokens.index(LONG_OPTION_PREFIX)] if LONG_OPTION_PREFIX in tokens else tokens
+
+
+def _asked_for_json(root: argparse.ArgumentParser, given: list[str]) -> bool:
+    """Whether this invocation asked for JSON, answered by the parsers it
+    reached rather than by the raw tokens alone (issue #432): only a command
+    declaring `--json` can answer in the envelope, so `aco bootstrap --json`
+    stays argparse's own text, while `aco release --jso` -- an abbreviation
+    argparse accepts -- is JSON. Each level is asked about its own tokens,
+    the ones argparse handed it, so a `--` cuts that level alone."""
+    parser, tokens = root, tuple(given)
+    while True:
+        if any(_spells_json_flag(token, parser) for token in _level_options(tokens)):
+            return True
+        subcommands = _subcommands(parser)
+        if subcommands is None or subcommands.chosen is None:
+            return False
+        parser, tokens = subcommands.chosen, subcommands.handed_down
+
+
 def main(arguments: list[str] | None = None) -> int:
-    # One `ERROR:` site for parsing (`board.parse_item_reference` is an
-    # argparse `type=` whose own refusal is a `ClaimError`), a local
-    # workspace operation, and an ordinary dispatch (issue #372). Whatever
-    # reaches here prints the plain sentence alone: a parser refusal has no
-    # parsed `--json` to read yet, and a refusal a command raises past its
-    # own reported vocabulary must not be dressed as one (issue #425).
+    # Every refusal the parse itself raises -- argparse's own usage errors,
+    # and `board.parse_item_reference`, an argparse `type=` whose refusal is
+    # a `ClaimError` -- fires before any namespace carries `--json`, so the
+    # mode is read back off the parsers this parse reached (issue #432).
+    # Both report `invalid_usage` through the one envelope. Past the parse
+    # the plain sentence alone still stands: a refusal a command raises
+    # outside its own reported vocabulary must not be dressed as one
+    # (issue #425).
+    given = sys.argv[1:] if arguments is None else arguments
+    parser = _parser()
     try:
-        parsed = _parser().parse_args(arguments)
+        parsed = parser.parse_args(given)
+    except _UsageError as error:
+        return _refuse_usage(error, as_json=_asked_for_json(parser, given))
+    except protocol.ClaimError as error:
+        return _refuse(
+            PreDispatchReason.INVALID_USAGE, error, as_json=_asked_for_json(parser, given)
+        )
+    try:
         if parsed.command in {"_run-at-login", "register", "run", "login"}:
             return _local_operation(parsed)
         if parsed.command == "protect":
