@@ -805,6 +805,22 @@ def test_github_adapter_deleting_an_already_absent_branch_is_idempotent(decoded:
     client.delete_branch(LANDING_BRANCH)
 
 
+def test_github_adapter_delete_branch_reraises_an_unrelated_422() -> None:
+    """Issue #405 review finding: only GitHub's own "reference does not
+    exist" 422 is idempotent absence; any other 422 -- a protected branch
+    refusing the delete, say -- is a real failure `delete_branch` must
+    still surface, not silently treat as already gone."""
+    client = GitHubForge(
+        github._repository_id(REPOSITORY),
+        run=lambda arguments, input_data=None: (_ for _ in ()).throw(
+            forge.ForgeError("HTTP 422 Validation Failed: branch is protected")
+        ),
+    )
+
+    with pytest.raises(forge.ForgeError, match="branch is protected"):
+        client.delete_branch(LANDING_BRANCH)
+
+
 @pytest.mark.parametrize(
     "action",
     [

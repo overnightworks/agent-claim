@@ -68,6 +68,11 @@ _HTTP_SERVER_ERROR_PATTERN = re.compile(r"HTTP 5\d\d")
 # `_nonzero_exit_failure` above already classifies, so `merge_landing`
 # matches this pattern itself and raises `ForgeMergeConflictError`.
 _MERGE_CONFLICT_PATTERN = re.compile(r"HTTP 40[59]")
+# `delete_branch`'s own idempotent-absence signal (issue #405 review
+# finding): GitHub answers deleting a ref that does not exist with HTTP 422
+# and this exact message -- any other 422 (a protected branch, a malformed
+# ref name) is a real failure this adapter must still surface.
+_BRANCH_ALREADY_ABSENT_PATTERN = re.compile(r"HTTP 422.*reference does not exist", re.IGNORECASE)
 GITHUB_HOST = "github.com"
 # Accepts both pinned remote forms, the SCP one included.
 GITHUB_REMOTE_PATTERN = re.compile(r"github\.com[:/]([^/\s]+)/([^/\s]+?)(?:\.git)?$")
@@ -700,7 +705,10 @@ class GitHubForge:
         merged (`aco land`, issue #405): idempotent -- GitHub answering that
         the ref already does not exist (branch protection auto-deleted it,
         or a previous `land` run already deleted it before a later step
-        failed) is success, not a failure to surface."""
+        failed) is success, not a failure to surface. Any other 422 -- a
+        protected branch refusing the delete, say -- is this adapter's
+        normal error family, not an absence to swallow (issue #405 review
+        finding)."""
         try:
             self._run(
                 ["api", "--method", "DELETE", f"repos/{self.repository}/git/refs/heads/{branch}"]
@@ -708,7 +716,7 @@ class GitHubForge:
         except forge.ForgeNotFoundError:
             return
         except forge.ForgeError as error:
-            if "HTTP 422" in str(error):
+            if _BRANCH_ALREADY_ABSENT_PATTERN.search(str(error)) is not None:
                 return
             raise
 
