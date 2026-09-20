@@ -4,18 +4,22 @@
 line to an item's `agent-claim` block; `--question`/`--example`/`--picture
 FILE.svg` (issue #295) attach the card fields a picture-owner's mockup
 shows instead of the bare `text`. This file owns the command's own argument
-shape, its `ASKED` line and `--json` shape, and the two refusals unique to
-appending a card (an unreadable or refused `--picture` file), plus the
-malformed-body refusal `aco rule` shares verbatim. `specs/rule.spec.md`
-owns every refusal the two commands share only by substituting `command`
-("ask" where rule reads "rule"): a missing item, a pull-request target, a
-forge that cannot write the body (RULE-06..RULE-08); this file cites those
-IDs rather than restating them. `specs/body-block.spec.md` owns the
-picture's own content grammar field-by-field (BODY-37..BODY-42) and the
-question/example length and non-empty rules (BODY-34..BODY-36): appending
-a card checks each field by the same rule the body parser applies. `<n>`
-is the item's own number, always the argument given; `<k>` the fresh
-line's 1-based index.
+shape, its `ASKED` line, its own `reason` vocabulary, and the two refusals
+unique to appending a card (an unreadable or refused `--picture` file),
+plus the malformed-body refusal `aco rule` shares verbatim.
+`specs/output.spec.md` owns the `--json` envelope itself (OUT-nn: key
+order, `ok`, `message`); this file names only `ask`'s own `reason` values.
+`specs/rule.spec.md` owns every refusal the two commands share only by
+substituting `command` ("ask" where rule reads "rule"): a missing item, a
+pull-request target, a forge that cannot write the body
+(RULE-06..RULE-08); this file cites those IDs rather than restating them.
+`specs/storage-pin.spec.md` owns the state-ref forge gate (PIN-04) `ask`
+shares with `rule` and `brief`; this file cites it rather than restating
+it. `specs/body-block.spec.md` owns the picture's own content grammar
+field-by-field (BODY-37..BODY-42) and the question/example length and
+non-empty rules (BODY-34..BODY-36): appending a card checks each field by
+the same rule the body parser applies. `<n>` is the item's own number,
+always the argument given; `<k>` the fresh line's 1-based index.
 
 ## Behavior table
 
@@ -26,14 +30,16 @@ line's 1-based index.
 | `--picture FILE.svg` unreadable | ASK-06 | ASK-09 | — |
 | `--picture` content refused | ASK-07 | ASK-09 | — |
 | `--text` blank or all whitespace | ASK-08 | ASK-09 | — |
+| `--question`/`--example` content refused | ASK-10 | ASK-09 | — |
 | item is a pull request | RULE-08 (cited) | ASK-09 | — |
 | item does not exist | RULE-07 (cited) | ASK-09 | — |
 | this forge cannot write the body | RULE-06 (cited) | ASK-09 | — |
+| `--repo` given, `storage = "state-ref"` | ASK-11 | ASK-09 | — |
 
 ## Appending a proposed line
 
 - [ ] [ASK-01] A valid item body makes `aco ask ITEM --text TEXT` append a fresh proposed `[[expectation]]` line and print `ASKED #<n> line <k>: <text>` on stdout, exit `0` (see E-ASK-01).
-- [ ] [ASK-02] `--json` on the same call prints `{"item": <n>, "index": <k>, "text": "<text>", "default": "<default>"}`, `default` reading `yes` unless `--default` was given.
+- [ ] [ASK-02] `--json` prints `specs/output.spec.md`'s envelope, `reason: "asked"`, then `"item": <n>, "index": <k>, "text": "<text>", "default": "<default>"` (`yes` unless `--default` given).
 - [ ] [ASK-03] `--question`/`--example`/`--picture FILE.svg` attach to the fresh entry, but the `ASKED` line itself never changes: it still names `TEXT` alone, never the question or example (see E-ASK-02).
 - [ ] [ASK-04] `--json` on that same call adds `"question"`/`"example"`/`"picture"` keys, one per flag actually given, each the exact string written.
 
@@ -46,7 +52,26 @@ text (BODY-01..BODY-50); a picture's own content rules are BODY-37..BODY-42.
 - [ ] [ASK-06] `--picture FILE.svg` naming an unreadable file refuses `--picture <path> could not be read: <error>`, exit `2`, before the forge or the item body are touched (see E-ASK-04).
 - [ ] [ASK-07] A `--picture` failing a BODY-37..42 rule refuses `picture <reason>` (no `expectation[0].` prefix), exit `2`, before any write; `<reason>` is the first-matching row below.
 - [ ] [ASK-08] `--text` that is blank or all whitespace refuses `expectation text must be a non-empty string`, exit `2`, before any write.
-- [ ] [ASK-09] `--json` on a dispatched refusal (ASK-05..ASK-08, RULE-06..RULE-08) prints the `{"ok": false, "error": "<sentence>"}` envelope REL-24 owns, exit `2`.
+- [ ] [ASK-09] `--json` on a dispatched refusal (ASK-05..ASK-08, ASK-10, ASK-11, RULE-06..RULE-08) prints the envelope with `reason` from the table below and the sentence as `message`, exit `2` (see E-ASK-05).
+- [ ] [ASK-10] A `--question`/`--example` failing BODY-34..36 refuses `<field> <reason>`, exit `2`, before any write; `<field>` is `question` or `example`, `<reason>` from the table below (see E-ASK-06).
+- [ ] [ASK-11] Under `storage = "state-ref"`, `aco ask` resolves the state-ref forge like `aco rule`; `--repo` there refuses the same as PIN-04 (see E-ASK-07).
+
+`reason`, by which refusal fired:
+
+| refusal | `reason` |
+|---|---|
+| ASK-05 (malformed body), RULE-07 (missing item, cited), RULE-08 (pull-request target, cited) | `invalid_item` |
+| ASK-06 (`--picture` unreadable), ASK-07 (`--picture` content refused) | `invalid_picture` |
+| ASK-08 (blank `--text`), ASK-10 (`--question`/`--example` content refused) | `invalid_expectation` |
+| ASK-11 (`--repo` under `storage = state-ref`, cites PIN-04) | `invalid_usage` |
+| RULE-06 (forge cannot write, cited) | `unavailable` |
+
+`<reason>` for ASK-10, checked in this fixed order:
+
+| `--question`/`--example` content | `<reason>` |
+|---|---|
+| blank or all whitespace | `must be a non-empty string` |
+| `--question` over 160 characters | `must be at most 160 characters` |
 
 `<reason>`, checked in this fixed order:
 
@@ -97,7 +122,7 @@ $ aco ask <item-id> --text "New question?"
 ASKED #<n> line 1: New question?
 exit 0
 $ aco ask <item-id> --text "Ship on Friday?" --json
-{"item": <n>, "index": 2, "text": "Ship on Friday?", "default": "yes"}
+{"ok": true, "reason": "asked", "item": <n>, "index": 2, "text": "Ship on Friday?", "default": "yes"}
 exit 0
 ```
 
@@ -110,7 +135,7 @@ $ cat > sketch.svg <<'SVG'
 <svg xmlns='http://www.w3.org/2000/svg'><circle cx='5' cy='5' r='4'/></svg>
 SVG
 $ aco ask <item-id> --text "New question?" --question "Ship it?" --example "Release on Friday." --picture sketch.svg --json
-{"item": <n>, "index": 1, "text": "New question?", "default": "yes", "question": "Ship it?", "example": "Release on Friday.", "picture": "<svg xmlns='http://www.w3.org/2000/svg'><circle cx='5' cy='5' r='4'/></svg>"}
+{"ok": true, "reason": "asked", "item": <n>, "index": 1, "text": "New question?", "default": "yes", "question": "Ship it?", "example": "Release on Friday.", "picture": "<svg xmlns='http://www.w3.org/2000/svg'><circle cx='5' cy='5' r='4'/></svg>"}
 exit 0
 ```
 
@@ -131,5 +156,38 @@ Setup: bare-remote, bootstrapped, `storage = "state-ref"` tracked, `<item-id>` o
 ```console
 $ aco ask <item-id> --text "New question?" --picture missing.svg
 2> ERROR: --picture missing.svg could not be read: <error>
+exit 2
+```
+
+### E-ASK-05 — a refusal's own `--json` envelope
+
+Setup: bare-remote, bootstrapped, `storage = "state-ref"` tracked, `items/aco-000001.md` hand-written with no `agent-claim` block
+
+```console
+$ aco ask aco-000001 --text "New question?" --json
+2> ERROR: #<n> body malformed: agent-claim: no agent-claim block; ask needs a valid agent-claim block
+{"ok": false, "reason": "invalid_item", "message": "#<n> body malformed: agent-claim: no agent-claim block; ask needs a valid agent-claim block"}
+exit 2
+```
+
+### E-ASK-06 — a refused `--question` gets `invalid_expectation`, not `invalid_picture`
+
+Setup: bare-remote, bootstrapped, `storage = "state-ref"` tracked, `<item-id>` open
+
+```console
+$ aco ask <item-id> --text "New question?" --question "   " --json
+2> ERROR: question must be a non-empty string
+{"ok": false, "reason": "invalid_expectation", "message": "question must be a non-empty string"}
+exit 2
+```
+
+### E-ASK-07 — `--repo` under `storage = "state-ref"` refuses `invalid_usage`
+
+Setup: bare-remote, bootstrapped, `storage = "state-ref"` tracked
+
+```console
+$ aco ask <item-id> --text "New question?" --repo acme/items --json
+2> ERROR: --repo is meaningless under storage = state-ref
+{"ok": false, "reason": "invalid_usage", "message": "--repo is meaningless under storage = state-ref"}
 exit 2
 ```

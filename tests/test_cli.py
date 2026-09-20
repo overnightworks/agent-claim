@@ -3824,13 +3824,18 @@ def test_rule_json_reports_item_index_ruling_date_and_open(
     )
 
     assert exit_code == 0
-    assert json.loads(capsys.readouterr().out) == {
+    output = capsys.readouterr().out
+    expected = {
+        "ok": True,
+        "reason": "ruled",
         "item": RULE_ITEM,
         "index": 1,
         "ruling": "yes",
         "ruled_on": RULE_TODAY.isoformat(),
         "open": 0,
     }
+    assert output == json.dumps(expected) + "\n"
+    assert json.loads(output) == expected
 
 
 def test_rule_appends_a_note_to_the_ruled_line_via_cli(
@@ -3868,12 +3873,14 @@ def test_rule_refuses_an_already_ruled_line_before_any_write(
     client = _client_with_item(monkeypatch, tmp_path, RULE_ITEM, agent_claim_body(toml_text))
 
     exit_code = issue_claim.main(
-        ["--repo", "example/agent-claim", "rule", str(RULE_ITEM), "--line", "1", "--no"]
+        ["--repo", "example/agent-claim", "rule", str(RULE_ITEM), "--line", "1", "--no", "--json"]
     )
 
     assert exit_code == 2
-    assert "line 1 is already ruled" in capsys.readouterr().err
+    captured = capsys.readouterr()
+    assert "line 1 is already ruled" in captured.err
     assert client.item_bodies == {}
+    _assert_json_refusal_object(captured.err, captured.out, reason="already_ruled")
 
 
 def test_rule_refuses_an_out_of_range_line_before_any_write(
@@ -3883,12 +3890,14 @@ def test_rule_refuses_an_out_of_range_line_before_any_write(
     client = _client_with_item(monkeypatch, tmp_path, RULE_ITEM, agent_claim_body(toml_text))
 
     exit_code = issue_claim.main(
-        ["--repo", "example/agent-claim", "rule", str(RULE_ITEM), "--line", "2", "--yes"]
+        ["--repo", "example/agent-claim", "rule", str(RULE_ITEM), "--line", "2", "--yes", "--json"]
     )
 
     assert exit_code == 2
-    assert "out of range" in capsys.readouterr().err
+    captured = capsys.readouterr()
+    assert "out of range" in captured.err
     assert client.item_bodies == {}
+    _assert_json_refusal_object(captured.err, captured.out, reason="line_out_of_range")
 
 
 def test_rule_refuses_when_the_forge_cannot_update_item_body(
@@ -3899,12 +3908,56 @@ def test_rule_refuses_when_the_forge_cannot_update_item_body(
     client.capability_overrides[forge.ForgeOperation.UPDATE_ITEM_BODY] = forge.Capability.READ_ONLY
 
     exit_code = issue_claim.main(
-        ["--repo", "example/agent-claim", "rule", str(RULE_ITEM), "--line", "1", "--yes"]
+        ["--repo", "example/agent-claim", "rule", str(RULE_ITEM), "--line", "1", "--yes", "--json"]
     )
 
     assert exit_code == 2
+    captured = capsys.readouterr()
     assert client.item_bodies == {}
-    assert "ERROR: this forge cannot update_item_body; rule by hand" in capsys.readouterr().err
+    assert "ERROR: this forge cannot update_item_body; rule by hand" in captured.err
+    _assert_json_refusal_object(captured.err, captured.out, reason="unavailable")
+
+
+def test_rule_refuses_a_non_github_canonical_remote_by_host(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`rule` resolves its forge (`session.forge.writer()`) before its own
+    typed-refusal handlers (issue #396 review finding): a resolution
+    failure -- here a canonical remote on a host no adapter serves -- must
+    still reach `rule`'s own `_refuse`, not `main`'s legacy `error` object."""
+    monkeypatch.setattr(checkout, "remote_url", lambda remote: "file:///srv/git/agent-claim.git")
+
+    def unused(*_args: object, **_kwargs: object) -> forge.RepositoryId:
+        pytest.fail("rule must refuse the host before ever calling discover_repository")
+
+    monkeypatch.setattr(github, "discover_repository", unused)
+
+    status = issue_claim.main(["rule", "258", "--line", "1", "--yes", "--json"])
+
+    captured = capsys.readouterr()
+    assert status == 2
+    assert captured.err == "ERROR: no forge adapter for host file\n"
+    _assert_json_refusal_object(captured.err, captured.out, reason="unavailable")
+
+
+def test_rule_reports_invalid_usage_when_repo_is_given_under_state_ref(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """A new `RULE-10` cites `specs/storage-pin.spec.md`'s PIN-04: under
+    `storage = state-ref`, `--repo` is the wrong flag for this run,
+    reported through `--json` as `invalid_usage` -- `rule`'s forge
+    resolution must tell this apart from its generic `unavailable`
+    bucket, the same distinction `brief` already draws."""
+    _write_state_ref_pin(tmp_path)
+
+    status = issue_claim.main(
+        ["--repo", "acme/items", "rule", "258", "--line", "1", "--yes", "--json"]
+    )
+
+    captured = capsys.readouterr()
+    assert status == 2
+    assert captured.err == "ERROR: --repo is meaningless under storage = state-ref\n"
+    _assert_json_refusal_object(captured.err, captured.out, reason="invalid_usage")
 
 
 def test_rule_refuses_a_missing_item_before_any_write(
@@ -3914,12 +3967,14 @@ def test_rule_refuses_a_missing_item_before_any_write(
     client.issue_references[RULE_ITEM] = forge.ItemReference(forge.ItemState.MISSING)
 
     exit_code = issue_claim.main(
-        ["--repo", "example/agent-claim", "rule", str(RULE_ITEM), "--line", "1", "--yes"]
+        ["--repo", "example/agent-claim", "rule", str(RULE_ITEM), "--line", "1", "--yes", "--json"]
     )
 
     assert exit_code == 2
+    captured = capsys.readouterr()
     assert client.item_bodies == {}
-    assert f"#{RULE_ITEM} does not exist" in capsys.readouterr().err
+    assert f"#{RULE_ITEM} does not exist" in captured.err
+    _assert_json_refusal_object(captured.err, captured.out, reason="invalid_item")
 
 
 def test_rule_refuses_a_pull_request_target_before_any_write(
@@ -3931,15 +3986,14 @@ def test_rule_refuses_a_pull_request_target_before_any_write(
     )
 
     exit_code = issue_claim.main(
-        ["--repo", "example/agent-claim", "rule", str(RULE_ITEM), "--line", "1", "--yes"]
+        ["--repo", "example/agent-claim", "rule", str(RULE_ITEM), "--line", "1", "--yes", "--json"]
     )
 
     assert exit_code == 2
+    captured = capsys.readouterr()
     assert client.item_bodies == {}
-    assert (
-        f"#{RULE_ITEM} is a pull request, not an issue; rule needs an issue"
-        in capsys.readouterr().err
-    )
+    assert f"#{RULE_ITEM} is a pull request, not an issue; rule needs an issue" in captured.err
+    _assert_json_refusal_object(captured.err, captured.out, reason="invalid_item")
 
 
 def test_ask_appends_a_proposed_line_and_rulings_shows_it_as_open(
@@ -3993,12 +4047,17 @@ def test_ask_json_reports_item_index_text_and_default(
     )
 
     assert exit_code == 0
-    assert json.loads(capsys.readouterr().out) == {
+    output = capsys.readouterr().out
+    expected = {
+        "ok": True,
+        "reason": "asked",
         "item": RULE_ITEM,
         "index": 1,
         "text": "New question?",
         "default": "later",
     }
+    assert output == json.dumps(expected) + "\n"
+    assert json.loads(output) == expected
 
 
 def test_ask_refuses_a_blockless_item_before_any_write(
@@ -4007,15 +4066,112 @@ def test_ask_refuses_a_blockless_item_before_any_write(
     client = _client_with_item(monkeypatch, tmp_path, RULE_ITEM, "## Now\nOld prose.\n")
 
     exit_code = issue_claim.main(
-        ["--repo", "example/agent-claim", "ask", str(RULE_ITEM), "--text", "New question?"]
+        [
+            "--repo",
+            "example/agent-claim",
+            "ask",
+            str(RULE_ITEM),
+            "--text",
+            "New question?",
+            "--json",
+        ]
     )
 
     assert exit_code == 2
+    captured = capsys.readouterr()
     assert (
         "body malformed: agent-claim: no agent-claim block; ask needs a valid agent-claim block"
-        in capsys.readouterr().err
+        in captured.err
     )
     assert client.item_bodies == {}
+    _assert_json_refusal_object(captured.err, captured.out, reason="invalid_item")
+
+
+def test_ask_refuses_when_the_forge_cannot_update_item_body(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    client = _client_with_item(
+        monkeypatch, tmp_path, RULE_ITEM, agent_claim_body(MINIMAL_BLOCK_TOML)
+    )
+    client.capability_overrides[forge.ForgeOperation.UPDATE_ITEM_BODY] = forge.Capability.READ_ONLY
+
+    exit_code = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "ask",
+            str(RULE_ITEM),
+            "--text",
+            "New question?",
+            "--json",
+        ]
+    )
+
+    assert exit_code == 2
+    captured = capsys.readouterr()
+    assert client.item_bodies == {}
+    assert "ERROR: this forge cannot update_item_body; ask by hand" in captured.err
+    _assert_json_refusal_object(captured.err, captured.out, reason="unavailable")
+
+
+def test_ask_refuses_a_non_github_canonical_remote_by_host(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`ask` resolves its forge (`session.forge.writer()`) before its own
+    typed-refusal handlers (issue #396 review finding): a resolution
+    failure -- here a canonical remote on a host no adapter serves -- must
+    still reach `ask`'s own `_refuse`, not `main`'s legacy `error` object."""
+    monkeypatch.setattr(checkout, "remote_url", lambda remote: "file:///srv/git/agent-claim.git")
+
+    def unused(*_args: object, **_kwargs: object) -> forge.RepositoryId:
+        pytest.fail("ask must refuse the host before ever calling discover_repository")
+
+    monkeypatch.setattr(github, "discover_repository", unused)
+
+    status = issue_claim.main(["ask", "258", "--text", "New question?", "--json"])
+
+    captured = capsys.readouterr()
+    assert status == 2
+    assert captured.err == "ERROR: no forge adapter for host file\n"
+    _assert_json_refusal_object(captured.err, captured.out, reason="unavailable")
+
+
+def test_ask_reports_invalid_usage_when_repo_is_given_under_state_ref(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """A new `ASK-11` cites `specs/storage-pin.spec.md`'s PIN-04: under
+    `storage = state-ref`, `--repo` is the wrong flag for this run,
+    reported through `--json` as `invalid_usage` -- `ask`'s forge
+    resolution must tell this apart from its generic `unavailable`
+    bucket, the same distinction `brief` already draws."""
+    _write_state_ref_pin(tmp_path)
+
+    status = issue_claim.main(
+        ["--repo", "acme/items", "ask", "258", "--text", "New question?", "--json"]
+    )
+
+    captured = capsys.readouterr()
+    assert status == 2
+    assert captured.err == "ERROR: --repo is meaningless under storage = state-ref\n"
+    _assert_json_refusal_object(captured.err, captured.out, reason="invalid_usage")
+
+
+def test_ask_refuses_blank_text_before_any_write(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    client = _client_with_item(
+        monkeypatch, tmp_path, RULE_ITEM, agent_claim_body(MINIMAL_BLOCK_TOML)
+    )
+
+    exit_code = issue_claim.main(
+        ["--repo", "example/agent-claim", "ask", str(RULE_ITEM), "--text", "   ", "--json"]
+    )
+
+    assert exit_code == 2
+    captured = capsys.readouterr()
+    assert "expectation text must be a non-empty string" in captured.err
+    assert client.item_bodies == {}
+    _assert_json_refusal_object(captured.err, captured.out, reason="invalid_expectation")
 
 
 ASK_PICTURE_SVG = '<svg xmlns="http://www.w3.org/2000/svg"><circle cx="5" cy="5" r="4"/></svg>'
@@ -4093,6 +4249,8 @@ def test_ask_json_reports_question_example_and_picture_when_given(
 
     assert exit_code == 0
     assert json.loads(capsys.readouterr().out) == {
+        "ok": True,
+        "reason": "asked",
         "item": RULE_ITEM,
         "index": 1,
         "text": "New question?",
@@ -4122,12 +4280,47 @@ def test_ask_refuses_an_invalid_picture_file_before_any_write(
             "New question?",
             "--picture",
             str(picture_file),
+            "--json",
         ]
     )
 
     assert exit_code == 2
-    assert "picture must be inline SVG rooted at <svg>" in capsys.readouterr().err
+    captured = capsys.readouterr()
+    assert "picture must be inline SVG rooted at <svg>" in captured.err
     assert client.item_bodies == {}
+    _assert_json_refusal_object(captured.err, captured.out, reason="invalid_picture")
+
+
+def test_ask_refuses_a_blank_question_with_invalid_expectation_not_invalid_picture(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """`ExpectationFieldError` covers `question`, `example`, and `picture`
+    alike (issue #396 review finding): only a refused `picture` names
+    `invalid_picture`, per `specs/ask.spec.md`'s ASK-10 -- a refused
+    `--question`/`--example` names `invalid_expectation` instead."""
+    client = _client_with_item(
+        monkeypatch, tmp_path, RULE_ITEM, agent_claim_body(MINIMAL_BLOCK_TOML)
+    )
+
+    exit_code = issue_claim.main(
+        [
+            "--repo",
+            "example/agent-claim",
+            "ask",
+            str(RULE_ITEM),
+            "--text",
+            "New question?",
+            "--question",
+            "   ",
+            "--json",
+        ]
+    )
+
+    assert exit_code == 2
+    captured = capsys.readouterr()
+    assert "question must be a non-empty string" in captured.err
+    assert client.item_bodies == {}
+    _assert_json_refusal_object(captured.err, captured.out, reason="invalid_expectation")
 
 
 def test_ask_refuses_a_missing_picture_file_before_any_write(
@@ -10009,6 +10202,19 @@ def _assert_json_error_object_mirrors_stderr(err: str, out: str) -> None:
     assert json.loads(out) == {"ok": False, "error": message}
 
 
+def _assert_json_refusal_object(err: str, out: str, *, reason: str) -> None:
+    """`ask`/`rule`/`brief`'s own `_emit_json` refusal (issue #396,
+    `specs/output.spec.md`): the identical sentence stderr already printed,
+    now under `message`, next to `reason` instead of a dropped `error`
+    key. Compares the raw JSON text, not a parsed dict, so a reordering of
+    OUT-01's `ok`, `reason`, `message` sequence would fail this assertion."""
+    assert err.startswith("ERROR: ")
+    message = err.removeprefix("ERROR: ").rstrip("\n")
+    expected = {"ok": False, "reason": reason, "message": message}
+    assert out == json.dumps(expected) + "\n"
+    assert json.loads(out) == expected
+
+
 @pytest.mark.parametrize(
     "arguments",
     [
@@ -13515,7 +13721,10 @@ def test_cli_brief_json_prints_one_object_with_body_claim_tip_and_touched(
     status = issue_claim.main(["--repo", "example/agent-claim", "brief", "258", "--json"])
 
     assert status == 0
-    assert json.loads(capsys.readouterr().out) == {
+    output = capsys.readouterr().out
+    expected = {
+        "ok": True,
+        "reason": "composed",
         "body": "The item's own body.",
         "claim": {
             "agent": "Codex Sol",
@@ -13529,6 +13738,8 @@ def test_cli_brief_json_prints_one_object_with_body_claim_tip_and_touched(
         "tip": tip,
         "touched": ["README.md"],
     }
+    assert output == json.dumps(expected) + "\n"
+    assert json.loads(output) == expected
 
 
 _DEFAULT_BRIEF_TOML = '[build]\nrules = ["Stay in scope."]\nchecks = ["ruff check ."]\n'
@@ -13691,6 +13902,8 @@ def test_cli_brief_step_json_adds_rules_and_checks_to_the_existing_object(
 
     assert status == 0
     assert json.loads(capsys.readouterr().out) == {
+        "ok": True,
+        "reason": "composed",
         "body": "The item's own body.",
         "claim": {
             "agent": "Codex Sol",
@@ -13739,13 +13952,14 @@ def test_cli_brief_step_refuses_with_no_usable_brief_config(
     monkeypatch.setattr(FakeForge, "item_reference", unused)
     monkeypatch.setattr(github, "GitHubForge", lambda _repository: client)
     monkeypatch.chdir(repository)
-    arguments = ["--repo", "example/agent-claim", "brief", "258", "--step", "build"]
+    arguments = ["--repo", "example/agent-claim", "brief", "258", "--step", "build", "--json"]
 
     status = issue_claim.main(arguments)
 
     captured = capsys.readouterr()
     assert status == 2
     assert captured.err == "ERROR: no .agent-claim/brief.toml in the repository\n"
+    _assert_json_refusal_object(captured.err, captured.out, reason="unavailable")
 
 
 def test_cli_brief_refuses_a_non_github_canonical_remote_by_host(
@@ -13762,11 +13976,29 @@ def test_cli_brief_refuses_a_non_github_canonical_remote_by_host(
 
     monkeypatch.setattr(github, "discover_repository", unused)
 
-    status = issue_claim.main(["brief", "258"])
+    status = issue_claim.main(["brief", "258", "--json"])
 
     captured = capsys.readouterr()
     assert status == 2
     assert captured.err == "ERROR: no forge adapter for host file\n"
+    _assert_json_refusal_object(captured.err, captured.out, reason="unavailable")
+
+
+def test_cli_brief_reports_invalid_usage_when_repo_is_given_under_state_ref(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """BRIEF-09 cites `specs/storage-pin.spec.md`'s PIN-04: under `storage =
+    state-ref`, `--repo` is the wrong flag for this run, reported through
+    `--json` as `invalid_usage` -- brief's one refusal that is not this
+    environment being generically `unavailable`."""
+    _write_state_ref_pin(tmp_path)
+
+    status = issue_claim.main(["--repo", "acme/items", "brief", "258", "--json"])
+
+    captured = capsys.readouterr()
+    assert status == 2
+    assert captured.err == "ERROR: --repo is meaningless under storage = state-ref\n"
+    _assert_json_refusal_object(captured.err, captured.out, reason="invalid_usage")
 
 
 @pytest.mark.parametrize(

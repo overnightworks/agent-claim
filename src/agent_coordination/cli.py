@@ -2691,11 +2691,19 @@ def _resolved_forge_target(repo: str | None, canonical_remote: str) -> forge.Rep
     return forge_target
 
 
+class RepoMeaninglessUnderStateRefError(protocol.ClaimUnavailableError):
+    """`_refuse_repo_under_state_ref`'s own refusal, typed (issue #396) so
+    `aco brief`'s `--json` can report `invalid_usage` instead of its own
+    generic `unavailable` bucket for every other forge-resolution refusal --
+    every other caller of `_refuse_repo_under_state_ref` still just needs a
+    `protocol.ClaimError` to catch, unaffected by the narrower type."""
+
+
 def _refuse_repo_under_state_ref(repo: str | None) -> None:
     """`--repo` names a GitHub target; under `storage = "state-ref"` there
     is no host-based target to override (issue #248)."""
     if repo is not None:
-        raise protocol.ClaimUnavailableError("--repo is meaningless under storage = state-ref")
+        raise RepoMeaninglessUnderStateRefError("--repo is meaningless under storage = state-ref")
 
 
 @dataclass(frozen=True)
@@ -3580,6 +3588,48 @@ def _print_brief(composition: _BriefComposition) -> None:
         _print_brief_step_rules(composition.step_rules)
 
 
+def _emit_json(ok: bool, reason: StrEnum, **payload: object) -> None:
+    """The one `--json` envelope owner (issue #396, `specs/output.spec.md`):
+    `ok` and `reason` always print first, in that order -- `reason` a
+    stable enum token, never an `error` object -- then the payload in the
+    order given, with an optional `message` (free prose) moved last so a
+    reader can stop before it. `ask`, `rule`, and `brief` are its first
+    callers, on success and on every refusal alike. `reason` is typed
+    `StrEnum` -- the shared base every command's own reason vocabulary
+    (`AskReason`, `RuleReason`, `BriefReason`) already subclasses -- so a
+    loose string can never reach this envelope."""
+    message = payload.pop("message", None)
+    envelope: dict[str, object] = {"ok": ok, "reason": reason}
+    envelope.update(payload)
+    if message is not None:
+        envelope["message"] = message
+    print(json.dumps(envelope))
+
+
+def _refuse(reason: StrEnum, error: protocol.ClaimError, *, json_mode: bool) -> int:
+    """One shared refusal report for `ask`/`rule`/`brief` (issue #396):
+    `ERROR: <sentence>` on stderr exactly as `main`'s own generic handler
+    always printed it, then -- only under `--json` -- the envelope naming
+    this call's own reason instead of the dropped `error` key. Exit `2`,
+    the one exit every refusal past the parser still uses."""
+    print(f"ERROR: {error}", file=sys.stderr)
+    if json_mode:
+        _emit_json(False, reason, message=str(error))
+    return 2
+
+
+class BriefReason(StrEnum):
+    """`aco brief`'s own `--json` `reason` vocabulary (`specs/brief.spec.md`,
+    issue #396): `composed` the only success. `invalid_item` names no
+    reachable refusal today -- brief never refuses for an item nothing
+    carries (BRIEF-08's own Never clause) -- so it stays out until a future
+    slice gives it a caller."""
+
+    COMPOSED = "composed"
+    INVALID_USAGE = "invalid_usage"
+    UNAVAILABLE = "unavailable"
+
+
 def _brief_claim_json(live: _BriefClaim, observed_at: datetime) -> dict[str, object]:
     claim = live.claim
     return {
@@ -3605,7 +3655,7 @@ def _brief_json(composition: _BriefComposition) -> int:
     if step_rules is not None:
         payload["rules"] = list(step_rules.rules)
         payload["checks"] = list(step_rules.checks)
-    print(json.dumps(payload))
+    _emit_json(True, BriefReason.COMPOSED, **payload)
     return 0
 
 
@@ -3639,10 +3689,22 @@ def _cmd_brief(parsed: argparse.Namespace, session: _ReadSession) -> int:
     names the body, the lane tip ... and the commands"): the item's body from
     the forge, its live claim from the store, the claim branch's current tip,
     and the files the lane touches against its base. Never a new data
-    source, and never a write."""
-    step_rules = _brief_step_rules_or_refusal(parsed.step)
+    source, and never a write. Every refusal this function itself can name
+    (BRIEF-07, BRIEF-09's PIN-04/PIN-05, BRIEF-15) reports through
+    `_refuse`; anything else -- an unspecified forge read failure -- still
+    reaches `main`'s own generic handler untouched."""
+    json_mode = parsed.json
+    try:
+        step_rules = _brief_step_rules_or_refusal(parsed.step)
+    except protocol.ClaimError as error:
+        return _refuse(BriefReason.UNAVAILABLE, error, json_mode=json_mode)
     item = int(parsed.item)
-    client = session.forge()
+    try:
+        client = session.forge()
+    except RepoMeaninglessUnderStateRefError as error:
+        return _refuse(BriefReason.INVALID_USAGE, error, json_mode=json_mode)
+    except protocol.ClaimError as error:
+        return _refuse(BriefReason.UNAVAILABLE, error, json_mode=json_mode)
     body = client.item_reference(item).body or ""
     worktree, _remote, state = _store_observation()
     live = _brief_live_claim(worktree, state, item)
@@ -3654,7 +3716,7 @@ def _cmd_brief(parsed: argparse.Namespace, session: _ReadSession) -> int:
         touched = _touched_files(live.claim.base, tip) if tip is not None else ()
     observed_at = datetime.now(UTC)
     composition = _BriefComposition(body, live, observed_at, tip, touched, step_rules)
-    if parsed.json:
+    if json_mode:
         return _brief_json(composition)
     _print_brief(composition)
     return 0
@@ -4952,28 +5014,73 @@ def _require_update_item_body(client: forge.ForgeWriter, *, command: str) -> Non
         )
 
 
+class _TargetUnavailableError(protocol.ClaimError):
+    """`_require_writable_target`'s own "forge cannot write" refusal (issue
+    #396) -- a distinct type from `_InvalidTargetError` so `ask`/`rule` can
+    each choose their own `unavailable` without parsing prose."""
+
+
+class _InvalidTargetError(protocol.ClaimError):
+    """`_require_writable_target`'s own "no such writable item" refusal
+    (issue #396) -- missing, a pull request, or a malformed body -- so
+    `ask`/`rule` can each choose their own `invalid_item` without parsing
+    prose."""
+
+
+def _require_writable_target(
+    client: forge.ForgeWriter, number: int, *, command: str
+) -> tuple[str, board.BoardConfig]:
+    """`ask` and `rule`'s shared target gate (RULE-06..08, cited verbatim by
+    `specs/ask.spec.md`): the forge must accept a body write, the item must
+    exist and not be a pull request, and its body must parse -- in that
+    order, unchanged from before issue #396 factored it out of both
+    commands. Returns the live body and the board configuration `ask`/
+    `rule` still need for their own write."""
+    try:
+        _require_update_item_body(client, command=command)
+    except protocol.ClaimError as error:
+        raise _TargetUnavailableError(str(error)) from error
+    config = _load_board_config(client, _resolve_toplevel())
+    try:
+        body = _item_body_or_refuse(client, number, command=command)
+        _located_block_or_refuse(number, body, command=command, storage=config.storage)
+    except protocol.ClaimError as error:
+        raise _InvalidTargetError(str(error)) from error
+    return body, config
+
+
 def _rule_remaining_open(new_body: str, *, storage: board.Storage) -> int:
     return sum(
         1 for line in board.expectation_lines(new_body, storage=storage) if line.ruling is None
     )
 
 
-def _print_rule_result(
-    number: int, line: board.ExpectationLine, open_remaining: int, *, as_json: bool
+class RuleReason(StrEnum):
+    """`aco rule`'s own `--json` `reason` vocabulary (`specs/rule.spec.md`,
+    issue #396): `ruled` the only success."""
+
+    RULED = "ruled"
+    ALREADY_RULED = "already_ruled"
+    LINE_OUT_OF_RANGE = "line_out_of_range"
+    INVALID_ITEM = "invalid_item"
+    INVALID_USAGE = "invalid_usage"
+    UNAVAILABLE = "unavailable"
+
+
+def _emit_rule_result(
+    number: int, line: board.ExpectationLine, open_remaining: int, *, json_mode: bool
 ) -> None:
     ruling = cast(str, line.ruling)
     ruled_on = cast(date, line.ruled_on)
-    if as_json:
-        print(
-            json.dumps(
-                {
-                    "item": number,
-                    "index": line.index,
-                    "ruling": ruling,
-                    "ruled_on": ruled_on.isoformat(),
-                    "open": open_remaining,
-                }
-            )
+    if json_mode:
+        _emit_json(
+            True,
+            RuleReason.RULED,
+            item=number,
+            index=line.index,
+            ruling=ruling,
+            ruled_on=ruled_on.isoformat(),
+            open=open_remaining,
         )
         return
     print(f"RULED #{number} line {line.index} {ruling}; {open_remaining} line(s) still open")
@@ -4989,10 +5096,7 @@ def rule_item(
     still has open; raises `protocol.ClaimError` by name for every refusal
     (already ruled, out of range, a bad outcome, a malformed or missing
     item), which both callers turn into their own by-name response."""
-    _require_update_item_body(client, command="rule")
-    config = _load_board_config(client, _resolve_toplevel())
-    body = _item_body_or_refuse(client, number, command="rule")
-    _located_block_or_refuse(number, body, command="rule", storage=config.storage)
+    body, config = _require_writable_target(client, number, command="rule")
     ruled_on = datetime.now(UTC).date()
     new_body = board.rule_expectation(body, line, ruling, ruled_on, note=note)
     client.update_item_body(number, new_body)
@@ -5000,11 +5104,49 @@ def rule_item(
     return ruled_line, _rule_remaining_open(new_body, storage=config.storage)
 
 
+_RuleItemError = (
+    _TargetUnavailableError
+    | _InvalidTargetError
+    | board.ExpectationAlreadyRuledError
+    | board.ExpectationOutOfRangeError
+)
+
+
+def _rule_item_reason(error: _RuleItemError) -> RuleReason:
+    """`_cmd_rule`'s own mapping from `rule_item`'s four refusals to their
+    `--json` `reason` (issue #396): a bad target names `unavailable`
+    (forge cannot write) or `invalid_item` (missing item, pull request);
+    a bad line names `already_ruled` or `line_out_of_range`."""
+    if isinstance(error, _TargetUnavailableError):
+        return RuleReason.UNAVAILABLE
+    if isinstance(error, _InvalidTargetError):
+        return RuleReason.INVALID_ITEM
+    if isinstance(error, board.ExpectationAlreadyRuledError):
+        return RuleReason.ALREADY_RULED
+    return RuleReason.LINE_OUT_OF_RANGE
+
+
 def _cmd_rule(parsed: argparse.Namespace, session: _WriteSession) -> int:
-    client = session.forge.writer()
+    json_mode = parsed.json
+    try:
+        client = session.forge.writer()
+    except RepoMeaninglessUnderStateRefError as error:
+        return _refuse(RuleReason.INVALID_USAGE, error, json_mode=json_mode)
+    except protocol.ClaimError as error:
+        return _refuse(RuleReason.UNAVAILABLE, error, json_mode=json_mode)
     number = int(parsed.item)
-    ruled_line, open_remaining = rule_item(client, number, parsed.line, parsed.ruling, parsed.note)
-    _print_rule_result(number, ruled_line, open_remaining, as_json=parsed.json)
+    try:
+        ruled_line, open_remaining = rule_item(
+            client, number, parsed.line, parsed.ruling, parsed.note
+        )
+    except (
+        _TargetUnavailableError,
+        _InvalidTargetError,
+        board.ExpectationAlreadyRuledError,
+        board.ExpectationOutOfRangeError,
+    ) as error:
+        return _refuse(_rule_item_reason(error), error, json_mode=json_mode)
+    _emit_rule_result(number, ruled_line, open_remaining, json_mode=json_mode)
     return 0
 
 
@@ -5076,20 +5218,38 @@ class _AskedLine:
     card: board.ExpectationCardFields
 
 
-def _print_ask_result(asked: _AskedLine, *, as_json: bool) -> None:
-    if as_json:
-        payload = {
-            "item": asked.item,
-            "index": asked.index,
-            "text": asked.text,
-            "default": asked.default,
-        }
-        payload.update(
-            (key, value) for key, value in asdict(asked.card).items() if value is not None
+class AskReason(StrEnum):
+    """`aco ask`'s own `--json` `reason` vocabulary (`specs/ask.spec.md`,
+    issue #396): `asked` the only success."""
+
+    ASKED = "asked"
+    INVALID_ITEM = "invalid_item"
+    INVALID_EXPECTATION = "invalid_expectation"
+    INVALID_PICTURE = "invalid_picture"
+    INVALID_USAGE = "invalid_usage"
+    UNAVAILABLE = "unavailable"
+
+
+def _emit_ask_result(asked: _AskedLine, *, json_mode: bool) -> None:
+    if json_mode:
+        card_fields = {key: value for key, value in asdict(asked.card).items() if value is not None}
+        _emit_json(
+            True,
+            AskReason.ASKED,
+            item=asked.item,
+            index=asked.index,
+            text=asked.text,
+            default=asked.default,
+            **card_fields,
         )
-        print(json.dumps(payload))
         return
     print(f"ASKED #{asked.item} line {asked.index}: {asked.text}")
+
+
+class _PictureFileError(protocol.ClaimError):
+    """`_read_picture_file`'s own unreadable-file refusal (issue #396),
+    typed so `aco ask`'s `--json` can choose `invalid_picture` without
+    parsing prose."""
 
 
 def _read_picture_file(path: str) -> str:
@@ -5101,27 +5261,61 @@ def _read_picture_file(path: str) -> str:
     try:
         return Path(path).read_text(encoding="utf-8")
     except OSError as error:
-        raise protocol.ClaimError(f"--picture {path} could not be read: {error}") from error
+        raise _PictureFileError(f"--picture {path} could not be read: {error}") from error
+
+
+def _ask_target_reason(error: _TargetUnavailableError | _InvalidTargetError) -> AskReason:
+    """`_cmd_ask`'s own mapping from `_require_writable_target`'s two
+    target refusals to their `--json` `reason` (issue #396)."""
+    if isinstance(error, _TargetUnavailableError):
+        return AskReason.UNAVAILABLE
+    return AskReason.INVALID_ITEM
+
+
+def _ask_expectation_reason(
+    error: board.ExpectationTextError | board.ExpectationFieldError,
+) -> AskReason:
+    """`_cmd_ask`'s own mapping from `append_expectation`'s two card-content
+    refusals (issue #396) to their `--json` `reason`: a blank `--text`
+    (`ExpectationTextError`) and a `--question`/`--example` failing its own
+    rule both name `invalid_expectation`; only a refused `--picture`
+    (`ExpectationFieldError` whose `field` is `picture`) names
+    `invalid_picture`, per `specs/ask.spec.md`'s ASK-07/ASK-10 split."""
+    if isinstance(error, board.ExpectationFieldError) and error.field == "picture":
+        return AskReason.INVALID_PICTURE
+    return AskReason.INVALID_EXPECTATION
 
 
 def _cmd_ask(parsed: argparse.Namespace, session: _WriteSession) -> int:
-    picture = _read_picture_file(parsed.picture) if parsed.picture else None
+    json_mode = parsed.json
+    try:
+        picture = _read_picture_file(parsed.picture) if parsed.picture else None
+    except _PictureFileError as error:
+        return _refuse(AskReason.INVALID_PICTURE, error, json_mode=json_mode)
     card = board.ExpectationCardFields(
         question=parsed.question, example=parsed.example, picture=picture
     )
-    client = session.forge.writer()
-    _require_update_item_body(client, command="ask")
-    config = _load_board_config(client, _resolve_toplevel())
+    try:
+        client = session.forge.writer()
+    except RepoMeaninglessUnderStateRefError as error:
+        return _refuse(AskReason.INVALID_USAGE, error, json_mode=json_mode)
+    except protocol.ClaimError as error:
+        return _refuse(AskReason.UNAVAILABLE, error, json_mode=json_mode)
     number = int(parsed.item)
-    body = _item_body_or_refuse(client, number, command="ask")
-    _located_block_or_refuse(number, body, command="ask", storage=config.storage)
-    new_body = board.append_expectation(body, parsed.text, parsed.default, card=card)
+    try:
+        body, config = _require_writable_target(client, number, command="ask")
+    except (_TargetUnavailableError, _InvalidTargetError) as error:
+        return _refuse(_ask_target_reason(error), error, json_mode=json_mode)
+    try:
+        new_body = board.append_expectation(body, parsed.text, parsed.default, card=card)
+    except (board.ExpectationTextError, board.ExpectationFieldError) as error:
+        return _refuse(_ask_expectation_reason(error), error, json_mode=json_mode)
     index = len(board.expectation_lines(new_body, storage=config.storage))
     client.update_item_body(number, new_body)
     asked = _AskedLine(
         item=number, index=index, text=parsed.text, default=parsed.default, card=card
     )
-    _print_ask_result(asked, as_json=parsed.json)
+    _emit_ask_result(asked, json_mode=json_mode)
     return 0
 
 

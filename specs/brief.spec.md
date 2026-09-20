@@ -7,14 +7,15 @@ base. `aco brief <item> --step <step>` adds two more sections, this
 repository's own rules and checks for that lane step, read from the tracked
 `.agent-claim/brief.toml`. This file owns the command's own argument, its
 printed section shape, when each section carries a value versus stays empty,
-and its `--json` object; `specs/claim-record.spec.md` owns the claim record's
-own fields this command reads (CLAIM-01, CLAIM-05, CLAIM-47),
-`specs/storage-pin.spec.md` owns the item-reference grammar `<item>` accepts
-(PIN-08) and the state-ref forge gate (PIN-04, PIN-05), and
-`specs/release.spec.md` owns the `--json` refusal object's own shape
-(REL-24). `<item>` is the argument as given; `<n>` its resolved number;
-`<step>` is one of `build`, `review`, `fix`, `land`. A refusal reaching the
-shared collection point prints `ERROR: <sentence>` on stderr, exit `2`.
+its own success payload, and its own `reason` vocabulary;
+`specs/output.spec.md` owns the `--json` envelope itself (OUT-nn: key
+order, `ok`, `message`). `specs/claim-record.spec.md` owns the claim
+record's own fields this command reads (CLAIM-01, CLAIM-05, CLAIM-47), and
+`specs/storage-pin.spec.md` owns the item-reference grammar `<item>`
+accepts (PIN-08) and the state-ref forge gate (PIN-04, PIN-05). `<item>`
+is the argument as given; `<n>` its resolved number; `<step>` is one of
+`build`, `review`, `fix`, `land`. A refusal reaching the shared collection
+point prints `ERROR: <sentence>` on stderr, exit `2`.
 
 ## Behavior table
 
@@ -39,7 +40,7 @@ shared collection point prints `ERROR: <sentence>` on stderr, exit `2`.
 
 ## `--json`
 
-- [ ] [BRIEF-06] `aco brief <item> --json` prints one object `{"body", "claim", "tip", "touched"}`, `"claim"` `null` with no live claim (see E-BRIEF-04).
+- [ ] [BRIEF-06] `aco brief <item> --json` prints `specs/output.spec.md`'s envelope with `reason: "composed"`, then `"body", "claim", "tip", "touched"`, `"claim"` `null` with no live claim (see E-BRIEF-04).
 - [ ] [BRIEF-10] A non-`null` `"claim"` object is `{"agent", "role", "branch", "base", "scope", "whole", "age"}`, `"whole"` `null` without one (see E-BRIEF-04).
 
 ## `--step`
@@ -58,6 +59,14 @@ shared collection point prints `ERROR: <sentence>` on stderr, exit `2`.
 
 - [ ] [BRIEF-07] `aco brief <item>` on a canonical remote whose host has no forge adapter refuses `no forge adapter for host <host>`, exit `2`, before any forge resolution (see E-BRIEF-05).
 - [ ] [BRIEF-09] Under `storage = "state-ref"`, `aco brief <item>` resolves the state-ref forge like `item show`/`edit`/`close`; `--repo` there refuses the same as those (PIN-04, PIN-05).
+- [ ] [BRIEF-17] `--json` on a dispatched refusal (BRIEF-07, BRIEF-09, BRIEF-15) prints `specs/output.spec.md`'s envelope with the sentence as `message` and `reason` from the table below, exit `2` (see E-BRIEF-11).
+
+`reason`, by which refusal fired:
+
+| refusal | `reason` |
+|---|---|
+| PIN-04 (`--repo` under `storage = state-ref`) | `invalid_usage` |
+| BRIEF-07 (no forge adapter for host), PIN-05 (no resolvable default branch), BRIEF-15 (no tracked `.agent-claim/brief.toml`) | `unavailable` |
 
 ## Never
 
@@ -149,7 +158,7 @@ one commit on `ada/issue-42` past `<base>` touching `README.md`, pushed to
 
 ```console
 $ aco brief 42 --json
-{"body": "The item's own body.", "claim": {"agent": "Ada", "role": "builder", "branch": "ada/issue-42", "base": "<base>", "scope": ["README.md"], "whole": null, "age": "0h 0m"}, "tip": "<tip>", "touched": ["README.md"]}
+{"ok": true, "reason": "composed", "body": "The item's own body.", "claim": {"agent": "Ada", "role": "builder", "branch": "ada/issue-42", "base": "<base>", "scope": ["README.md"], "whole": null, "age": "0h 0m"}, "tip": "<tip>", "touched": ["README.md"]}
 exit 0
 ```
 
@@ -221,7 +230,7 @@ Setup: as E-BRIEF-07
 
 ```console
 $ aco brief 42 --step build --json
-{"body": "The item's own body.", "claim": {"agent": "Ada", "role": "builder", "branch": "ada/issue-42", "base": "<base>", "scope": ["README.md"], "whole": null, "age": "0h 0m"}, "tip": "<tip>", "touched": ["README.md"], "rules": ["Stay in scope."], "checks": ["ruff check ."]}
+{"ok": true, "reason": "composed", "body": "The item's own body.", "claim": {"agent": "Ada", "role": "builder", "branch": "ada/issue-42", "base": "<base>", "scope": ["README.md"], "whole": null, "age": "0h 0m"}, "tip": "<tip>", "touched": ["README.md"], "rules": ["Stay in scope."], "checks": ["ruff check ."]}
 exit 0
 ```
 
@@ -254,4 +263,15 @@ TIP
 TOUCHED
 README.md
 exit 0
+```
+
+### E-BRIEF-11 -- a refusal's own `--json` envelope
+
+Setup: `origin` points at a non-GitHub remote, no other precondition
+
+```console
+$ aco brief 42 --json
+2> ERROR: no forge adapter for host <host>
+{"ok": false, "reason": "unavailable", "message": "no forge adapter for host <host>"}
+exit 2
 ```

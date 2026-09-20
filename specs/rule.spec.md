@@ -6,14 +6,18 @@ word (`aco ask` proposes; this command decides). This command and
 `board --serve`'s own `POST /rule` form (issue #280) share the one write
 path; a refusal reads the identical sentence through either caller. This
 file owns the ruling's own refusals -- an already-ruled
-line, an out-of-range one -- the `RULED` line and `--json` shape, and every
-refusal `aco ask` shares only by substituting `command` ("rule" where ask's
-own reads "ask"): a missing item, a pull-request target, a forge that
-cannot write the body. `specs/ask.spec.md` owns the malformed-body-target
-refusal the two commands share verbatim (ASK-05); this file cites it rather
-than restating it. `<n>` is the item's own number; `<k>` the 1-based line
-index `--line` names, the same index `aco ask`'s own `ASKED` line and
-`rulings` print.
+line, an out-of-range one -- the `RULED` line, its own `reason` vocabulary,
+and every refusal `aco ask` shares only by substituting `command` ("rule"
+where ask's own reads "ask"): a missing item, a pull-request target, a
+forge that cannot write the body. `specs/output.spec.md` owns the `--json`
+envelope itself (OUT-nn: key order, `ok`, `message`); this file names only
+`rule`'s own `reason` values. `specs/ask.spec.md` owns the
+malformed-body-target refusal the two commands share verbatim (ASK-05);
+this file cites it rather than restating it. `specs/storage-pin.spec.md`
+owns the state-ref forge gate (PIN-04) `rule` shares with `ask` and
+`brief`; this file cites it rather than restating it. `<n>` is the item's
+own number; `<k>` the 1-based line index `--line` names, the same index
+`aco ask`'s own `ASKED` line and `rulings` print.
 
 ## Behavior table
 
@@ -26,11 +30,12 @@ index `--line` names, the same index `aco ask`'s own `ASKED` line and
 | item does not exist | RULE-07 | RULE-09 | — |
 | item is a pull request | RULE-08 | RULE-09 | — |
 | item body malformed | ASK-05 (cited) | RULE-09 | — |
+| `--repo` given, `storage = "state-ref"` | RULE-10 | RULE-09 | — |
 
 ## Ruling a line
 
 - [ ] [RULE-01] A still-open line makes `aco rule ITEM --line N` with `--yes`/`--no`/`--later` print `RULED #<n> line <k> <ruling>; <m> line(s) still open` on stdout, exit `0` (see E-RULE-01).
-- [ ] [RULE-02] `--json` on the same call prints `{"item": <n>, "index": <k>, "ruling": "<ruling>", "ruled_on": "<date>", "open": <m>}`.
+- [ ] [RULE-02] `--json` on the same call prints `specs/output.spec.md`'s envelope with `reason: "ruled"`, then `"item": <n>, "index": <k>, "ruling": "<ruling>", "ruled_on": "<date>", "open": <m>`.
 - [ ] [RULE-03] `--note TEXT` appends ` Anmerkung: TEXT` to the ruled line's own `text`, never a separate field (see E-RULE-02).
 
 ## Refusals this command owns
@@ -43,7 +48,18 @@ the same sentence; RULE-07's sentence is identical for both commands.
 - [ ] [RULE-06] A forge whose `update_item_body` capability is not `READ_WRITE` refuses `this forge cannot update_item_body; rule by hand`, exit `2`, before any write.
 - [ ] [RULE-07] An item no reference resolves refuses `#<n> does not exist`, exit `2`, before any write.
 - [ ] [RULE-08] An item that is a pull request refuses `#<n> is a pull request, not an issue; rule needs an issue`, exit `2`, before any write.
-- [ ] [RULE-09] `--json` on a dispatched refusal (RULE-04..RULE-08, ASK-05) prints the `{"ok": false, "error": "<sentence>"}` envelope REL-24 owns, exit `2`.
+- [ ] [RULE-09] `--json` on a dispatched refusal (RULE-04..RULE-08, RULE-10, ASK-05) prints the envelope with `reason` from the table below and the sentence as `message`, exit `2` (see E-RULE-05).
+- [ ] [RULE-10] Under `storage = "state-ref"`, `aco rule` resolves the state-ref forge like `aco ask`; `--repo` there refuses the same as PIN-04 (see E-RULE-06).
+
+`reason`, by which refusal fired:
+
+| refusal | `reason` |
+|---|---|
+| RULE-04 (already ruled) | `already_ruled` |
+| RULE-05 (out of range) | `line_out_of_range` |
+| RULE-07 (missing item), RULE-08 (pull-request target), ASK-05 (malformed body, cited) | `invalid_item` |
+| RULE-10 (`--repo` under `storage = state-ref`, cites PIN-04) | `invalid_usage` |
+| RULE-06 (forge cannot write) | `unavailable` |
 
 ## Never
 
@@ -74,7 +90,7 @@ $ aco rule <item-id> --line 1 --yes
 RULED #<n> line 1 yes; 1 line(s) still open
 exit 0
 $ aco rule <item-id> --line 2 --later --json
-{"item": <n>, "index": 2, "ruling": "later", "ruled_on": "<ruled-on>", "open": 0}
+{"ok": true, "reason": "ruled", "item": <n>, "index": 2, "ruling": "later", "ruled_on": "<ruled-on>", "open": 0}
 exit 0
 ```
 
@@ -105,5 +121,27 @@ Setup: bare-remote, bootstrapped, `storage = "state-ref"` tracked, `<item-id>` o
 ```console
 $ aco rule <item-id> --line 2 --yes
 2> ERROR: line 2 out of range: this item has 1 expectation line(s)
+exit 2
+```
+
+### E-RULE-05 — a refusal's own `--json` envelope
+
+Setup: bare-remote, bootstrapped, `storage = "state-ref"` tracked, `<item-id>` open with one already-ruled line, `--line 1`
+
+```console
+$ aco rule <item-id> --line 1 --no --json
+2> ERROR: line 1 is already ruled; a changed ruling is a new line
+{"ok": false, "reason": "already_ruled", "message": "line 1 is already ruled; a changed ruling is a new line"}
+exit 2
+```
+
+### E-RULE-06 — `--repo` under `storage = "state-ref"` refuses `invalid_usage`
+
+Setup: bare-remote, bootstrapped, `storage = "state-ref"` tracked
+
+```console
+$ aco rule <item-id> --line 1 --yes --repo acme/items --json
+2> ERROR: --repo is meaningless under storage = state-ref
+{"ok": false, "reason": "invalid_usage", "message": "--repo is meaningless under storage = state-ref"}
 exit 2
 ```
