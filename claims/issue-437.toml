@@ -1,7 +1,0 @@
-claim_id = "2f119d3db116482d8192379676f25ac9"
-agent = "Claude head (coordinator)"
-role = "builder"
-base = "f0ce478593f0b6067c144b1f362a0c5ed3141dc9"
-branch = "claude/issue-437-version-3"
-scope = [".agent-claim/brief.toml", "README.md", "src/agent_coordination/__init__.py"]
-opened_commit = "43532ebcf8bc2d6436603cdfebd4394d219251c4"
