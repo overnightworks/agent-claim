@@ -1,0 +1,8 @@
+claim_id = "d4deab521e094475ad10be23471bd345"
+agent = "Claude head (coordinator)"
+role = "builder"
+base = "382a5b4a3e2c1c768ba8157a10bbb190bb588ade"
+branch = "claude/issue-439-rename-repository"
+scope = [".github", "AGENTS.md", "README.md", "docs", "pyproject.toml", "scripts", "specs", "src/agent_coordination", "tests"]
+opened_commit = "fea60cb82fa028a234abffcdf5740393c67da2e7"
+whole_reason = "ein mechanischer Namensschnitt über das ganze Repository; die Teile ergeben nur zusammen einen Namen"
