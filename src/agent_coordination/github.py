@@ -295,9 +295,7 @@ def _is_recovered_not_found_error(
     return section == "repository" and alias in aliases and repository.get(alias) is None
 
 
-def _not_found_batch_nodes(
-    message: str, numbers: Sequence[int]
-) -> Mapping[str, object] | None:
+def _not_found_batch_nodes(message: str, numbers: Sequence[int]) -> Mapping[str, object] | None:
     """`_item_reference_block`'s own recovery (issue #440 review): `gh api
     graphql` exits nonzero whenever any alias in `_item_reference_query`
     resolved to neither an issue nor a pull request, even though GraphQL's
@@ -328,9 +326,7 @@ def _not_found_batch_nodes(
     aliases = frozenset(f"n{index}" for index in range(len(numbers)))
     if not aliases.issubset(repository):
         return None
-    recovered = all(
-        _is_recovered_not_found_error(error, aliases, repository) for error in errors
-    )
+    recovered = all(_is_recovered_not_found_error(error, aliases, repository) for error in errors)
     return repository if recovered else None
 
 
