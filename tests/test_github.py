@@ -1422,27 +1422,75 @@ def test_github_adapter_item_references_fails_loud_on_a_malformed_response(
         client.item_references((10,))
 
 
-def test_github_adapter_item_references_reraises_an_unrecovered_graphql_error() -> None:
+@pytest.mark.parametrize(
+    ("message", "match"),
+    [
+        pytest.param("gh: rate limited\n", "rate limited", id="not-json"),
+        pytest.param(json.dumps(["unexpected"]), "unexpected", id="response-not-an-object"),
+        pytest.param(
+            json.dumps(
+                {
+                    "data": {"repository": None},
+                    "errors": [{"type": "NOT_FOUND", "path": ["repository", "n0"]}],
+                }
+            ),
+            "NOT_FOUND",
+            id="repository-not-a-mapping",
+        ),
+        pytest.param(
+            json.dumps({"data": {"repository": {"n0": None}}, "errors": []}),
+            "errors",
+            id="no-errors",
+        ),
+        pytest.param(
+            json.dumps(
+                {
+                    "data": {"repository": {}},
+                    "errors": [{"type": "NOT_FOUND", "path": ["repository", "n0"]}],
+                }
+            ),
+            "NOT_FOUND",
+            id="alias-missing-from-repository",
+        ),
+        pytest.param(
+            json.dumps(
+                {
+                    "data": {"repository": {"n0": None}},
+                    "errors": [{"type": "NOT_FOUND", "path": ["repository"]}],
+                }
+            ),
+            "NOT_FOUND",
+            id="error-path-wrong-length",
+        ),
+        pytest.param(
+            json.dumps(
+                {
+                    "data": {"repository": {"n0": None}},
+                    "errors": [{"type": "FORBIDDEN", "path": ["repository", "n0"]}],
+                }
+            ),
+            "FORBIDDEN",
+            id="error-not-not-found",
+        ),
+    ],
+)
+def test_github_adapter_item_references_reraises_an_unrecovered_graphql_error(
+    message: str, match: str
+) -> None:
     """Issue #440 review: `_not_found_batch_nodes` only recovers a batch
-    whose every error is `NOT_FOUND` on one of its own aliases. A batch that
-    also fails for an unrelated reason -- a permission error here -- keeps
-    failing loud with its original error, never guessed at as a not-found."""
-    message = (
-        json.dumps(
-            {
-                "data": {"repository": {"n0": None}},
-                "errors": [{"type": "FORBIDDEN", "path": ["repository", "n0"]}],
-            }
-        )
-        + "gh: Resource not accessible by integration\n"
-    )
+    whose response parses as the shape a not-found alias actually produces,
+    every error on it is `NOT_FOUND` on one of this call's own aliases, and
+    `data.repository` already holds every alias asked for. Anything else --
+    unparseable output, an unexpected shape, an unrelated error, a
+    malformed path, or an alias `repository` never answered for -- keeps
+    failing loud with the original error, never guessed at as a not-found."""
 
     def run(_arguments: list[str]) -> str:
         raise forge.ForgeError(message)
 
     client = GitHubForge(github._repository_id(REPOSITORY), run=run)
 
-    with pytest.raises(forge.ForgeError, match="FORBIDDEN"):
+    with pytest.raises(forge.ForgeError, match=match):
         client.item_references((10,))
 
 
