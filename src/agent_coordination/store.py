@@ -942,16 +942,13 @@ def _parse_state_tree(worktree: Path, tip: ObjectId) -> ClaimState:
     tree_oid = _tree_oid(worktree, tip)
     entries = _list_tree(worktree, tree_oid, tip=tip, context="state")
     top_level = {name: value for name, value in entries.items() if "/" not in name}
-    archive = _read_state_archive(
-        worktree, tree_oid, tip=tip, paths=sorted(top_level.keys() - {ITEMS_DIRECTORY})
-    )
-    # The schema version decides which top-level names are legal, so a
-    # version this client does not speak is reported as such (issue #341),
-    # never as a malformed layout it has no grounds to judge.
-    parse_schema_toml(_read_schema_toml(top_level, archive, tip=tip), tip=tip)
     unknown = set(top_level) - _STATE_TOP_LEVEL_NAMES
     if unknown:
         raise MalformedStateTreeError(f"state tree at {tip} has unknown entries: {sorted(unknown)}")
+    archive = _read_state_archive(
+        worktree, tree_oid, tip=tip, paths=sorted(top_level.keys() - {ITEMS_DIRECTORY})
+    )
+    parse_schema_toml(_read_schema_toml(top_level, archive, tip=tip), tip=tip)
     return ClaimState(
         tip=tip,
         claims=_parse_claims_subtree(
@@ -1065,10 +1062,9 @@ def peek_state(*, worktree: Path, remote: str = DEFAULT_CANONICAL_REMOTE) -> Cla
     transition (`claim`, `release`, ...) still needs, since those callers go
     on to write and must keep this worktree's own lineage current.
     """
-    probed = _ls_remote_state(worktree, remote)
+    probed = _peek_tip(worktree, remote)
     if probed is None:
         return EMPTY_STATE
-    _fetch_ref_objects(worktree, remote)
     return _parse_state_tree(worktree, probed)
 
 
@@ -1078,11 +1074,41 @@ def peek_state_for_reset(
     """`peek_state` for `reset` alone (issue #341): a tip whose schema this
     client does not speak comes back as its oid and version -- all the
     export and the lease need -- instead of failing the one command built
-    to replace exactly such a ledger. Any other defect still fails loud."""
+    to replace exactly such a ledger. The schema is judged before the
+    layout, because a version this client does not speak may legally carry
+    top-level names it does not know; a supported tip then gets the full
+    `_parse_state_tree` every other command gets, so any other defect still
+    fails loud with the same refusal."""
+    probed = _peek_tip(worktree, remote)
+    if probed is None:
+        return EMPTY_STATE
     try:
-        return peek_state(worktree=worktree, remote=remote)
+        parse_schema_toml(_read_tip_schema_toml(worktree, probed), tip=probed)
     except UnsupportedStateSchemaError as error:
         return UnreadableState(tip=error.tip, schema_version=error.version)
+    return _parse_state_tree(worktree, probed)
+
+
+def _peek_tip(worktree: Path, remote: str) -> ObjectId | None:
+    """`STATE_REF`'s tip on `remote` with its objects in this worktree's
+    store, or `None` for a proven-absent ref -- `peek_state`'s write-free
+    read, shared by both peeks."""
+    probed = _ls_remote_state(worktree, remote)
+    if probed is not None:
+        _fetch_ref_objects(worktree, remote)
+    return probed
+
+
+def _read_tip_schema_toml(worktree: Path, tip: ObjectId) -> str:
+    """`schema.toml`'s text at `tip` alone. Archives that one name only, so
+    no other top-level name -- which this client has not yet judged -- ever
+    reaches `git archive` as a pathspec."""
+    tree_oid = _tree_oid(worktree, tip)
+    entries = _list_tree(worktree, tree_oid, tip=tip, context="state")
+    top_level = {name: value for name, value in entries.items() if "/" not in name}
+    schema_paths = [SCHEMA_TOML_FILENAME] if SCHEMA_TOML_FILENAME in top_level else []
+    archive = _read_state_archive(worktree, tree_oid, tip=tip, paths=schema_paths)
+    return _read_schema_toml(top_level, archive, tip=tip)
 
 
 def _commit_tree(

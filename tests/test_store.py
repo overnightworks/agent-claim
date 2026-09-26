@@ -598,10 +598,7 @@ def test_fetch_state_ignores_a_foreign_fetch_that_wins_the_fetch_head_race(
     ("files", "expected_error", "match"),
     [
         pytest.param(
-            {
-                "schema.toml": protocol.serialize_empty_schema_toml().encode(),
-                "extra.txt": b"stray\n",
-            },
+            {"schema.toml": _SCHEMA_TOML_VERSION_ONE, "extra.txt": b"stray\n"},
             protocol.MalformedStateTreeError,
             "unknown entries",
             id="extra-file",

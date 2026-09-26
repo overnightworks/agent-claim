@@ -115,7 +115,7 @@ version field from the work-item body block's own `version = 1`
 (CLAIM-06..CLAIM-09, CLAIM-59..CLAIM-66); this section covers only the
 tree's structural shape before that content is ever parsed.
 
-- [ ] [CAS-27] A fetched tree of the supported schema carrying a top-level entry outside `schema.toml`, `claims`, `ids`, `resources`, `items` refuses `state tree at <tip> has unknown entries: ['extra.txt']`.
+- [ ] [CAS-27] A fetched tree carrying a top-level entry outside `schema.toml`, `claims`, `ids`, `resources`, `items` refuses `state tree at <tip> has unknown entries: ['extra.txt']`.
 - [ ] [CAS-28] A `claims`/`ids`/`resources`/`items` top-level entry that is not a directory refuses `<name> at <tip> is not a directory`.
 - [ ] [CAS-29] A `claims/` entry that is not a `.toml` blob refuses `claims/<name> at <tip> is not a claim file`.
 - [ ] [CAS-30] An `ids/` entry that is not a bare, claim-id-shaped blob refuses `ids/<name> at <tip> is not a claim id`.
