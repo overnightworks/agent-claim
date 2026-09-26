@@ -1149,8 +1149,10 @@ class TestStateRefBoardWrites:
             MALFORMED_ID, expected=None, content=_blank_title_item(), store_expected=None
         )
 
+        re_edited = edited.replace("Edited", "Re-edited", 1)
+
         with pytest.raises(protocol.ClaimUnavailableError) as refusal:
-            adapter.update_item_body(CHILD_A_NUMBER, edited.replace("Edited", "Re-edited", 1))
+            adapter.update_item_body(CHILD_A_NUMBER, re_edited)
 
         assert str(refusal.value) == protocol.ITEMS_WRITTEN_SINCE_CHECKED
         fresh = _fetch_state_ref_board(bare_remote, worktree)
