@@ -357,7 +357,7 @@ def test_a_repeated_get_serves_the_held_page_with_its_age_until_an_explicit_relo
 
 
 def test_the_reload_link_redirects_so_a_later_plain_refresh_does_not_rebuild(
-    served_board: ServedBoard, monkeypatch: pytest.MonkeyPatch
+    served_board: ServedBoard,
 ) -> None:
     """Issue #440 review, BOARD-50: the reload control is a plain link to
     `/?t=<token>&reload=1`; before this fix the server answered that request
@@ -369,27 +369,26 @@ def test_the_reload_link_redirects_so_a_later_plain_refresh_does_not_rebuild(
     bar drops `reload=1` and the redirected `GET` serves the already-held
     page without rebuilding."""
     token = served_board.server.token
-    build_count = 0
-    original_board_page = issue_claim._board_page
-
-    def counting_board_page(*args: object, **kwargs: object) -> issue_claim.board_html.BoardPage:
-        nonlocal build_count
-        build_count += 1
-        return original_board_page(*args, **kwargs)  # type: ignore[arg-type]
-
-    monkeypatch.setattr(issue_claim, "_board_page", counting_board_page)
 
     reload_response = served_board.get(token=token, reload=True)
 
     assert reload_response.status == 303
     assert reload_response.location == f"/?t={token}"
     assert reload_response.body == b""
-    builds_after_reload = build_count
+
+    # A forge rename after the reload is invisible to a plain refresh only if
+    # that refresh serves the page the reload already built and held, rather
+    # than rebuilding from the (now renamed) forge state.
+    served_board.client.board_issues = (
+        replace(served_board.client.board_issues[0], title="Renamed item"),
+    )
 
     plain_response = served_board.get(token=token)
+    plain_body = plain_response.body.decode("utf-8")
 
     assert plain_response.status == 200
-    assert build_count == builds_after_reload
+    assert "Plain item" in plain_body
+    assert "Renamed item" not in plain_body
 
 
 def test_post_rule_with_a_wrong_token_is_forbidden_and_writes_nothing(
