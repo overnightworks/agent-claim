@@ -3182,7 +3182,7 @@ def _cmd_item_new(parsed: argparse.Namespace) -> int:
     try:
         config = _board_config(_resolve_toplevel())
         if config.storage is body.Storage.GITHUB:
-            return _item_new_on_github(parsed)
+            return _item_new_on_github(parsed, config.canonical_remote)
         return _item_new_on_state_ref(parsed, config.canonical_remote)
     except _PartialWriteError as error:
         return _refuse_partial_write(error, ItemReason.PARTIAL_WRITE, as_json=as_json)
@@ -3198,7 +3198,7 @@ def _item_new_body(parsed: argparse.Namespace, raw_body: str) -> str:
     return _block_body_with_whole(new_body, _requested_whole_reason(parsed.whole))
 
 
-def _item_new_on_github(parsed: argparse.Namespace) -> int:
+def _item_new_on_github(parsed: argparse.Namespace, canonical_remote: str) -> int:
     """`item new` under `storage = "github"` (issue #444): the body piped on
     stdin passes the same shape check `aco check <n>` applies before
     anything else is read or written, so an invalid body creates nothing;
@@ -3214,7 +3214,7 @@ def _item_new_on_github(parsed: argparse.Namespace) -> int:
     if defects:
         return _refuse_item_body_invalid(defects, as_json=parsed.json)
     new_body = _item_new_body(parsed, raw_body)
-    client = _LazyForge(parsed.repo).writer()
+    client = github.GitHubForge(_resolved_forge_target(parsed.repo, canonical_remote))
     open_issues = client.list_open_board_issues()
     if parsed.parent is not None:
         _open_container(open_issues, parsed.parent)
@@ -5972,9 +5972,11 @@ def _open_container(open_issues: Iterable[board.Issue], number: int) -> board.Is
     return target
 
 
-def _cut_target(client: forge.ForgeWriter, number: int) -> board.Issue:
+def _cut_target(
+    client: forge.ForgeWriter, open_issues: Iterable[board.Issue], number: int
+) -> board.Issue:
     """The open container `cut` targets, or why it refuses before any write."""
-    target = _open_container(client.list_open_board_issues(), number)
+    target = _open_container(open_issues, number)
     parent = client.parent_issue(number)
     if parent is not None:
         raise protocol.ClaimUnavailableError(
@@ -6342,19 +6344,19 @@ CUT_RERUN_RECOVERY = "re-run the same cut -- it adopts the child"
 def _cut_slice(
     client: forge.ForgeWriter,
     target: board.Issue,
+    open_issues: Iterable[board.Issue],
     parsed: argparse.Namespace,
-    idea_label: str | None,
-    storage: body.Storage,
+    config: board.BoardConfig,
 ) -> int:
     number = target.number
-    located = _located_block_or_refuse(number, target.body, command="cut", storage=storage)
+    located = _located_block_or_refuse(number, target.body, command="cut", storage=config.storage)
     link = _cut_link(number, located.data, parsed.row)
     if link is not None:
         _require_matching_title(number, link, parsed.title)
     child_scope = _cut_row_scope(link, _requested_body_scope(parsed.scope))
-    adopted = _adoptable_child(client, number, parsed.title, idea_label)
+    adopted = _adoptable_child(client, number, parsed.title, config.idea_label)
     if adopted is None and not parsed.not_a_twin:
-        _refuse_possible_twin(client, parsed.title, client.list_open_board_issues(), parent=number)
+        _refuse_possible_twin(client, parsed.title, open_issues, parent=number)
     try:
         child = (
             adopted.number
@@ -6426,8 +6428,9 @@ def _cmd_cut(parsed: argparse.Namespace, session: _WriteSession) -> int:
                     f"this forge cannot {operation.value}; cut the slice by hand"
                 )
         config = _load_board_config(client, _resolve_toplevel())
+        open_issues = client.list_open_board_issues()
         return _cut_slice(
-            client, _cut_target(client, number), parsed, config.idea_label, config.storage
+            client, _cut_target(client, open_issues, number), open_issues, parsed, config
         )
     except _PartialWriteError as error:
         return _refuse_partial_write(error, CutReason.PARTIAL_WRITE, as_json=as_json)
