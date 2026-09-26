@@ -3844,8 +3844,9 @@ class _LazyForge:
         this tool builds -- `github.GitHubForge`, `state_board.StateRefBoard`
         (its `ItemWriter` injected by `_state_ref_forge`), and every test
         fake standing in for either -- already implements the full
-        `ForgeWriter` surface, checked at each call site by `capability()`,
-        never by `isinstance`.
+        `ForgeWriter` surface, an unsupported operation as a method raising
+        `forge.ForgeUnsupportedError`, checked at each call site by
+        `capability()`, never by `isinstance`.
         """
         return cast(forge.ForgeWriter, self())
 

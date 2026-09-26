@@ -577,9 +577,27 @@ class TestStateRefBoardMethods:
 
         assert adapter.item_reference(CHILD_A_NUMBER).state is forge.ItemState.CLOSED
 
-    def test_landing_is_unsupported(self, state_ref_board: StateRefBoard) -> None:
-        with pytest.raises(forge.ForgeUnsupportedError, match="not yet derived"):
-            state_ref_board.landing(CHILD_A_NUMBER)
+    @pytest.mark.parametrize(
+        ("unsupported_call", "sentence"),
+        [
+            pytest.param(
+                lambda adapter: adapter.landing(CHILD_A_NUMBER), "not yet derived", id="landing"
+            ),
+            pytest.param(
+                lambda adapter: adapter.create_issue(title="T", body="", kind=ItemKind.TASK),
+                "created by aco item new",
+                id="create_issue",
+            ),
+        ],
+    )
+    def test_unsupported_operations_refuse_by_name(
+        self,
+        state_ref_board: StateRefBoard,
+        unsupported_call: Callable[[StateRefBoard], object],
+        sentence: str,
+    ) -> None:
+        with pytest.raises(forge.ForgeUnsupportedError, match=sentence):
+            unsupported_call(state_ref_board)
 
     def test_parent_issue_is_none_for_an_item_without_one(
         self, state_ref_board: StateRefBoard

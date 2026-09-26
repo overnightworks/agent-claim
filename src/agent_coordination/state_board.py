@@ -92,6 +92,7 @@ NO_LANDINGS_YET = (
     "landings are not yet derived from the state ref; "
     "#230 slice 6 adds merge-commit-derived landings"
 )
+NO_BARE_ISSUE = "a state-ref item is created by aco item new, never as a bare forge issue"
 
 
 @dataclass(frozen=True)
@@ -428,6 +429,11 @@ class StateRefBoard:
         return self._write_new_item(
             parent_id=parent_id, title=title, body=body, kind=kind, origin=origin
         )
+
+    def create_issue(self, *, title: str, body: str, kind: ItemKind) -> int:
+        """Unsupported (`STATE_REF_CAPABILITIES`): `create_item` mints a
+        state-ref item's id and records its parent and origin in one write."""
+        raise forge.ForgeUnsupportedError(NO_BARE_ISSUE)
 
     def create_child(self, *, parent: int, title: str, body: str, kind: ItemKind) -> int:
         item_id = self.create_item(title=title, body=body, kind=kind, parent=parent)
