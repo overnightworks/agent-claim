@@ -15889,10 +15889,12 @@ def _item_new_github_client(
 ) -> FakeForge:
     """A `storage = "github"` checkout whose forge holds container `#79`
     and a plain open issue `#951` titled `Ship it now`, with `piped_body` on
-    stdin -- the arrangement every `item new` GitHub scenario shares."""
+    stdin -- the arrangement every `item new` GitHub scenario shares. An
+    issue it creates joins the open issues a later run reads."""
     look_alike = board_issue(951, "Ship it now", complete_contract("Ship it."))
-    container = _cut_container_issue(MINIMAL_BLOCK_TOML)
-    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container, look_alike))
+    client = _configured_board_client(monkeypatch, tmp_path)
+    client.board_issues = (_cut_container_issue(MINIMAL_BLOCK_TOML), look_alike)
+    monkeypatch.setattr(client, "list_open_board_issues", lambda: client.board_issues)
     monkeypatch.setattr(sys, "stdin", io.StringIO(piped_body))
     return client
 
@@ -16074,6 +16076,80 @@ def test_item_new_json_reports_a_created_issue_it_could_not_finish(
             "message": message,
         },
     )
+
+
+_EARLIER_ITEM_NEW = (
+    "ERROR: #900 already carries this title and body, an earlier item new's own issue; "
+)
+
+
+@pytest.mark.parametrize(
+    ("failure", "title", "flags", "retry_flags", "err"),
+    [
+        pytest.param(
+            "fail_create_child_relation",
+            "Write the docs",
+            ("--parent", "79"),
+            (),
+            _EARLIER_ITEM_NEW + "record it under #79 on the forge by hand\n",
+            id="relation_failed",
+        ),
+        pytest.param(
+            "fail_create_child_relation",
+            "Write the docs",
+            ("--parent", "79", "--not-a-twin"),
+            (),
+            _EARLIER_ITEM_NEW + "record it under #79 on the forge by hand\n",
+            id="relation_failed_not_a_twin",
+        ),
+        pytest.param(
+            "drop_created_issue_type",
+            "Write the docs",
+            ("--parent", "79"),
+            ("--not-a-twin",),
+            _EARLIER_ITEM_NEW + "set its task type and record it under #79 on the forge by hand\n",
+            id="type_dropped_under_a_parent",
+        ),
+        pytest.param(
+            None,
+            "!!!",
+            ("--kind", "feature"),
+            ("--not-a-twin",),
+            _EARLIER_ITEM_NEW + "nothing is left to do\n",
+            id="wordless_title_already_created",
+        ),
+    ],
+)
+def test_item_new_retry_on_github_never_creates_a_second_issue(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    failure: str | None,
+    title: str,
+    flags: tuple[str, ...],
+    retry_flags: tuple[str, ...],
+    err: str,
+) -> None:
+    """Issue #444: an open issue carrying exactly the title and the final
+    body -- read back with GitHub's own CRLF -- is an earlier run's own
+    creation, so the same command again refuses naming it and what is left,
+    whatever `--not-a-twin` says and however few words the title has."""
+    client = _item_new_github_client(monkeypatch, tmp_path, _ITEM_NEW_BODY)
+    if failure is not None:
+        setattr(client, failure, True)
+    command = ["item", "new", "--title", title, *flags]
+    issue_claim.main(command)
+    if failure is not None:
+        setattr(client, failure, False)
+    client.board_issues = tuple(
+        replace(issue, body=issue.body.replace("\n", "\r\n")) for issue in client.board_issues
+    )
+    monkeypatch.setattr(sys, "stdin", io.StringIO(_ITEM_NEW_BODY))
+    capsys.readouterr()
+
+    status = issue_claim.main([*command, *retry_flags])
+
+    assert (status, capsys.readouterr().err, len(client.created_issues)) == (2, err, 1)
 
 
 def test_item_new_json_reports_ok_reason_created(

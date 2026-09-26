@@ -3202,7 +3202,8 @@ def _item_new_on_github(parsed: argparse.Namespace) -> int:
     """`item new` under `storage = "github"` (issue #444): the body piped on
     stdin passes the same shape check `aco check <n>` applies before
     anything else is read or written, so an invalid body creates nothing;
-    `--parent` must name an open container; then the twin search, then one
+    `--parent` must name an open container; then the retry identity
+    (`_refuse_earlier_creation`) and the twin search, then one
     issue of the organization's type for `--kind`, recorded under
     `--parent` when given (`create_child`, else `create_issue`). `--origin`
     binds a state-ref item only: a GitHub issue binds to no foreign one."""
@@ -3217,6 +3218,7 @@ def _item_new_on_github(parsed: argparse.Namespace) -> int:
     open_issues = client.list_open_board_issues()
     if parsed.parent is not None:
         _open_container(open_issues, parsed.parent)
+    _refuse_earlier_creation(client, open_issues, parsed, new_body)
     if not parsed.not_a_twin:
         _refuse_possible_twin(client, parsed.title, open_issues, parent=parsed.parent)
     kind = body.ItemKind(parsed.kind)
@@ -3241,6 +3243,43 @@ def _item_new_on_github(parsed: argparse.Namespace) -> int:
         board.item_label(number, body.Storage.GITHUB), number, as_json=parsed.json
     )
     return 0
+
+
+def _refuse_earlier_creation(
+    client: forge.ForgeReader,
+    open_issues: Iterable[board.Issue],
+    parsed: argparse.Namespace,
+    new_body: str,
+) -> None:
+    """`item new`'s own retry identity on GitHub (issue #444): an open issue
+    carrying exactly `--title` and the final `new_body` -- line endings aside,
+    since a GitHub GET returns CRLF -- is an earlier run's own creation whose
+    relation write, type, or response failed, never a look-alike. It refuses
+    by number with what is left, whatever `--not-a-twin` says, so a retry
+    never creates a second issue."""
+    earlier = next(
+        (
+            issue
+            for issue in open_issues
+            if issue.title == parsed.title and issue.body.splitlines() == new_body.splitlines()
+        ),
+        None,
+    )
+    if earlier is None:
+        return
+    kind = body.ItemKind(parsed.kind)
+    parent = parsed.parent
+    left = []
+    if earlier.kind is not kind:
+        left.append(f"set its {kind} type")
+    recorded = None if parent is None else client.parent_issue(earlier.number)
+    if parent is not None and (recorded is None or recorded.reference.number != parent):
+        left.append(f"record it under #{parent}")
+    remaining = f"{' and '.join(left)} on the forge by hand" if left else "nothing is left to do"
+    raise protocol.ClaimUnavailableError(
+        f"#{earlier.number} already carries this title and body, an earlier item new's own "
+        f"issue; {remaining}"
+    )
 
 
 def _item_new_on_state_ref(parsed: argparse.Namespace, canonical_remote: str) -> int:
