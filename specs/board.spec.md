@@ -126,7 +126,7 @@ does, before either reads a single issue -- cited there, not restated.
 - [ ] [BOARD-41] A symlinked or others-writable level of `<token-path>` refuses `board token directory <path> must be private and owned by this user (found mode <mode>)`, exit `2` (see E-BOARD-12).
 - [ ] [BOARD-46] A repeated page request answers from the page the first one built; a forge change shows only after a ruling click or the reload link (see E-BOARD-18).
 - [ ] [BOARD-47] Every served page shows its age and a reload link, `Stand` `vor <h>h <m>m` `neu laden`; the `--html` page carries neither (see E-BOARD-18).
-- [ ] [BOARD-48] Every ruling click, written or refused, rebuilds the page, so the page it redirects to shows the line as the forge now holds it.
+- [ ] [BOARD-48] Every ruling click, written or refused, rebuilds the page, so the page it redirects to shows the line as the forge now holds it, unless BOARD-51 keeps the last page.
 - [ ] [BOARD-49] A client that hangs up mid-response leaves stderr empty; any other request error still prints its traceback.
 - [ ] [BOARD-50] The reload link's request rebuilds, then redirects (`303`) to the plain URL, no `reload` field, so a later plain refresh serves the held page without rebuilding (see E-BOARD-18).
 - [ ] [BOARD-51] A rebuild PIN-29 refuses (`specs/storage-pin.spec.md`) keeps the page last built and shows PIN-29's sentence beside its age.
