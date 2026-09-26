@@ -54,6 +54,8 @@ runner's own git object ids.
 | a delivered `[record]`, present or absent | — | — | ITEM-12..ITEM-14 | — |
 | `item show`/`edit`/`close --json` | — | ITEM-09 | ITEM-15 | ITEM-16 |
 | a malformed piped body | ITEM-27 | — | ITEM-25 | — |
+| another item malformed | ITEM-37 | ITEM-37 | — | — |
+| the item itself malformed | — | ITEM-38 | ITEM-39 | ITEM-38 |
 | a refusal reached with `--json` | ITEM-17, ITEM-18 | ITEM-17, ITEM-18 | ITEM-17, ITEM-18 | ITEM-17, ITEM-18 |
 
 ## `item new`
@@ -116,6 +118,12 @@ runner's own git object ids.
 ## `item close`
 
 - [ ] [ITEM-16] `aco item close ITEM --json` prints `reason: "closed"`, then `item`, `number`, `closed_at`, `parent_closable` (issue #348's parent hint); overlaps ITEM-09's `item`/`number` (see E-ITEM-04).
+
+## One malformed item (issue #447)
+
+- [ ] [ITEM-37] Under `storage = "state-ref"`, an item whose file PIN-14/PIN-15 refuse never stops `item new`, nor `item show` of any other item.
+- [ ] [ITEM-38] Reading that item itself (`item show`, `item close`, `item edit --size`/`--whole`, `cut`) refuses PIN-14/PIN-15's sentence, then the repair clause of E-ITEM-10.
+- [ ] [ITEM-39] `aco item edit <id> < BODY` on that item takes BODY's complete `[record]` as the item's own, `updated_at` moved to now; BODY without a `[record]` refuses as ITEM-38 (see E-ITEM-10).
 
 ## `--json` and the shared envelope
 
@@ -301,4 +309,20 @@ $ aco item new --title "" --json
 {"ok": false, "reason": "invalid_usage", "message": "--title must be a non-empty string"}
 2> ERROR: --title must be a non-empty string
 exit 2
+```
+
+### E-ITEM-10 — one malformed item, refused alone and repaired
+
+Setup: bare-remote, bootstrapped, `storage = "state-ref"` tracked, `items/aco-3e26d9.md` hand-written with `title = ""` in its `[record]`, `<item-id>` another open item, `repaired.md` a body whose block carries a complete `[record]`
+
+```console
+$ aco item show aco-3e26d9
+2> ERROR: item aco-3e26d9 has a malformed agent-claim block; repair it with aco item edit aco-3e26d9 and a body whose agent-claim block carries a valid [record]
+exit 2
+$ aco item new --title "Fresh item"
+<item-id>
+exit 0
+$ aco item edit aco-3e26d9 < repaired.md
+EDITED aco-3e26d9
+exit 0
 ```

@@ -294,6 +294,31 @@ def _item_files_with_one_scoped_slice(
 # `aco rulings` still has something to print for this item -- a fully-ruled
 # item drops out of `rulings` entirely (it only lists open lines), which
 # would otherwise hide the very ruling this proof exists to show.
+MALFORMED_ID = "aco-3e26d9"
+MALFORMED_NUMBER = items.item_number(MALFORMED_ID)
+
+
+def _malformed_item_refusal(problem: str = "has a malformed agent-claim block") -> str:
+    return (
+        f"item {MALFORMED_ID} {problem}; repair it with aco item edit {MALFORMED_ID} "
+        "and a body whose agent-claim block carries a valid [record]"
+    )
+
+
+def _item_files_with_a_malformed_item(content: bytes) -> dict[str, bytes]:
+    """`_item_files()` plus `MALFORMED_ID`'s own file planted by hand with
+    `content` -- the store issue #447's reproduction left behind."""
+    return {**_item_files(), f"{MALFORMED_ID}.md": content}
+
+
+def _blank_title_item() -> bytes:
+    """The item `item new --title ""` wrote before issue #447: a complete
+    `[record]` whose only defect is its empty title."""
+    return _state_ref_body(
+        _CHILD_A_PROJECTION, _record(title="", state="open", kind="task")
+    ).encode()
+
+
 RULABLE_ID = "aco-000004"
 RULABLE_NUMBER = items.item_number(RULABLE_ID)
 _RULABLE_PROJECTION = _Projection(
@@ -506,29 +531,55 @@ class TestEmptyStart:
         assert adapter.list_open_board_issues() == ()
 
 
-class TestMalformedItem:
-    def test_a_record_missing_its_required_fields_fails_loud(self) -> None:
-        body = (
+_MALFORMED_CONTENTS = pytest.mark.parametrize(
+    ("content", "problem"),
+    [
+        pytest.param(
             b'```agent-claim\nversion = 1\nnow = "N"\nnext = "X"\ndone_when = "D"\n\n'
-            b'[record]\ntitle = "Bare"\n```\n'
-        )
+            b'[record]\ntitle = "Bare"\n```\n',
+            "has a malformed agent-claim block",
+            id="record-missing-required-fields",
+        ),
+        pytest.param(
+            CONTAINER_BODY.encode(),
+            "has a malformed agent-claim block",
+            id="no-record-table",
+        ),
+        pytest.param(
+            _blank_title_item(), "has a malformed agent-claim block", id="blank-record-title"
+        ),
+        pytest.param(b"\xff\xfe not utf-8", "is not valid UTF-8", id="not-utf8"),
+    ],
+)
 
-        with pytest.raises(MalformedStateTreeError, match="malformed agent-claim block"):
-            _state_ref_board({"aco-000001.md": body})
 
-    def test_a_body_with_no_record_table_fails_loud(self) -> None:
-        body = CONTAINER_BODY.encode()
+class TestMalformedItem:
+    """Issue #447: one malformed item file is corrupt state only for the
+    reads that need exactly that item, never for the rest of the store."""
 
-        with pytest.raises(MalformedStateTreeError, match="malformed agent-claim block"):
-            _state_ref_board({"aco-000001.md": body})
+    @_MALFORMED_CONTENTS
+    def test_every_other_item_still_reads(self, content: bytes, problem: str) -> None:
+        del problem
+        adapter = _state_ref_board(_item_files_with_a_malformed_item(content))
+
+        numbers = {issue.number for issue in adapter.list_open_board_issues()}
+
+        assert numbers == {CONTAINER_NUMBER, CHILD_A_NUMBER, CHILD_B_NUMBER}
+
+    @_MALFORMED_CONTENTS
+    def test_reading_that_item_refuses_naming_its_repair(
+        self, content: bytes, problem: str
+    ) -> None:
+        adapter = _state_ref_board(_item_files_with_a_malformed_item(content))
+
+        with pytest.raises(MalformedStateTreeError) as refusal:
+            adapter.item_reference(MALFORMED_NUMBER)
+
+        assert str(refusal.value) == _malformed_item_refusal(problem)
 
     def test_a_malformed_filename_fails_loud(self) -> None:
         with pytest.raises(MalformedStateTreeError, match="not a valid item file name"):
             _state_ref_board({"not-an-item.md": b"anything"})
-
-    def test_non_utf8_content_fails_loud(self) -> None:
-        with pytest.raises(MalformedStateTreeError, match="is not valid UTF-8"):
-            _state_ref_board({"aco-000001.md": b"\xff\xfe not utf-8"})
 
 
 class TestStateRefBoardMethods:
@@ -2055,7 +2106,9 @@ class TestCliStateRefForge:
 
         assert status == 2
         assert capsys.readouterr().err == (
-            f"ERROR: item {CONTAINER_ID} has a malformed agent-claim block\n"
+            f"ERROR: item {CONTAINER_ID} has a malformed agent-claim block; "
+            f"repair it with aco item edit {CONTAINER_ID} "
+            "and a body whose agent-claim block carries a valid [record]\n"
         )
         after = store.fetch_state(worktree=worktree, remote=remote_url)
         assert after.tip == before.tip
@@ -2561,6 +2614,89 @@ class TestCliStateRefForge:
             f"{closed_id} · #{closed_number} · closed · parent {CONTAINER_ID} · origin none"
         )
         assert out == f"{header_line}\n{closed_body}"
+
+    @pytest.mark.parametrize(
+        "arguments",
+        [
+            pytest.param(["item", "new", "--title", "Fresh Item"], id="item-new"),
+            pytest.param(["item", "show", CHILD_A_ID], id="item-show-of-another-item"),
+        ],
+    )
+    def test_a_malformed_item_leaves_every_other_item_working(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+        arguments: list[str],
+    ) -> None:
+        """Issue #447 proof 1: an item `item new --title ""` once wrote,
+        planted by hand, no longer stops `item new` or `item show` of any
+        other item."""
+        item_files = _item_files_with_a_malformed_item(_blank_title_item())
+        self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, item_files)
+
+        assert issue_claim.main(arguments) == 0
+
+    @pytest.mark.parametrize(
+        ("arguments", "piped_body"),
+        [
+            pytest.param(["item", "show", MALFORMED_ID], None, id="item-show"),
+            pytest.param(["item", "close", MALFORMED_ID], None, id="item-close"),
+            pytest.param(["item", "edit", MALFORMED_ID, "--size", "S"], None, id="edit-size"),
+            pytest.param(
+                ["item", "edit", MALFORMED_ID], CONTAINER_BODY, id="edit-without-a-record"
+            ),
+        ],
+    )
+    def test_a_malformed_item_refuses_naming_its_repair_and_writes_nothing(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+        arguments: list[str],
+        piped_body: str | None,
+    ) -> None:
+        """Issue #447 proof 1: every command that must read exactly the
+        malformed item refuses by its id, naming `item edit` with a valid
+        `[record]` as the repair, and nothing reaches the remote."""
+        item_files = _item_files_with_a_malformed_item(_blank_title_item())
+        self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, item_files)
+        monkeypatch.setattr(sys, "stdin", io.StringIO(piped_body or ""))
+        remote_url = f"file://{bare_remote}"
+        before = store.fetch_state(worktree=worktree, remote=remote_url)
+
+        status = issue_claim.main(arguments)
+
+        assert (status, capsys.readouterr().err) == (2, f"ERROR: {_malformed_item_refusal()}\n")
+        assert store.fetch_state(worktree=worktree, remote=remote_url).tip == before.tip
+
+    def test_item_edit_with_a_valid_record_repairs_a_malformed_item(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+    ) -> None:
+        """Issue #447: the repair the refusal names -- `item edit` with a
+        body whose block carries a complete `[record]` -- makes the item
+        readable again for a fresh process."""
+        item_files = _item_files_with_a_malformed_item(_blank_title_item())
+        self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, item_files)
+        repaired = _state_ref_body(
+            _CHILD_A_PROJECTION, _record(title="Repaired", state="open", kind="task")
+        )
+        monkeypatch.setattr(sys, "stdin", io.StringIO(repaired))
+
+        edited = issue_claim.main(["item", "edit", MALFORMED_ID])
+
+        assert (edited, capsys.readouterr().out) == (0, f"EDITED {MALFORMED_ID}\n")
+        assert issue_claim.main(["item", "show", MALFORMED_ID, "--json"]) == 0
+        shown = json.loads(capsys.readouterr().out)["body"]
+        assert _decoded_record(shown, MALFORMED_ID).title == "Repaired"
 
     def test_item_show_refuses_an_unknown_id(
         self,

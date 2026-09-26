@@ -59,8 +59,8 @@ including the surviving refusal, is `specs/landing-grammar.spec.md`'s own
 ## The state-ref item file, one layer above the block
 
 - [ ] [PIN-13] An `items/<id>.md` entry whose filename is not `aco-` plus six lowercase hex characters plus `.md` makes a state-ref read refuse `items/<name> is not a valid item file name`.
-- [ ] [PIN-14] An `items/<id>.md` entry whose bytes are not valid UTF-8 refuses `item <id> is not valid UTF-8`.
-- [ ] [PIN-15] An `items/<id>.md` entry whose text carries no valid `agent-claim` block with a `[record]` table refuses `item <id> has a malformed agent-claim block` (see E-PIN-07).
+- [ ] [PIN-14] A read of an `items/<id>.md` entry whose bytes are not valid UTF-8 refuses `item <id> is not valid UTF-8`, then ITEM-38's repair clause.
+- [ ] [PIN-15] A read of an `items/<id>.md` entry with no valid `agent-claim` block and `[record]` refuses `item <id> has a malformed agent-claim block`, then ITEM-38's repair clause (see E-PIN-07).
 - [ ] [PIN-16] An item whose own `record.parent` names an id no `items/` entry carries refuses `item <parent-id> is referenced as a parent but does not exist`.
 - [ ] [PIN-17] An item whose own `record.blocked_by` names an id no `items/` entry carries refuses `item <blocker-id> is listed as a blocker but does not exist`.
 
@@ -159,8 +159,8 @@ exit 2
 Setup: bare-remote, bootstrapped, `storage = "state-ref"` tracked, `items/aco-000001.md` hand-written with no `agent-claim` block
 
 ```console
-$ aco board
-2> ERROR: item aco-000001 has a malformed agent-claim block
+$ aco item show aco-000001
+2> ERROR: item aco-000001 has a malformed agent-claim block; repair it with aco item edit aco-000001 and a body whose agent-claim block carries a valid [record]
 exit 2
 ```
 

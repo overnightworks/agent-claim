@@ -103,6 +103,18 @@ class _DecodedItem:
 
 
 @dataclass(frozen=True)
+class _MalformedItem:
+    """An item file whose bytes decode to no valid `agent-claim` block with
+    a `[record]` table (issue #447): kept aside rather than refusing the
+    whole store, so only a command that must read exactly this item
+    refuses. `problem` completes the sentence `item <id> ...`; `oid` is the
+    CAS `expected` a repairing `update_item_body` writes over."""
+
+    problem: str
+    oid: ObjectId
+
+
+@dataclass(frozen=True)
 class LandingWrite:
     """One item's own close write, composed but not yet applied (issue
     #359): `item_id`/`expected`/`content` are exactly the CAS write
@@ -119,24 +131,34 @@ class LandingWrite:
     record: items.ItemRecord
 
 
-def _decoded_text(item_id: str, content: bytes) -> str:
-    try:
-        return content.decode("utf-8")
-    except UnicodeDecodeError as error:
-        raise MalformedStateTreeError(f"item {item_id} is not valid UTF-8") from error
-
-
-def _decode_item(item_id: str, content: bytes, oid: ObjectId) -> _DecodedItem:
-    """`content` turned into a `_DecodedItem`, or a loud refusal (ruling "a
-    broken tree is corrupt state"): every item file must parse as a VALID
-    `agent-claim` block carrying a `[record]` table, the same block grammar
-    `body.py` already reads, gated open to `record` only under
-    `Storage.STATE_REF`."""
-    text = _decoded_text(item_id, content)
+def _valid_record(text: str) -> Mapping[str, object] | None:
+    """`text`'s own `[record]` table when its `agent-claim` block is VALID
+    under `Storage.STATE_REF` -- the same block grammar `body.py` already
+    reads, gated open to `record` only there -- else `None`."""
     parsed = parse_body(text, storage=Storage.STATE_REF)
-    if parsed.read_state is not BodyReadState.VALID or parsed.record is None:
-        raise MalformedStateTreeError(f"item {item_id} has a malformed agent-claim block")
-    return _DecodedItem(record=items.parse_item_record(item_id, parsed.record), body=text, oid=oid)
+    return parsed.record if parsed.read_state is BodyReadState.VALID else None
+
+
+def _decode_item(item_id: str, content: bytes, oid: ObjectId) -> _DecodedItem | _MalformedItem:
+    """`content` turned into a `_DecodedItem`, or set aside as a
+    `_MalformedItem` (issue #447): every item file must be UTF-8 text whose
+    block parses VALID with a `[record]` table; one that does not is
+    corrupt state only for the commands that read exactly that item."""
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError:
+        return _MalformedItem(problem="is not valid UTF-8", oid=oid)
+    record = _valid_record(text)
+    if record is None:
+        return _MalformedItem(problem="has a malformed agent-claim block", oid=oid)
+    return _DecodedItem(record=items.parse_item_record(item_id, record), body=text, oid=oid)
+
+
+def _malformed_item_refusal(item_id: str, malformed: _MalformedItem) -> MalformedStateTreeError:
+    return MalformedStateTreeError(
+        f"item {item_id} {malformed.problem}; repair it with aco item edit {item_id} "
+        "and a body whose agent-claim block carries a valid [record]"
+    )
 
 
 def _with_record(body: str, record: items.ItemRecord) -> str:
@@ -202,14 +224,17 @@ class StateRefBoard:
         self.repository = repository
         self._default_branch = default_branch
         self._writer = writer
-        self._items: dict[str, _DecodedItem] = {
-            (item_id := items.item_id_from_filename(filename)): _decode_item(
-                item_id, content, item_oids[item_id]
-            )
-            for filename, content in item_files.items()
-        }
+        self._items: dict[str, _DecodedItem] = {}
+        self._malformed: dict[str, _MalformedItem] = {}
+        for filename, content in item_files.items():
+            item_id = items.item_id_from_filename(filename)
+            decoded = _decode_item(item_id, content, item_oids[item_id])
+            if isinstance(decoded, _MalformedItem):
+                self._malformed[item_id] = decoded
+            else:
+                self._items[item_id] = decoded
         self._by_number = {
-            decoded.record.number: item_id for item_id, decoded in self._items.items()
+            items.item_number(item_id): item_id for item_id in (*self._items, *self._malformed)
         }
 
     @property
@@ -222,9 +247,27 @@ class StateRefBoard:
     def capability(self, operation: forge.ForgeOperation) -> forge.Capability:
         return STATE_REF_CAPABILITIES[operation]
 
+    def holds(self, number: int) -> bool:
+        """Whether `items/` carries `number` at all, malformed or not: the
+        one existence check `aco item edit` needs, since it is also the
+        repair path for a malformed item every other read refuses."""
+        return number in self._by_number
+
     def _decoded(self, number: int) -> _DecodedItem | None:
         item_id = self._by_number.get(number)
-        return self._items.get(item_id) if item_id is not None else None
+        return None if item_id is None else self._related(item_id, missing="does not exist")
+
+    def _related(self, item_id: str, *, missing: str) -> _DecodedItem:
+        """`item_id`'s decoded item, or a refusal by name: a malformed one
+        names its repair (issue #447), an unknown one completes `item <id>`
+        with `missing`."""
+        malformed = self._malformed.get(item_id)
+        if malformed is not None:
+            raise _malformed_item_refusal(item_id, malformed)
+        decoded = self._items.get(item_id)
+        if decoded is None:
+            raise MalformedStateTreeError(f"item {item_id} {missing}")
+        return decoded
 
     def _issue(self, item_id: str) -> board.Issue:
         decoded = self._items[item_id]
@@ -279,11 +322,9 @@ class StateRefBoard:
         decoded = self._decoded(number)
         if decoded is None or decoded.record.parent is None:
             return None
-        parent = self._items.get(decoded.record.parent)
-        if parent is None:
-            raise MalformedStateTreeError(
-                f"item {decoded.record.parent} is referenced as a parent but does not exist"
-            )
+        parent = self._related(
+            decoded.record.parent, missing="is referenced as a parent but does not exist"
+        )
         return board.ParentIssue(
             board.IssueReference(self.repository.path, parent.record.number),
             parent.body,
@@ -316,11 +357,7 @@ class StateRefBoard:
             return ()
         dependencies: list[board.IssueDependency] = []
         for blocker_id in decoded.record.blocked_by:
-            blocker = self._items.get(blocker_id)
-            if blocker is None:
-                raise MalformedStateTreeError(
-                    f"item {blocker_id} is listed as a blocker but does not exist"
-                )
+            blocker = self._related(blocker_id, missing="is listed as a blocker but does not exist")
             closed_at = None
             if blocker.record.closed_at is not None:
                 closed_at = datetime.fromisoformat(blocker.record.closed_at).astimezone(UTC)
@@ -385,7 +422,7 @@ class StateRefBoard:
         by `create_item` (`aco item new`, an optional parent and origin) and
         `create_child` (`cut`, always one, never an origin -- a cut child is
         always this repository's own item)."""
-        new_id = items.mint_item_id(self._items.keys())
+        new_id = items.mint_item_id(self._by_number.values())
         now = items.format_record_timestamp(datetime.now(UTC))
         record = items.ItemRecord(
             number=items.item_number(new_id),
@@ -448,21 +485,31 @@ class StateRefBoard:
         `updated_at` always moves to now. The CAS write's `expected` is
         `current.oid`, this instance's own already-read snapshot -- never a
         re-read -- so a second writer holding the same stale oid refuses
-        with issue #279's own sentence rather than merging or overwriting."""
+        with issue #279's own sentence rather than merging or overwriting.
+        A malformed item (issue #447) has no stored record to merge into:
+        `body`'s own complete `[record]` repairs it, else it refuses by
+        name."""
         item_id = self._by_number[number]
-        current = self._items[item_id]
-        title, labels, blocked_by = _delivered_content_fields(body, current.record)
-        updated_record = replace(
-            current.record,
-            title=title,
-            labels=labels,
-            blocked_by=blocked_by,
-            updated_at=items.format_record_timestamp(datetime.now(UTC)),
-        )
+        now = items.format_record_timestamp(datetime.now(UTC))
+        malformed = self._malformed.get(item_id)
+        if malformed is None:
+            current = self._items[item_id]
+            title, labels, blocked_by = _delivered_content_fields(body, current.record)
+            updated_record = replace(
+                current.record, title=title, labels=labels, blocked_by=blocked_by, updated_at=now
+            )
+            expected = current.oid
+        else:
+            delivered = _valid_record(body)
+            if delivered is None:
+                raise _malformed_item_refusal(item_id, malformed)
+            updated_record = replace(items.parse_item_record(item_id, delivered), updated_at=now)
+            expected = malformed.oid
         new_body = _with_record(body, updated_record)
         new_oid = self._writer.write_item(
-            item_id, expected=current.oid, content=new_body.encode("utf-8")
+            item_id, expected=expected, content=new_body.encode("utf-8")
         )
+        self._malformed.pop(item_id, None)
         self._items[item_id] = _DecodedItem(record=updated_record, body=new_body, oid=new_oid)
 
     def _closing_write(self, number: int) -> LandingWrite:

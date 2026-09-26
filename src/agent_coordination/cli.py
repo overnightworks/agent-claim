@@ -3351,7 +3351,7 @@ def _cmd_item_edit(parsed: argparse.Namespace) -> int:
             return _refuse_item_body_invalid(defects, as_json=as_json)
         client = _state_ref_forge(parsed.repo, config.canonical_remote)
         number = parsed.item
-        if client.item_reference(number).state is forge.ItemState.MISSING:
+        if not client.holds(number):
             raise protocol.ClaimUnavailableError(_missing_item_refusal(number, client))
         client.update_item_body(number, new_body)
         _print_item_edit_result(
@@ -5955,9 +5955,14 @@ def _open_container(open_issues: Iterable[board.Issue], number: int) -> board.Is
 
 
 def _cut_target(
-    client: forge.ForgeWriter, open_issues: Iterable[board.Issue], number: int
+    client: forge.ForgeWriter, open_issues: Sequence[board.Issue], number: int
 ) -> board.Issue:
     """The open container `cut` targets, or why it refuses before any write."""
+    if all(issue.number != number for issue in open_issues):
+        # A state-ref item with a malformed block is absent from
+        # `open_issues`; reading it refuses by its id and repair (issue
+        # #447) instead of calling it no open container.
+        client.item_reference(number)
     target = _open_container(open_issues, number)
     parent = client.parent_issue(number)
     if parent is not None:
