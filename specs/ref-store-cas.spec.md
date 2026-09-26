@@ -115,7 +115,7 @@ version field from the work-item body block's own `version = 1`
 (CLAIM-06..CLAIM-09, CLAIM-59..CLAIM-66); this section covers only the
 tree's structural shape before that content is ever parsed.
 
-- [ ] [CAS-27] A fetched tree carrying a top-level entry outside `schema.toml`, `claims`, `ids`, `resources`, `items` refuses `state tree at <tip> has unknown entries: ['extra.txt']`.
+- [ ] [CAS-27] A fetched tree of the supported schema carrying a top-level entry outside `schema.toml`, `claims`, `ids`, `resources`, `items` refuses `state tree at <tip> has unknown entries: ['extra.txt']`.
 - [ ] [CAS-28] A `claims`/`ids`/`resources`/`items` top-level entry that is not a directory refuses `<name> at <tip> is not a directory`.
 - [ ] [CAS-29] A `claims/` entry that is not a `.toml` blob refuses `claims/<name> at <tip> is not a claim file`.
 - [ ] [CAS-30] An `ids/` entry that is not a bare, claim-id-shaped blob refuses `ids/<name> at <tip> is not a claim id`.
@@ -138,11 +138,12 @@ tree's structural shape before that content is ever parsed.
 
 `aco reset` (issue #298, operator-ruled 15.09.2026/16.09.2026) is the one
 recovery path over a broken or rewritten `refs/aco/state`: a mandatory
-export, no silent data loss, and a live claim always refuses it outright,
-`--confirm` or not.
+export, no silent data loss, and a live claim in a state this aco can read
+always refuses it outright, `--confirm` or not; a state whose schema it
+cannot read needs `--force-unreadable` besides (`specs/reset.spec.md`).
 
 - [ ] [CAS-39] `aco reset` without `--confirm` prints five `would: ` lines -- export, delete-remote, delete-local, clear-stamps, bootstrap -- exit `0`, and touches nothing.
-- [ ] [CAS-40] `aco reset`, confirmed or not, against a repository with any live claim refuses before anything else runs, printing the same claim lines `status` prints, exit `2`.
+- [ ] [CAS-40] `aco reset`, confirmed or not, against a readable state with any live claim refuses before anything else runs, printing the same claim lines `status` prints, exit `2`.
 - [ ] [CAS-41] `aco reset --confirm`, when the ref exists on the remote, exports its tip to a `git bundle`-verifiable `aco-state-<repo>-<date>-<12-hex>.bundle` under `--export-dir` before any deletion.
 - [ ] [CAS-42] `aco reset --confirm` against an export path that already carries that bundle's name refuses `<path> already exists; refusing to overwrite an export`, before anything is deleted.
 - [ ] [CAS-43] `aco reset --confirm` deletes `refs/aco/state` on the remote with `--force-with-lease` matched to the tip it read; a rejected or stale-leased push refuses and leaves the local ref untouched.

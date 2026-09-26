@@ -7,7 +7,8 @@ along with the mandatory export and its bundle naming, the live-claim
 refusal, `--no-export`, and the bundle's own restore proof; this file owns
 the command's own argument shape, forge-freedom, and the exact per-step line
 for every state CAS-39..46 do not already spell out: an absent ref, a
-failed export, and every shape a rejected remote delete can take. A refusal
+failed export, every shape a rejected remote delete can take, and a state
+whose schema this aco cannot read (issue #341). A refusal
 reaching this command's own sink prints `ERROR: <sentence>` on stderr, exit
 `2`, the shared sink `specs/ref-store-cas.spec.md`'s own preamble already
 documents. `<repo>`/`<sha>`/`<tip>`/`<remote>` are the runner's own values;
@@ -30,6 +31,9 @@ documents. `<repo>`/`<sha>`/`<tip>`/`<remote>` are the runner's own values;
 | a `--force-with-lease` delete whose remote is unreachable | — | RESET-07 |
 | a rejected push whose commit actually landed | — | RESET-08 |
 | a local ref a foreign tool left behind | — | RESET-09 |
+| `schema.toml` names a version this aco cannot read | RESET-14 | RESET-15 |
+| that same state, with `--force-unreadable` | RESET-14 | RESET-16 |
+| a readable state, with `--force-unreadable` | RESET-17 | RESET-17 |
 | that local ref's own deletion fails | — | RESET-13 |
 | an argument this command does not define | RESET-10 | RESET-10 |
 | `--repo`, or a non-GitHub canonical remote | RESET-11 | RESET-11 |
@@ -51,15 +55,22 @@ documents. `<repo>`/`<sha>`/`<tip>`/`<remote>` are the runner's own values;
 - [ ] [RESET-09] `aco reset --confirm` against a local `refs/aco/state` a foreign tool left behind prints `deleted local refs/aco/state` as its own third line.
 - [ ] [RESET-13] That local delete itself failing (a stale `.lock` file, or any other local git failure) refuses `cannot delete local refs/aco/state: <detail>`, after the remote step already succeeded.
 
+## A schema this aco cannot read
+
+- [ ] [RESET-14] `aco reset` over a state whose schema this aco cannot read prints `schema <n> not readable by this aco; live claims unknown (--confirm needs --force-unreadable)`, then CAS-39's lines (see E-RESET-06).
+- [ ] [RESET-15] `aco reset --confirm` over that state refuses with RESET-14's own sentence, exit `2`, before any export or deletion (see E-RESET-06).
+- [ ] [RESET-16] `aco reset --confirm --force-unreadable` over that state exports its tip, deletes it with the lease, clears stamps, and bootstraps, exactly as CAS-41..44 (see E-RESET-06).
+- [ ] [RESET-17] `--force-unreadable` over a readable state changes nothing: a live claim still refuses as CAS-40 says, and a claim-free state resets as `--confirm` alone.
+
 ## The command's own argument shape
 
-- [ ] [RESET-10] `aco reset` followed by any argument outside `--confirm`/`--no-export`/`--export-dir` is refused by the parser, exactly as `aco bootstrap` refuses an unknown flag (BOOT-02), before any read.
+- [ ] [RESET-10] `aco reset` followed by any argument outside `--confirm`/`--no-export`/`--export-dir`/`--force-unreadable` is refused by the parser before any read, as `aco bootstrap` does (BOOT-02).
 - [ ] [RESET-11] `aco --repo OWNER/REPO reset` behaves exactly as with no `--repo`, forge-free like `aco bootstrap` (`specs/bootstrap.spec.md` BOOT-03): a non-GitHub canonical remote is no error either.
 - [ ] [RESET-12] `--export-dir` omitted writes the bundle under the repository's own parent directory, the default its own `--export-dir DIR` help text names.
 
 ## Never
 
-- `aco reset` never accepts `--json`: its own parser defines only `--confirm`, `--no-export`, and `--export-dir` (README, "Refusals and `--json`").
+- `aco reset` never accepts `--json`: its own parser defines only `--confirm`, `--no-export`, `--export-dir`, and `--force-unreadable` (README, "Refusals and `--json`").
 - A rejected `--force-with-lease` delete never leaves the local ref deleted while the remote one survives: RESET-05..07 all raise before the local-delete step runs.
 - A remote-delete repair sentence never names a manual `--force-with-lease` command: RESET-05 and RESET-06 both name only re-running `aco reset --confirm` itself.
 - An export failure never leaves a bundle file at the destination path: the temporary file it was staged to is always removed on the way out.
@@ -134,4 +145,29 @@ $ aco reset --confirm --export-dir <tmp>
 exported refs/aco/state at <tip> to <tmp>/aco-state-<repo>-<date>-<sha>.bundle (restore with: git fetch <tmp>/aco-state-<repo>-<date>-<sha>.bundle refs/worktree/aco/reset-export:refs/aco/state)
 2> ERROR: cannot delete refs/aco/state on origin (lease <tip>): <detail>; refs/aco/state is still present at <tip>, unchanged from the lease -- re-run `aco reset --confirm` once the cause is fixed
 exit 2
+```
+
+### E-RESET-06 -- a schema this aco cannot read needs `--force-unreadable`
+
+Setup: bare-remote, `refs/aco/state` on `origin` a commit whose tree holds only `schema.toml` with `version = 1`
+
+```console
+$ aco reset --export-dir <tmp>
+schema 1 not readable by this aco; live claims unknown (--confirm needs --force-unreadable)
+would: export refs/aco/state at <tip> to <tmp>/aco-state-<repo>-<date>-<sha>.bundle (restore with: git fetch <tmp>/aco-state-<repo>-<date>-<sha>.bundle refs/worktree/aco/reset-export:refs/aco/state)
+would: delete refs/aco/state on origin (lease <tip>)
+would: no local refs/aco/state to delete
+would: clear lineage stamps and fetch anchors in 1 worktree
+would: bootstrap a fresh empty state
+exit 0
+$ aco reset --confirm --export-dir <tmp>
+2> ERROR: schema 1 not readable by this aco; live claims unknown (--confirm needs --force-unreadable)
+exit 2
+$ aco reset --confirm --force-unreadable --export-dir <tmp>
+exported refs/aco/state at <tip> to <tmp>/aco-state-<repo>-<date>-<sha>.bundle (restore with: git fetch <tmp>/aco-state-<repo>-<date>-<sha>.bundle refs/worktree/aco/reset-export:refs/aco/state)
+deleted refs/aco/state on origin (lease <tip>)
+no local refs/aco/state to delete
+cleared lineage stamps and fetch anchors in 1 worktree
+bootstrapped a fresh empty state at <sha>
+exit 0
 ```
