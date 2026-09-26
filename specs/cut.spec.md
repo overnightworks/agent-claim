@@ -45,7 +45,7 @@ with `--json` also `specs/output.spec.md`'s envelope, `reason`
 | GitHub's own relation write fails | CUT-17 | — | — | CUT-28 |
 | the row-removal write fails, either storage | CUT-18 | — | — | CUT-28 |
 | GitHub creates the child without its issue type | CUT-32 | — | — | CUT-28 |
-| an identical re-run after any of those failures | CUT-19 | — | — | CUT-19 |
+| an identical re-run after CUT-17, CUT-18, or a CUT-32 whose type is now set | CUT-19 | — | — | CUT-19 |
 | a re-run while the CUT-32 child is still untyped | CUT-30 | — | — | CUT-30 |
 | a linked row's own `scope` is empty | — | — | CUT-20, CUT-22 | — |
 | a linked row already names a `scope` | — | — | CUT-21 | — |
