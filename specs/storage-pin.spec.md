@@ -16,7 +16,7 @@ reaches `ERROR: <sentence>` on stderr, exit `2`, unless noted otherwise.
 | pin state \ trigger | any store command | `item new` | `item edit` / `item close` | `release --merged` | an id argument |
 |---|---|---|---|---|---|
 | `.agent-claim/board.toml` untracked, absent, or ignored | PIN-01 | PIN-01 | PIN-01 | PIN-01 | — |
-| `storage` unset (default `github`) | PIN-02 | PIN-09 | PIN-10, PIN-11 | — | PIN-08 |
+| `storage` unset (default `github`) | PIN-02 | ITEM-26..ITEM-32 | PIN-10, PIN-11 | — | PIN-08 |
 | `storage` names an unrecognized value | PIN-03 | PIN-03 | PIN-03 | PIN-03 | — |
 | `storage = "state-ref"` | PIN-04\*, PIN-05\* | PIN-18..21 | PIN-22..28 | —\*\* | PIN-08 |
 | a state-ref item file itself is malformed | PIN-13..17 | — | — | — | — |
@@ -51,7 +51,7 @@ including the surviving refusal, is `specs/landing-grammar.spec.md`'s own
 
 ## Commands refused by the wrong pin
 
-- [ ] [PIN-09] `aco item new` under `storage = "github"` refuses `items live on the forge; open the issue there` (see E-PIN-05).
+- PIN-09 (retired 26.09.2026, issue #444): `aco item new` under `storage = "github"` no longer refuses; it creates the GitHub issue itself (`specs/item.spec.md` ITEM-26..ITEM-32).
 - [ ] [PIN-10] `aco item edit ITEM` under `storage = "github"` refuses `forge issues are edited on the forge; aco never governs them`.
 - [ ] [PIN-11] `aco item close ITEM` under `storage = "github"` refuses `the forge closes its issues; aco never governs them`.
 - PIN-12 (retired 19.09.2026, issue #359): the outright `release --merged` refusal it named under `storage = "state-ref"` no longer exists; `--merged <sha|empty>` verifies and closes the named issue itself (`specs/landing-grammar.spec.md` LAND-47/LAND-52/LAND-59), and only an issue-less lane still refuses (LAND-56).
@@ -151,16 +151,6 @@ Setup: bare-remote, bootstrapped, `storage = "state-ref"` tracked
 ```console
 $ aco item show not-an-id
 2> ERROR: 'not-an-id' is not an item reference; use aco-xxxxxx, #n, or the bare number n
-exit 2
-```
-
-### E-PIN-05 — `item new` refused under the default pin
-
-Setup: bare-remote, `.agent-claim/board.toml` tracked with no `storage` key
-
-```console
-$ aco item new --title "Reset export"
-2> ERROR: items live on the forge; open the issue there
 exit 2
 ```
 
