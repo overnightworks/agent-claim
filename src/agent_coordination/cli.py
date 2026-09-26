@@ -3138,6 +3138,13 @@ def _state_ref_forge(
     )
 
 
+def _github_forge(repo: str | None, canonical_remote: str) -> github.GitHubForge:
+    """The `github` storage pin's forge: `--repo`, else the canonical
+    remote's own repository (`_resolved_forge_target`) -- the one place this
+    module builds `github.GitHubForge`, as `_state_ref_forge` is for its pin."""
+    return github.GitHubForge(_resolved_forge_target(repo, canonical_remote))
+
+
 ITEM_NEW_ORIGIN_ON_GITHUB_REFUSAL = '--origin needs storage = "state-ref"'
 
 
@@ -3214,7 +3221,7 @@ def _item_new_on_github(parsed: argparse.Namespace, canonical_remote: str) -> in
     if defects:
         return _refuse_item_body_invalid(defects, as_json=parsed.json)
     new_body = _item_new_body(parsed, raw_body)
-    client = github.GitHubForge(_resolved_forge_target(parsed.repo, canonical_remote))
+    client = _github_forge(parsed.repo, canonical_remote)
     open_issues = client.list_open_board_issues()
     if parsed.parent is not None:
         _open_container(open_issues, parsed.parent)
@@ -3838,8 +3845,7 @@ class _LazyForge:
                     self._repo, canonical_remote, directory=self._directory
                 )
             else:
-                target = _resolved_forge_target(self._repo, canonical_remote)
-                self._resolved = github.GitHubForge(target)
+                self._resolved = _github_forge(self._repo, canonical_remote)
         return self._resolved
 
     def writer(self) -> forge.ForgeWriter:
@@ -6145,33 +6151,37 @@ def _orphan_names_container(raw_body: str, container: int) -> bool:
 
 
 def _adoptable_child(
-    client: forge.ForgeWriter, container: int, title: str, idea_label: str | None
+    client: forge.ForgeWriter,
+    container: int,
+    title: str,
+    idea_label: str | None,
+    open_issues: Iterable[board.Issue],
 ) -> board.ChildItem | None:
     """`container`'s already-open child titled exactly `title`, so a repeat
     `cut` after a partial failure (`forge.ForgePartialChildCreationError`)
     adopts the child GitHub already recorded instead of risking a second one
     (#260). Two sources can carry that child: already linked under
-    `container` (`list_children`), or an orphan -- an open issue with no
-    recorded parent at all, exactly the shape a failed `link_child` POST
-    leaves behind. A title match alone is too weak to adopt an orphan: any
-    unrelated open issue anywhere in the repository -- including one a
-    human filed -- could share it. An orphan is adoptable only when it is
-    also a `TASK` (never the container itself, never an idea-labelled item)
-    and its body still names `container` as the parent `_cut_child_body`
-    wrote for it; a recovery orphan is always exactly that shape, and
-    nothing else can fake it. An orphan GitHub created without any type
-    (`forge.ForgeIssueTypeNotSetError`, issue #444) is this cut's own child
-    too, but adopting it would leave it untyped: it refuses by number until
-    its type is set by hand, and the caller runs this before `--not-a-twin`
-    is read, so a retry never mints a second child beside it. An orphan
-    match is linked under `container` right here before it is returned, so
-    the caller's remaining steps treat it exactly like an already-linked
-    child; the container's own issue is never created twice for it. More
-    than one open match refuses by name rather than guess which one the
-    failed cut actually created. A closed
-    linked child with that title refuses too -- adoption finishes an
-    interrupted cut, it does not reopen a closed one. `None` when nothing
-    matches, so the caller falls through to `create_child`.
+    `container` (`list_children`), or an orphan -- one of the caller's own
+    `open_issues` snapshot with no recorded parent at all, exactly the shape
+    a failed `link_child` POST leaves behind. A title match alone is too
+    weak to adopt an orphan: any unrelated open issue anywhere in the
+    repository -- including one a human filed -- could share it. An orphan
+    is adoptable only when it is also a `TASK` (never the container itself,
+    never an idea-labelled item) and its body still names `container` as the
+    parent `_cut_child_body` wrote for it; a recovery orphan is always
+    exactly that shape, and nothing else can fake it. An orphan GitHub
+    created without any type (`forge.ForgeIssueTypeNotSetError`, issue #444)
+    is this cut's own child too, but adopting it would leave it untyped: it
+    refuses by number until its type is set by hand, and the caller runs
+    this before `--not-a-twin` is read, so a retry never mints a second
+    child beside it. An orphan match is linked under `container` right here
+    before it is returned, so the caller's remaining steps treat it exactly
+    like an already-linked child; the container's own issue is never created
+    twice for it. More than one open match refuses by name rather than guess
+    which one the failed cut actually created. A closed linked child with
+    that title refuses too -- adoption finishes an interrupted cut, it does
+    not reopen a closed one. `None` when nothing matches, so the caller
+    falls through to `create_child`.
     """
     linked = [
         child
@@ -6181,7 +6191,7 @@ def _adoptable_child(
     open_linked = [child.number for child in linked if child.state is board.ChildState.OPEN]
     orphans = {
         issue.number: issue.kind
-        for issue in client.list_open_board_issues()
+        for issue in open_issues
         if issue.title == title
         and issue.number != container
         and issue.kind in (body.ItemKind.TASK, None)
@@ -6369,7 +6379,7 @@ def _cut_slice(
     if link is not None:
         _require_matching_title(number, link, parsed.title)
     child_scope = _cut_row_scope(link, _requested_body_scope(parsed.scope))
-    adopted = _adoptable_child(client, number, parsed.title, config.idea_label)
+    adopted = _adoptable_child(client, number, parsed.title, config.idea_label, open_issues)
     if adopted is None and not parsed.not_a_twin:
         _refuse_possible_twin(client, parsed.title, open_issues, parent=number)
     try:
