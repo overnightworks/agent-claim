@@ -3271,7 +3271,7 @@ def _refuse_earlier_creation(
     parent = parsed.parent
     left = []
     if earlier.kind is not kind:
-        left.append(f"set its {kind} type")
+        left.append(f"set its type {github.ITEM_KIND_TYPE_NAMES[kind]}")
     recorded = None if parent is None else client.parent_issue(earlier.number)
     if parent is not None and (recorded is None or recorded.reference.number != parent):
         left.append(f"record it under #{parent}")

@@ -16172,7 +16172,7 @@ _EARLIER_ITEM_NEW = (
             "Write the docs",
             ("--parent", "79"),
             ("--not-a-twin",),
-            _EARLIER_ITEM_NEW + "set its task type and record it under #79 on the forge by hand\n",
+            _EARLIER_ITEM_NEW + "set its type Task and record it under #79 on the forge by hand\n",
             id="type_dropped_under_a_parent",
         ),
         pytest.param(
