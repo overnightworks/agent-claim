@@ -103,6 +103,7 @@ NO_BARE_ISSUE = "a state-ref item is created by aco item new, never as a bare fo
 # PIN-16/PIN-17's sentences, completing `item <id> ...`.
 _PARENT_MISSING = "is referenced as a parent but does not exist"
 _BLOCKER_MISSING = "is listed as a blocker but does not exist"
+_BLOCKER_ITSELF = "is listed as its own blocker"
 
 
 @dataclass(frozen=True)
@@ -155,8 +156,8 @@ def _valid_record(text: str) -> Mapping[str, object] | None:
 def _decode_item(item_id: str, content: bytes, oid: ObjectId) -> _DecodedItem | _MalformedItem:
     """`content` turned into a `_DecodedItem`, or set aside as a
     `_MalformedItem` (issue #447): every item file must be UTF-8 text whose
-    block parses VALID with a `[record]` table; one that does not is
-    corrupt state only for the commands that read exactly that item."""
+    block parses VALID with a `[record]` table; one that does not refuses
+    its own read and every whole-store read (PIN-29), never another item's."""
     try:
         text = content.decode("utf-8")
     except UnicodeDecodeError:
@@ -571,6 +572,9 @@ class StateRefBoard:
         `current.oid`, this instance's own already-read snapshot -- never a
         re-read -- so a second writer holding the same stale oid refuses
         with issue #279's own sentence rather than merging or overwriting.
+        Every resulting blocker must resolve to another readable item
+        before the write (issue #450), since a dangling one would stop every
+        later `board`/`next` (PIN-17).
         A malformed item (issue #447) has no stored record to merge into:
         `body`'s own complete `[record]` repairs it once its relations
         resolve (`_refuse_unresolved_repair`), else it refuses by name."""
@@ -580,6 +584,7 @@ class StateRefBoard:
         if malformed is None:
             current = self._items[item_id]
             title, labels, blocked_by = _delivered_content_fields(body, current.record)
+            self._refuse_unresolved_blockers(item_id, blocked_by)
             updated_record = replace(
                 current.record, title=title, labels=labels, blocked_by=blocked_by, updated_at=now
             )
@@ -610,8 +615,16 @@ class StateRefBoard:
             )
         if record.parent is not None:
             self._related(record.parent, missing=_PARENT_MISSING)
-        for blocker_id in record.blocked_by:
+        self._refuse_unresolved_blockers(item_id, record.blocked_by)
+
+    def _refuse_unresolved_blockers(self, item_id: str, blocked_by: Iterable[str]) -> None:
+        """Every id in `blocked_by` names a readable item other than
+        `item_id` (issues #447, #450): a missing one refuses PIN-17's
+        sentence, a malformed one its repair, `item_id` itself by name."""
+        for blocker_id in blocked_by:
             self._related(blocker_id, missing=_BLOCKER_MISSING)
+            if blocker_id == item_id:
+                raise ClaimUnavailableError(f"item {item_id} {_BLOCKER_ITSELF}")
 
     def _closing_write(self, number: int) -> LandingWrite:
         """`number`'s own close write, composed but not written (issues
