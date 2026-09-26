@@ -16272,9 +16272,18 @@ def test_cli_reset_dry_run_prints_five_would_lines_and_changes_nothing(
     assert _lineage_observation(repository) == lineage_before
 
 
+@pytest.mark.parametrize(
+    "force_unreadable",
+    [pytest.param([], id="plain"), pytest.param(["--force-unreadable"], id="forced")],
+)
 def test_cli_reset_confirm_exports_a_verifiable_bundle_and_bootstraps_a_fresh_ref(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    force_unreadable: list[str],
 ) -> None:
+    """A readable claim-free state resets the same with or without
+    `--force-unreadable` (RESET-17)."""
     _use_real_store(monkeypatch)
     repository, bare_remote = _reset_repository(tmp_path)
     tip = store.bootstrap(worktree=repository, remote=str(bare_remote))
@@ -16282,8 +16291,9 @@ def test_cli_reset_confirm_exports_a_verifiable_bundle_and_bootstraps_a_fresh_re
     export_dir.mkdir()
     monkeypatch.chdir(repository)
     monkeypatch.setattr(issue_claim, "datetime", FixedDateTime)
+    command = ["reset", "--confirm", *force_unreadable, "--export-dir", str(export_dir)]
 
-    status = issue_claim.main(["reset", "--confirm", "--export-dir", str(export_dir)])
+    status = issue_claim.main(command)
 
     assert status == 0
     lines = capsys.readouterr().out.splitlines()
