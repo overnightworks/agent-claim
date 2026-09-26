@@ -1346,7 +1346,9 @@ class GitHubForge:
         That create drops the type silently when the caller lacks push
         access, so the response's own `type` is read back: an issue created
         without it raises `forge.ForgeIssueTypeNotSetError` naming the
-        issue, never a plain success.
+        issue, never a plain success. Once `number` is read, every later
+        failure names it; the internal `id` is never required here, since
+        `link_child` reads it itself.
         """
         raw = self._run(
             ["api", "--method", "POST", f"repos/{self.repository}/issues", "--input", "-"],
@@ -1360,16 +1362,8 @@ class GitHubForge:
             raise forge.ForgeMalformedResponseError(
                 "GitHub returned invalid created-issue JSON"
             ) from error
-        identifier = created.get("id") if isinstance(created, dict) else None
         number = created.get("number") if isinstance(created, dict) else None
-        if (
-            isinstance(identifier, bool)
-            or not isinstance(identifier, int)
-            or identifier < 1
-            or isinstance(number, bool)
-            or not isinstance(number, int)
-            or number < 1
-        ):
+        if isinstance(number, bool) or not isinstance(number, int) or number < 1:
             raise forge.ForgeMalformedResponseError("GitHub did not return a created issue")
         type_name = _ITEM_KIND_TYPE_NAMES[kind]
         issue_type = created.get("type")

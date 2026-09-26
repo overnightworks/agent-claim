@@ -319,8 +319,7 @@ def test_github_adapter_creates_a_child_and_links_it_as_a_sub_issue() -> None:
     [
         pytest.param("not json", id="invalid-json"),
         pytest.param(json.dumps({"id": 1}), id="missing-number"),
-        pytest.param(json.dumps({"number": 1}), id="missing-id"),
-        pytest.param(json.dumps({"id": True, "number": 1}), id="id-is-a-bool"),
+        pytest.param(json.dumps({"id": 1, "number": True}), id="number-is-a-bool"),
     ],
 )
 def test_github_adapter_fails_loud_on_a_malformed_created_child(payload: str) -> None:
@@ -375,19 +374,21 @@ def test_github_adapter_creates_an_issue_without_linking_it_as_a_child() -> None
 
 
 @pytest.mark.parametrize(
-    "issue_type",
+    "created",
     [
-        pytest.param(None, id="type-null"),
-        pytest.param({"id": 7, "name": "Bug"}, id="another-type"),
+        pytest.param({"id": 555444, "number": 101, "type": None}, id="type-null"),
+        pytest.param({"id": 555444, "number": 101, "type": {"name": "Bug"}}, id="another-type"),
+        pytest.param({"number": 101}, id="number-only"),
     ],
 )
 def test_github_adapter_names_the_created_issue_github_left_without_its_type(
-    issue_type: dict[str, object] | None,
+    created: dict[str, object],
 ) -> None:
     """GitHub's REST create drops `type` silently without push access
     (#444): the issue exists anyway, so the refusal names it and the type
-    still to set, never a plain success."""
-    payload = json.dumps({"id": 555444, "number": 101, "type": issue_type})
+    still to set, never a plain success -- nor a generic malformed-response
+    error once the response has named the created issue."""
+    payload = json.dumps(created)
     client = GitHubForge(github._repository_id(REPOSITORY), run=lambda *_a, **_k: payload)
 
     with pytest.raises(forge.ForgeIssueTypeNotSetError) as excinfo:
