@@ -72,9 +72,10 @@ _ISSUE_TYPE_KINDS: dict[str, ItemKind] = {
     "feature": ItemKind.FEATURE,
 }
 # The write-side names GitHub's issue-type API expects (`cut`'s
-# `create_child`) -- derived from the one read-side mapping above so the
-# type name has a single owner, capitalized the way GitHub itself names them.
-_ITEM_KIND_TYPE_NAMES: dict[ItemKind, str] = {
+# `create_child`), also the names a refusal tells a person to set -- derived
+# from the one read-side mapping above so the type name has a single owner,
+# capitalized the way GitHub itself names them.
+ITEM_KIND_TYPE_NAMES: dict[ItemKind, str] = {
     kind: name.capitalize() for name, kind in _ISSUE_TYPE_KINDS.items()
 }
 # GitHub's issues-list pagination fills every page but the last, so a result
@@ -82,6 +83,7 @@ _ITEM_KIND_TYPE_NAMES: dict[ItemKind, str] = {
 # snapshot a concurrent open/close cannot have shifted an issue across.
 ISSUES_PER_PAGE = 100
 MALFORMED_PULL_REQUEST = "GitHub returned a malformed pull request"
+MALFORMED_CLOSED_ISSUE = "GitHub returned a malformed closed issue"
 # The combined-status endpoint's own aggregate `state` can be `pending`,
 # `failure`, or `error` with a `statuses` page that, this instant, names no
 # context at all -- a status posted after this read, say (issue #405
@@ -417,9 +419,11 @@ _READ_ONLY_OPERATIONS = (
     forge.ForgeOperation.LIST_BOARD_DEPENDENCIES,
     forge.ForgeOperation.LIST_OPEN_BOARD_PULL_REQUESTS,
     forge.ForgeOperation.LIST_RECENT_MERGED_BOARD_PULL_REQUESTS,
+    forge.ForgeOperation.LIST_RECENTLY_CLOSED_ISSUES,
 )
 _READ_WRITE_OPERATIONS = (
     forge.ForgeOperation.LINK_CHILD,
+    forge.ForgeOperation.CREATE_ISSUE,
     forge.ForgeOperation.CREATE_CHILD,
     forge.ForgeOperation.UPDATE_ITEM_BODY,
 )
@@ -1287,23 +1291,70 @@ class GitHubForge:
                 recent.append(pull_request)
         return tuple(recent)
 
-    def _create_issue(self, *, title: str, body: str, kind: ItemKind) -> int:
-        """Create a fresh issue of `kind`, linked to no parent.
+    def _closed_issue_page(self, since: str, page: int) -> tuple[object, ...]:
+        """One page of issues GitHub reports closed and updated at or after
+        `since` -- a superset of those closed since then, since a close is
+        itself an update; `list_recently_closed_issues` narrows it."""
+        raw = self._run(
+            [
+                "api",
+                f"repos/{self.repository}/issues?state=closed&since={since}"
+                f"&per_page={ISSUES_PER_PAGE}&page={page}",
+                "--jq",
+                '.[] | {number,title,closedAt:.closed_at,isPullRequest:has("pull_request")}',
+            ]
+        )
+        return self._json_lines(raw, "closed issue")
 
-        Private: `create_child` is the only caller (#260) -- nothing else
-        in the package needs an issue with no parent, so this is not a
-        port operation.
+    def _closed_issue(self, value: object) -> tuple[forge.ClosedIssue, str] | None:
+        """`value` and its own `closed_at`, or `None` for a pull request."""
+        if not isinstance(value, dict):
+            raise forge.ForgeMalformedResponseError(MALFORMED_CLOSED_ISSUE)
+        number = value.get("number")
+        title = value.get("title")
+        closed_at = value.get("closedAt")
+        is_pull_request = value.get("isPullRequest")
+        if (
+            isinstance(number, bool)
+            or not isinstance(number, int)
+            or number < 1
+            or not isinstance(title, str)
+            or not isinstance(closed_at, str)
+            or protocol.RFC3339_TIMESTAMP_PATTERN.fullmatch(closed_at) is None
+            or not isinstance(is_pull_request, bool)
+        ):
+            raise forge.ForgeMalformedResponseError(MALFORMED_CLOSED_ISSUE)
+        return None if is_pull_request else (forge.ClosedIssue(number, title), closed_at)
 
-        Validates the same response shape `create_child` depends on --
-        `id` alongside `number` -- even though only the number is returned
-        here: GitHub always sends both, and a caller that later runs
-        `link_child` against this issue needs that id to already be
-        trustworthy rather than fail out of place.
+    def list_recently_closed_issues(self, since: datetime) -> tuple[forge.ClosedIssue, ...]:
+        cutoff = since.astimezone(UTC).strftime(protocol.RFC3339_TIMESTAMP_FORMAT)
+        values = self._fetch_pages(
+            lambda page: self._closed_issue_page(cutoff, page), per_page=ISSUES_PER_PAGE
+        )
+        # Both sides share RFC 3339's fixed UTC `Z` form, so string order is time order.
+        return tuple(
+            issue
+            for issue, closed_at in filter(None, map(self._closed_issue, values))
+            if closed_at >= cutoff
+        )
+
+    def create_issue(self, *, title: str, body: str, kind: ItemKind) -> int:
+        """Create a fresh issue of `kind`, linked to no parent -- `item new`'s
+        own write without `--parent` (issue #444), and `create_child`'s first
+        write. GitHub's REST issue create takes the organization's issue type
+        by its name (`ITEM_KIND_TYPE_NAMES`), so no type id is ever looked up.
+
+        That create drops the type silently when the caller lacks push
+        access, so the response's own `type` is read back: an issue created
+        without it raises `forge.ForgeIssueTypeNotSetError` naming the
+        issue, never a plain success. Once `number` is read, every later
+        failure names it; the internal `id` is never required here, since
+        `link_child` reads it itself.
         """
         raw = self._run(
             ["api", "--method", "POST", f"repos/{self.repository}/issues", "--input", "-"],
             input_data=json.dumps(
-                {"title": title, "body": body, "type": _ITEM_KIND_TYPE_NAMES[kind]}
+                {"title": title, "body": body, "type": ITEM_KIND_TYPE_NAMES[kind]}
             ).encode("utf-8"),
         )
         try:
@@ -1312,17 +1363,14 @@ class GitHubForge:
             raise forge.ForgeMalformedResponseError(
                 "GitHub returned invalid created-issue JSON"
             ) from error
-        identifier = created.get("id") if isinstance(created, dict) else None
         number = created.get("number") if isinstance(created, dict) else None
-        if (
-            isinstance(identifier, bool)
-            or not isinstance(identifier, int)
-            or identifier < 1
-            or isinstance(number, bool)
-            or not isinstance(number, int)
-            or number < 1
-        ):
+        if isinstance(number, bool) or not isinstance(number, int) or number < 1:
             raise forge.ForgeMalformedResponseError("GitHub did not return a created issue")
+        issue_type = created.get("type")
+        if not isinstance(issue_type, dict) or self._issue_kind(issue_type.get("name")) is not kind:
+            raise forge.ForgeIssueTypeNotSetError(
+                created=number, type_name=ITEM_KIND_TYPE_NAMES[kind]
+            )
         return number
 
     def _issue_identifier(self, number: int) -> int:
@@ -1362,14 +1410,16 @@ class GitHubForge:
     def create_child(self, *, parent: int, title: str, body: str, kind: ItemKind) -> int:
         """Create a fresh issue of `kind` and record it as `parent`'s sub-issue.
 
-        Composed from `_create_issue` and `link_child` (#260): not atomic,
+        Composed from `create_issue` and `link_child` (#260): not atomic,
         since GitHub has no transaction across the two writes. A failure in
         the relation POST raises `forge.ForgePartialChildCreationError`
         naming the child that already exists; safe to retry the same `cut`,
         since it then finds this child orphaned -- open, no recorded parent
         -- and adopts it with `link_child` rather than creating a second one.
+        `item new --parent` gets the same error but reports a by-hand
+        recovery (ITEM-32), never a re-run.
         """
-        child = self._create_issue(title=title, body=body, kind=kind)
+        child = self.create_issue(title=title, body=body, kind=kind)
         try:
             self.link_child(parent, child)
         except protocol.ClaimError as error:

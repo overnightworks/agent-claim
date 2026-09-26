@@ -54,27 +54,57 @@ class ForgeMergeConflictError(ForgeError):
     and re-runs rather than merging a commit it never actually validated."""
 
 
-class ForgePartialChildCreationError(ForgeError):
-    """`cut` created `child` under `parent`, but `step` failed to finish
+class ForgePartialCreationError(ForgeError):
+    """The forge created issue `created`, but `step` did not finish it.
+
+    The issue already exists, so a caller's refusal must name it and what is
+    left (issue #444) rather than read as "nothing created". `step` is the
+    failed step as a verb phrase, `partial_write`'s own `failed` value.
+    """
+
+    def __init__(self, message: str, *, created: int, step: str) -> None:
+        self.created = created
+        self.step = step
+        super().__init__(message)
+
+
+class ForgeIssueTypeNotSetError(ForgePartialCreationError):
+    """GitHub created issue `created` without the organization's issue type
+    `type_name` it was asked for: its REST create drops the type silently
+    when the caller lacks push access (issue #444)."""
+
+    def __init__(self, *, created: int, type_name: str) -> None:
+        self.type_name = type_name
+        super().__init__(
+            f"created #{created} but GitHub did not set its type {type_name}",
+            created=created,
+            step=f"set #{created}'s type {type_name}",
+        )
+
+
+class ForgePartialChildCreationError(ForgePartialCreationError):
+    """`cut` created `created` under `parent`, but `step` failed to finish
     recording it there.
 
     Not atomic across `create_child`'s own two writes (the issue and its
     sub-issue relation), nor across `create_child` and the later block
     rewrite -- but a repeat is safe (#260): re-run the same cut and it
-    adopts `child` -- an orphan open issue with no recorded parent, exactly
+    adopts the child -- an orphan open issue with no recorded parent, exactly
     what a failed relation write leaves behind -- instead of risking a
     second one, finishing whichever `step` failed. Raised by the GitHub
     adapter when its own relation write fails, and reused by
     `cli._cmd_cut` when the later block rewrite fails -- one type, so both
-    failures recover the same way.
+    failures recover the same way. `item new --parent` meets the same error
+    through `create_child` but reports a by-hand recovery (ITEM-32), never
+    a re-run.
     """
 
     def __init__(self, *, child: int, parent: int, step: str, cause: Exception) -> None:
-        self.child = child
         self.parent = parent
-        self.step = step
         self.cause = cause
-        super().__init__(f"created #{child} but failed to {step}: {cause}")
+        super().__init__(
+            f"created #{child} but failed to {step}: {cause}", created=child, step=step
+        )
 
 
 @dataclass(frozen=True)
@@ -120,6 +150,15 @@ class ItemReference:
     body: str | None = None
     is_landing: bool = False
     origin: str | None = None
+
+
+@dataclass(frozen=True)
+class ClosedIssue:
+    """One issue closed at or after a caller's cutoff: only the number and
+    title `item new`'s and `cut`'s twin search compares (issue #444)."""
+
+    number: int
+    title: str
 
 
 @dataclass(frozen=True)
@@ -199,7 +238,9 @@ class ForgeOperation(StrEnum):
     LIST_BOARD_DEPENDENCIES = "list_board_dependencies"
     LIST_OPEN_BOARD_PULL_REQUESTS = "list_open_board_pull_requests"
     LIST_RECENT_MERGED_BOARD_PULL_REQUESTS = "list_recent_merged_board_pull_requests"
+    LIST_RECENTLY_CLOSED_ISSUES = "list_recently_closed_issues"
     LINK_CHILD = "link_child"
+    CREATE_ISSUE = "create_issue"
     CREATE_CHILD = "create_child"
     UPDATE_ITEM_BODY = "update_item_body"
 
@@ -279,11 +320,21 @@ class ForgeReader(Protocol):
         self, since: datetime
     ) -> tuple[board.PullRequest, ...]: ...
 
+    def list_recently_closed_issues(self, since: datetime) -> tuple[ClosedIssue, ...]:
+        """Every issue closed at or after `since`, never a pull request --
+        the closed half of the twin search (issue #444)."""
+        ...
+
 
 class ForgeWriter(ForgeReader, Protocol):
     """`ForgeReader` plus every operation that mutates forge state."""
 
     def link_child(self, parent: int, child: int) -> None: ...
+
+    def create_issue(self, *, title: str, body: str, kind: ItemKind) -> int:
+        """A fresh issue of `kind`, linked to no parent (`item new`, issue
+        #444); `create_child` is the same write plus the parent relation."""
+        ...
 
     def create_child(self, *, parent: int, title: str, body: str, kind: ItemKind) -> int: ...
 

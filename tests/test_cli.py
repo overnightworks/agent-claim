@@ -12,7 +12,7 @@ import sys
 import threading
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import MappingProxyType
 
@@ -136,6 +136,8 @@ class FakeForge:
     parents: dict[int, board.ParentIssue] = field(default_factory=dict)
     children: dict[int, tuple[board.ChildItem, ...]] = field(default_factory=dict)
     closed_issues: set[int] = field(default_factory=set)
+    recently_closed_issues: tuple[forge.ClosedIssue, ...] = ()
+    closed_issue_cutoffs: list[datetime] = field(default_factory=list)
     landing_comments: dict[int, str] = field(default_factory=dict)
     issue_references: dict[int, forge.ItemReference] = field(default_factory=dict)
     issue_reference_lookups: list[int] = field(default_factory=list)
@@ -146,6 +148,7 @@ class FakeForge:
     item_bodies: dict[int, str] = field(default_factory=dict)
     fail_update_item_body: bool = False
     fail_create_child_relation: bool = False
+    drop_created_issue_type: bool = False
     capability_overrides: dict[forge.ForgeOperation, forge.Capability] = field(default_factory=dict)
     readiness_by_number: dict[int, forge.LandingReadiness] = field(default_factory=dict)
     merge_calls: list[tuple[int, str, str, str]] = field(default_factory=list)
@@ -170,16 +173,26 @@ class FakeForge:
     def capability(self, operation: forge.ForgeOperation) -> forge.Capability:
         return self.capability_overrides.get(operation, github.GITHUB_CAPABILITIES[operation])
 
-    def _create_issue(self, *, title: str, body: str, kind: body.ItemKind) -> int:
-        """This fake's mirror of `GitHubForge._create_issue`: a fresh issue
+    def create_issue(self, *, title: str, body: str, kind: body.ItemKind) -> int:
+        """This fake's mirror of `GitHubForge.create_issue`: a fresh issue
         with no recorded parent, immediately visible to
         `list_open_board_issues` -- the orphan shape a failed `link_child`
         leaves behind (#260). Carries `kind` (#260 Sonnet finding), since a
-        repeat `cut`'s orphan scan refuses to adopt anything but a `TASK`."""
+        repeat `cut`'s orphan scan refuses to adopt anything but a `TASK`.
+        `drop_created_issue_type` simulates GitHub silently dropping that
+        type (#444): the issue exists untyped and the create raises."""
         number = self.next_created_child_number
         self.next_created_child_number += 1
         self.created_issues.append((title, body, kind))
-        self.board_issues = (*self.board_issues, board_issue(number, title, body, kind=kind))
+        stored_kind = None if self.drop_created_issue_type else kind
+        self.board_issues = (
+            *self.board_issues,
+            board_issue(number, title, body, kind=stored_kind),
+        )
+        if self.drop_created_issue_type:
+            raise forge.ForgeIssueTypeNotSetError(
+                created=number, type_name=github.ITEM_KIND_TYPE_NAMES[kind]
+            )
         return number
 
     def link_child(self, parent: int, child: int) -> None:
@@ -206,7 +219,7 @@ class FakeForge:
         (#260), so a relation failure leaves the same real orphan behind
         for a repeat `cut` to find."""
         self.created_children.append((parent, title, body, kind))
-        number = self._create_issue(title=title, body=body, kind=kind)
+        number = self.create_issue(title=title, body=body, kind=kind)
         try:
             self.link_child(parent, number)
         except ClaimError as error:
@@ -336,6 +349,11 @@ class FakeForge:
         self._run()
         return self.board_merged_pull_requests
 
+    def list_recently_closed_issues(self, since: datetime) -> tuple[forge.ClosedIssue, ...]:
+        self._run()
+        self.closed_issue_cutoffs.append(since)
+        return self.recently_closed_issues
+
 
 class ReaderOnlyForge(FakeForge):
     """A `FakeForge` whose write operations fail the test instead of quietly
@@ -343,7 +361,7 @@ class ReaderOnlyForge(FakeForge):
     independent of the `ForgeReader`/`ForgeWriter` annotations (documentation
     only; nothing type-checks in CI)."""
 
-    def _create_issue(self, *, title: str, body: str, kind: body.ItemKind) -> int:
+    def create_issue(self, *, title: str, body: str, kind: body.ItemKind) -> int:
         pytest.fail("a read-only command must never create an issue")
 
     def link_child(self, parent: int, child: int) -> None:
@@ -414,6 +432,9 @@ class _MinimalForgeReader:
         self, since: datetime
     ) -> tuple[board.PullRequest, ...]:
         self.observed_merged_pull_request_floors.append(since)
+        return ()
+
+    def list_recently_closed_issues(self, since: datetime) -> tuple[forge.ClosedIssue, ...]:
         return ()
 
     def list_children(self, number: int) -> tuple[board.ChildItem, ...]:
@@ -3413,14 +3434,39 @@ def test_cut_names_the_created_child_when_the_relation_post_fails(
     assert "re-run the same cut -- it adopts the child" in err
 
 
+@pytest.mark.parametrize(
+    ("failure", "failed", "message"),
+    [
+        pytest.param(
+            "fail_create_child_relation",
+            f"record #900 as a sub-issue of #{CUT_CONTAINER}",
+            f"created #900 but failed to record #900 as a sub-issue of #{CUT_CONTAINER}: "
+            "relation POST failed (simulated); re-run the same cut -- it adopts the child",
+            id="parent_relation",
+        ),
+        pytest.param(
+            "drop_created_issue_type",
+            "set #900's type Task",
+            "created #900 but GitHub did not set its type Task; set that type on the forge "
+            "by hand, then re-run the same cut -- it adopts the child",
+            id="issue_type",
+        ),
+    ],
+)
 def test_cut_json_reports_partial_write_with_written_and_failed(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    failure: str,
+    failed: str,
+    message: str,
 ) -> None:
     """Issue #425: a partial write's own `--json` shape carries `written`/
     `failed` as structured siblings next to `reason: "partial_write"`,
-    never only the prose sentence stderr already printed."""
+    never only the prose sentence stderr already printed -- a failed
+    relation write, or an issue type GitHub dropped (#444)."""
     client = _configured_board_client(monkeypatch, tmp_path, open_issues=(_one_slice_container(),))
-    client.fail_create_child_relation = True
+    setattr(client, failure, True)
 
     exit_code = issue_claim.main(
         [
@@ -3435,18 +3481,13 @@ def test_cut_json_reports_partial_write_with_written_and_failed(
     )
 
     assert exit_code == 2
-    child = client.next_created_child_number - 1
     captured = capsys.readouterr()
-    message = (
-        f"created #{child} but failed to record #{child} as a sub-issue of #{CUT_CONTAINER}: "
-        "relation POST failed (simulated); re-run the same cut -- it adopts the child"
-    )
     assert captured.err == f"ERROR: {message}\n"
     expected = {
         "ok": False,
         "reason": "partial_write",
-        "written": child,
-        "failed": f"record #{child} as a sub-issue of #{CUT_CONTAINER}",
+        "written": 900,
+        "failed": failed,
         "message": message,
     }
     assert captured.out == json.dumps(expected) + "\n"
@@ -3917,7 +3958,8 @@ def test_cut_never_adopts_an_orphan_that_is_not_this_containers_recovery_shape(
     human-filed issue, an idea, the container's own issue, or another
     container's own failed-cut orphan can all share the row's exact title
     without being this container's recovery shape, so `cut` creates a fresh
-    child instead of silently re-parenting any of them."""
+    child instead of silently re-parenting any of them -- once the caller
+    has said the look-alike is no twin (issue #444)."""
     client = _configured_board_client(monkeypatch, tmp_path, open_issues=(_one_slice_container(),))
     _write_block_pin(tmp_path)
     if idea_label is not None:
@@ -3927,7 +3969,7 @@ def test_cut_never_adopts_an_orphan_that_is_not_this_containers_recovery_shape(
     monkeypatch.setattr(client, "list_open_board_issues", lambda: (_one_slice_container(), orphan))
 
     exit_code = issue_claim.main(
-        ["--repo", REPOSITORY, "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
+        ["--repo", REPOSITORY, "cut", str(CUT_CONTAINER), "--title", "Scheibe 1", "--not-a-twin"]
     )
 
     assert exit_code == 0
@@ -3942,6 +3984,132 @@ def test_cut_never_adopts_an_orphan_that_is_not_this_containers_recovery_shape(
         )
     ]
     assert capsys.readouterr().out == f"CUT #{CUT_CONTAINER} row 1 -> #{child}\n"
+
+
+_CUT_TWIN_REFUSAL = "ERROR: possible twin #{twin}; pass --not-a-twin\n"
+
+
+@pytest.mark.parametrize(
+    ("title", "open_titles", "closed_titles", "flags", "exit_code", "out", "err"),
+    [
+        pytest.param(
+            "Scheibe 1",
+            {951: "Scheibe 1 bauen"},
+            {},
+            (),
+            2,
+            "",
+            _CUT_TWIN_REFUSAL.format(twin=951),
+            id="open_issue_sharing_two_of_three_words",
+        ),
+        pytest.param(
+            "Scheibe 1",
+            {},
+            {952: "scheibe 1"},
+            (),
+            2,
+            "",
+            _CUT_TWIN_REFUSAL.format(twin=952),
+            id="recently_closed_issue_in_any_case",
+        ),
+        pytest.param(
+            "Scheibe 1",
+            {951: "Scheibe 1 bauen", 953: "Scheibe 1"},
+            {952: "Scheibe 1"},
+            (),
+            2,
+            "",
+            _CUT_TWIN_REFUSAL.format(twin=952),
+            id="closest_title_then_lower_number_wins",
+        ),
+        pytest.param(
+            "Scheibe 1",
+            {951: "Scheibe 2"},
+            {},
+            (),
+            0,
+            f"CUT #{CUT_CONTAINER} -> #900\n",
+            "",
+            id="one_shared_word_of_three_is_no_twin",
+        ),
+        pytest.param(
+            "Scheibe 1 bauen",
+            {951: "Scheibe 1 bauen und testen"},
+            {},
+            (),
+            2,
+            "",
+            _CUT_TWIN_REFUSAL.format(twin=951),
+            id="three_shared_words_of_five_is_a_twin",
+        ),
+        pytest.param(
+            "Scheibe 1 bauen",
+            {951: "Scheibe 1 testen"},
+            {},
+            (),
+            0,
+            f"CUT #{CUT_CONTAINER} -> #900\n",
+            "",
+            id="two_shared_words_of_four_is_no_twin",
+        ),
+        pytest.param(
+            "!!!",
+            {951: "???"},
+            {},
+            (),
+            0,
+            f"CUT #{CUT_CONTAINER} -> #900\n",
+            "",
+            id="wordless_titles_never_match",
+        ),
+        pytest.param(
+            "Scheibe 1",
+            {951: "Scheibe 1"},
+            {},
+            ("--not-a-twin",),
+            0,
+            f"CUT #{CUT_CONTAINER} -> #900\n",
+            "",
+            id="not_a_twin_creates_anyway",
+        ),
+    ],
+)
+def test_cut_searches_open_and_recently_closed_titles_for_a_twin_before_creating(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    title: str,
+    open_titles: dict[int, str],
+    closed_titles: dict[int, str],
+    flags: tuple[str, ...],
+    exit_code: int,
+    out: str,
+    err: str,
+) -> None:
+    """Issue #444: before a fresh child exists, `cut` refuses a title that
+    shares most of its words with an open or recently closed issue, naming
+    the closest one; `--not-a-twin` creates anyway."""
+    look_alikes = tuple(
+        board_issue(number, other, complete_contract("Ship it."))
+        for number, other in open_titles.items()
+    )
+    container = _cut_container_issue(MINIMAL_BLOCK_TOML)
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container, *look_alikes))
+    client.recently_closed_issues = tuple(
+        forge.ClosedIssue(number, other) for number, other in closed_titles.items()
+    )
+    _write_block_pin(tmp_path)
+    command = ["--repo", REPOSITORY, "cut", str(CUT_CONTAINER), "--title", title, *flags]
+    searched_since = (
+        [] if "--not-a-twin" in flags else [FixedDateTime.now(UTC) - timedelta(days=30)]
+    )
+
+    observed_exit_code = issue_claim.main(command)
+
+    captured = capsys.readouterr()
+    assert (observed_exit_code, captured.out, captured.err) == (exit_code, out, err)
+    assert len(client.created_issues) == (exit_code == 0)
+    assert client.closed_issue_cutoffs == searched_since
 
 
 @pytest.mark.parametrize("line_ending", ["\n", "\r\n"], ids=["orphan_body_lf", "orphan_body_crlf"])
@@ -3994,6 +4162,40 @@ def test_cut_adopts_the_orphan_after_a_relation_partial_failure(
     remaining = body.locate_agent_claim_block(client.item_bodies[CUT_CONTAINER]).data
     assert remaining["slice"] == []
     assert capsys.readouterr().out == f"ADOPTED #{CUT_CONTAINER} row 1 -> #{child}\n"
+
+
+def test_cut_retry_meets_its_untyped_child_as_a_twin_until_its_type_is_set_then_adopts_it(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """Issue #444 (CUT-16, CUT-19, CUT-30): GitHub drops the type when the
+    caller lacks push access, so the first cut leaves an untyped, unlinked
+    orphan. Nothing guesses it is this cut's own: the same re-run meets it
+    as a twin by its identical title and creates nothing; once the type is
+    set by hand, the re-run adopts it."""
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(_one_slice_container(),))
+    _write_block_pin(tmp_path)
+    client.board_issues = (_one_slice_container(),)
+    monkeypatch.setattr(client, "list_open_board_issues", lambda: client.board_issues)
+    client.drop_created_issue_type = True
+    command = ["--repo", REPOSITORY, "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
+
+    assert issue_claim.main(command) == 2
+    child = client.next_created_child_number - 1
+    capsys.readouterr()
+    client.drop_created_issue_type = False
+
+    assert issue_claim.main(command) == 2
+    assert capsys.readouterr().err == f"ERROR: possible twin #{child}; pass --not-a-twin\n"
+    client.board_issues = tuple(
+        replace(issue, kind=body.ItemKind.TASK) if issue.number == child else issue
+        for issue in client.board_issues
+    )
+
+    assert issue_claim.main(command) == 0
+    assert capsys.readouterr().out == f"ADOPTED #{CUT_CONTAINER} row 1 -> #{child}\n"
+    assert len(client.created_issues) == 1
 
 
 RULE_ITEM = 90
@@ -15739,14 +15941,252 @@ def test_main_refuses_a_malformed_item_reference_before_ever_dispatching(
     assert "is not an item reference" in capsys.readouterr().err
 
 
-def test_item_new_refuses_under_github_storage(capsys: pytest.CaptureFixture[str]) -> None:
-    """Issue #285 proof 6: under `storage = "github"` (the default, and
-    what an unconfigured toplevel reads), `item new` refuses by name rather
-    than opening a GitHub issue on the repository's behalf."""
-    status = issue_claim.main(["item", "new", "--title", "X"])
+_ITEM_NEW_BODY = complete_contract("Ship it.")
 
-    assert status == 2
-    assert capsys.readouterr().err == "ERROR: items live on the forge; open the issue there\n"
+
+def _item_new_github_client(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, piped_body: str
+) -> FakeForge:
+    """A `storage = "github"` checkout whose forge holds container `#79`
+    and a plain open issue `#951` titled `Ship it now`, with `piped_body` on
+    stdin -- the arrangement every `item new` GitHub scenario shares. An
+    issue it creates joins the open issues a later run reads."""
+    look_alike = board_issue(951, "Ship it now", complete_contract("Ship it."))
+    client = _configured_board_client(monkeypatch, tmp_path)
+    client.board_issues = (_cut_container_issue(MINIMAL_BLOCK_TOML), look_alike)
+    monkeypatch.setattr(client, "list_open_board_issues", lambda: client.board_issues)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(piped_body))
+    return client
+
+
+@pytest.mark.parametrize(
+    ("arguments", "out", "created", "linked"),
+    [
+        pytest.param(
+            ["item", "new", "--title", "Write the docs", "--kind", "feature"],
+            "#900\n",
+            [("Write the docs", _ITEM_NEW_BODY, body.ItemKind.FEATURE)],
+            [],
+            id="typed_issue_without_parent",
+        ),
+        pytest.param(
+            ["item", "new", "--title", "Write the docs", "--parent", "79", "--scope", "src/a.py"],
+            "#900\n",
+            [
+                (
+                    "Write the docs",
+                    complete_contract("Ship it.", scope=["src/a.py"]),
+                    body.ItemKind.TASK,
+                )
+            ],
+            [(CUT_CONTAINER, 900)],
+            id="sub_issue_of_an_open_container_with_scope",
+        ),
+        pytest.param(
+            ["item", "new", "--title", "Ship it", "--not-a-twin", "--json"],
+            '{"ok": true, "reason": "created", "item": "#900", "number": 900}\n',
+            [("Ship it", _ITEM_NEW_BODY, body.ItemKind.TASK)],
+            [],
+            id="not_a_twin_creates_past_a_look_alike",
+        ),
+        pytest.param(
+            ["item", "new", "--title", "Ship it now", "--not-a-twin"],
+            "#900\n",
+            [("Ship it now", _ITEM_NEW_BODY, body.ItemKind.TASK)],
+            [],
+            id="not_a_twin_creates_an_exact_duplicate",
+        ),
+    ],
+)
+def test_item_new_creates_a_github_issue_from_the_piped_body(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    arguments: list[str],
+    out: str,
+    created: list[tuple[str, str, body.ItemKind]],
+    linked: list[tuple[int, int]],
+) -> None:
+    """Issue #444 proof 1: under `storage = "github"`, `item new` opens one
+    issue of the organization's type for `--kind`, its body the piped one
+    (plus `--scope`), recorded under `--parent` when given, and prints the
+    issue number the way the state-ref path prints its id."""
+    client = _item_new_github_client(monkeypatch, tmp_path, _ITEM_NEW_BODY)
+
+    status = issue_claim.main(arguments)
+
+    assert (status, capsys.readouterr().out) == (0, out)
+    assert (client.created_issues, client.linked_children) == (created, linked)
+
+
+@pytest.mark.parametrize(
+    ("piped_body", "flags", "closed", "err"),
+    [
+        pytest.param(
+            "no block\n",
+            ("--title", "Write the docs"),
+            (),
+            "ERROR: body malformed: agent-claim: no agent-claim block\n",
+            id="invalid_body",
+        ),
+        pytest.param(
+            _ITEM_NEW_BODY,
+            ("--title", "Ship it"),
+            (),
+            "ERROR: possible twin #951; pass --not-a-twin\n",
+            id="open_twin",
+        ),
+        pytest.param(
+            _ITEM_NEW_BODY,
+            ("--title", "Write docs"),
+            (forge.ClosedIssue(952, "write the docs"),),
+            "ERROR: possible twin #952; pass --not-a-twin\n",
+            id="recently_closed_twin",
+        ),
+        pytest.param(
+            _ITEM_NEW_BODY,
+            ("--title", "!!!"),
+            (forge.ClosedIssue(952, "!!!"),),
+            "ERROR: possible twin #952; pass --not-a-twin\n",
+            id="identical_title_without_words",
+        ),
+        pytest.param(
+            _ITEM_NEW_BODY,
+            ("--title", "Write the docs", "--parent", "951"),
+            (),
+            "ERROR: #951 is not a container\n",
+            id="parent_is_not_a_container",
+        ),
+        pytest.param(
+            _ITEM_NEW_BODY,
+            ("--title", "Write the docs", "--parent", "81"),
+            (),
+            "ERROR: #81 is not an open container\n",
+            id="parent_is_not_open",
+        ),
+        pytest.param(
+            _ITEM_NEW_BODY,
+            ("--title", "Write the docs", "--origin", "gitlab#5"),
+            (),
+            'ERROR: --origin needs storage = "state-ref"\n',
+            id="origin_under_github",
+        ),
+    ],
+)
+def test_item_new_on_github_refuses_before_creating_anything(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    piped_body: str,
+    flags: tuple[str, ...],
+    closed: tuple[forge.ClosedIssue, ...],
+    err: str,
+) -> None:
+    """Issue #444 proof 1: an invalid body (the same check `aco check <n>`
+    applies), a possible twin, a parent that is no open container, or
+    `--origin` refuses with exit 2 and creates no issue at all."""
+    client = _item_new_github_client(monkeypatch, tmp_path, piped_body)
+    client.recently_closed_issues = closed
+
+    status = issue_claim.main(["item", "new", *flags])
+
+    assert (status, capsys.readouterr().err, client.created_issues) == (2, err, [])
+
+
+@pytest.mark.parametrize(
+    ("failure", "flags", "failed", "message"),
+    [
+        pytest.param(
+            "fail_create_child_relation",
+            ("--parent", "79"),
+            "record #900 as a sub-issue of #79",
+            "created #900 but failed to record #900 as a sub-issue of #79: "
+            "relation POST failed (simulated); record that sub-issue relation on the forge by hand",
+            id="parent_relation",
+        ),
+        pytest.param(
+            "drop_created_issue_type",
+            (),
+            "set #900's type Task",
+            "created #900 but GitHub did not set its type Task; set that type on the forge by hand",
+            id="issue_type",
+        ),
+        pytest.param(
+            "drop_created_issue_type",
+            ("--parent", "79"),
+            "set #900's type Task",
+            "created #900 but GitHub did not set its type Task; "
+            "set that type and record it under #79 on the forge by hand",
+            id="issue_type_under_a_parent",
+        ),
+    ],
+)
+def test_item_new_json_reports_a_created_issue_it_could_not_finish(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    failure: str,
+    flags: tuple[str, ...],
+    failed: str,
+    message: str,
+) -> None:
+    """Issue #444: the issue exists once its create returns, so a failed
+    sub-issue relation or an issue type GitHub dropped reports
+    `partial_write` naming it and what is left, never a plain refusal that
+    would read as "nothing created" nor a success."""
+    client = _item_new_github_client(monkeypatch, tmp_path, _ITEM_NEW_BODY)
+    setattr(client, failure, True)
+    command = ["item", "new", "--title", "Write the docs", *flags, "--json"]
+
+    status = issue_claim.main(command)
+
+    assert (status, json.loads(capsys.readouterr().out)) == (
+        2,
+        {
+            "ok": False,
+            "reason": "partial_write",
+            "written": 900,
+            "failed": failed,
+            "message": message,
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [None, "fail_create_child_relation", "drop_created_issue_type"],
+    ids=["after_a_success", "after_a_relation_failure", "after_a_dropped_type"],
+)
+def test_item_new_rerun_on_github_meets_its_own_issue_as_a_twin(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    failure: str | None,
+) -> None:
+    """Issue #444 (ITEM-35): nothing guesses whether an open issue is an
+    earlier run's own. The same command again meets the issue it created in
+    the twin search and creates nothing; `--not-a-twin` creates a second
+    one anyway, as ruled."""
+    client = _item_new_github_client(monkeypatch, tmp_path, _ITEM_NEW_BODY)
+    if failure is not None:
+        setattr(client, failure, True)
+    command = ["item", "new", "--title", "Write the docs", "--parent", "79"]
+    issue_claim.main(command)
+    if failure is not None:
+        setattr(client, failure, False)
+    capsys.readouterr()
+    monkeypatch.setattr(sys, "stdin", io.StringIO(_ITEM_NEW_BODY))
+
+    refused = issue_claim.main(command)
+
+    assert (refused, capsys.readouterr().err, len(client.created_issues)) == (
+        2,
+        "ERROR: possible twin #900; pass --not-a-twin\n",
+        1,
+    )
+    monkeypatch.setattr(sys, "stdin", io.StringIO(_ITEM_NEW_BODY))
+    assert issue_claim.main([*command, "--not-a-twin"]) == 0
+    assert len(client.created_issues) == 2
 
 
 def test_item_new_json_reports_ok_reason_created(
@@ -16083,7 +16523,7 @@ def test_item_show_refuses_when_the_parent_read_fails(
 def _item_new_github_storage_refusal(
     _monkeypatch: pytest.MonkeyPatch, _tmp_path: Path
 ) -> list[str]:
-    return ["item", "new", "--title", "X", "--json"]
+    return ["item", "new", "--title", "X", "--origin", "gitlab#5", "--json"]
 
 
 def _item_edit_github_storage_refusal(

@@ -4,7 +4,8 @@
 child, remove that slice's own `[[slice]]` row from the container's block,
 and recover instead of duplicating when a prior run already got partway.
 This file owns the command's own target precondition, row selection,
-`--scope` inheritance (issue #337), the fresh child's own body, the printed
+`--scope` inheritance (issue #337), the twin search `cut` and `item new`
+share before either creates an issue (issue #444), the fresh child's own body, the printed
 `CUT`/`ADOPTED` line and `--json` shape, and the two ways a partial failure
 recovers. `specs/body-block.spec.md` owns the `[[slice]]` schema (BODY-43..
 BODY-49) and a malformed body's own defect sentences (BODY-01..BODY-52);
@@ -17,7 +18,7 @@ restating them. `<n>` is the container's own number, `<child>` the fresh or
 adopted child's, `<idx>` a `[[slice]]` row's `index`. A refusal reaching the
 shared collection point prints `ERROR: <sentence>` on stderr, exit `2`, and
 with `--json` also `specs/output.spec.md`'s envelope, `reason`
-`precondition_failed` -- except CUT-17/CUT-18's own partial write, whose
+`precondition_failed` -- except CUT-17/CUT-18/CUT-32's own partial write, whose
 `reason` is `partial_write` instead (CUT-28).
 
 ## Behavior table
@@ -39,9 +40,13 @@ with `--json` also `specs/output.spec.md`'s envelope, `reason`
 | a closed child matches, none open | CUT-14 | — | — | CUT-14 |
 | two or more open matches | CUT-15 | — | — | CUT-15 |
 | an orphan shares the title, wrong shape | CUT-16 | — | — | — |
+| an open or recently closed look-alike title | CUT-29, CUT-30 | CUT-29, CUT-30 | — | CUT-30 |
+| `--not-a-twin` given | CUT-31 | CUT-31 | CUT-31 | CUT-31 |
 | GitHub's own relation write fails | CUT-17 | — | — | CUT-28 |
 | the row-removal write fails, either storage | CUT-18 | — | — | CUT-28 |
-| an identical re-run after either failure | CUT-19 | — | — | CUT-19 |
+| GitHub creates the child without its issue type | CUT-32 | — | — | CUT-28 |
+| an identical re-run after CUT-17, CUT-18, or a CUT-32 whose type is now set | CUT-19 | — | — | CUT-19 |
+| a re-run while the CUT-32 child is still untyped | CUT-30 | — | — | CUT-30 |
 | a linked row's own `scope` is empty | — | — | CUT-20, CUT-22 | — |
 | a linked row already names a `scope` | — | — | CUT-21 | — |
 | every successful cut's own child body | CUT-25 | CUT-25 | CUT-25 | — |
@@ -82,12 +87,19 @@ with `--json` also `specs/output.spec.md`'s envelope, `reason`
 - [ ] [CUT-15] Two or more open matches refuses `#<n>'s row '<title>' matches more than one open issue (#a, #b); adopt the right one by hand and remove the row`, exit `2`, naming every match.
 - [ ] [CUT-16] An open issue sharing `--title` is adopted only in CUT-13's recovery shape -- never the container itself, idea-labelled, non-`task`, or naming a different `Parent:` (see E-CUT-05).
 
+## The twin search (issue #444)
+
+- [ ] [CUT-29] Before a fresh child exists, `aco cut` compares `--title` with the titles of every open issue and every issue closed within the last 30 days, the container itself excepted.
+- [ ] [CUT-30] Titles sharing at least 60 % of their combined distinct casefolded words (3 of 5 twin, 2 of 4 not) refuse `possible twin #<n>; pass --not-a-twin`, exit `2`, before any write (see E-CUT-05, E-CUT-09).
+- [ ] [CUT-31] An identical title always twins, even without a word; the refusal names the closest title, the lower number on a tie; `--not-a-twin` skips the search and creates; an adoption (CUT-13) never searches.
+
 ## Partial failure and recovery
 
-- [ ] [CUT-17] GitHub's own failed sub-issue relation write refuses `created #<child> but failed to record #<child> as a sub-issue of #<n>: <cause>; re-run the same cut`, exit `2`.
-- [ ] [CUT-18] A failed row-removal write, either storage, refuses `created #<child> but failed to remove row <idx> from #<n>'s agent-claim block: <cause>; re-run the same cut`, exit `2`.
-- [ ] [CUT-19] An identical re-run after CUT-17 or CUT-18 prints `ADOPTED` (CUT-13) instead of minting a second child, then finishes the row removal when a row was linked (see E-CUT-06).
-- [ ] [CUT-28] CUT-17/CUT-18's partial write reports `reason: "partial_write"`, `written` (`<child>`) and `failed` (the step) as siblings, exit `2` (see E-CUT-08).
+- [ ] [CUT-17] GitHub's own failed sub-issue relation write refuses `created #<child> but failed to record #<child> as a sub-issue of #<n>: <cause>; re-run the same cut -- it adopts the child`, exit `2`.
+- [ ] [CUT-18] A failed row-removal write, either storage, refuses `created #<child> but failed to remove row <idx> from #<n>'s agent-claim block: <cause>; re-run the same cut -- it adopts the child`, exit `2`.
+- [ ] [CUT-19] An identical re-run after CUT-17, CUT-18, or -- once its type is set -- CUT-32 prints `ADOPTED` (CUT-13) instead of a second child, then finishes the row removal when a row was linked (see E-CUT-06).
+- [ ] [CUT-32] A child created without its `Task` type refuses `created #<child> but GitHub did not set its type Task; set that type on the forge by hand, then re-run the same cut -- it adopts the child`, exit `2`.
+- [ ] [CUT-28] CUT-17/CUT-18/CUT-32's partial write reports `reason: "partial_write"`, `written` (`<child>`) and `failed` (the step) as siblings, exit `2` (see E-CUT-08).
 
 ## `--scope` (issue #337)
 
@@ -198,6 +210,9 @@ Setup: bare-remote, `storage = "github"`, fake `gh`, container `#90` with one
 
 ```console
 $ aco cut 90 --title "Slice A"
+2> ERROR: possible twin #<lookalike>; pass --not-a-twin
+exit 2
+$ aco cut 90 --title "Slice A" --not-a-twin
 CUT #90 row 1 -> #<child>
 exit 0
 ```
@@ -267,5 +282,20 @@ sub-issue relation write fails
 $ aco cut 90 --title "Slice A" --json
 {"ok": false, "reason": "partial_write", "written": <child>, "failed": "record #<child> as a sub-issue of #90", "message": "created #<child> but failed to record #<child> as a sub-issue of #90: <cause>; re-run the same cut -- it adopts the child"}
 2> ERROR: created #<child> but failed to record #<child> as a sub-issue of #90: <cause>; re-run the same cut -- it adopts the child
+exit 2
+```
+
+### E-CUT-09 -- a twin closed last week, then `--json`
+
+Setup: bare-remote, `storage = "github"`, fake `gh`, container `#90` with no
+`slice` key at all; `#85`, titled `Import the ledger`, closed six days ago
+
+```console
+$ aco cut 90 --title "Import ledger"
+2> ERROR: possible twin #85; pass --not-a-twin
+exit 2
+$ aco cut 90 --title "Import ledger" --json
+{"ok": false, "reason": "precondition_failed", "message": "possible twin #85; pass --not-a-twin"}
+2> ERROR: possible twin #85; pass --not-a-twin
 exit 2
 ```

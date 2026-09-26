@@ -35,7 +35,7 @@ def test_forge_operation_exhaustiveness_matches_the_declared_reader_and_writer_m
         if not name.startswith("_") and name not in {"repository", "capability", "requests"}
     }
     assert {operation.value for operation in forge.ForgeOperation} == declared_methods
-    assert len(forge.ForgeOperation) == 13
+    assert len(forge.ForgeOperation) == 15
     assert set(github.GITHUB_CAPABILITIES) == set(forge.ForgeOperation)
     assert forge.Capability.UNSUPPORTED not in github.GITHUB_CAPABILITIES.values()
 
@@ -287,7 +287,7 @@ def test_github_adapter_creates_a_child_and_links_it_as_a_sub_issue() -> None:
     def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
         observed.append((arguments, input_data))
         if arguments[2] == "POST" and arguments[3].endswith("/issues"):
-            return json.dumps({"id": 555444, "number": 101})
+            return json.dumps({"id": 555444, "number": 101, "type": {"name": "Task"}})
         if arguments[1] == f"repos/{REPOSITORY}/issues/101":
             return "555444"
         return ""
@@ -319,8 +319,7 @@ def test_github_adapter_creates_a_child_and_links_it_as_a_sub_issue() -> None:
     [
         pytest.param("not json", id="invalid-json"),
         pytest.param(json.dumps({"id": 1}), id="missing-number"),
-        pytest.param(json.dumps({"number": 1}), id="missing-id"),
-        pytest.param(json.dumps({"id": True, "number": 1}), id="id-is-a-bool"),
+        pytest.param(json.dumps({"id": 1, "number": True}), id="number-is-a-bool"),
     ],
 )
 def test_github_adapter_fails_loud_on_a_malformed_created_child(payload: str) -> None:
@@ -337,7 +336,7 @@ def test_github_adapter_names_the_created_child_when_the_relation_post_fails() -
 
     def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
         if arguments[2] == "POST" and arguments[3].endswith("/issues"):
-            return json.dumps({"id": 555444, "number": 101})
+            return json.dumps({"id": 555444, "number": 101, "type": {"name": "Task"}})
         raise forge.ForgeError("HTTP 422 could not create sub-issue relation")
 
     client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
@@ -345,25 +344,27 @@ def test_github_adapter_names_the_created_child_when_the_relation_post_fails() -
     with pytest.raises(forge.ForgePartialChildCreationError) as excinfo:
         client.create_child(parent=79, title="Scheibe 4", body="", kind=ItemKind.TASK)
 
-    assert excinfo.value.child == 101
+    assert excinfo.value.created == 101
     assert excinfo.value.parent == 79
 
 
-def test_github_adapter_creates_an_issue_without_linking_it_as_a_child() -> None:
-    """`_create_issue` is `create_child`'s first write on its own (#260): one
-    POST, no sub-issue relation -- `link_child` is the caller's to run,
-    later, against a number it may not have yet. Private (no other caller,
-    #260 Sonnet finding): exercised directly here rather than through the
-    port."""
+@pytest.mark.parametrize("returned_type_name", ["Task", "task"], ids=["github-case", "org-case"])
+def test_github_adapter_creates_an_issue_without_linking_it_as_a_child(
+    returned_type_name: str,
+) -> None:
+    """`create_issue` is `item new`'s own write without `--parent` (#444) and
+    `create_child`'s first write (#260): one POST carrying the issue type by
+    name, no sub-issue relation. The returned type is read as the board
+    reads it, so an org's own casing of the name still counts as set."""
     observed: list[tuple[list[str], bytes | None]] = []
 
     def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
         observed.append((arguments, input_data))
-        return json.dumps({"id": 555444, "number": 101})
+        return json.dumps({"id": 555444, "number": 101, "type": {"name": returned_type_name}})
 
     client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
 
-    number = client._create_issue(title="Scheibe 4", body=BLOCK_CHILD_SKELETON, kind=ItemKind.TASK)
+    number = client.create_issue(title="Scheibe 4", body=BLOCK_CHILD_SKELETON, kind=ItemKind.TASK)
 
     assert number == 101
     assert observed == [
@@ -374,6 +375,99 @@ def test_github_adapter_creates_an_issue_without_linking_it_as_a_child() -> None
             ),
         )
     ]
+
+
+@pytest.mark.parametrize(
+    "created",
+    [
+        pytest.param({"id": 555444, "number": 101, "type": None}, id="type-null"),
+        pytest.param({"id": 555444, "number": 101, "type": {"name": "Bug"}}, id="another-type"),
+        pytest.param({"number": 101}, id="number-only"),
+    ],
+)
+def test_github_adapter_names_the_created_issue_github_left_without_its_type(
+    created: dict[str, object],
+) -> None:
+    """GitHub's REST create drops `type` silently without push access
+    (#444): the issue exists anyway, so the refusal names it and the type
+    still to set, never a plain success -- nor a generic malformed-response
+    error once the response has named the created issue."""
+    payload = json.dumps(created)
+    client = GitHubForge(github._repository_id(REPOSITORY), run=lambda *_a, **_k: payload)
+
+    with pytest.raises(forge.ForgeIssueTypeNotSetError) as excinfo:
+        client.create_issue(title="Scheibe 4", body="", kind=ItemKind.CONTAINER)
+
+    assert (excinfo.value.created, str(excinfo.value)) == (
+        101,
+        "created #101 but GitHub did not set its type Container",
+    )
+
+
+def closed_issue_row(
+    number: int, closed_at: str, *, is_pull_request: bool = False
+) -> dict[str, object]:
+    return {
+        "number": number,
+        "title": f"Issue {number}",
+        "closedAt": closed_at,
+        "isPullRequest": is_pull_request,
+    }
+
+
+def test_github_adapter_lists_only_issues_closed_since_the_cutoff() -> None:
+    """The twin search's closed half (#444): GitHub's `since` filters by the
+    last update, so an issue closed before the cutoff but touched after it
+    is dropped here, and a pull request never counts as an issue."""
+    observed: list[list[str]] = []
+    rows = (
+        closed_issue_row(7, "2026-09-20T10:00:00Z"),
+        closed_issue_row(8, "2026-08-01T10:00:00Z"),
+        closed_issue_row(9, "2026-09-21T10:00:00Z", is_pull_request=True),
+    )
+
+    def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
+        observed.append(arguments)
+        return "\n".join(json.dumps(row) for row in rows)
+
+    client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
+    since = datetime(2026, 8, 27, 10, 0, tzinfo=UTC)
+
+    closed = client.list_recently_closed_issues(since)
+
+    assert closed == (forge.ClosedIssue(7, "Issue 7"),)
+    assert observed == [
+        [
+            "api",
+            f"repos/{REPOSITORY}/issues?state=closed&since=2026-08-27T10:00:00Z"
+            "&per_page=100&page=1",
+            "--jq",
+            '.[] | {number,title,closedAt:.closed_at,isPullRequest:has("pull_request")}',
+        ]
+    ]
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        pytest.param([], id="not-an-object"),
+        pytest.param({**closed_issue_row(7, "2026-09-20T10:00:00Z"), "number": 0}, id="number"),
+        pytest.param({**closed_issue_row(7, "2026-09-20T10:00:00Z"), "title": None}, id="title"),
+        pytest.param(closed_issue_row(7, "20.09.2026"), id="closed-at"),
+        pytest.param(
+            {**closed_issue_row(7, "2026-09-20T10:00:00Z"), "isPullRequest": None},
+            id="pull-request-flag",
+        ),
+    ],
+)
+def test_github_adapter_fails_loud_on_a_malformed_closed_issue(row: object) -> None:
+    client = GitHubForge(
+        github._repository_id(REPOSITORY), run=lambda *_arguments, **_options: json.dumps(row)
+    )
+    since = datetime(2026, 8, 27, tzinfo=UTC)
+
+    with pytest.raises(forge.ForgeMalformedResponseError, match="malformed closed issue"):
+        client.list_recently_closed_issues(since)
 
 
 def test_github_adapter_links_an_existing_child_by_reading_its_internal_id() -> None:

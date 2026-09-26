@@ -577,9 +577,27 @@ class TestStateRefBoardMethods:
 
         assert adapter.item_reference(CHILD_A_NUMBER).state is forge.ItemState.CLOSED
 
-    def test_landing_is_unsupported(self, state_ref_board: StateRefBoard) -> None:
-        with pytest.raises(forge.ForgeUnsupportedError, match="not yet derived"):
-            state_ref_board.landing(CHILD_A_NUMBER)
+    @pytest.mark.parametrize(
+        ("unsupported_call", "sentence"),
+        [
+            pytest.param(
+                lambda adapter: adapter.landing(CHILD_A_NUMBER), "not yet derived", id="landing"
+            ),
+            pytest.param(
+                lambda adapter: adapter.create_issue(title="T", body="", kind=ItemKind.TASK),
+                "created by aco item new",
+                id="create_issue",
+            ),
+        ],
+    )
+    def test_unsupported_operations_refuse_by_name(
+        self,
+        state_ref_board: StateRefBoard,
+        unsupported_call: Callable[[StateRefBoard], object],
+        sentence: str,
+    ) -> None:
+        with pytest.raises(forge.ForgeUnsupportedError, match=sentence):
+            unsupported_call(state_ref_board)
 
     def test_parent_issue_is_none_for_an_item_without_one(
         self, state_ref_board: StateRefBoard
@@ -645,6 +663,28 @@ class TestStateRefBoardMethods:
 
         assert dependencies[0].state is board.BlockerState.CLOSED
         assert dependencies[0].closed_at == datetime(2026, 9, 14, tzinfo=UTC)
+
+    def test_list_recently_closed_issues_keeps_only_items_closed_at_or_after_the_cutoff(
+        self,
+    ) -> None:
+        """Issue #444's twin search: an item closed before `since` is past the
+        window and never listed; one closed exactly at it is."""
+        closed_in_window = _record(
+            title="In window", state="closed", kind="task", closed_at="2026-09-01T00:00:00Z"
+        )
+        closed_before = _record(
+            title="Before", state="closed", kind="task", closed_at="2026-08-31T23:59:59Z"
+        )
+        adapter = _state_ref_board(
+            {
+                f"{CHILD_A_ID}.md": _state_ref_body(_CHILD_A_PROJECTION, closed_in_window).encode(),
+                f"{CHILD_B_ID}.md": _state_ref_body(_CHILD_B_PROJECTION, closed_before).encode(),
+            }
+        )
+
+        closed = adapter.list_recently_closed_issues(datetime(2026, 9, 1, tzinfo=UTC))
+
+        assert closed == (forge.ClosedIssue(CHILD_A_NUMBER, "In window"),)
 
     def test_pull_request_listings_are_always_empty(self, state_ref_board: StateRefBoard) -> None:
         assert state_ref_board.list_open_board_pull_requests() == ()
@@ -2868,6 +2908,34 @@ class TestCliStateRefForge:
         )
         after = store.fetch_state(worktree=worktree, remote=remote_url)
         assert after.tip == before.tip
+
+    def test_item_new_refuses_a_title_twinning_a_just_closed_item(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+    ) -> None:
+        """Issue #444: the twin search reads state-ref items too -- an item
+        closed a moment ago still twins a fresh `item new` of its title,
+        leaving the remote's tip untouched; `--not-a-twin` creates anyway."""
+        self._live_state_ref_checkout(
+            monkeypatch, tmp_path, bare_remote, worktree, _close_scenario_item_files()
+        )
+        assert issue_claim.main(["item", "close", str(CLOSE_BLOCKER_NUMBER)]) == 0
+        capsys.readouterr()
+        remote_url = f"file://{bare_remote}"
+        before = store.fetch_state(worktree=worktree, remote=remote_url)
+
+        refused = issue_claim.main(["item", "new", "--title", "blocker"])
+
+        assert (refused, capsys.readouterr().err) == (
+            2,
+            f"ERROR: possible twin #{CLOSE_BLOCKER_NUMBER}; pass --not-a-twin\n",
+        )
+        assert store.fetch_state(worktree=worktree, remote=remote_url).tip == before.tip
+        assert issue_claim.main(["item", "new", "--title", "blocker", "--not-a-twin"]) == 0
 
     def test_item_close_sets_state_and_closed_at_leaves_board_and_next_and_names_the_freed_item(
         self,

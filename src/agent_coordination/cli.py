@@ -5,14 +5,15 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import threading
 import tomllib
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field, replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal, NoReturn, cast
@@ -59,6 +60,7 @@ ITEM_WHOLE_HELP = (
     "one sentence justifying this item's own wide scope, stored in its body; "
     "claim/start read it as --whole's own fallback when the call itself names none"
 )
+NOT_A_TWIN_HELP = "create even though an open or recently closed issue carries a similar title"
 START_DESCRIPTION = (
     "Creates the item's linked worktree and branch from the canonical remote's own trunk "
     "when neither exists yet, then claims it exactly as aco claim would; a second call "
@@ -642,6 +644,7 @@ def _add_cut_parser(commands: argparse._SubParsersAction) -> None:
             "cut slice's own row scope when it has none, and becomes the child's scope"
         ),
     )
+    cut.add_argument("--not-a-twin", action="store_true", help=NOT_A_TWIN_HELP)
     _add_json_flag(cut)
 
 
@@ -755,12 +758,14 @@ def _add_brief_parser(commands: argparse._SubParsersAction) -> None:
 
 
 def _add_item_parser(commands: argparse._SubParsersAction) -> None:
-    item = commands.add_parser(
-        "item", help="create or show one work item straight in refs/aco/state"
-    )
+    item = commands.add_parser("item", help="create, show, edit, or close one work item")
     item_commands = _add_subcommands(item, "item_command")
     new = item_commands.add_parser(
-        "new", help="create a fresh item in refs/aco/state and print its id"
+        "new",
+        help=(
+            "create a fresh item and print its id; under storage = github, a GitHub issue "
+            "whose body is read from stdin"
+        ),
     )
     new.add_argument("--title", required=True, help="the fresh item's title")
     new.add_argument(
@@ -792,6 +797,7 @@ def _add_item_parser(commands: argparse._SubParsersAction) -> None:
         help="this item's size class, for the board's own measured estimate; default none",
     )
     new.add_argument("--whole", metavar="REASON", help=ITEM_WHOLE_HELP)
+    new.add_argument("--not-a-twin", action="store_true", help=NOT_A_TWIN_HELP)
     _add_json_flag(new)
     show = item_commands.add_parser(
         "show", help="print one item's header and its stored body byte-exact"
@@ -3132,19 +3138,29 @@ def _state_ref_forge(
     )
 
 
-ITEM_NEW_GITHUB_REFUSAL = "items live on the forge; open the issue there"
+def _github_forge(repo: str | None, canonical_remote: str) -> github.GitHubForge:
+    """The `github` storage pin's forge: `--repo`, else the canonical
+    remote's own repository (`_resolved_forge_target`) -- the one place this
+    module builds `github.GitHubForge`, as `_state_ref_forge` is for its pin."""
+    return github.GitHubForge(_resolved_forge_target(repo, canonical_remote))
+
+
+ITEM_NEW_ORIGIN_ON_GITHUB_REFUSAL = '--origin needs storage = "state-ref"'
 
 
 class ItemReason(StrEnum):
     """`aco item`'s own `--json` `reason` vocabulary, shared across its four
     subcommands (issue #425, `specs/item.spec.md`): `created`/`edited`/
     `closed`/`shown` name each subcommand's own success. `body_invalid`
-    covers only `item edit`'s own piped-body shape check (`_body_shape_defects`,
-    the same check `body --check` runs), carrying `defects` the same way
-    (`BodyCheckReason`, issue #404). Every other refusal -- a `storage =
-    "github"` command, a missing item or parent, a pull request target, a
-    forge write capability, or a live claim still on the item -- is
-    `precondition_failed`, this command family's single generic bucket."""
+    covers only `item new`'s and `item edit`'s own piped-body shape check
+    (`_body_shape_defects`, the same check `body --check` runs), carrying
+    `defects` the same way (`BodyCheckReason`, issue #404); `partial_write`
+    only a GitHub issue `item new` created but could not type or record under
+    its `--parent` (issue #444), `cut`'s own shape. Every other refusal -- a
+    `storage = "github"` command, a missing item or parent, a possible twin,
+    a pull request target, a forge write capability, or a live claim still
+    on the item -- is `precondition_failed`, this command family's single
+    generic bucket."""
 
     CREATED = "created"
     EDITED = "edited"
@@ -3152,6 +3168,7 @@ class ItemReason(StrEnum):
     SHOWN = "shown"
     PRECONDITION_FAILED = "precondition_failed"
     BODY_INVALID = "body_invalid"
+    PARTIAL_WRITE = "partial_write"
 
 
 def _refuse_item_body_invalid(defects: tuple[str, ...], *, as_json: bool) -> int:
@@ -3162,48 +3179,118 @@ def _refuse_item_body_invalid(defects: tuple[str, ...], *, as_json: bool) -> int
 
 
 def _cmd_item_new(parsed: argparse.Namespace) -> int:
-    """`aco item new` (issues #285, #316): the one write path for a fresh
-    state-ref item -- `StateRefBoard.create_item`, the same CAS write
-    `cut`'s own `create_child` performs, generalized to an optional
-    parent and origin -- so this module never grows a second way to
-    create one. `--origin` binds the fresh item to a foreign forge issue
-    (`items.parse_origin`'s own grammar, refused by `argparse` before this
-    ever runs) without aco governing that forge at all. Refuses under
-    `storage = "github"`: the forge is pulled, never governed, so aco
-    never opens a GitHub issue on a repository's behalf. Never resolves
-    the generic `_LazyForge` (issue #248) -- it calls `_state_ref_forge`
-    directly, since `create_item` is not part of the generic `ForgeWriter`
-    port every other write command narrows to. Every refusal reports
-    through the shared envelope as `precondition_failed` (issue #425)."""
+    """`aco item new` (issues #285, #316, #444): one fresh item under
+    either storage pin, each through its own adapter's write
+    (`_item_new_on_github`, `_item_new_on_state_ref`), both behind the same
+    twin search `cut` runs (`_refuse_possible_twin`). Every refusal but a
+    malformed piped body or a partial GitHub write reports through the
+    shared envelope as `precondition_failed` (issue #425)."""
     as_json = parsed.json
     try:
-        toplevel = _resolve_toplevel()
-        config = _board_config(toplevel)
-        if config.storage is not body.Storage.STATE_REF:
-            raise protocol.ClaimUnavailableError(ITEM_NEW_GITHUB_REFUSAL)
-        client = _state_ref_forge(parsed.repo, config.canonical_remote)
-        parent_missing = (
-            parsed.parent is not None
-            and client.item_reference(parsed.parent).state is forge.ItemState.MISSING
-        )
-        if parent_missing:
-            raise protocol.ClaimUnavailableError(f"#{parsed.parent} does not exist")
-        kind = body.ItemKind(parsed.kind)
-        skeleton = (
-            body.BLOCK_CONTAINER_SKELETON
-            if kind is body.ItemKind.CONTAINER
-            else body.BLOCK_CHILD_SKELETON
-        )
-        new_body = _block_body_with_scope(skeleton, _requested_body_scope(parsed.scope))
-        new_body = _block_body_with_size(new_body, parsed.size)
-        new_body = _block_body_with_whole(new_body, _requested_whole_reason(parsed.whole))
-        item_id = client.create_item(
-            title=parsed.title, body=new_body, kind=kind, parent=parsed.parent, origin=parsed.origin
-        )
-        _print_item_new_result(item_id, items.item_number(item_id), as_json=as_json)
-        return 0
+        config = _board_config(_resolve_toplevel())
+        if config.storage is body.Storage.GITHUB:
+            return _item_new_on_github(parsed, config.canonical_remote)
+        return _item_new_on_state_ref(parsed, config.canonical_remote)
+    except _PartialWriteError as error:
+        return _refuse_partial_write(error, ItemReason.PARTIAL_WRITE, as_json=as_json)
     except protocol.ClaimError as error:
         return _refuse(ItemReason.PRECONDITION_FAILED, error, as_json=as_json)
+
+
+def _item_new_body(parsed: argparse.Namespace, raw_body: str) -> str:
+    """`raw_body` with `item new`'s own `--scope`, `--size`, and `--whole`
+    written into its `agent-claim` block, each only when given."""
+    new_body = _block_body_with_scope(raw_body, _requested_body_scope(parsed.scope))
+    new_body = _block_body_with_size(new_body, parsed.size)
+    return _block_body_with_whole(new_body, _requested_whole_reason(parsed.whole))
+
+
+def _item_new_on_github(parsed: argparse.Namespace, canonical_remote: str) -> int:
+    """`item new` under `storage = "github"` (issue #444): the body piped on
+    stdin passes the same shape check `aco check <n>` applies before
+    anything else is read or written, so an invalid body creates nothing;
+    `--parent` must name an open container; then the twin search, the only
+    guard against a second run: the issue an earlier run created carries
+    the same title, so the search names it. Then one issue of the
+    organization's type for `--kind`, recorded under `--parent` when given
+    (`create_child`, else `create_issue`); a type or relation write that
+    fails after the create refuses naming the issue and what is left to do
+    by hand, never a re-run. `--origin` binds a state-ref item only: a
+    GitHub issue binds to no foreign one."""
+    if parsed.origin is not None:
+        raise protocol.ClaimUnavailableError(ITEM_NEW_ORIGIN_ON_GITHUB_REFUSAL)
+    raw_body = _read_body_check_input()
+    defects = _body_shape_defects(raw_body)
+    if defects:
+        return _refuse_item_body_invalid(defects, as_json=parsed.json)
+    new_body = _item_new_body(parsed, raw_body)
+    client = _github_forge(parsed.repo, canonical_remote)
+    open_issues = client.list_open_board_issues()
+    if parsed.parent is not None:
+        _open_container(open_issues, parsed.parent)
+    if not parsed.not_a_twin:
+        _refuse_possible_twin(client, parsed.title, open_issues, parent=parsed.parent)
+    kind = body.ItemKind(parsed.kind)
+    try:
+        number = (
+            client.create_issue(title=parsed.title, body=new_body, kind=kind)
+            if parsed.parent is None
+            else client.create_child(
+                parent=parsed.parent, title=parsed.title, body=new_body, kind=kind
+            )
+        )
+    except forge.ForgeIssueTypeNotSetError as error:
+        relation = "" if parsed.parent is None else f" and record it under #{parsed.parent}"
+        raise _PartialWriteError(
+            error, recovery=f"set that type{relation} on the forge by hand"
+        ) from error
+    except forge.ForgePartialChildCreationError as error:
+        raise _PartialWriteError(
+            error, recovery="record that sub-issue relation on the forge by hand"
+        ) from error
+    _print_item_new_result(
+        board.item_label(number, body.Storage.GITHUB), number, as_json=parsed.json
+    )
+    return 0
+
+
+def _item_new_on_state_ref(parsed: argparse.Namespace, canonical_remote: str) -> int:
+    """`item new` under `storage = "state-ref"` (issues #285, #316): the one
+    write path for a fresh state-ref item -- `StateRefBoard.create_item`,
+    the same CAS write `cut`'s own `create_child` performs, generalized to
+    an optional parent and origin -- so this module never grows a second
+    way to create one. `--origin` binds the fresh item to a foreign forge
+    issue (`items.parse_origin`'s own grammar, refused by `argparse` before
+    this ever runs) without aco governing that forge at all. Never resolves
+    the generic `_LazyForge` (issue #248) -- it calls `_state_ref_forge`
+    directly, since `create_item` is not part of the generic `ForgeWriter`
+    port every other write command narrows to."""
+    client = _state_ref_forge(parsed.repo, canonical_remote)
+    parent_missing = (
+        parsed.parent is not None
+        and client.item_reference(parsed.parent).state is forge.ItemState.MISSING
+    )
+    if parent_missing:
+        raise protocol.ClaimUnavailableError(f"#{parsed.parent} does not exist")
+    if not parsed.not_a_twin:
+        _refuse_possible_twin(
+            client, parsed.title, client.list_open_board_issues(), parent=parsed.parent
+        )
+    kind = body.ItemKind(parsed.kind)
+    skeleton = (
+        body.BLOCK_CONTAINER_SKELETON
+        if kind is body.ItemKind.CONTAINER
+        else body.BLOCK_CHILD_SKELETON
+    )
+    item_id = client.create_item(
+        title=parsed.title,
+        body=_item_new_body(parsed, skeleton),
+        kind=kind,
+        parent=parsed.parent,
+        origin=parsed.origin,
+    )
+    _print_item_new_result(item_id, items.item_number(item_id), as_json=parsed.json)
+    return 0
 
 
 def _print_item_new_result(item_id: str, number: int, *, as_json: bool) -> None:
@@ -3233,10 +3320,8 @@ def _cmd_item_edit(parsed: argparse.Namespace) -> int:
     `update_item_body`'s own owner rule; `updated_at` always moves to now;
     `title`, `labels`, `blocked_by` come from the piped record when it
     carries one. Refuses under `storage = "github"`: forge issues are edited
-    on the forge, never governed by aco -- mirrors `item new`'s own refusal,
-    and calls `_state_ref_forge` directly for the same reason (`create_item`/
-    `update_item_body` are not part of the generic `ForgeWriter` port every
-    other write command narrows to). A malformed piped body reports through
+    on the forge, never governed by aco. Calls `_state_ref_forge` directly,
+    as `item new`'s state-ref path does. A malformed piped body reports through
     the shared envelope as `body_invalid`, with `body --check`'s own
     `defects`; every other refusal is `precondition_failed` (issue #425)."""
     if parsed.size is not None:
@@ -3721,8 +3806,7 @@ class _LazyForge:
                     self._repo, canonical_remote, directory=self._directory
                 )
             else:
-                target = _resolved_forge_target(self._repo, canonical_remote)
-                self._resolved = github.GitHubForge(target)
+                self._resolved = _github_forge(self._repo, canonical_remote)
         return self._resolved
 
     def writer(self) -> forge.ForgeWriter:
@@ -3731,8 +3815,9 @@ class _LazyForge:
         this tool builds -- `github.GitHubForge`, `state_board.StateRefBoard`
         (its `ItemWriter` injected by `_state_ref_forge`), and every test
         fake standing in for either -- already implements the full
-        `ForgeWriter` surface, checked at each call site by `capability()`,
-        never by `isinstance`.
+        `ForgeWriter` surface, an unsupported operation as a method raising
+        `forge.ForgeUnsupportedError`, checked at each call site by
+        `capability()`, never by `isinstance`.
         """
         return cast(forge.ForgeWriter, self())
 
@@ -5847,14 +5932,22 @@ def _print_release_result(report: ReleaseReport, *, as_json: bool) -> None:
         print(f"worktree: {worktree_cleanup_outcome_text(report.worktree)}")
 
 
-def _cut_target(client: forge.ForgeWriter, number: int) -> board.Issue:
-    """The open container `cut` targets, or why it refuses before any write."""
-    open_issues = client.list_open_board_issues()
+def _open_container(open_issues: Iterable[board.Issue], number: int) -> board.Issue:
+    """`number`'s open issue when its type is a container -- `cut`'s own
+    target and `item new --parent` (issue #444) -- or why it is not."""
     target = next((issue for issue in open_issues if issue.number == number), None)
     if target is None:
         raise protocol.ClaimUnavailableError(f"#{number} is not an open container")
     if target.kind is not body.ItemKind.CONTAINER:
         raise protocol.ClaimUnavailableError(f"#{number} is not a container")
+    return target
+
+
+def _cut_target(
+    client: forge.ForgeWriter, open_issues: Iterable[board.Issue], number: int
+) -> board.Issue:
+    """The open container `cut` targets, or why it refuses before any write."""
+    target = _open_container(open_issues, number)
     parent = client.parent_issue(number)
     if parent is not None:
         raise protocol.ClaimUnavailableError(
@@ -5923,16 +6016,17 @@ def _print_cut_result(
     print(f"{verb} #{number}{suffix} -> #{child}")
 
 
-class _CutPartialWriteError(protocol.ClaimError):
-    """Wraps `forge.ForgePartialChildCreationError` so `_cmd_cut` can choose
-    `partial_write`'s own structured `--json` shape (`written`, `failed`)
-    without parsing the wrapped error's prose (mirrors `ask`/`rule`'s own
-    `_TargetUnavailableError`/`_InvalidTargetError`, issue #396)."""
+class _PartialWriteError(protocol.ClaimError):
+    """Wraps `forge.ForgePartialCreationError` so `cut` and `item new`
+    can choose `partial_write`'s own structured `--json` shape (`written`,
+    `failed`) without parsing the wrapped error's prose (mirrors `ask`/
+    `rule`'s own `_TargetUnavailableError`/`_InvalidTargetError`, issue
+    #396); `recovery` is the caller's own way to finish the write."""
 
-    def __init__(self, error: forge.ForgePartialChildCreationError) -> None:
-        self.written = error.child
+    def __init__(self, error: forge.ForgePartialCreationError, *, recovery: str) -> None:
+        self.written = error.created
         self.failed = error.step
-        super().__init__(f"{error}; re-run the same cut -- it adopts the child")
+        super().__init__(f"{error}; {recovery}")
 
 
 def _body_with_parent(skeleton: str, parent: int | None) -> str:
@@ -6018,28 +6112,34 @@ def _orphan_names_container(raw_body: str, container: int) -> bool:
 
 
 def _adoptable_child(
-    client: forge.ForgeWriter, container: int, title: str, idea_label: str | None
+    client: forge.ForgeWriter,
+    container: int,
+    title: str,
+    idea_label: str | None,
+    open_issues: Iterable[board.Issue],
 ) -> board.ChildItem | None:
     """`container`'s already-open child titled exactly `title`, so a repeat
     `cut` after a partial failure (`forge.ForgePartialChildCreationError`)
     adopts the child GitHub already recorded instead of risking a second one
     (#260). Two sources can carry that child: already linked under
-    `container` (`list_children`), or an orphan -- an open issue with no
-    recorded parent at all, exactly the shape a failed `link_child` POST
-    leaves behind. A title match alone is too weak to adopt an orphan: any
-    unrelated open issue anywhere in the repository -- including one a
-    human filed -- could share it. An orphan is adoptable only when it is
-    also a `TASK` (never the container itself, never an idea-labelled item)
-    and its body still names `container` as the parent `_cut_child_body`
-    wrote for it; a recovery orphan is always exactly that shape, and
-    nothing else can fake it. An orphan match is linked under `container`
-    right here before it is returned, so the caller's remaining steps treat
-    it exactly like an already-linked child; the container's own issue is
-    never created twice for it. More than one open match refuses by name
-    rather than guess which one the failed cut actually created. A closed
-    linked child with that title refuses too -- adoption finishes an
-    interrupted cut, it does not reopen a closed one. `None` when nothing
-    matches, so the caller falls through to `create_child`.
+    `container` (`list_children`), or an orphan -- one of the caller's own
+    `open_issues` snapshot with no recorded parent at all, exactly the shape
+    a failed `link_child` POST leaves behind. A title match alone is too
+    weak to adopt an orphan: any unrelated open issue anywhere in the
+    repository -- including one a human filed -- could share it. An orphan
+    is adoptable only when it is also a `TASK` (never the container itself,
+    never an idea-labelled item) and its body still names `container` as the
+    parent `_cut_child_body` wrote for it; a recovery orphan is always
+    exactly that shape, and nothing else can fake it. An untyped orphan
+    (`forge.ForgeIssueTypeNotSetError`, issue #444) is never adopted: the
+    twin search names it instead. An orphan match is linked under
+    `container` right here before it is returned, so the caller's remaining steps treat it exactly
+    like an already-linked child; the container's own issue is never created
+    twice for it. More than one open match refuses by name rather than guess
+    which one the failed cut actually created. A closed linked child with
+    that title refuses too -- adoption finishes an interrupted cut, it does
+    not reopen a closed one. `None` when nothing matches, so the caller
+    falls through to `create_child`.
     """
     linked = [
         child
@@ -6049,7 +6149,7 @@ def _adoptable_child(
     open_linked = [child.number for child in linked if child.state is board.ChildState.OPEN]
     orphans = [
         issue.number
-        for issue in client.list_open_board_issues()
+        for issue in open_issues
         if issue.title == title
         and issue.number != container
         and issue.kind is body.ItemKind.TASK
@@ -6076,6 +6176,63 @@ def _adoptable_child(
         f"#{container} already has a closed child #{closed.number} titled {title!r}; "
         "reopen it or remove the row by hand"
     )
+
+
+# How far back a closed issue still counts for the twin search (issue #444):
+# a duplicate usually repeats an item closed weeks, not months, ago.
+TWIN_SEARCH_CLOSED_WINDOW = timedelta(days=30)
+# Two titles are possible twins when at least this share of their combined
+# distinct casefolded words appears in both (issue #444).
+TWIN_TITLE_WORD_OVERLAP = 0.6
+_TITLE_WORD = re.compile(r"\w+")
+
+
+def _title_words(title: str) -> frozenset[str]:
+    return frozenset(_TITLE_WORD.findall(title.casefold()))
+
+
+def _title_overlap(title: str, other: str) -> float:
+    """The share of both titles' combined distinct words they have in
+    common; an identical title overlaps fully even without a single word,
+    so a re-run is always named as its own earlier run's twin."""
+    if other == title:
+        return 1.0
+    first, second = _title_words(title), _title_words(other)
+    combined = first | second
+    return len(first & second) / len(combined) if combined else 0.0
+
+
+def _possible_twin(title: str, candidates: Iterable[tuple[int, str]]) -> int | None:
+    """The candidate whose title overlaps `title` most, at least
+    `TWIN_TITLE_WORD_OVERLAP`, the lower number on a tie; `None` when no
+    candidate reaches it."""
+    hits = [
+        (overlap, number)
+        for number, other in candidates
+        if (overlap := _title_overlap(title, other)) >= TWIN_TITLE_WORD_OVERLAP
+    ]
+    return min(hits, key=lambda hit: (-hit[0], hit[1]))[1] if hits else None
+
+
+def _refuse_possible_twin(
+    client: forge.ForgeReader,
+    title: str,
+    open_issues: Iterable[board.Issue],
+    *,
+    parent: int | None,
+) -> None:
+    """The one twin search `item new` and `cut` run before they create an
+    issue (issue #444): the titles of every open issue and every issue closed
+    within `TWIN_SEARCH_CLOSED_WINDOW`, never the new issue's own `parent`.
+    A hit refuses by number; `--not-a-twin` is the caller's way past it."""
+    since = datetime.now(UTC) - TWIN_SEARCH_CLOSED_WINDOW
+    candidates = [
+        *((issue.number, issue.title) for issue in open_issues),
+        *((issue.number, issue.title) for issue in client.list_recently_closed_issues(since)),
+    ]
+    twin = _possible_twin(title, (entry for entry in candidates if entry[0] != parent))
+    if twin is not None:
+        raise protocol.ClaimUnavailableError(f"possible twin #{twin}; pass --not-a-twin")
 
 
 def _block_slice_entries(data: Mapping[str, object]) -> list[dict[str, object]]:
@@ -6163,20 +6320,26 @@ def _cut_row_scope(
     return requested
 
 
+CUT_RERUN_RECOVERY = "re-run the same cut -- it adopts the child"
+CUT_TYPE_RECOVERY = f"set that type on the forge by hand, then {CUT_RERUN_RECOVERY}"
+
+
 def _cut_slice(
     client: forge.ForgeWriter,
     target: board.Issue,
+    open_issues: Iterable[board.Issue],
     parsed: argparse.Namespace,
-    idea_label: str | None,
-    storage: body.Storage,
+    config: board.BoardConfig,
 ) -> int:
     number = target.number
-    located = _located_block_or_refuse(number, target.body, command="cut", storage=storage)
+    located = _located_block_or_refuse(number, target.body, command="cut", storage=config.storage)
     link = _cut_link(number, located.data, parsed.row)
     if link is not None:
         _require_matching_title(number, link, parsed.title)
     child_scope = _cut_row_scope(link, _requested_body_scope(parsed.scope))
-    adopted = _adoptable_child(client, number, parsed.title, idea_label)
+    adopted = _adoptable_child(client, number, parsed.title, config.idea_label, open_issues)
+    if adopted is None and not parsed.not_a_twin:
+        _refuse_possible_twin(client, parsed.title, open_issues, parent=number)
     try:
         child = (
             adopted.number
@@ -6198,8 +6361,10 @@ def _cut_slice(
             new_body = body.replace_agent_claim_block(target.body, located, new_data)
             step = f"remove row {link.index} from #{number}'s agent-claim block"
             _link_created_child(client, number, new_body, child, step)
+    except forge.ForgeIssueTypeNotSetError as error:
+        raise _PartialWriteError(error, recovery=CUT_TYPE_RECOVERY) from error
     except forge.ForgePartialChildCreationError as error:
-        raise _CutPartialWriteError(error) from error
+        raise _PartialWriteError(error, recovery=CUT_RERUN_RECOVERY) from error
     _print_cut_result(
         number,
         None if link is None else link.index,
@@ -6210,12 +6375,14 @@ def _cut_slice(
     return 0
 
 
-def _refuse_cut_partial_write(error: _CutPartialWriteError, *, as_json: bool) -> int:
+def _refuse_partial_write(
+    error: _PartialWriteError, reason: CutReason | ItemReason, *, as_json: bool
+) -> int:
     print(f"{CLI_ERROR_PREFIX}{error}", file=sys.stderr)
     if as_json:
         _emit_json(
             False,
-            CutReason.PARTIAL_WRITE,
+            reason,
             written=error.written,
             failed=error.failed,
             message=str(error),
@@ -6225,7 +6392,7 @@ def _refuse_cut_partial_write(error: _CutPartialWriteError, *, as_json: bool) ->
 
 def _cmd_cut(parsed: argparse.Namespace, session: _WriteSession) -> int:
     """`cut`'s own `--json` envelope (issue #425): a partial write reports
-    through `_refuse_cut_partial_write`'s own structured shape; every other
+    through `_refuse_partial_write`'s own structured shape; every other
     refusal past the parser is `precondition_failed`, matching this
     command's single generic refusal bucket."""
     as_json = parsed.json
@@ -6242,11 +6409,12 @@ def _cmd_cut(parsed: argparse.Namespace, session: _WriteSession) -> int:
                     f"this forge cannot {operation.value}; cut the slice by hand"
                 )
         config = _load_board_config(client, _resolve_toplevel())
+        open_issues = client.list_open_board_issues()
         return _cut_slice(
-            client, _cut_target(client, number), parsed, config.idea_label, config.storage
+            client, _cut_target(client, open_issues, number), open_issues, parsed, config
         )
-    except _CutPartialWriteError as error:
-        return _refuse_cut_partial_write(error, as_json=as_json)
+    except _PartialWriteError as error:
+        return _refuse_partial_write(error, CutReason.PARTIAL_WRITE, as_json=as_json)
     except protocol.ClaimError as error:
         return _refuse(CutReason.PRECONDITION_FAILED, error, as_json=as_json)
 
