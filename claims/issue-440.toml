@@ -3,6 +3,6 @@ agent = "Claude head (coordinator)"
 role = "builder"
 base = "382a5b4a3e2c1c768ba8157a10bbb190bb588ade"
 branch = "claude/issue-440-board-speed"
-scope = ["specs/board.spec.md", "src/agent_coordination/board_html.py", "src/agent_coordination/board_serve.py", "src/agent_coordination/cli.py", "src/agent_coordination/forge.py", "src/agent_coordination/github.py", "tests/test_board_html.py", "tests/test_board_serve.py", "tests/test_cli.py", "tests/test_github.py"]
+scope = ["specs/board.spec.md", "src/agent_coordination/board_html.py", "src/agent_coordination/board_serve.py", "src/agent_coordination/cli.py", "src/agent_coordination/forge.py", "src/agent_coordination/github.py", "src/agent_coordination/state_board.py", "tests/test_board_html.py", "tests/test_board_serve.py", "tests/test_cli.py", "tests/test_github.py", "tests/test_state_board.py"]
 opened_commit = "98542934b04464c7d54fa9ccd1339521eaedb305"
 whole_reason = "eine Messung, eine Ursache: der Batch-Leser, seine Einbindung und der Serve-Cache gehören zusammen"
