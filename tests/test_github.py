@@ -1472,6 +1472,16 @@ def test_github_adapter_item_references_fails_loud_on_a_malformed_response(
             "FORBIDDEN",
             id="error-not-not-found",
         ),
+        pytest.param(
+            json.dumps(
+                {
+                    "data": {"repository": {"n0": None}},
+                    "errors": [{"type": "NOT_FOUND", "path": ["repository", []]}],
+                }
+            ),
+            "NOT_FOUND",
+            id="error-path-alias-not-a-string",
+        ),
     ],
 )
 def test_github_adapter_item_references_reraises_an_unrecovered_graphql_error(

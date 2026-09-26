@@ -292,6 +292,8 @@ def _is_recovered_not_found_error(
     if not isinstance(path, list) or len(path) != _ITEM_REFERENCE_ERROR_PATH_LENGTH:
         return False
     section, alias = path
+    if not isinstance(section, str) or not isinstance(alias, str):
+        return False
     return section == "repository" and alias in aliases and repository.get(alias) is None
 
 
