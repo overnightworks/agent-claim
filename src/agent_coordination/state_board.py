@@ -29,7 +29,7 @@ pull-request data.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from types import MappingProxyType
@@ -50,6 +50,7 @@ from .protocol import ClaimUnavailableError, MalformedStateTreeError, ObjectId
 STATE_REF_CAPABILITIES: Mapping[forge.ForgeOperation, forge.Capability] = MappingProxyType(
     {
         forge.ForgeOperation.ITEM_REFERENCE: forge.Capability.READ_ONLY,
+        forge.ForgeOperation.ITEM_REFERENCES: forge.Capability.READ_ONLY,
         forge.ForgeOperation.PARENT_ISSUE: forge.Capability.READ_ONLY,
         forge.ForgeOperation.LIST_CHILDREN: forge.Capability.READ_ONLY,
         forge.ForgeOperation.DEFAULT_BRANCH: forge.Capability.READ_ONLY,
@@ -258,6 +259,13 @@ class StateRefBoard:
         return forge.ItemReference(
             state, decoded.record.title, decoded.body, False, decoded.record.origin
         )
+
+    def item_references(self, numbers: Iterable[int]) -> Mapping[int, forge.ItemReference]:
+        """Every one of `numbers`, read straight from the already-fetched
+        `items/` tree (issue #440): this adapter performs no IO of its own at
+        all (module docstring), so there is no round trip here to batch --
+        `item_reference` per number costs the same as this already does."""
+        return {number: self.item_reference(number) for number in numbers}
 
     def landing(self, number: int) -> forge.Landing:
         raise forge.ForgeUnsupportedError(NO_LANDINGS_YET)

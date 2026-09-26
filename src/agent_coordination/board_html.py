@@ -34,7 +34,7 @@ import html
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC
+from datetime import UTC, timedelta
 from enum import StrEnum
 from pathlib import Path
 from typing import cast
@@ -47,16 +47,21 @@ RULE_OUTCOMES: tuple[str, ...] = ("yes", "no", "later")
 
 @dataclass(frozen=True)
 class ServedRuleForm:
-    """The two transport-owned facts `render` needs only when `board --serve`
+    """The transport-owned facts `render` needs only when `board --serve`
     (#280) is the caller, never when `board --html` writes a static page:
-    the loopback token every POST form must carry, and the refusal sentence
-    from the click that led back here, when the last one was refused. State
-    stays `render`'s only input otherwise -- this is not a second renderer,
-    just the one extra parameter that switches a card's affordance from a
-    copyable command to a live form."""
+    the loopback token every POST form must carry, the refusal sentence from
+    the click that led back here, when the last one was refused, and (issue
+    #440) how long ago the page it is about to render was actually built --
+    `cli._board_server`'s own cache holds one `board_html.BoardPage` between
+    `GET`s, and this is the one clock reading that page's own render still
+    needs, computed by the caller (`render` itself stays clockless) and
+    shown next to a reload control. State stays `render`'s only other input
+    -- this is not a second renderer, just the one extra parameter that
+    switches a card's affordance from a copyable command to a live form."""
 
     token: str
     refused: str | None = None
+    age: timedelta | None = None
 
 
 @dataclass(frozen=True)
@@ -638,6 +643,20 @@ def _origin_line(page: BoardPage) -> str:
     return f"{html.escape(page.repository)} {_ORIGIN_SEPARATOR} {html.escape(str(page.checkout))}"
 
 
+def _render_stand(served: ServedRuleForm | None) -> str:
+    """`board --serve`'s own held-page age, next to an explicit reload
+    control (issue #440): empty for `board --html`'s static page and for a
+    served page's very first render, before `cli._board_server` has built
+    anything to hold an age for."""
+    if served is None or served.age is None:
+        return ""
+    token = html.escape(served.token)
+    return (
+        f"<div><dt>Stand</dt><dd>vor {board.format_claim_age(served.age)}"
+        f' <a class="reload" href="/?t={token}&amp;reload=1">neu laden</a></dd></div>'
+    )
+
+
 def render(page: BoardPage, *, served: ServedRuleForm | None = None) -> str:
     """`page` alone renders `board --html`'s static page; passing `served`
     (issue #280) switches every card to its live `POST /rule` forms and, when
@@ -647,6 +666,7 @@ def render(page: BoardPage, *, served: ServedRuleForm | None = None) -> str:
     origin = _origin_line(page)
     facts = (
         f"<div><dt>state tip</dt><dd><code>{html.escape(page.state_tip or '-')}</code></dd></div>"
+        f"{_render_stand(served)}"
     )
     notice = (
         f'<p class="refused">{html.escape(served.refused)}</p>'

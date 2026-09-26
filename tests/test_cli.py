@@ -283,9 +283,7 @@ class FakeForge:
             raise ClaimError(f"GitHub has no pull request #{number}")
         return detail
 
-    def item_reference(self, number: int) -> forge.ItemReference:
-        self._run()
-        self.issue_reference_lookups.append(number)
+    def _item_reference_value(self, number: int) -> forge.ItemReference:
         served = self.issue_references.get(number)
         if served is not None:
             return served
@@ -293,6 +291,24 @@ class FakeForge:
         # `landings` is this fake's set of pull requests, so the one flag that
         # distributes `check` is derived from it rather than set twice.
         return forge.ItemReference(state, "", "", number in self.landings)
+
+    def item_reference(self, number: int) -> forge.ItemReference:
+        self._run()
+        self.issue_reference_lookups.append(number)
+        return self._item_reference_value(number)
+
+    def item_references(self, numbers: Iterable[int]) -> Mapping[int, forge.ItemReference]:
+        """This fake's mirror of `GitHubForge.item_references` (issue #440):
+        one `_run()` for the whole batch -- never one per number -- so a
+        test can assert `requests` against the same one-round-trip count the
+        real adapter now pays for any closed-item history that fits one
+        GraphQL block."""
+        ordered = tuple(dict.fromkeys(numbers))
+        if not ordered:
+            return {}
+        self._run()
+        self.issue_reference_lookups.extend(ordered)
+        return {number: self._item_reference_value(number) for number in ordered}
 
     def default_branch(self) -> str:
         self._run()
@@ -372,6 +388,9 @@ class _MinimalForgeReader:
 
     def item_reference(self, number: int) -> forge.ItemReference:
         return forge.ItemReference(state=forge.ItemState.MISSING)
+
+    def item_references(self, numbers: Iterable[int]) -> Mapping[int, forge.ItemReference]:
+        return {number: self.item_reference(number) for number in numbers}
 
     def landing(self, number: int) -> forge.Landing:
         raise NotImplementedError

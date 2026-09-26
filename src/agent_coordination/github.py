@@ -7,7 +7,7 @@ import os
 import re
 import sys
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime, timedelta
 from types import MappingProxyType
@@ -28,6 +28,22 @@ MAX_RECENT_MERGED_PULL_REQUESTS = 1000
 # instead. This bounds how many `gh` subprocesses run at once, comfortably
 # under GitHub's secondary rate limit for concurrent requests.
 PARALLEL_FETCH_CONCURRENCY = 20
+# GraphQL aliases every number into one query field, so a block this size
+# stays one round trip; GitHub's own guidance keeps a query's alias count in
+# the 50-100 range rather than one huge query per repository (issue #440).
+GRAPHQL_ITEM_REFERENCE_BATCH_SIZE = 100
+# `Repository.issueOrPullRequest`'s own `state` enum spans both `Issue`
+# (`OPEN`/`CLOSED`) and `PullRequest` (`OPEN`/`CLOSED`/`MERGED`); `forge.
+# ItemReference.state` only ever distinguishes open from not, matching the
+# REST issues endpoint `item_reference` reads a single number through, so a
+# merged pull request reads exactly like a closed one here too.
+_GRAPHQL_ITEM_STATES: dict[str, forge.ItemState] = {
+    "OPEN": forge.ItemState.OPEN,
+    "CLOSED": forge.ItemState.CLOSED,
+    "MERGED": forge.ItemState.CLOSED,
+}
+_GRAPHQL_ITEM_TYPENAMES = frozenset({"Issue", "PullRequest"})
+_MALFORMED_BATCHED_ITEM_REFERENCE = "GitHub returned a malformed batched item reference"
 GH_TIMEOUT_SECONDS = 60
 GH_QUIET_ENVIRONMENT = {
     "NO_COLOR": "1",
@@ -176,6 +192,53 @@ def _query_days(start: date, end: date) -> tuple[date, ...]:
     return tuple(start + timedelta(days=offset) for offset in range((end - start).days + 1))
 
 
+_ITEM_REFERENCE_FIELDS = (
+    "__typename ... on Issue { state title body } ... on PullRequest { state title body }"
+)
+
+
+def _item_reference_query(numbers: Sequence[int]) -> str:
+    """One GraphQL query reading every one of `numbers` through its own
+    alias (issue #440): `issueOrPullRequest` -- unlike the narrower `issue`
+    field -- answers for a pull request number too, matching `item_reference`'s
+    own REST read of a single number, and returns `null` for a number that
+    exists in neither space rather than a query-ending error, so a missing
+    item costs nothing beyond its own alias key coming back empty."""
+    aliases = "\n".join(
+        f"n{index}: issueOrPullRequest(number: {number}) {{ {_ITEM_REFERENCE_FIELDS} }}"
+        for index, number in enumerate(numbers)
+    )
+    return (
+        "query($owner: String!, $name: String!) { "
+        f"repository(owner: $owner, name: $name) {{ {aliases} }} }}"
+    )
+
+
+def _parsed_item_reference_node(node: object) -> forge.ItemReference:
+    """One alias's own value from `_item_reference_query`'s response: `None`
+    for a number GitHub could resolve to neither an issue nor a pull request
+    (`item_reference`'s own `ForgeNotFoundError` case), a malformed shape
+    raised loud, never guessed at."""
+    if node is None:
+        return forge.ItemReference(forge.ItemState.MISSING)
+    if not isinstance(node, dict):
+        raise forge.ForgeMalformedResponseError(_MALFORMED_BATCHED_ITEM_REFERENCE)
+    typename = node.get("__typename")
+    state = node.get("state")
+    title = node.get("title")
+    body = node.get("body")
+    if (
+        typename not in _GRAPHQL_ITEM_TYPENAMES
+        or state not in _GRAPHQL_ITEM_STATES
+        or not isinstance(title, str)
+        or (body is not None and not isinstance(body, str))
+    ):
+        raise forge.ForgeMalformedResponseError(_MALFORMED_BATCHED_ITEM_REFERENCE)
+    return forge.ItemReference(
+        _GRAPHQL_ITEM_STATES[state], title, body or "", typename == "PullRequest"
+    )
+
+
 def _decoded(result: process.BoundedResult, purpose: str) -> str:
     try:
         return strip_ansi(result.output.decode("utf-8")).strip()
@@ -250,6 +313,7 @@ def _bounded_command(command: list[str], *, purpose: str, input_data: bytes | No
 
 _READ_ONLY_OPERATIONS = (
     forge.ForgeOperation.ITEM_REFERENCE,
+    forge.ForgeOperation.ITEM_REFERENCES,
     forge.ForgeOperation.LANDING,
     forge.ForgeOperation.PARENT_ISSUE,
     forge.ForgeOperation.LIST_CHILDREN,
@@ -354,6 +418,56 @@ class GitHubForge:
             body or "",
             is_landing,
         )
+
+    def _item_reference_block(self, numbers: tuple[int, ...]) -> dict[int, forge.ItemReference]:
+        """One `numbers`-sized GraphQL round trip (issue #440): `item_
+        references`' own block, never called with more than `GRAPHQL_ITEM_
+        REFERENCE_BATCH_SIZE` numbers."""
+        raw = self._run(
+            [
+                "api",
+                "graphql",
+                "-f",
+                f"query={_item_reference_query(numbers)}",
+                "-f",
+                f"owner={self.repository.namespace[0]}",
+                "-f",
+                f"name={self.repository.name}",
+                "--jq",
+                ".data.repository",
+            ]
+        )
+        values = self._json_lines(raw, "batched item reference")
+        if len(values) != 1 or not isinstance(values[0], dict):
+            raise forge.ForgeMalformedResponseError(_MALFORMED_BATCHED_ITEM_REFERENCE)
+        nodes = values[0]
+        return {
+            number: _parsed_item_reference_node(nodes.get(f"n{index}"))
+            for index, number in enumerate(numbers)
+        }
+
+    def item_references(self, numbers: Iterable[int]) -> Mapping[int, forge.ItemReference]:
+        """Every one of `numbers`, batched into GraphQL blocks of
+        `GRAPHQL_ITEM_REFERENCE_BATCH_SIZE` (issue #440): the 32-call, fully
+        serial `gh api .../issues/N` walk `cli._closed_item_sizes` used to pay
+        (12.8 of an 18s board build) collapses to one round trip for any
+        repository whose closed-item history still fits one block, and stays
+        flat as that history grows -- a repository large enough to need more
+        than one block fetches them concurrently, capped the same way every
+        other sharded board read already is (`PARALLEL_FETCH_CONCURRENCY`)."""
+        ordered = tuple(dict.fromkeys(numbers))
+        if not ordered:
+            return {}
+        blocks = tuple(
+            ordered[start : start + GRAPHQL_ITEM_REFERENCE_BATCH_SIZE]
+            for start in range(0, len(ordered), GRAPHQL_ITEM_REFERENCE_BATCH_SIZE)
+        )
+        with ThreadPoolExecutor(max_workers=min(len(blocks), PARALLEL_FETCH_CONCURRENCY)) as pool:
+            results = list(pool.map(self._item_reference_block, blocks))
+        references: dict[int, forge.ItemReference] = {}
+        for result in results:
+            references.update(result)
+        return references
 
     def _json_lines(self, raw: str, description: str) -> tuple[object, ...]:
         """Parse compact NDJSON, pretty JSON, or a concatenated JSON sequence."""

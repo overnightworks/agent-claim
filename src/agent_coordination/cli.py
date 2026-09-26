@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import sys
+import threading
 import tomllib
 import uuid
 from collections.abc import Callable, Mapping, Sequence
@@ -1661,21 +1662,26 @@ def _closed_item_numbers(
 def _closed_item_sizes(
     client: forge.ForgeReader, numbers: frozenset[int], storage: body.Storage
 ) -> dict[int, metrics.Size | None]:
-    """Each closed (or vanished) item's own current size, read once per
-    number through the forge/state (issue #357 R2): a completed lane for a
-    since-closed item still belongs in its size class's own measured lanes
-    -- most lanes close their item on landing, so without this the size
-    classes `aco board` estimates from would stay almost always empty.
+    """Each closed (or vanished) item's own current size, read through one
+    batched forge/state fetch (issue #357 R2, issue #440): a completed lane
+    for a since-closed item still belongs in its size class's own measured
+    lanes -- most lanes close their item on landing, so without this the
+    size classes `aco board` estimates from would stay almost always empty.
     `ItemState.MISSING` (a deleted or renumbered item) and a bodyless
     reference both read as no size, exactly like an open item that never
-    carried a `size` key."""
-    sizes: dict[int, metrics.Size | None] = {}
-    for number in numbers:
-        raw_body = client.item_reference(number).body
-        sizes[number] = (
-            None if raw_body is None else body.parse_body(raw_body, storage=storage).size
+    carried a `size` key. `client.item_references` -- not one `item_
+    reference` call per number -- is what turned this from the board's own
+    dominant cost (32 serial round trips, 12.8 of an 18s build) into a
+    single round trip that stays flat as the closed-item history grows."""
+    references = client.item_references(numbers)
+    return {
+        number: (
+            None
+            if (raw_body := references[number].body) is None
+            else body.parse_body(raw_body, storage=storage).size
         )
-    return sizes
+        for number in numbers
+    }
 
 
 def _board(
@@ -1692,11 +1698,6 @@ def _board(
     if issues is None:
         issues = client.list_open_board_issues()
     since = _merged_pull_request_floor(issues, now)
-    closed_item_sizes = _closed_item_sizes(
-        client,
-        _closed_item_numbers(history.lane_events, frozenset(issue.number for issue in issues)),
-        config.storage,
-    )
     # A container whose own summary already says 0 (or carries no summary at
     # all, `children_total is None`) can never own an open child either way:
     # `_container_progress` returns no progress at all without both numbers,
@@ -1708,20 +1709,29 @@ def _board(
         for issue in issues
         if issue.kind is body.ItemKind.CONTAINER and issue.children_total
     )
-    # Open and recently-merged pull requests and each container's children
-    # are independent reads once `since` is known, so fetching them on
-    # separate threads instead of one after another overlaps their `gh`
-    # subprocess wait time. Children get their own executor
-    # (`_fetch_children`) so their concurrency stays capped at
-    # `BOARD_CHILD_FETCH_CONCURRENCY` even once these two base reads finish
-    # and free their own pool's workers. The dependency wave runs afterward
-    # instead (below), so peak concurrent `gh` subprocesses stays at 2+4,
-    # then at most 4.
-    with ThreadPoolExecutor(max_workers=2) as pool:
+    # Open and recently-merged pull requests, the closed-item size batch
+    # (issue #440: one `item_references` round trip rather than the 32
+    # serial single-item reads this used to pay before the pool ever
+    # started), and each container's children are independent reads once
+    # `since` is known, so fetching them on separate threads instead of one
+    # after another overlaps their `gh` subprocess wait time. Children get
+    # their own executor (`_fetch_children`) so their concurrency stays
+    # capped at `BOARD_CHILD_FETCH_CONCURRENCY` even once these three base
+    # reads finish and free their own pool's workers. The dependency wave
+    # runs afterward instead (below), so peak concurrent `gh` subprocesses
+    # stays at 3+4, then at most 4.
+    with ThreadPoolExecutor(max_workers=3) as pool:
         open_pull_requests = pool.submit(client.list_open_board_pull_requests)
         merged_pull_requests = pool.submit(client.list_recent_merged_board_pull_requests, since)
+        closed_item_sizes_future = pool.submit(
+            _closed_item_sizes,
+            client,
+            _closed_item_numbers(history.lane_events, frozenset(issue.number for issue in issues)),
+            config.storage,
+        )
         children = _fetch_children(client, container_numbers)
         pull_requests = (open_pull_requests.result(), merged_pull_requests.result())
+        closed_item_sizes = closed_item_sizes_future.result()
     if dependencies is None:
         # A caller that already fetched and validated this exact candidate
         # set -- `_release_landing`'s own `list_board_dependencies` wave,
@@ -4241,6 +4251,31 @@ class _ObservedBoard:
     live_claims: tuple[protocol.ScopedClaim, ...]
 
 
+@dataclass(frozen=True)
+class _StoreAndIssues:
+    """`_store_observation_and_issues`'s own result: the claim-state fetch
+    and the open-issue list, read concurrently (issue #440) rather than one
+    after the other -- both are independent `git`/`gh` round trips a board
+    build always pays, and neither reads the other's result."""
+
+    worktree: Path
+    remote: str
+    observed: protocol.ClaimState
+    issues: tuple[board.Issue, ...]
+
+
+def _store_observation_and_issues(client: forge.ForgeReader) -> _StoreAndIssues:
+    """The claim-state fetch (`ls-remote` + `fetch`) and the open-issue list
+    overlapped on separate threads (issue #440): a board build that needs
+    both -- every one that has not already been handed a pre-fetched
+    `issues` tuple -- used to pay their wait times back to back."""
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        observation = pool.submit(_store_observation)
+        issues = pool.submit(client.list_open_board_issues)
+        worktree, remote, observed = observation.result()
+        return _StoreAndIssues(worktree, remote, observed, issues.result())
+
+
 def _observed_board(
     session: _ReadSession,
     *,
@@ -4249,7 +4284,13 @@ def _observed_board(
     """`board`/`rulings`/`next` share this: the store's live claims, projected
     onto forge board data (issue #176 -- claims no longer come from the
     ledger; the forge is still the board's own data source)."""
-    worktree, _remote, observed = _store_observation()
+    if issues is None:
+        fetched = _store_observation_and_issues(session.forge())
+        worktree, observed, issues = fetched.worktree, fetched.observed, fetched.issues
+    else:
+        # A caller that already fetched `issues` itself (`rulings`) has
+        # nothing left to overlap the state fetch with.
+        worktree, _remote, observed = _store_observation()
     live_claims = tuple(observed.claims.values())
     projected = _board(
         session.forge(),
@@ -4271,36 +4312,41 @@ def _lane_claimants(observed: protocol.ClaimState) -> dict[int, board_html.LaneC
     }
 
 
-def _board_html_page(
-    session: _ReadSession, *, served: board_html.ServedRuleForm | None = None
-) -> str:
-    """The one state -> page render both `board --html` (issue #276) and
-    `board --serve` (issue #280) use -- every `gh`/local-git read `board`
+def _board_page(session: _ReadSession) -> board_html.BoardPage:
+    """The one board build both `board --html` (issue #276) and `board
+    --serve` (issue #280) render -- every `gh`/local-git read `board`
     already performs, including `_board`'s own `checkout.trunk_landings`
     read, which now also serves the Landungen section's rows directly
-    through `projected.landings` (issue #371) -- rendered fresh every call
-    so `--serve`'s `GET` never reads stale state."""
+    through `projected.landings` (issue #371). `--html` calls this fresh
+    every time; `--serve` (issue #440) holds its own result between `GET`s
+    instead, rebuilding only on a ruling or an explicit reload."""
     client = session.forge()
-    issues = client.list_open_board_issues()
-    worktree, _remote, observed = _store_observation()
+    fetched = _store_observation_and_issues(client)
     projected = _board(
         client,
-        tuple(observed.claims.values()),
-        issues=issues,
-        history=_claim_history(worktree, observed),
+        tuple(fetched.observed.claims.values()),
+        issues=fetched.issues,
+        history=_claim_history(fetched.worktree, fetched.observed),
     )
-    bodies = {issue.number: issue.body for issue in issues}
+    bodies = {issue.number: issue.body for issue in fetched.issues}
     toplevel = _resolve_toplevel()
     config = _board_config(toplevel)
     sources = board_html.BoardSources(
         bodies=bodies,
-        claimants=_lane_claimants(observed),
-        state_tip="" if observed.tip is None else str(observed.tip),
+        claimants=_lane_claimants(fetched.observed),
+        state_tip="" if fetched.observed.tip is None else str(fetched.observed.tip),
         checkout=toplevel,
         storage=config.storage,
     )
-    page = board_html.build_page(projected, sources)
-    return board_html.render(page, served=served)
+    return board_html.build_page(projected, sources)
+
+
+def _board_html_page(
+    session: _ReadSession, *, served: board_html.ServedRuleForm | None = None
+) -> str:
+    """`board --html`'s own static rendering (issue #276): `_board_page`,
+    rendered fresh every call so a written page never shows stale state."""
+    return board_html.render(_board_page(session), served=served)
 
 
 def _cmd_board_html(parsed: argparse.Namespace, session: _ReadSession) -> None:
@@ -6379,22 +6425,40 @@ def _board_token_location(repository: forge.RepositoryId) -> workspace.BoardToke
     return workspace.default_board_token_location(repository.host, repository.path, os.environ)
 
 
+@dataclass
+class _ServedBoardCache:
+    """`board --serve`'s own held page (issue #440): built once by the first
+    `GET` (or the first after a rebuild) and reused by every one after it,
+    instead of paying `_board_page`'s full forge fetch again on every
+    request -- the fix for the operator's own report of a 19s-per-load
+    board. A successful `POST /rule` or an explicit `?reload=1` clears
+    `page`, so the next `GET` rebuilds it. `lock` serializes a rebuild
+    against a concurrent request: `ThreadingHTTPServer` runs each one on its
+    own thread."""
+
+    page: board_html.BoardPage | None = None
+    built_at: datetime = field(default_factory=lambda: datetime.min.replace(tzinfo=UTC))
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+
 def _board_server(parsed: argparse.Namespace, session: _WriteSession) -> board_serve.BoardServer:
     """`board --serve`'s bound, listening server (issue #280), built but not
-    yet run: a loopback page that reads through `_board_html_page` and
-    writes through `rule_item`, exactly like `--html` and `aco rule` do
-    apart -- `board_serve.py` is transport only, so this function is still
-    the one place that resolves the forge, the persistent token (issue
-    #388: `workspace.board_token`, `--new-token` mints a fresh one), renders
-    a page, and rules a line. `resolve_token` is only called by `start`
-    itself once the socket is already bound, so `render_page`'s own closure
-    reads the resolved value back out of `token_holder` -- never a token
-    read before the busy-port check that could bind. Split from
-    `_cmd_board_serve`'s own `serve_forever` loop so a test can bind a real
-    ephemeral port and drive it without blocking."""
+    yet run: a loopback page built through `_board_page` and held in
+    `_ServedBoardCache` between requests (issue #440), and writes through
+    `rule_item`, exactly like `aco rule` does apart -- `board_serve.py` is
+    transport only, so this function is still the one place that resolves
+    the forge, the persistent token (issue #388: `workspace.board_token`,
+    `--new-token` mints a fresh one), renders a page, and rules a line.
+    `resolve_token` is only called by `start` itself once the socket is
+    already bound, so `render_page`'s own closure reads the resolved value
+    back out of `token_holder` -- never a token read before the busy-port
+    check that could bind. Split from `_cmd_board_serve`'s own
+    `serve_forever` loop so a test can bind a real ephemeral port and drive
+    it without blocking."""
     client = session.forge.writer()
     read_session = _ReadSession(forge=session.forge)
     token_holder: list[str] = []
+    cache = _ServedBoardCache()
 
     def resolve_token() -> str:
         token = workspace.board_token(
@@ -6403,15 +6467,24 @@ def _board_server(parsed: argparse.Namespace, session: _WriteSession) -> board_s
         token_holder.append(token)
         return token
 
-    def render_page(refused: str | None) -> str:
-        served = board_html.ServedRuleForm(token=token_holder[0], refused=refused)
-        return _board_html_page(read_session, served=served)
+    def render_page(refused: str | None, reload: bool) -> str:
+        with cache.lock:
+            if cache.page is None or reload:
+                cache.page = _board_page(read_session)
+                cache.built_at = datetime.now(UTC)
+            page, built_at = cache.page, cache.built_at
+        served = board_html.ServedRuleForm(
+            token=token_holder[0], refused=refused, age=datetime.now(UTC) - built_at
+        )
+        return board_html.render(page, served=served)
 
     def post_rule(item: int, line: int, ruling: str, note: str | None) -> board_serve.RuleOutcome:
         try:
             rule_item(client, item, line, ruling, note)
         except protocol.ClaimError as error:
             return board_serve.RuleOutcome(refusal=str(error))
+        with cache.lock:
+            cache.page = None
         return board_serve.RuleOutcome(refusal=None)
 
     return board_serve.start(

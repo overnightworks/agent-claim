@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import hmac
 import os
+import socket
+import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from errno import EADDRINUSE
@@ -31,6 +33,7 @@ from . import protocol
 LOOPBACK_HOST = "127.0.0.1"
 TOKEN_FIELD = "t"
 REFUSED_FIELD = "refused"
+RELOAD_FIELD = "reload"
 _ROOT_PATH = "/"
 _RULE_PATH = "/rule"
 _NO_STORE = "no-store"
@@ -56,10 +59,13 @@ class RuleOutcome:
     refusal: str | None
 
 
-RenderPage = Callable[[str | None], str]
-"""The one state -> page function `board --serve` calls fresh per `GET`:
-`refused` is the last `POST /rule`'s refusal sentence, when the request
-carries one, else `None`."""
+RenderPage = Callable[[str | None, bool], str]
+"""The one state -> page function `board --serve` calls per `GET` (issue
+#440: no longer necessarily a fresh build -- `cli._board_server`'s own
+closure decides that): `refused` is the last `POST /rule`'s refusal
+sentence, when the request carries one, else `None`; `reload` is whether
+the request carried `?reload=1`, an explicit "rebuild now" the caller must
+honor regardless of how fresh its held page already is."""
 
 RuleItem = Callable[[int, int, str, str | None], RuleOutcome]
 """The one write function `board --serve` calls per `POST /rule`: item
@@ -133,6 +139,23 @@ class _BoardHTTPServer(ThreadingHTTPServer):
         self.render_page = render_page
         self.rule_item = rule_item
 
+    def handle_error(
+        self, request: socket.socket | tuple[bytes, socket.socket], client_address: tuple[str, int]
+    ) -> None:
+        """The stdlib default (`socketserver.BaseServer.handle_error`) prints
+        a full traceback to stderr for any exception a handler thread lets
+        escape -- including the one an operator's browser causes just by
+        navigating away mid-response, once the served page stopped costing
+        19 seconds to build (issue #440): the write side of its socket is
+        already gone, so the next `wfile.write` raises `BrokenPipeError` or
+        `ConnectionResetError`. Both are a client hanging up, not a served
+        page bug, so only those two stay quiet; anything else still gets the
+        stdlib's own traceback."""
+        _, error, _ = sys.exc_info()
+        if isinstance(error, BrokenPipeError | ConnectionResetError):
+            return
+        super().handle_error(request, client_address)
+
 
 class _BoardRequestHandler(BaseHTTPRequestHandler):
     def _board_server(self) -> _BoardHTTPServer:
@@ -174,7 +197,8 @@ class _BoardRequestHandler(BaseHTTPRequestHandler):
         if not self._authorized(server, _field(query, TOKEN_FIELD)):
             self._respond(HTTPStatus.FORBIDDEN, _FORBIDDEN_BODY)
             return
-        page = server.render_page(_field(query, REFUSED_FIELD))
+        reload_requested = _field(query, RELOAD_FIELD) is not None
+        page = server.render_page(_field(query, REFUSED_FIELD), reload_requested)
         self._respond(HTTPStatus.OK, page.encode("utf-8"), content_type=_HTML_CONTENT_TYPE)
 
     def do_POST(self) -> None:

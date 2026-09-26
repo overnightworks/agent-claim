@@ -12,6 +12,7 @@ cannot serve a board at all.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -189,6 +190,7 @@ class ForgeOperation(StrEnum):
     """Every port operation; each member's value is its Protocol method name."""
 
     ITEM_REFERENCE = "item_reference"
+    ITEM_REFERENCES = "item_references"
     LANDING = "landing"
     PARENT_ISSUE = "parent_issue"
     LIST_CHILDREN = "list_children"
@@ -247,6 +249,17 @@ class ForgeReader(Protocol):
     def capability(self, operation: ForgeOperation) -> Capability: ...
 
     def item_reference(self, number: int) -> ItemReference: ...
+
+    def item_references(self, numbers: Iterable[int]) -> Mapping[int, ItemReference]:
+        """Every one of `numbers`, read in as few round trips as the adapter
+        can manage rather than one per number (issue #440): a closed item's
+        own board-estimate size is the one caller today (`cli._closed_item_
+        sizes`), and its own history only ever grows, so a per-number round
+        trip there stays the board's dominant cost as a repository ages. A
+        number this adapter cannot resolve at all reads exactly like
+        `item_reference`'s own single-read case -- `ItemState.MISSING`, no
+        body -- never dropped from the result silently."""
+        ...
 
     def landing(self, number: int) -> Landing: ...
 

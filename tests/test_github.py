@@ -35,7 +35,7 @@ def test_forge_operation_exhaustiveness_matches_the_declared_reader_and_writer_m
         if not name.startswith("_") and name not in {"repository", "capability", "requests"}
     }
     assert {operation.value for operation in forge.ForgeOperation} == declared_methods
-    assert len(forge.ForgeOperation) == 12
+    assert len(forge.ForgeOperation) == 13
     assert set(github.GITHUB_CAPABILITIES) == set(forge.ForgeOperation)
     assert forge.Capability.UNSUPPORTED not in github.GITHUB_CAPABILITIES.values()
 
@@ -1249,6 +1249,134 @@ def test_github_adapter_item_reference_fails_loud_on_a_malformed_response(
 
     with pytest.raises(ClaimError, match=match):
         client.item_reference(10)
+
+
+def test_github_adapter_item_references_reads_every_number_from_one_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #440: an open issue, a merged pull request (`state: MERGED`
+    reads as closed, matching `item_reference`'s own REST-issues-endpoint
+    normalization), and a number GitHub resolves to neither -- one `gh api
+    graphql` round trip for all three, never one per number."""
+    observed: list[list[str]] = []
+
+    def run(arguments: list[str]) -> str:
+        observed.append(arguments)
+        return json.dumps(
+            {
+                "n0": {
+                    "__typename": "Issue",
+                    "state": "OPEN",
+                    "title": "Open one",
+                    "body": "Do it.",
+                },
+                "n1": {
+                    "__typename": "PullRequest",
+                    "state": "MERGED",
+                    "title": "Landed",
+                    "body": None,
+                },
+                "n2": None,
+            }
+        )
+
+    client = GitHubForge(github._repository_id("example/agent-claim"), run=run)
+
+    assert client.item_references((10, 20, 30)) == {
+        10: forge.ItemReference(forge.ItemState.OPEN, "Open one", "Do it."),
+        20: forge.ItemReference(forge.ItemState.CLOSED, "Landed", "", True),
+        30: forge.ItemReference(forge.ItemState.MISSING),
+    }
+    assert len(observed) == 1
+    assert observed[0][:2] == ["api", "graphql"]
+
+
+def test_github_adapter_item_references_of_nothing_costs_no_round_trip() -> None:
+    def _fail(_arguments: list[str]) -> str:
+        raise AssertionError("an empty batch must never call gh")
+
+    client = GitHubForge(github._repository_id("example/agent-claim"), run=_fail)
+
+    assert client.item_references(()) == {}
+
+
+def test_github_adapter_item_references_splits_into_blocks_of_the_batch_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #440: a closed-item history larger than one GraphQL block still
+    resolves every number, fetched over more than one round trip rather than
+    one query that keeps growing forever."""
+    numbers = tuple(range(1, github.GRAPHQL_ITEM_REFERENCE_BATCH_SIZE + 11))
+    observed: list[list[str]] = []
+
+    def run(arguments: list[str]) -> str:
+        observed.append(arguments)
+        alias_count = arguments[3].count("issueOrPullRequest(")
+        return json.dumps(
+            {
+                f"n{index}": {
+                    "__typename": "Issue",
+                    "state": "CLOSED",
+                    "title": "Closed",
+                    "body": "",
+                }
+                for index in range(alias_count)
+            }
+        )
+
+    client = GitHubForge(github._repository_id("example/agent-claim"), run=run)
+
+    references = client.item_references(numbers)
+
+    assert set(references) == set(numbers)
+    assert len(observed) == 2
+
+
+@pytest.mark.parametrize(
+    ("node", "match"),
+    [
+        pytest.param("not-a-dict", "malformed batched item reference", id="not-a-dict"),
+        pytest.param(
+            {"__typename": "Discussion", "state": "OPEN", "title": "x", "body": ""},
+            "malformed batched item reference",
+            id="unknown-typename",
+        ),
+        pytest.param(
+            {"__typename": "Issue", "state": "unknown", "title": "x", "body": ""},
+            "malformed batched item reference",
+            id="unknown-state",
+        ),
+        pytest.param(
+            {"__typename": "Issue", "state": "OPEN", "title": 5, "body": ""},
+            "malformed batched item reference",
+            id="title-not-text",
+        ),
+        pytest.param(
+            {"__typename": "Issue", "state": "OPEN", "title": "x", "body": 5},
+            "malformed batched item reference",
+            id="body-not-text",
+        ),
+    ],
+)
+def test_github_adapter_item_references_fails_loud_on_a_malformed_node(
+    node: object, match: str
+) -> None:
+    client = GitHubForge(
+        github._repository_id("example/agent-claim"),
+        run=lambda _arguments: json.dumps({"n0": node}),
+    )
+
+    with pytest.raises(ClaimError, match=match):
+        client.item_references((10,))
+
+
+def test_github_adapter_item_references_fails_loud_on_an_unparseable_response() -> None:
+    client = GitHubForge(
+        github._repository_id("example/agent-claim"), run=lambda _arguments: "not-json"
+    )
+
+    with pytest.raises(ClaimError, match="invalid batched item reference JSON"):
+        client.item_references((10,))
 
 
 def test_github_reads_board_dependencies_local_and_foreign(

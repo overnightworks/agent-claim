@@ -1021,7 +1021,7 @@ def test_new_token_without_serve_reports_invalid_usage_under_json(
     _assert_json_refusal_object(captured.err, captured.out, reason="invalid_usage")
 
 
-def _noop_render_page(_refused: str | None) -> str:
+def _noop_render_page(_refused: str | None, _reload: bool) -> str:
     return ""
 
 
