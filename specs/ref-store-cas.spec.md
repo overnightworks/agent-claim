@@ -156,7 +156,7 @@ cannot read needs `--force-unreadable` besides (`specs/reset.spec.md`).
 - No command but `aco bootstrap` ever creates `refs/aco/state`; every other write path refuses (CAS-03) instead of creating it as a side effect.
 - A push against `refs/aco/state` is never `--force`/`--force-with-lease` outside the documented reset/recovery path (CAS-43): every ordinary transition is a plain fast-forward.
 - A worktree's own lineage stamp and fetch anchor are never shared with another linked worktree of the same checkout: each has its own git-dir.
-- A malformed fetched tree is never partially trusted: the whole read fails loud (CAS-22..38), never a single quarantined claim or resource; a malformed item file alone is refused only as far as `specs/storage-pin.spec.md` PIN-29 and `specs/item.spec.md` ITEM-37..ITEM-39 allow.
+- A malformed fetched tree is never partially trusted: the whole read fails loud (CAS-22..38), never a single quarantined claim or resource; a malformed item file alone is refused only as far as `specs/storage-pin.spec.md` PIN-29 and `specs/item.spec.md` ITEM-37..ITEM-42 allow, and ITEM-42 alone reads its still-valid `record.title`.
 - No state-store fetch ever lands a tag or `FETCH_HEAD`: each carries `--no-tags --no-write-fetch-head`, so it writes only objects and the ref its own refspec names (issue #298 finding 2).
 - A read that does not advance local state (CAS-49) never writes this worktree's fetch anchor or lineage stamp; only an anchoring fetch (CAS-07) moves `refs/worktree/aco/state` and that stamp.
 
