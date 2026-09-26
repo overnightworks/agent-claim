@@ -89,7 +89,7 @@ with `--json` also `specs/output.spec.md`'s envelope, `reason`
 ## The twin search (issue #444)
 
 - [ ] [CUT-29] Before a fresh child exists, `aco cut` compares `--title` with the titles of every open issue and every issue closed within the last 30 days, the container itself excepted.
-- [ ] [CUT-30] A title sharing at least 60 % of both titles' distinct casefolded words refuses `possible twin #<n>; pass --not-a-twin`, exit `2`, before any write (see E-CUT-05, E-CUT-09).
+- [ ] [CUT-30] Titles sharing at least 60 % of their combined distinct casefolded words (3 of 5 twin, 2 of 4 not) refuse `possible twin #<n>; pass --not-a-twin`, exit `2`, before any write (see E-CUT-05, E-CUT-09).
 - [ ] [CUT-31] The refusal names the closest title, the lower number on a tie; `--not-a-twin` skips the search and creates; an adoption (CUT-13) creates nothing, so it never searches.
 
 ## Partial failure and recovery
