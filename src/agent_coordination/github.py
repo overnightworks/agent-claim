@@ -239,7 +239,9 @@ def _parsed_item_reference_node(node: object) -> forge.ItemReference:
     if (
         not isinstance(typename, str)
         or not isinstance(state, str)
-        or state not in _GRAPHQL_ITEM_STATES
+        # Every state named per typename is already a key of
+        # `_GRAPHQL_ITEM_STATES`, so this alone also rejects a state
+        # `_GRAPHQL_ITEM_STATES` does not know at all.
         or state not in _GRAPHQL_ITEM_STATES_BY_TYPENAME.get(typename, frozenset())
         or not isinstance(title, str)
         or (body is not None and not isinstance(body, str))
