@@ -1391,6 +1391,16 @@ def test_github_adapter_item_references_splits_into_blocks_of_the_batch_size(
             "malformed batched item reference",
             id="issue-cannot-be-merged",
         ),
+        pytest.param(
+            {"__typename": ["Issue"], "state": "OPEN", "title": "x", "body": ""},
+            "malformed batched item reference",
+            id="typename-not-text",
+        ),
+        pytest.param(
+            {"__typename": "Issue", "state": ["OPEN"], "title": "x", "body": ""},
+            "malformed batched item reference",
+            id="state-not-text",
+        ),
     ],
 )
 def test_github_adapter_item_references_fails_loud_on_a_malformed_node(

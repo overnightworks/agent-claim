@@ -237,7 +237,9 @@ def _parsed_item_reference_node(node: object) -> forge.ItemReference:
     title = node.get("title")
     body = node.get("body")
     if (
-        state not in _GRAPHQL_ITEM_STATES
+        not isinstance(typename, str)
+        or not isinstance(state, str)
+        or state not in _GRAPHQL_ITEM_STATES
         or state not in _GRAPHQL_ITEM_STATES_BY_TYPENAME.get(typename, frozenset())
         or not isinstance(title, str)
         or (body is not None and not isinstance(body, str))
