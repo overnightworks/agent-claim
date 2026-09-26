@@ -18,7 +18,7 @@ that page writes is `specs/rule.spec.md`'s (RULE-01..09);
 `specs/output.spec.md` owns the `--json` envelope itself (OUT-nn: key
 order, `ok`, `message`) that wraps BOARD-11's own top-level keys.
 `--serve`'s own request/response wire contract is not specified here beyond
-the held page, its age, and its rebuilds (BOARD-46..49). `board`'s own ranking, scoring, and per-item
+the held page, its age, and its rebuilds (BOARD-46..50). `board`'s own ranking, scoring, and per-item
 field semantics (`score`, `priority_bucket`, `age_days`, ...) are
 pre-existing, untouched behaviour this lane does not re-derive into
 criteria; each item's own `actionable`/`actionable_reason` fields are the
@@ -252,7 +252,7 @@ http://127.0.0.1:<port>/?t=<token>
 
 The line above is the whole of this transcript: `--serve` then blocks in
 its request loop, so no further line is printed until it is stopped.
-What a request to that URL returns is BOARD-46..49's (see E-BOARD-18).
+What a request to that URL returns is BOARD-46..50's (see E-BOARD-18).
 
 ### E-BOARD-08 — a ruled line moves into its item's `Themen` entry
 
