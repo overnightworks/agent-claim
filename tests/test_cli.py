@@ -8991,6 +8991,34 @@ def test_cli_claim_explicit_whole_overrides_the_items_own_body(
     assert _live_store_claim().whole_reason == cli_reason
 
 
+def test_cli_claim_replay_of_a_wide_scope_without_whole_reads_only_its_own_item(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """PIN-29/CLM-15 (issue #447): a replayed wide claim that names no
+    `--whole` takes its item's own `whole` from that item alone, so another
+    item the whole-board read refuses never stops the replay."""
+    reason = "the four adapters share one lock"
+    wide_scope = ["a.py", "b.py", "c.py", "d.py"]
+    item_body = complete_contract("Ship it.", scope=wide_scope, whole=reason)
+    client = _arranged_claim_client(monkeypatch)
+    client.board_issues = (board_issue(72, "Work", item_body),)
+    client.issue_references[72] = forge.ItemReference(forge.ItemState.OPEN, "Work", item_body)
+    argv = _claim_argv(*(flag for path in wide_scope for flag in ("--scope", path)))
+    assert issue_claim.main(argv) == 0
+    capsys.readouterr()
+
+    def another_item_malformed() -> tuple[board.Issue, ...]:
+        raise protocol.MalformedStateTreeError("item aco-3e26d9 has a malformed agent-claim block")
+
+    monkeypatch.setattr(client, "list_open_board_issues", another_item_malformed)
+
+    status = issue_claim.main(argv)
+
+    assert status == 0
+    assert "CLAIMED issue #72: cli-claim" in capsys.readouterr().out
+    assert _live_store_claim().whole_reason == reason
+
+
 def test_cli_claim_replay_without_scope_takes_the_live_claims_own_stored_scope(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

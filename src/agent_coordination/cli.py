@@ -4771,10 +4771,12 @@ def _whole_from_item_body(
     a lazy resolver `_reject_wide_scope` calls only once the scope actually
     trips the gate and neither call names `--whole` -- so a narrow scope, or
     an explicit `--whole`, never costs this read. Reuses `open_by_number`
-    when the caller already fetched it (a derived scope, or the slice-rule
-    checks); resolves the repository's own storage pin itself, since a
-    trip's resolver runs before `_cmd_claim`'s own branch has necessarily
-    done so."""
+    when the caller already fetched it (a derived scope); otherwise reads
+    the one target item alone, never the whole board, so a replay (CLM-15)
+    or a live-claim resume (START-06) never meets PIN-29's refusal of some
+    other item (issue #447). Resolves the repository's own storage pin
+    itself, since a trip's resolver runs before `_cmd_claim`'s own branch
+    has necessarily done so."""
     if not isinstance(identity, protocol.IssueIdentity):
         return None
     number = identity.issue
@@ -4782,12 +4784,7 @@ def _whole_from_item_body(
     def resolve() -> str | None:
         client = session.forge()
         storage = _board_config(_resolve_toplevel(directory=directory)).storage
-        listing = (
-            open_by_number
-            if open_by_number is not None
-            else {issue.number: issue for issue in client.list_open_board_issues()}
-        )
-        return _item_whole(client, listing, number, storage=storage)
+        return _item_whole(client, open_by_number or {}, number, storage=storage)
 
     return resolve
 
