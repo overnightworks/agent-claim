@@ -1366,10 +1366,11 @@ class GitHubForge:
         number = created.get("number") if isinstance(created, dict) else None
         if isinstance(number, bool) or not isinstance(number, int) or number < 1:
             raise forge.ForgeMalformedResponseError("GitHub did not return a created issue")
-        type_name = ITEM_KIND_TYPE_NAMES[kind]
         issue_type = created.get("type")
-        if not isinstance(issue_type, dict) or issue_type.get("name") != type_name:
-            raise forge.ForgeIssueTypeNotSetError(created=number, type_name=type_name)
+        if not isinstance(issue_type, dict) or self._issue_kind(issue_type.get("name")) is not kind:
+            raise forge.ForgeIssueTypeNotSetError(
+                created=number, type_name=ITEM_KIND_TYPE_NAMES[kind]
+            )
         return number
 
     def _issue_identifier(self, number: int) -> int:

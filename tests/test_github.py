@@ -348,15 +348,19 @@ def test_github_adapter_names_the_created_child_when_the_relation_post_fails() -
     assert excinfo.value.parent == 79
 
 
-def test_github_adapter_creates_an_issue_without_linking_it_as_a_child() -> None:
+@pytest.mark.parametrize("returned_type_name", ["Task", "task"], ids=["github-case", "org-case"])
+def test_github_adapter_creates_an_issue_without_linking_it_as_a_child(
+    returned_type_name: str,
+) -> None:
     """`create_issue` is `item new`'s own write without `--parent` (#444) and
     `create_child`'s first write (#260): one POST carrying the issue type by
-    name, no sub-issue relation."""
+    name, no sub-issue relation. The returned type is read as the board
+    reads it, so an org's own casing of the name still counts as set."""
     observed: list[tuple[list[str], bytes | None]] = []
 
     def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
         observed.append((arguments, input_data))
-        return json.dumps({"id": 555444, "number": 101, "type": {"name": "Task"}})
+        return json.dumps({"id": 555444, "number": 101, "type": {"name": returned_type_name}})
 
     client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
 
