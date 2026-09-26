@@ -629,7 +629,9 @@ def _add_rescope_parser(commands: argparse._SubParsersAction) -> None:
 def _add_cut_parser(commands: argparse._SubParsersAction) -> None:
     cut = commands.add_parser("cut", help="create a container's next slice as a fresh child issue")
     cut.add_argument("issue", type=board.parse_item_reference, help="the container to cut")
-    cut.add_argument("--title", required=True, help="the fresh child issue's title")
+    cut.add_argument(
+        "--title", required=True, type=_nonblank_title, help="the fresh child issue's title"
+    )
     cut.add_argument(
         "--row",
         type=int,
@@ -758,9 +760,9 @@ def _add_brief_parser(commands: argparse._SubParsersAction) -> None:
 
 
 def _nonblank_title(value: str) -> str:
-    """`item new --title`'s argparse `type=` (issue #447): `value` unchanged
-    unless `body.is_valid_title` -- the rule `record.title` is read by --
-    refuses it, before anything is read, created, or minted."""
+    """`item new`'s and `cut`'s `--title` argparse `type=` (issue #447):
+    `value` unchanged unless `body.is_valid_title` -- the rule `record.title`
+    is read by -- refuses it, before anything is read, created, or minted."""
     if not body.is_valid_title(value):
         raise protocol.ClaimUnavailableError("--title must be a non-empty string")
     return value

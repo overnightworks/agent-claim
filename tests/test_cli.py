@@ -3350,17 +3350,30 @@ def test_cut_json_refusal_reports_precondition_failed(
     _assert_json_refusal_object(captured.err, captured.out, reason="precondition_failed")
 
 
-def test_cut_refuses_a_number_that_names_no_open_issue(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+@pytest.mark.parametrize(
+    ("title", "refusal"),
+    [
+        pytest.param("Scheibe 1", f"#{CUT_CONTAINER} is not an open container", id="no-open-issue"),
+        pytest.param(" \t ", "--title must be a non-empty string", id="blank-title"),
+    ],
+)
+def test_cut_refuses_a_number_that_names_no_open_issue_or_a_blank_title(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    title: str,
+    refusal: str,
 ) -> None:
+    """CUT-01, and CUT-33 (issue #447): a blank title refuses before `cut`
+    reads the board at all, so no creation path writes a blank-titled item."""
     _configured_board_client(monkeypatch, tmp_path, open_issues=())
 
     exit_code = issue_claim.main(
-        ["--repo", REPOSITORY, "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
+        ["--repo", REPOSITORY, "cut", str(CUT_CONTAINER), "--title", title]
     )
 
     assert exit_code == 2
-    assert f"ERROR: #{CUT_CONTAINER} is not an open container" in capsys.readouterr().err
+    assert f"ERROR: {refusal}" in capsys.readouterr().err
 
 
 def test_cut_refuses_a_container_that_already_has_a_parent(

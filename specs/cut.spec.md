@@ -26,6 +26,7 @@ with `--json` also `specs/output.spec.md`'s envelope, `reason`
 | state \ trigger | `cut <n> --title T` | `--row N` | `--scope P` | `--json` |
 |---|---|---|---|---|
 | `<n>` not open, or not on the board | CUT-01 | CUT-01 | CUT-01 | CUT-01 |
+| `--title` empty or whitespace only | CUT-33 | CUT-33 | CUT-33 | CUT-33 |
 | `<n>` open but not a container | CUT-02 | CUT-02 | CUT-02 | CUT-02 |
 | `<n>` itself has a parent | CUT-03 | CUT-03 | CUT-03 | CUT-03 |
 | a required forge write is unsupported | CUT-04 | CUT-04 | CUT-04 | CUT-04 |
@@ -55,6 +56,7 @@ with `--json` also `specs/output.spec.md`'s envelope, `reason`
 ## The target
 
 - [ ] [CUT-01] `aco cut <n> --title T` against an `<n>` that names no open issue on the board refuses `#<n> is not an open container`, exit `2`, before any write.
+- [ ] [CUT-33] An empty or whitespace-only `--title` refuses `--title must be a non-empty string`, exit `2`, before anything is read or written; `--json` prints OUT-06's envelope (issue #447).
 - [ ] [CUT-02] The same against an open issue that is not a container refuses `#<n> is not a container`, exit `2`.
 - [ ] [CUT-03] The same against a container that is itself a child of another item refuses `#<n> is itself a child of <ref>; nested containers are not supported`, exit `2`.
 
