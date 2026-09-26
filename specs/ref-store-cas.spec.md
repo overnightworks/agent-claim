@@ -138,11 +138,12 @@ tree's structural shape before that content is ever parsed.
 
 `aco reset` (issue #298, operator-ruled 15.09.2026/16.09.2026) is the one
 recovery path over a broken or rewritten `refs/aco/state`: a mandatory
-export, no silent data loss, and a live claim always refuses it outright,
-`--confirm` or not.
+export, no silent data loss, and a live claim in a state this aco can read
+always refuses it outright, `--confirm` or not; a state whose schema it
+cannot read needs `--force-unreadable` besides (`specs/reset.spec.md`).
 
 - [ ] [CAS-39] `aco reset` without `--confirm` prints five `would: ` lines -- export, delete-remote, delete-local, clear-stamps, bootstrap -- exit `0`, and touches nothing.
-- [ ] [CAS-40] `aco reset`, confirmed or not, against a repository with any live claim refuses before anything else runs, printing the same claim lines `status` prints, exit `2`.
+- [ ] [CAS-40] `aco reset`, confirmed or not, against a readable state with any live claim refuses before anything else runs, printing the same claim lines `status` prints, exit `2`.
 - [ ] [CAS-41] `aco reset --confirm`, when the ref exists on the remote, exports its tip to a `git bundle`-verifiable `aco-state-<repo>-<date>-<12-hex>.bundle` under `--export-dir` before any deletion.
 - [ ] [CAS-42] `aco reset --confirm` against an export path that already carries that bundle's name refuses `<path> already exists; refusing to overwrite an export`, before anything is deleted.
 - [ ] [CAS-43] `aco reset --confirm` deletes `refs/aco/state` on the remote with `--force-with-lease` matched to the tip it read; a rejected or stale-leased push refuses and leaves the local ref untouched.

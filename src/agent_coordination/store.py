@@ -59,6 +59,8 @@ from .protocol import (
     RescopeIntent,
     ResourceRecord,
     StateLineageError,
+    UnreadableState,
+    UnsupportedStateSchemaError,
     apply,
     parse_claim_toml,
     parse_resource_toml,
@@ -714,10 +716,12 @@ def _fetch_into_anchor(worktree: Path, remote: str) -> ObjectId:
 def _fetch_ref_objects(worktree: Path, remote: str) -> None:
     """Fetch `STATE_REF`'s objects into this worktree's local object store
     without creating any local ref for it -- production never creates the
-    shared `refs/aco/state` locally. `peek_state`, this function's only
-    caller, already knows the tip from `_ls_remote_state`'s own answer, so
-    no destination ref is needed here. `--no-write-fetch-head` keeps this
-    from even landing the tip in `FETCH_HEAD` (`peek_state` never reads it
+    shared `refs/aco/state` locally. `_peek_tip`, this function's only
+    caller and the shared read behind `peek_state` and
+    `peek_state_for_reset`, already knows the tip from `_ls_remote_state`'s
+    own answer, so no destination ref is needed here.
+    `--no-write-fetch-head` keeps this from even landing the tip in
+    `FETCH_HEAD` (neither peek reads it
     either way, but a dry run, live-claim refusal, or failed export must
     write nothing at all, not merely nothing this worktree reads back);
     `--no-tags` keeps a reachable tag on `STATE_REF`'s own history from
@@ -1032,7 +1036,8 @@ def fetch_state(*, worktree: Path, remote: str = DEFAULT_CANONICAL_REMOTE) -> Cl
 def peek_state(*, worktree: Path, remote: str = DEFAULT_CANONICAL_REMOTE) -> ClaimState:
     """Read `STATE_REF` on `remote` for a caller that must not write (issue
     #298, 19.09.2026 gate finding 1; issue #405 review/gate finding, `land`'s
-    read-only preflight): the one read in this module that skips
+    read-only preflight): one of the two peeks in this module, with
+    `peek_state_for_reset`, that read through `_peek_tip` and so skip
     `fetch_state`'s own lineage guard, anchor, and stamp.
 
     The tip is `_ls_remote_state`'s own answer (issue #310 finding 48): the
@@ -1046,25 +1051,68 @@ def peek_state(*, worktree: Path, remote: str = DEFAULT_CANONICAL_REMOTE) -> Cla
     reachable tag on `STATE_REF`'s own history from auto-following into the
     shared local `refs/tags/*` namespace during this read.
 
-    `reset` uses this to recover from exactly what `_check_lineage` refuses
-    -- a rewritten or deleted ref this worktree's own stamp disagrees with --
-    so it reads and acts on whatever tip is on `remote` right now, never
-    against this worktree's history. `land`'s preflight uses it to observe a
-    live claim before its first write: a pull request this preflight goes on
-    to refuse must never have anchored a ref or stamped a lineage the merge
-    itself never happens. Both callers share the same requirement -- a dry
-    run, a live-claim refusal, a failed export, or a refused merge must
-    change nothing durable -- so this performs no per-worktree write at all:
-    no anchor write, no `_write_lineage_stamp`, no local tag, no
-    `FETCH_HEAD`. `fetch_state` stays the write-capable read every live
-    transition (`claim`, `release`, ...) still needs, since those callers go
-    on to write and must keep this worktree's own lineage current.
+    `reset` reads this way, through `peek_state_for_reset`, to recover from
+    exactly what `_check_lineage` refuses -- a rewritten or deleted ref this
+    worktree's own stamp disagrees with -- so it reads and acts on whatever
+    tip is on `remote` right now, never against this worktree's history.
+    `land`'s preflight uses it to observe a live claim before its first
+    write: a pull request this preflight goes on to refuse must never have
+    anchored a ref or stamped a lineage the merge itself never happens. Both
+    callers share the same requirement -- a dry run, a live-claim refusal, a
+    failed export, or a refused merge must change nothing durable -- so this
+    performs no per-worktree write at all: no anchor write, no
+    `_write_lineage_stamp`, no local tag, no `FETCH_HEAD`. `fetch_state`
+    stays the write-capable read every live transition (`claim`, `release`,
+    ...) still needs, since those callers go on to write and must keep this
+    worktree's own lineage current.
     """
-    probed = _ls_remote_state(worktree, remote)
+    probed = _peek_tip(worktree, remote)
     if probed is None:
         return EMPTY_STATE
-    _fetch_ref_objects(worktree, remote)
     return _parse_state_tree(worktree, probed)
+
+
+def peek_state_for_reset(
+    *, worktree: Path, remote: str = DEFAULT_CANONICAL_REMOTE
+) -> ClaimState | UnreadableState:
+    """`peek_state` for `reset` alone (issue #341): a tip whose schema this
+    client does not speak comes back as its oid and version -- all the
+    export and the lease need -- instead of failing the one command built
+    to replace exactly such a ledger. The schema is judged before the
+    layout, because a version this client does not speak may legally carry
+    top-level names it does not know; a supported tip then gets the full
+    `_parse_state_tree` every other command gets, so any other defect still
+    fails loud with the same refusal."""
+    probed = _peek_tip(worktree, remote)
+    if probed is None:
+        return EMPTY_STATE
+    try:
+        parse_schema_toml(_read_tip_schema_toml(worktree, probed), tip=probed)
+    except UnsupportedStateSchemaError as error:
+        return UnreadableState(tip=error.tip, schema_version=error.version)
+    return _parse_state_tree(worktree, probed)
+
+
+def _peek_tip(worktree: Path, remote: str) -> ObjectId | None:
+    """`STATE_REF`'s tip on `remote` with its objects in this worktree's
+    store, or `None` for a proven-absent ref -- `peek_state`'s write-free
+    read, shared by both peeks."""
+    probed = _ls_remote_state(worktree, remote)
+    if probed is not None:
+        _fetch_ref_objects(worktree, remote)
+    return probed
+
+
+def _read_tip_schema_toml(worktree: Path, tip: ObjectId) -> str:
+    """`schema.toml`'s text at `tip` alone. Archives that one name only, so
+    no other top-level name -- which this client has not yet judged -- ever
+    reaches `git archive` as a pathspec."""
+    tree_oid = _tree_oid(worktree, tip)
+    entries = _list_tree(worktree, tree_oid, tip=tip, context="state")
+    top_level = {name: value for name, value in entries.items() if "/" not in name}
+    schema_paths = [SCHEMA_TOML_FILENAME] if SCHEMA_TOML_FILENAME in top_level else []
+    archive = _read_state_archive(worktree, tree_oid, tip=tip, paths=schema_paths)
+    return _read_schema_toml(top_level, archive, tip=tip)
 
 
 def _commit_tree(

@@ -16272,9 +16272,18 @@ def test_cli_reset_dry_run_prints_five_would_lines_and_changes_nothing(
     assert _lineage_observation(repository) == lineage_before
 
 
+@pytest.mark.parametrize(
+    "force_unreadable",
+    [pytest.param([], id="plain"), pytest.param(["--force-unreadable"], id="forced")],
+)
 def test_cli_reset_confirm_exports_a_verifiable_bundle_and_bootstraps_a_fresh_ref(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    force_unreadable: list[str],
 ) -> None:
+    """A readable claim-free state resets the same with or without
+    `--force-unreadable` (RESET-17)."""
     _use_real_store(monkeypatch)
     repository, bare_remote = _reset_repository(tmp_path)
     tip = store.bootstrap(worktree=repository, remote=str(bare_remote))
@@ -16282,8 +16291,9 @@ def test_cli_reset_confirm_exports_a_verifiable_bundle_and_bootstraps_a_fresh_re
     export_dir.mkdir()
     monkeypatch.chdir(repository)
     monkeypatch.setattr(issue_claim, "datetime", FixedDateTime)
+    command = ["reset", "--confirm", *force_unreadable, "--export-dir", str(export_dir)]
 
-    status = issue_claim.main(["reset", "--confirm", "--export-dir", str(export_dir)])
+    status = issue_claim.main(command)
 
     assert status == 0
     lines = capsys.readouterr().out.splitlines()
@@ -16309,9 +16319,18 @@ def test_cli_reset_confirm_exports_a_verifiable_bundle_and_bootstraps_a_fresh_re
     assert not store.local_state_ref_exists(repository)
 
 
+@pytest.mark.parametrize(
+    "force_unreadable",
+    [pytest.param([], id="plain"), pytest.param(["--force-unreadable"], id="forced")],
+)
 def test_cli_reset_refuses_when_a_claim_is_live_and_touches_nothing(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    force_unreadable: list[str],
 ) -> None:
+    """`--force-unreadable` (issue #341) only lifts the refusal over a
+    schema this aco cannot read; a readable tree's live claim still refuses."""
     _use_real_store(monkeypatch)
     repository, bare_remote = _reset_repository(tmp_path)
     store.bootstrap(worktree=repository, remote=str(bare_remote))
@@ -16330,7 +16349,9 @@ def test_cli_reset_refuses_when_a_claim_is_live_and_touches_nothing(
     export_dir.mkdir()
     monkeypatch.chdir(repository)
 
-    status = issue_claim.main(["reset", "--confirm", "--export-dir", str(export_dir)])
+    command = ["reset", "--confirm", *force_unreadable, "--export-dir", str(export_dir)]
+
+    status = issue_claim.main(command)
 
     assert status == 2
     out = capsys.readouterr().out
@@ -16343,6 +16364,112 @@ def test_cli_reset_refuses_when_a_claim_is_live_and_touches_nothing(
     assert list(export_dir.iterdir()) == []
     assert not store.local_state_ref_exists(repository)
     assert _lineage_observation(repository) == lineage_before
+
+
+_UNREADABLE_SCHEMA_ONE_LINE = (
+    "schema 1 not readable by this aco; live claims unknown (--confirm needs --force-unreadable)"
+)
+
+
+def _push_schema_one_state(tmp_path: Path, bare_remote: Path) -> str:
+    """A `refs/aco/state` whose tree is the pre-`items/` `version = 1`
+    ledger (issue #341: songmaker, marketplace), built in a scratch
+    repository so the work repository never holds its objects locally."""
+    legacy = tmp_path / "legacy"
+    legacy.mkdir()
+    _real_git(legacy, "init", "-q", "-b", "main")
+    _real_git(legacy, "config", "user.email", "test@example.com")
+    _real_git(legacy, "config", "user.name", "Test")
+    (legacy / "schema.toml").write_text("version = 1\n")
+    _real_git(legacy, "add", "schema.toml")
+    _real_git(legacy, "commit", "-q", "-m", "schema 1 ledger")
+    _real_git(legacy, "push", "-q", str(bare_remote), f"HEAD:{store.STATE_REF}")
+    return _real_git(legacy, "rev-parse", "HEAD").stdout.strip()
+
+
+def _remote_state_tip(repository: Path, bare_remote: Path) -> str:
+    return _real_git(repository, "ls-remote", str(bare_remote), store.STATE_REF).stdout.split("\t")[
+        0
+    ]
+
+
+@pytest.fixture
+def unreadable_reset(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> tuple[Path, Path, str, Path]:
+    """A checkout whose remote carries a schema-1 state, cwd inside it, the
+    date fixed, and an empty export directory: repository, remote, tip, export."""
+    _use_real_store(monkeypatch)
+    repository, bare_remote = _reset_repository(tmp_path)
+    tip = _push_schema_one_state(tmp_path, bare_remote)
+    export_dir = tmp_path / "export"
+    export_dir.mkdir()
+    monkeypatch.chdir(repository)
+    monkeypatch.setattr(issue_claim, "datetime", FixedDateTime)
+    return repository, bare_remote, tip, export_dir
+
+
+def test_cli_reset_dry_run_over_an_unreadable_schema_names_it_and_prints_the_plan(
+    capsys: pytest.CaptureFixture[str], unreadable_reset: tuple[Path, Path, str, Path]
+) -> None:
+    repository, bare_remote, tip, export_dir = unreadable_reset
+    command = ["reset", "--export-dir", str(export_dir)]
+
+    status = issue_claim.main(command)
+
+    assert status == 0
+    bundle_path = export_dir / f"aco-state-repo-2026-08-21-{tip[:12]}.bundle"
+    assert capsys.readouterr().out.splitlines() == [
+        _UNREADABLE_SCHEMA_ONE_LINE,
+        f"would: export {store.STATE_REF} at {tip} to {bundle_path} "
+        f"(restore with: git fetch {bundle_path} {store.EXPORT_BUNDLE_REF}:{store.STATE_REF})",
+        f"would: delete {store.STATE_REF} on origin (lease {tip})",
+        f"would: no local {store.STATE_REF} to delete",
+        "would: clear lineage stamps and fetch anchors in 1 worktree",
+        "would: bootstrap a fresh empty state",
+    ]
+    assert _remote_state_tip(repository, bare_remote) == tip
+    assert list(export_dir.iterdir()) == []
+
+
+def test_cli_reset_confirm_over_an_unreadable_schema_refuses_without_the_flag(
+    capsys: pytest.CaptureFixture[str], unreadable_reset: tuple[Path, Path, str, Path]
+) -> None:
+    repository, bare_remote, tip, export_dir = unreadable_reset
+    command = ["reset", "--confirm", "--export-dir", str(export_dir)]
+
+    status = issue_claim.main(command)
+
+    assert status == 2
+    assert capsys.readouterr().err == f"ERROR: {_UNREADABLE_SCHEMA_ONE_LINE}\n"
+    assert _remote_state_tip(repository, bare_remote) == tip
+    assert list(export_dir.iterdir()) == []
+    assert _lineage_observation(repository) == (None, None)
+
+
+def test_cli_reset_force_unreadable_exports_deletes_and_bootstraps_a_fresh_state(
+    capsys: pytest.CaptureFixture[str], unreadable_reset: tuple[Path, Path, str, Path]
+) -> None:
+    repository, bare_remote, tip, export_dir = unreadable_reset
+    command = ["reset", "--confirm", "--force-unreadable", "--export-dir", str(export_dir)]
+
+    status = issue_claim.main(command)
+
+    assert status == 0
+    lines = capsys.readouterr().out.splitlines()
+    bundle_path = export_dir / f"aco-state-repo-2026-08-21-{tip[:12]}.bundle"
+    assert lines[:4] == [
+        f"exported {store.STATE_REF} at {tip} to {bundle_path} "
+        f"(restore with: git fetch {bundle_path} {store.EXPORT_BUNDLE_REF}:{store.STATE_REF})",
+        f"deleted {store.STATE_REF} on origin (lease {tip})",
+        f"no local {store.STATE_REF} to delete",
+        "cleared lineage stamps and fetch anchors in 1 worktree",
+    ]
+    fresh_tip = lines[4].removeprefix("bootstrapped a fresh empty state at ")
+    heads = _real_git(repository, "bundle", "list-heads", str(bundle_path)).stdout
+    assert heads.strip() == f"{tip} {store.EXPORT_BUNDLE_REF}"
+    fresh_state = store.fetch_state(worktree=repository, remote=str(bare_remote))
+    assert (fresh_state.tip, fresh_state.claims) == (fresh_tip, {})
 
 
 def test_cli_reset_no_export_skips_the_bundle_but_still_resets(

@@ -517,6 +517,69 @@ def test_peek_state_ignores_a_foreign_fetch_that_wins_the_fetch_head_race(
     assert state.tip == created
 
 
+@pytest.mark.parametrize(
+    ("files", "version"),
+    [
+        pytest.param({"schema.toml": _SCHEMA_TOML_VERSION_ONE}, 1, id="older-version"),
+        pytest.param(
+            {"schema.toml": b"version = 3\n", "future.txt": b"a later layout\n"},
+            3,
+            id="newer-version-with-an-unknown-entry",
+        ),
+    ],
+)
+def test_peek_state_for_reset_reports_an_unreadable_schema_by_tip_and_version(
+    bare_remote: Path, worktree: Path, files: dict[str, bytes], version: int
+) -> None:
+    """Issue #341: `reset` must still export and lease-delete a ledger whose
+    schema this client does not speak, so the read yields its oid and
+    version instead of refusing -- even when that schema's layout carries a
+    top-level entry this client does not know."""
+    tip = _push_custom_tree(bare_remote, worktree, parent=None, files=files)
+
+    observed = store.peek_state_for_reset(worktree=worktree, remote=str(bare_remote))
+
+    assert isinstance(observed, protocol.UnreadableState)
+    assert (observed.tip, observed.schema_version) == (tip, version)
+
+
+def test_peek_state_for_reset_parses_a_readable_tree_in_full(
+    bare_remote: Path, worktree: Path
+) -> None:
+    tip = store.bootstrap(worktree=worktree, remote=str(bare_remote))
+
+    observed = store.peek_state_for_reset(worktree=worktree, remote=str(bare_remote))
+
+    assert isinstance(observed, protocol.ClaimState)
+    assert observed.tip == tip
+
+
+@pytest.mark.parametrize(
+    "peek",
+    [
+        pytest.param(store.peek_state, id="peek_state"),
+        pytest.param(store.peek_state_for_reset, id="peek_state_for_reset"),
+    ],
+)
+def test_peeking_a_remote_without_a_state_ref_reads_the_empty_state_and_writes_nothing(
+    bare_remote: Path, worktree: Path, peek: Callable[..., object]
+) -> None:
+    """A remote that never carried `STATE_REF` reads as the empty ledger for
+    both write-free peeks, and the read leaves no ref, lineage stamp, or
+    `FETCH_HEAD` behind in the worktree."""
+    refs_before = _git("for-each-ref", cwd=worktree).stdout
+    fetch_head = (
+        Path(_git("rev-parse", "--absolute-git-dir", cwd=worktree).stdout.strip()) / "FETCH_HEAD"
+    )
+
+    observed = peek(worktree=worktree, remote=str(bare_remote))
+
+    assert observed == protocol.EMPTY_STATE
+    assert _git("for-each-ref", cwd=worktree).stdout == refs_before
+    assert store._read_lineage_stamp(worktree) is None
+    assert not fetch_head.exists()
+
+
 def test_fetch_state_ignores_a_foreign_fetch_that_wins_the_fetch_head_race(
     bare_remote: Path, worktree: Path, tmp_path: Path
 ) -> None:
@@ -565,6 +628,15 @@ def test_fetch_state_ignores_a_foreign_fetch_that_wins_the_fetch_head_race(
             protocol.MalformedStateTreeError,
             "unknown entries",
             id="extra-file",
+        ),
+        pytest.param(
+            {
+                "schema.toml": protocol.serialize_empty_schema_toml().encode(),
+                ":!schema.toml": b"pathspec magic\n",
+            },
+            protocol.MalformedStateTreeError,
+            "unknown entries",
+            id="pathspec-magic-name",
         ),
         pytest.param(
             {"schema.toml": b'name = "wrong-key"\n'},
