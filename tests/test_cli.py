@@ -511,7 +511,7 @@ def _board_fixture_environment(monkeypatch: pytest.MonkeyPatch) -> list[list[str
         },
     ]
     active = request("board-claim", issue=11, branch="codex/issue-11-claims")
-    repository = github._repository_id("example/agent-claim")
+    repository = github._repository_id(REPOSITORY)
     observed: list[list[str]] = []
 
     def run(arguments: list[str], *, input_data: bytes | None = None) -> str:
@@ -557,7 +557,7 @@ def test_board_json_shards_the_merged_pull_request_query_by_day_without_writes(
 ) -> None:
     observed = _board_fixture_environment(monkeypatch)
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "board", "--json"]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, "board", "--json"]) == 0
     capsys.readouterr()
     assert all("--method" not in arguments for arguments in observed)
     assert all("--jq" in arguments for arguments in observed)
@@ -580,7 +580,7 @@ def test_board_projects_fixture_json_without_github_writes(
 ) -> None:
     _board_fixture_environment(monkeypatch)
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "board", "--json"]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, "board", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert set(payload) == {
         "ok",
@@ -629,7 +629,7 @@ def test_board_json_pins_the_raw_envelope_text_for_a_single_item(
     `test_board_projects_fixture_json_without_github_writes` already covers."""
     _single_item_board_environment(monkeypatch, tmp_path)
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "board", "--json"]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, "board", "--json"]) == 0
 
     assert capsys.readouterr().out == (
         '{"ok": true, "reason": "projected", "items": [{"number": 10, "title": "Plain item", '
@@ -711,7 +711,7 @@ def test_board_shows_measured_estimates_across_json_and_html(
     measured_estimate_cell = (
         f"~{measured_median_hours}h ({measured_size}, n={measured_sample_count})"
     )
-    board_args = ["--repo", "example/agent-claim", "board"]
+    board_args = ["--repo", REPOSITORY, "board"]
 
     assert issue_claim.main([*board_args, "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -744,11 +744,11 @@ def test_board_shows_the_empty_measurements_sentence_with_nothing_measured(
     own empty-measurements sentence, never a fabricated estimate."""
     _single_item_board_environment(monkeypatch, tmp_path)
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "board", "--json"]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, "board", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["measurements"]["classes"] == []
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "board", "--html"]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, "board", "--html"]) == 0
     assert "keine Messungen seit" in capsys.readouterr().out
 
 
@@ -765,7 +765,7 @@ def test_board_html_shows_unparsed_commits_alongside_the_empty_measurements_sent
     _single_item_board_environment(monkeypatch, tmp_path)
     _patch_store_write(monkeypatch, unparsed_lifecycle_commits=2)
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "board", "--html"]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, "board", "--html"]) == 0
     html_page = capsys.readouterr().out
     assert "keine Messungen seit" in html_page
     assert f"2 {board.UNPARSED_TRAILER_SENTENCE}" in html_page
@@ -781,7 +781,7 @@ def test_board_projects_with_no_state_ref_bootstrapped_at_all(
     _single_item_board_environment(monkeypatch, tmp_path)
     _patch_store_write(monkeypatch, tip=None)
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "board", "--json"]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, "board", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["measurements"]["classes"] == []
 
@@ -795,7 +795,7 @@ def test_board_reports_requests_equal_to_the_adapters_own_invocation_count(
     not a tautology."""
     observed = _board_fixture_environment(monkeypatch)
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "board", "--json"]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, "board", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["requests"] == len(observed)
 
@@ -832,7 +832,7 @@ def test_board_marks_an_item_landed_by_a_trailer_carrying_trunk_commit_without_a
         ),
     )
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "board", "--json"]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, "board", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     ten = next(item for item in payload["items"] if item["number"] == 10)
     assert ten["stage"] == "code-landed"
@@ -872,7 +872,7 @@ def test_board_dedupes_a_landing_between_the_trunk_trailer_and_a_squash_pull_req
         "a" * 40, datetime(2026, 8, 29, tzinfo=UTC), board.TrunkWorkItemClassification((10,))
     )
     monkeypatch.setattr(checkout, "trunk_landings", lambda *_args, **_kwargs: (trailer_landing,))
-    board_command = ["--repo", "example/agent-claim", "board"]
+    board_command = ["--repo", REPOSITORY, "board"]
 
     assert issue_claim.main([*board_command, "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -897,10 +897,12 @@ def test_board_html_prints_the_page_naming_its_repository_and_checkout_to_stdout
     side by side say which one an operator is ruling on."""
     _single_item_board_environment(monkeypatch, tmp_path)
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "board", "--html"]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, "board", "--html"]) == 0
     rendered = capsys.readouterr().out
-    assert f"<title>example/agent-claim &middot; {tmp_path} &middot; Board</title>" in rendered
-    assert f'<p class="eyebrow">example/agent-claim &middot; {tmp_path}</p>' in rendered
+    assert (
+        f"<title>example/agent-coordination &middot; {tmp_path} &middot; Board</title>" in rendered
+    )
+    assert f'<p class="eyebrow">example/agent-coordination &middot; {tmp_path}</p>' in rendered
     assert "#10 Plain item" in rendered
 
 
@@ -910,9 +912,7 @@ def test_board_html_path_writes_the_page_to_a_file_instead_of_stdout(
     _single_item_board_environment(monkeypatch, tmp_path)
     output_path = tmp_path / "board.html"
 
-    exit_code = issue_claim.main(
-        ["--repo", "example/agent-claim", "board", "--html", str(output_path)]
-    )
+    exit_code = issue_claim.main(["--repo", REPOSITORY, "board", "--html", str(output_path)])
 
     assert exit_code == 0
     assert capsys.readouterr().out == ""
@@ -929,12 +929,12 @@ def test_board_html_costs_no_gh_call_beyond_board_json(
     exceeds `board --json`'s."""
     client = _single_item_board_environment(monkeypatch, tmp_path)
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "board", "--json"]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, "board", "--json"]) == 0
     capsys.readouterr()
     json_requests = client.requests
 
     client.requests = 0
-    assert issue_claim.main(["--repo", "example/agent-claim", "board", "--html"]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, "board", "--html"]) == 0
     capsys.readouterr()
 
     assert client.requests == json_requests
@@ -945,7 +945,7 @@ def test_board_html_and_json_are_mutually_exclusive(
 ) -> None:
     _single_item_board_environment(monkeypatch, tmp_path)
 
-    status = issue_claim.main(["--repo", "example/agent-claim", "board", "--html", "--json"])
+    status = issue_claim.main(["--repo", REPOSITORY, "board", "--html", "--json"])
 
     assert status == 2
     assert json.loads(capsys.readouterr().out)["reason"] == "invalid_usage"
@@ -1000,7 +1000,7 @@ def test_board_skips_the_children_list_for_a_container_with_zero_children(
     monkeypatch.setattr(checkout, "trunk_landings", lambda *_args, **_kwargs: ())
     _patch_store_write(monkeypatch)
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "board", "--json"]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, "board", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
 
     assert observed_children_calls == [30]
@@ -1040,7 +1040,7 @@ def test_board_skips_the_dependency_list_for_a_zero_blocker_item_in_block_mode(
     monkeypatch.setattr(checkout, "trunk_landings", lambda *_args, **_kwargs: ())
     _patch_store_write(monkeypatch)
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "board", "--json"]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, "board", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
 
     assert observed_dependency_calls == [11]
@@ -1081,7 +1081,7 @@ def test_board_shows_open_and_total_instead_of_proposed(
     monkeypatch.setattr(checkout, "_git_output", lambda _arguments, **_kwargs: str(tmp_path))
     monkeypatch.setattr(checkout, "trunk_landings", lambda *_args, **_kwargs: ())
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "board", "--json"]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, "board", "--json"]) == 0
     items = {item["number"]: item for item in json.loads(capsys.readouterr().out)["items"]}
     expectation_states = {number: item["expectation_state"] for number, item in items.items()}
     assert expectation_states == {10: "-", 11: "proposed", 12: "ruled"}
@@ -1142,7 +1142,7 @@ def test_rulings_lists_open_expectations_by_board_priority_then_open_count(
         open_pull_requests=(board.PullRequest(200, "Fixes #50", "", "branch"),),
     )
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "rulings"]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, "rulings"]) == 0
     headers = [line for line in capsys.readouterr().out.splitlines() if line.startswith("#")]
     assert headers == [
         "#50 2/3: In-flight security work",
@@ -1172,7 +1172,7 @@ def test_rulings_reads_expectation_progress_from_the_block_not_stale_prose(
     _configured_board_client(monkeypatch, tmp_path, open_issues=(issue,))
     _write_block_pin(tmp_path)
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "rulings"]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, "rulings"]) == 0
     assert capsys.readouterr().out == "#400 1/1: Block-only expectations\n  1 open: Proposed\n"
 
 
@@ -1189,7 +1189,7 @@ def test_rulings_renders_text_json_and_empty_success(
         total_lines=2,
     )
     client = _configured_board_client(monkeypatch, tmp_path, open_issues=(open_issue,))
-    rulings_command = ["--repo", "example/agent-claim", "rulings"]
+    rulings_command = ["--repo", REPOSITORY, "rulings"]
 
     assert issue_claim.main(rulings_command) == 0
     assert capsys.readouterr().out == (
@@ -1281,7 +1281,7 @@ def test_rulings_json_pins_the_raw_envelope_text_for_the_empty_success(
     dict `test_rulings_renders_text_json_and_empty_success` already covers."""
     _configured_board_client(monkeypatch, tmp_path, open_issues=())
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "rulings", "--json"]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, "rulings", "--json"]) == 0
 
     assert capsys.readouterr().out == '{"ok": true, "reason": "listed", "rulings": []}\n'
 
@@ -1310,7 +1310,7 @@ def test_rulings_json_carries_question_example_and_picture(
     )
     _configured_board_client(monkeypatch, tmp_path, open_issues=(open_issue,))
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "rulings", "--json"]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, "rulings", "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == {
         "ok": True,
         "reason": "listed",
@@ -1625,7 +1625,7 @@ def test_next_reports_the_highest_scored_actionable_item(
         standing=claims,
     )
 
-    assert issue_claim.main(["--repo", "example/agent-claim", *arguments]) == expected_exit
+    assert issue_claim.main(["--repo", REPOSITORY, *arguments]) == expected_exit
     rendered = capsys.readouterr().out
 
     if isinstance(expected_output, str):
@@ -1644,7 +1644,7 @@ def test_next_json_pins_the_raw_envelope_text_for_a_work_item_success(
         monkeypatch, tmp_path, open_issues=_TOP_AND_BLOCKED, dependencies=_BLOCKED_BY_ELEVEN
     )
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "next", "--json"]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, "next", "--json"]) == 0
 
     assert capsys.readouterr().out == (
         '{"ok": true, "reason": "work_item", "recovery": [], '
@@ -1713,7 +1713,7 @@ def test_next_reports_expectation_state(
     monkeypatch.setattr(checkout, "_git_output", lambda _arguments, **_kwargs: str(tmp_path))
     monkeypatch.setattr(checkout, "trunk_landings", lambda *_args, **_kwargs: ())
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "next"]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, "next"]) == 0
     assert capsys.readouterr().out == expected_output
 
     projected = projected_board(
@@ -1747,7 +1747,7 @@ def test_next_pulls_an_unruled_item_and_names_only_unworkable_ones_as_skipped(
     monkeypatch.setattr(checkout, "trunk_landings", lambda *_args, **_kwargs: ())
     _patch_store_write(monkeypatch, _store_claim_from_request(standing))
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "next"]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, "next"]) == 0
     assert capsys.readouterr().out == (
         "#11 score 10: Needs rulings\n"
         "Next: Claim #11.\n"
@@ -1761,7 +1761,7 @@ def test_next_pulls_an_unruled_item_and_names_only_unworkable_ones_as_skipped(
         "#13: claimed\n"
     )
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "next", "--json"]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, "next", "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == {
         "ok": True,
         "reason": "work_item",
@@ -2368,7 +2368,7 @@ def test_claim_accepts_an_item_with_no_dependencies(
         issue_claim.main(
             [
                 "--repo",
-                "example/agent-claim",
+                REPOSITORY,
                 "claim",
                 "10",
                 "--agent",
@@ -2422,7 +2422,7 @@ def test_claim_refuses_an_open_dependency_before_mutation(
         issue_claim.main(
             [
                 "--repo",
-                "example/agent-claim",
+                REPOSITORY,
                 "claim",
                 "10",
                 "--agent",
@@ -2461,7 +2461,7 @@ def test_claim_ignores_a_closed_dependency(
         issue_claim.main(
             [
                 "--repo",
-                "example/agent-claim",
+                REPOSITORY,
                 "claim",
                 "10",
                 "--agent",
@@ -2500,7 +2500,7 @@ def test_claim_allows_an_open_dependency_with_out_of_order_and_records_it(
         issue_claim.main(
             [
                 "--repo",
-                "example/agent-claim",
+                REPOSITORY,
                 "claim",
                 "10",
                 "--agent",
@@ -2535,7 +2535,7 @@ def test_claim_refuses_a_malformed_block_before_mutation(
         issue_claim.main(
             [
                 "--repo",
-                "example/agent-claim",
+                REPOSITORY,
                 "claim",
                 "10",
                 "--agent",
@@ -2586,7 +2586,7 @@ def test_claim_ignores_body_size_and_closed_next_references(
         issue_claim.main(
             [
                 "--repo",
-                "example/agent-claim",
+                REPOSITORY,
                 "claim",
                 "10",
                 "--agent",
@@ -2624,7 +2624,7 @@ def test_release_ignores_body_contract_defects(
         issue_claim.main(
             [
                 "--repo",
-                "example/agent-claim",
+                REPOSITORY,
                 "release",
                 "10",
                 "--agent",
@@ -2672,7 +2672,7 @@ def test_claim_refuses_when_the_higher_priority_item_needs_refining(
         issue_claim.main(
             [
                 "--repo",
-                "example/agent-claim",
+                REPOSITORY,
                 "claim",
                 "10",
                 "--agent",
@@ -2871,7 +2871,7 @@ def test_claim_refuses_out_of_order_without_a_reason_before_mutating(
 
     arguments = [
         "--repo",
-        "example/agent-claim",
+        REPOSITORY,
         "claim",
         "10",
         "--agent",
@@ -2916,7 +2916,7 @@ def test_claim_allows_out_of_order_with_a_reason_and_records_it(
         issue_claim.main(
             [
                 "--repo",
-                "example/agent-claim",
+                REPOSITORY,
                 "claim",
                 "10",
                 "--agent",
@@ -2970,7 +2970,7 @@ def test_claim_refuses_for_a_higher_priority_item_even_at_a_lower_score(
         issue_claim.main(
             [
                 "--repo",
-                "example/agent-claim",
+                REPOSITORY,
                 "claim",
                 "51",
                 "--agent",
@@ -3013,7 +3013,7 @@ def test_claim_json_refusal_reports_out_of_order_without_mutating(
     exit_code = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "claim",
             "10",
             "--agent",
@@ -3057,7 +3057,7 @@ def test_claim_does_not_require_out_of_order_for_the_top_ranked_item(
         issue_claim.main(
             [
                 "--repo",
-                "example/agent-claim",
+                REPOSITORY,
                 "claim",
                 "10",
                 "--agent",
@@ -3099,7 +3099,7 @@ def test_claim_refuses_a_closed_or_missing_target(
     exit_code = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "claim",
             "72",
             "--agent",
@@ -3141,7 +3141,7 @@ def test_claim_refuses_a_container(
     exit_code = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "claim",
             "72",
             "--agent",
@@ -3176,7 +3176,7 @@ def test_claim_refuses_a_freshly_cut_childs_incomplete_skeleton(
     exit_code = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "claim",
             "101",
             "--agent",
@@ -3220,7 +3220,7 @@ def test_claim_names_an_incomplete_body_even_when_the_item_is_also_blocked(
     exit_code = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "claim",
             "51",
             "--agent",
@@ -3264,7 +3264,7 @@ def test_cut_refuses_a_non_container(
     _configured_board_client(monkeypatch, tmp_path, open_issues=(plain,))
 
     exit_code = issue_claim.main(
-        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
+        ["--repo", REPOSITORY, "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
     )
 
     assert exit_code == 2
@@ -3283,7 +3283,7 @@ def test_cut_json_refusal_reports_precondition_failed(
     exit_code = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "cut",
             str(CUT_CONTAINER),
             "--title",
@@ -3304,7 +3304,7 @@ def test_cut_refuses_a_number_that_names_no_open_issue(
     _configured_board_client(monkeypatch, tmp_path, open_issues=())
 
     exit_code = issue_claim.main(
-        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
+        ["--repo", REPOSITORY, "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
     )
 
     assert exit_code == 2
@@ -3320,7 +3320,7 @@ def test_cut_refuses_a_container_that_already_has_a_parent(
     )
 
     exit_code = issue_claim.main(
-        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
+        ["--repo", REPOSITORY, "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
     )
 
     assert exit_code == 2
@@ -3348,7 +3348,7 @@ def test_cut_refuses_when_the_forge_cannot_perform_a_required_write(
     client.capability_overrides[operation] = forge.Capability.READ_ONLY
 
     exit_code = issue_claim.main(
-        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
+        ["--repo", REPOSITORY, "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
     )
 
     assert exit_code == 2
@@ -3370,7 +3370,7 @@ def test_cut_names_the_created_child_when_the_relation_post_fails(
     client.fail_create_child_relation = True
 
     exit_code = issue_claim.main(
-        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
+        ["--repo", REPOSITORY, "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
     )
 
     assert exit_code == 2
@@ -3401,7 +3401,7 @@ def test_cut_json_reports_partial_write_with_written_and_failed(
     exit_code = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "cut",
             str(CUT_CONTAINER),
             "--title",
@@ -3476,7 +3476,7 @@ def test_cut_creates_a_child_and_removes_the_first_cuttable_slice(
     exit_code = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "cut",
             str(CUT_CONTAINER),
             "--title",
@@ -3515,7 +3515,7 @@ def test_cut_selects_a_row_by_number_and_removes_only_that_entry(
     exit_code = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "cut",
             str(CUT_CONTAINER),
             "--title",
@@ -3547,7 +3547,7 @@ def test_cut_creates_an_untied_child_with_no_slice_table(
     _write_block_pin(tmp_path)
 
     exit_code = issue_claim.main(
-        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "Untied"]
+        ["--repo", REPOSITORY, "cut", str(CUT_CONTAINER), "--title", "Untied"]
     )
 
     assert exit_code == 0
@@ -3565,7 +3565,7 @@ def test_cut_creates_an_untied_child_when_slice_is_explicitly_empty(
     _write_block_pin(tmp_path)
 
     exit_code = issue_claim.main(
-        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "Untied"]
+        ["--repo", REPOSITORY, "cut", str(CUT_CONTAINER), "--title", "Untied"]
     )
 
     assert exit_code == 0
@@ -3582,7 +3582,7 @@ def test_cut_refuses_a_row_with_no_slice_table(
     exit_code = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "cut",
             str(CUT_CONTAINER),
             "--title",
@@ -3614,7 +3614,7 @@ def test_cut_refuses_a_row_with_no_cuttable_row(
     exit_code = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "cut",
             str(CUT_CONTAINER),
             "--title",
@@ -3638,7 +3638,7 @@ def test_cut_refuses_a_title_mismatch_before_any_write(
     _write_block_pin(tmp_path)
 
     exit_code = issue_claim.main(
-        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "Wrong title"]
+        ["--repo", REPOSITORY, "cut", str(CUT_CONTAINER), "--title", "Wrong title"]
     )
 
     assert exit_code == 2
@@ -3667,9 +3667,7 @@ def test_cut_refuses_a_blockless_container_before_any_write(
     client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
     _write_block_pin(tmp_path)
 
-    exit_code = issue_claim.main(
-        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "X"]
-    )
+    exit_code = issue_claim.main(["--repo", REPOSITORY, "cut", str(CUT_CONTAINER), "--title", "X"])
 
     assert exit_code == 2
     assert "body malformed: agent-claim: no agent-claim block" in capsys.readouterr().err
@@ -3683,9 +3681,7 @@ def test_cut_refuses_a_malformed_container_before_any_write(
     client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
     _write_block_pin(tmp_path)
 
-    exit_code = issue_claim.main(
-        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "X"]
-    )
+    exit_code = issue_claim.main(["--repo", REPOSITORY, "cut", str(CUT_CONTAINER), "--title", "X"])
 
     assert exit_code == 2
     assert (
@@ -3705,7 +3701,7 @@ def test_cut_names_the_created_child_when_linking_fails(
     client.fail_update_item_body = True
 
     exit_code = issue_claim.main(
-        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
+        ["--repo", REPOSITORY, "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
     )
 
     assert exit_code == 2
@@ -3770,7 +3766,7 @@ def test_cut_adopts_an_existing_open_child_instead_of_creating_one(
     exit_code = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "cut",
             str(CUT_CONTAINER),
             "--title",
@@ -3801,7 +3797,7 @@ def test_cut_refuses_to_adopt_a_closed_child_with_a_matching_title(
     )
 
     exit_code = issue_claim.main(
-        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
+        ["--repo", REPOSITORY, "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
     )
 
     assert exit_code == 2
@@ -3832,7 +3828,7 @@ def test_cut_refuses_to_adopt_when_two_open_issues_match_the_row_title(
     monkeypatch.setattr(client, "list_open_board_issues", lambda: (_one_slice_container(), orphan))
 
     exit_code = issue_claim.main(
-        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
+        ["--repo", REPOSITORY, "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
     )
 
     assert exit_code == 2
@@ -3907,7 +3903,7 @@ def test_cut_never_adopts_an_orphan_that_is_not_this_containers_recovery_shape(
     monkeypatch.setattr(client, "list_open_board_issues", lambda: (_one_slice_container(), orphan))
 
     exit_code = issue_claim.main(
-        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
+        ["--repo", REPOSITORY, "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
     )
 
     assert exit_code == 0
@@ -3947,7 +3943,7 @@ def test_cut_adopts_the_orphan_after_a_relation_partial_failure(
     client.fail_create_child_relation = True
 
     first_exit_code = issue_claim.main(
-        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
+        ["--repo", REPOSITORY, "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
     )
 
     assert first_exit_code == 2
@@ -3965,7 +3961,7 @@ def test_cut_adopts_the_orphan_after_a_relation_partial_failure(
     )
 
     second_exit_code = issue_claim.main(
-        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
+        ["--repo", REPOSITORY, "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
     )
 
     assert second_exit_code == 0
@@ -4012,7 +4008,7 @@ def test_rule_writes_a_ruling_and_reports_remaining_open_lines(
     client = _client_with_item(monkeypatch, tmp_path, RULE_ITEM, agent_claim_body(toml_text))
 
     exit_code = issue_claim.main(
-        ["--repo", "example/agent-claim", "rule", str(RULE_ITEM), "--line", "1", flag]
+        ["--repo", REPOSITORY, "rule", str(RULE_ITEM), "--line", "1", flag]
     )
 
     assert exit_code == 0
@@ -4029,7 +4025,7 @@ def test_rule_json_reports_item_index_ruling_date_and_open(
     _client_with_item(monkeypatch, tmp_path, RULE_ITEM, agent_claim_body(toml_text))
 
     exit_code = issue_claim.main(
-        ["--repo", "example/agent-claim", "rule", str(RULE_ITEM), "--line", "1", "--yes", "--json"]
+        ["--repo", REPOSITORY, "rule", str(RULE_ITEM), "--line", "1", "--yes", "--json"]
     )
 
     assert exit_code == 0
@@ -4056,7 +4052,7 @@ def test_rule_appends_a_note_to_the_ruled_line_via_cli(
     exit_code = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "rule",
             str(RULE_ITEM),
             "--line",
@@ -4082,7 +4078,7 @@ def test_rule_refuses_an_already_ruled_line_before_any_write(
     client = _client_with_item(monkeypatch, tmp_path, RULE_ITEM, agent_claim_body(toml_text))
 
     exit_code = issue_claim.main(
-        ["--repo", "example/agent-claim", "rule", str(RULE_ITEM), "--line", "1", "--no", "--json"]
+        ["--repo", REPOSITORY, "rule", str(RULE_ITEM), "--line", "1", "--no", "--json"]
     )
 
     assert exit_code == 2
@@ -4099,7 +4095,7 @@ def test_rule_refuses_an_out_of_range_line_before_any_write(
     client = _client_with_item(monkeypatch, tmp_path, RULE_ITEM, agent_claim_body(toml_text))
 
     exit_code = issue_claim.main(
-        ["--repo", "example/agent-claim", "rule", str(RULE_ITEM), "--line", "2", "--yes", "--json"]
+        ["--repo", REPOSITORY, "rule", str(RULE_ITEM), "--line", "2", "--yes", "--json"]
     )
 
     assert exit_code == 2
@@ -4117,7 +4113,7 @@ def test_rule_refuses_when_the_forge_cannot_update_item_body(
     client.capability_overrides[forge.ForgeOperation.UPDATE_ITEM_BODY] = forge.Capability.READ_ONLY
 
     exit_code = issue_claim.main(
-        ["--repo", "example/agent-claim", "rule", str(RULE_ITEM), "--line", "1", "--yes", "--json"]
+        ["--repo", REPOSITORY, "rule", str(RULE_ITEM), "--line", "1", "--yes", "--json"]
     )
 
     assert exit_code == 2
@@ -4134,7 +4130,9 @@ def test_rule_refuses_a_non_github_canonical_remote_by_host(
     typed-refusal handlers (issue #396 review finding): a resolution
     failure -- here a canonical remote on a host no adapter serves -- must
     still reach `rule`'s own `_refuse`, not `main`'s legacy `error` object."""
-    monkeypatch.setattr(checkout, "remote_url", lambda remote: "file:///srv/git/agent-claim.git")
+    monkeypatch.setattr(
+        checkout, "remote_url", lambda remote: "file:///srv/git/agent-coordination.git"
+    )
 
     def unused(*_args: object, **_kwargs: object) -> forge.RepositoryId:
         pytest.fail("rule must refuse the host before ever calling discover_repository")
@@ -4219,7 +4217,7 @@ def test_rule_refuses_a_missing_item_before_any_write(
     client.issue_references[RULE_ITEM] = forge.ItemReference(forge.ItemState.MISSING)
 
     exit_code = issue_claim.main(
-        ["--repo", "example/agent-claim", "rule", str(RULE_ITEM), "--line", "1", "--yes", "--json"]
+        ["--repo", REPOSITORY, "rule", str(RULE_ITEM), "--line", "1", "--yes", "--json"]
     )
 
     assert exit_code == 2
@@ -4238,7 +4236,7 @@ def test_rule_refuses_a_pull_request_target_before_any_write(
     )
 
     exit_code = issue_claim.main(
-        ["--repo", "example/agent-claim", "rule", str(RULE_ITEM), "--line", "1", "--yes", "--json"]
+        ["--repo", REPOSITORY, "rule", str(RULE_ITEM), "--line", "1", "--yes", "--json"]
     )
 
     assert exit_code == 2
@@ -4258,7 +4256,7 @@ def test_ask_appends_a_proposed_line_and_rulings_shows_it_as_open(
     client = _client_with_item(monkeypatch, tmp_path, RULE_ITEM, agent_claim_body(toml_text))
 
     exit_code = issue_claim.main(
-        ["--repo", "example/agent-claim", "ask", str(RULE_ITEM), "--text", "New question?"]
+        ["--repo", REPOSITORY, "ask", str(RULE_ITEM), "--text", "New question?"]
     )
 
     assert exit_code == 0
@@ -4271,7 +4269,7 @@ def test_ask_appends_a_proposed_line_and_rulings_shows_it_as_open(
         lambda: (board_issue(RULE_ITEM, "Decide something", new_body),),
     )
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "rulings"]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, "rulings"]) == 0
     assert capsys.readouterr().out == (
         f"#{RULE_ITEM} 1/2: Decide something\n"
         "  1 ruled yes 2026-08-01: Ship it?\n"
@@ -4300,7 +4298,7 @@ def test_a_failing_body_write_names_the_command_own_unavailable(
     client.fail_update_item_body = True
     refusal = "update item body failed (simulated)"
 
-    status = issue_claim.main(["--repo", "example/agent-claim", *arguments, "--json"])
+    status = issue_claim.main(["--repo", REPOSITORY, *arguments, "--json"])
 
     captured = capsys.readouterr()
     assert status == 2
@@ -4320,7 +4318,7 @@ def test_ask_json_reports_item_index_text_and_default(
     exit_code = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "ask",
             str(RULE_ITEM),
             "--text",
@@ -4353,7 +4351,7 @@ def test_ask_refuses_a_blockless_item_before_any_write(
     exit_code = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "ask",
             str(RULE_ITEM),
             "--text",
@@ -4383,7 +4381,7 @@ def test_ask_refuses_when_the_forge_cannot_update_item_body(
     exit_code = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "ask",
             str(RULE_ITEM),
             "--text",
@@ -4406,7 +4404,9 @@ def test_ask_refuses_a_non_github_canonical_remote_by_host(
     typed-refusal handlers (issue #396 review finding): a resolution
     failure -- here a canonical remote on a host no adapter serves -- must
     still reach `ask`'s own `_refuse`, not `main`'s legacy `error` object."""
-    monkeypatch.setattr(checkout, "remote_url", lambda remote: "file:///srv/git/agent-claim.git")
+    monkeypatch.setattr(
+        checkout, "remote_url", lambda remote: "file:///srv/git/agent-coordination.git"
+    )
 
     def unused(*_args: object, **_kwargs: object) -> forge.RepositoryId:
         pytest.fail("ask must refuse the host before ever calling discover_repository")
@@ -4449,7 +4449,7 @@ def test_ask_refuses_blank_text_before_any_write(
     )
 
     exit_code = issue_claim.main(
-        ["--repo", "example/agent-claim", "ask", str(RULE_ITEM), "--text", "   ", "--json"]
+        ["--repo", REPOSITORY, "ask", str(RULE_ITEM), "--text", "   ", "--json"]
     )
 
     assert exit_code == 2
@@ -4477,7 +4477,7 @@ def test_ask_writes_question_example_and_picture(
     exit_code = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "ask",
             str(RULE_ITEM),
             "--text",
@@ -4517,7 +4517,7 @@ def test_ask_json_reports_question_example_and_picture_when_given(
     exit_code = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "ask",
             str(RULE_ITEM),
             "--text",
@@ -4558,7 +4558,7 @@ def test_ask_refuses_an_invalid_picture_file_before_any_write(
     exit_code = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "ask",
             str(RULE_ITEM),
             "--text",
@@ -4590,7 +4590,7 @@ def test_ask_refuses_a_blank_question_with_invalid_expectation_not_invalid_pictu
     exit_code = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "ask",
             str(RULE_ITEM),
             "--text",
@@ -4619,7 +4619,7 @@ def test_ask_refuses_a_missing_picture_file_before_any_write(
     exit_code = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "ask",
             str(RULE_ITEM),
             "--text",
@@ -4645,14 +4645,14 @@ def test_next_prints_a_cut_command_block_mode_accepts_for_a_valid_container(
     _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
     _write_block_pin(tmp_path)
 
-    exit_code = issue_claim.main(["--repo", "example/agent-claim", "next"])
+    exit_code = issue_claim.main(["--repo", REPOSITORY, "next"])
 
     assert exit_code == 0
     out = capsys.readouterr().out
     assert f'aco cut {CUT_CONTAINER} --title "Scheibe 1"' in out
 
     cut_exit_code = issue_claim.main(
-        ["--repo", "example/agent-claim", "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
+        ["--repo", REPOSITORY, "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
     )
     assert cut_exit_code == 0
 
@@ -4680,7 +4680,7 @@ def test_next_prints_a_cut_command_block_mode_accepts_a_differing_next_line(
     client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
     _write_block_pin(tmp_path)
 
-    json_exit_code = issue_claim.main(["--repo", "example/agent-claim", "next", "--json"])
+    json_exit_code = issue_claim.main(["--repo", REPOSITORY, "next", "--json"])
     assert json_exit_code == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["reason"] == "cut_slice"
@@ -4690,7 +4690,7 @@ def test_next_prints_a_cut_command_block_mode_accepts_a_differing_next_line(
     json_cut_exit_code = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "cut",
             str(CUT_CONTAINER),
             "--title",
@@ -4700,14 +4700,14 @@ def test_next_prints_a_cut_command_block_mode_accepts_a_differing_next_line(
     assert json_cut_exit_code == 0
     capsys.readouterr()  # discard this leg's own "CUT #79 row 1 -> #N" line
 
-    next_exit_code = issue_claim.main(["--repo", "example/agent-claim", "next"])
+    next_exit_code = issue_claim.main(["--repo", REPOSITORY, "next"])
     assert next_exit_code == 0
     out = capsys.readouterr().out
     assert out.splitlines()[0] == f"cut_slice #{CUT_CONTAINER}: {_DIFFERING_NEXT_LINE}"
     command_line = out.splitlines()[1]
     cut_arguments = shlex.split(command_line.removeprefix("Next: aco "))
 
-    cut_exit_code = issue_claim.main(["--repo", "example/agent-claim", *cut_arguments])
+    cut_exit_code = issue_claim.main(["--repo", REPOSITORY, *cut_arguments])
 
     assert cut_exit_code == 0
     child = client.next_created_child_number - 1
@@ -4734,7 +4734,7 @@ def test_claim_json_refusal_carries_refused_issue_and_checks(
     exit_code = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "claim",
             "72",
             "--agent",
@@ -4780,7 +4780,7 @@ def test_claim_does_not_corridor_on_a_slice_list(
     exit_code = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "claim",
             "72",
             "--agent",
@@ -4829,7 +4829,7 @@ def test_claim_checks_a_slice_shaped_title_for_its_recorded_parent(
     exit_code = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "claim",
             "1017",
             "--agent",
@@ -4864,7 +4864,7 @@ def test_next_skips_a_frozen_item_and_names_it_as_such(
     monkeypatch.setattr(checkout, "_git_output", lambda _arguments, **_kwargs: str(tmp_path))
     monkeypatch.setattr(checkout, "trunk_landings", lambda *_args, **_kwargs: ())
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "next"]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, "next"]) == 0
     assert capsys.readouterr().out == (
         "#10 score -10: Lower work\n"
         "Next: Claim #10.\n"
@@ -4873,7 +4873,7 @@ def test_next_skips_a_frozen_item_and_names_it_as_such(
         f"#301: frozen: {FROZEN_TRIGGER}\n"
     )
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "next", "--json"]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, "next", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["number"] == 10
     assert payload["skipped"] == [{"number": 301, "reason": f"frozen: {FROZEN_TRIGGER}"}]
@@ -4900,7 +4900,7 @@ def test_claim_does_not_warn_about_a_frozen_higher_scored_item(
         issue_claim.main(
             [
                 "--repo",
-                "example/agent-claim",
+                REPOSITORY,
                 "claim",
                 "10",
                 "--agent",
@@ -4974,7 +4974,7 @@ def test_next_names_a_cuttable_container_slice(
     )
     _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
 
-    exit_code = issue_claim.main(["--repo", "example/agent-claim", "next"])
+    exit_code = issue_claim.main(["--repo", REPOSITORY, "next"])
 
     assert exit_code == 0
     assert capsys.readouterr().out == (
@@ -5066,12 +5066,12 @@ def test_next_prints_a_cut_command_that_cut_accepts(
     )
     client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
 
-    next_exit_code = issue_claim.main(["--repo", "example/agent-claim", "next"])
+    next_exit_code = issue_claim.main(["--repo", REPOSITORY, "next"])
     assert next_exit_code == 0
     command_line = capsys.readouterr().out.splitlines()[1]
     cut_arguments = shlex.split(command_line.removeprefix("Next: aco "))
 
-    cut_exit_code = issue_claim.main(["--repo", "example/agent-claim", *cut_arguments])
+    cut_exit_code = issue_claim.main(["--repo", REPOSITORY, *cut_arguments])
 
     assert cut_exit_code == 0
     child = client.next_created_child_number - 1
@@ -5152,7 +5152,7 @@ def test_next_prints_a_cut_command_that_cut_accepts_for_every_qualifying_contain
             monkeypatch, tmp_path, open_issues=(containers_by_number[item.number],)
         )
 
-        cut_exit_code = issue_claim.main(["--repo", "example/agent-claim", *cut_arguments])
+        cut_exit_code = issue_claim.main(["--repo", REPOSITORY, *cut_arguments])
 
         assert cut_exit_code == 0
         assert client.created_children[0][0] == item.number
@@ -5174,7 +5174,7 @@ def test_next_json_names_a_cuttable_container_slice(
     )
     _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
 
-    exit_code = issue_claim.main(["--repo", "example/agent-claim", "next", "--json"])
+    exit_code = issue_claim.main(["--repo", REPOSITORY, "next", "--json"])
 
     assert exit_code == 0
     payload = json.loads(capsys.readouterr().out)
@@ -5202,7 +5202,7 @@ def test_next_names_a_closeable_container(
     )
     _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
 
-    exit_code = issue_claim.main(["--repo", "example/agent-claim", "next"])
+    exit_code = issue_claim.main(["--repo", REPOSITORY, "next"])
 
     assert exit_code == 0
     assert capsys.readouterr().out == (
@@ -5227,7 +5227,7 @@ def test_next_json_names_a_closeable_container(
     )
     _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
 
-    exit_code = issue_claim.main(["--repo", "example/agent-claim", "next", "--json"])
+    exit_code = issue_claim.main(["--repo", REPOSITORY, "next", "--json"])
 
     assert exit_code == 0
     payload = json.loads(capsys.readouterr().out)
@@ -5261,7 +5261,7 @@ def test_next_names_a_container_with_no_slice_row_by_its_own_next_line(
     )
     _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
 
-    exit_code = issue_claim.main(["--repo", "example/agent-claim", "next"])
+    exit_code = issue_claim.main(["--repo", REPOSITORY, "next"])
 
     assert exit_code == 0
     assert capsys.readouterr().out == (
@@ -5291,7 +5291,7 @@ def test_next_json_names_a_container_with_no_slice_row_by_its_own_next_line(
     )
     _configured_board_client(monkeypatch, tmp_path, open_issues=(container,))
 
-    exit_code = issue_claim.main(["--repo", "example/agent-claim", "next", "--json"])
+    exit_code = issue_claim.main(["--repo", REPOSITORY, "next", "--json"])
 
     assert exit_code == 0
     payload = json.loads(capsys.readouterr().out)
@@ -5317,7 +5317,7 @@ def test_next_caps_the_parallel_text_list_at_three_and_counts_the_rest(
     )
     _configured_board_client(monkeypatch, tmp_path, open_issues=(alpha, *candidates))
 
-    exit_code = issue_claim.main(["--repo", "example/agent-claim", "next"])
+    exit_code = issue_claim.main(["--repo", REPOSITORY, "next"])
 
     assert exit_code == 0
     assert capsys.readouterr().out == (
@@ -5326,7 +5326,7 @@ def test_next_caps_the_parallel_text_list_at_three_and_counts_the_rest(
         "scope unknown: none\nclose: none\n"
     )
 
-    json_exit_code = issue_claim.main(["--repo", "example/agent-claim", "next", "--json"])
+    json_exit_code = issue_claim.main(["--repo", REPOSITORY, "next", "--json"])
     assert json_exit_code == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["parallel"]["candidates"] == [
@@ -5388,7 +5388,7 @@ def test_next_parallel_set_uses_a_cut_proposals_own_row_scope(
     )
     _configured_board_client(monkeypatch, tmp_path, open_issues=(epic1, epic2, epic3))
 
-    exit_code = issue_claim.main(["--repo", "example/agent-claim", "next"])
+    exit_code = issue_claim.main(["--repo", REPOSITORY, "next"])
 
     assert exit_code == 0
     assert capsys.readouterr().out == (
@@ -5397,7 +5397,7 @@ def test_next_parallel_set_uses_a_cut_proposals_own_row_scope(
         "\nSKIPPED\n#81: container; claim a child\n#82: container; claim a child\n"
     )
 
-    json_exit_code = issue_claim.main(["--repo", "example/agent-claim", "next", "--json"])
+    json_exit_code = issue_claim.main(["--repo", REPOSITORY, "next", "--json"])
     assert json_exit_code == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["parallel"] == {
@@ -5445,7 +5445,7 @@ def test_next_close_names_every_zero_cost_action_regardless_of_rank(
         ),
     )
 
-    exit_code = issue_claim.main(["--repo", "example/agent-claim", "next"])
+    exit_code = issue_claim.main(["--repo", REPOSITORY, "next"])
 
     assert exit_code == 0
     out = capsys.readouterr().out
@@ -5454,7 +5454,7 @@ def test_next_close_names_every_zero_cost_action_regardless_of_rank(
     assert "#70 score" in out
     assert "close: #71, #72" in out
 
-    json_exit_code = issue_claim.main(["--repo", "example/agent-claim", "next", "--json"])
+    json_exit_code = issue_claim.main(["--repo", REPOSITORY, "next", "--json"])
     assert json_exit_code == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["close"] == [71, 72]
@@ -5495,7 +5495,7 @@ def test_next_parallel_set_never_lets_a_recovery_item_occupy_or_candidate(
         ),
     )
 
-    exit_code = issue_claim.main(["--repo", "example/agent-claim", "next"])
+    exit_code = issue_claim.main(["--repo", REPOSITORY, "next"])
 
     assert exit_code == 0
     out = capsys.readouterr().out
@@ -5504,7 +5504,7 @@ def test_next_parallel_set_never_lets_a_recovery_item_occupy_or_candidate(
     assert "close: #71\n" in out
     assert "#71 (1 path)" not in out
 
-    json_exit_code = issue_claim.main(["--repo", "example/agent-claim", "next", "--json"])
+    json_exit_code = issue_claim.main(["--repo", REPOSITORY, "next", "--json"])
     assert json_exit_code == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["parallel"] == {
@@ -5672,7 +5672,7 @@ def test_board_shows_freed_from_a_sole_closed_local_dependency_and_claim_reaches
     exit_code = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "claim",
             "301",
             "--agent",
@@ -5845,13 +5845,13 @@ def test_next_pulls_a_configured_projectionless_idea_with_refinement_step(
     idea = board_issue(10, "Operator idea", idea_body("Make the board clearer."), labels=("idea",))
     _configured_board_client(monkeypatch, tmp_path, open_issues=(idea,))
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "next"]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, "next"]) == 0
     assert capsys.readouterr().out == (
         "#10 score -20: Operator idea\nNext: Problem neu prüfen und Item verfeinern\n"
         "Run: aco claim 10 --scope <paths>\n" + _UNKNOWN_SCOPE_NEXT_TAIL
     )
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "next", "--json"]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, "next", "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == {
         "ok": True,
         "reason": "work_item",
@@ -5877,14 +5877,14 @@ def test_next_keeps_an_unlabelled_projectionless_item_skipped_with_an_active_ide
     incomplete = board_issue(10, "Incomplete work", idea_body("Investigate."))
     _configured_board_client(monkeypatch, tmp_path, open_issues=(incomplete,))
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "next"]) == 3
+    assert issue_claim.main(["--repo", REPOSITORY, "next"]) == 3
     assert capsys.readouterr().out == (
         "No actionable item.\n"
         + _NO_ACTION_NEXT_TAIL
         + "\nSKIPPED\n#10: body incomplete: Now, Next, Done when\n"
     )
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "next", "--json"]) == 3
+    assert issue_claim.main(["--repo", REPOSITORY, "next", "--json"]) == 3
     assert json.loads(capsys.readouterr().out) == {
         "ok": False,
         "reason": "nothing_actionable",
@@ -5901,7 +5901,7 @@ def test_next_keeps_a_vision_labelled_projectionless_item_incomplete_without_con
     idea = board_issue(10, "Operator vision", idea_body("Investigate."), labels=("vision",))
     _configured_board_client(monkeypatch, tmp_path, open_issues=(idea,))
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "next"]) == 3
+    assert issue_claim.main(["--repo", REPOSITORY, "next"]) == 3
     assert capsys.readouterr().out == (
         "No actionable item.\n"
         + _NO_ACTION_NEXT_TAIL
@@ -5922,7 +5922,7 @@ def test_next_keeps_a_configured_idea_with_a_complete_projection_own_next(
     )
     _configured_board_client(monkeypatch, tmp_path, open_issues=(idea,))
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "next"]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, "next"]) == 0
     assert capsys.readouterr().out == (
         "#10 score -10: Refined idea\nNext: Build the chosen direction.\n"
         "Run: aco claim 10 --scope <paths>\n" + _UNKNOWN_SCOPE_NEXT_TAIL
@@ -5953,7 +5953,7 @@ def test_claim_treats_a_higher_ranked_configured_idea_as_out_of_order(
         issue_claim.main(
             [
                 "--repo",
-                "example/agent-claim",
+                REPOSITORY,
                 "claim",
                 "10",
                 "--agent",
@@ -6200,7 +6200,7 @@ def test_cli_board_family_reports_unavailable_for_a_forge_adapter_failure(
         lambda repository: (_ for _ in ()).throw(ClaimError("adapter failed")),
     )
 
-    status = issue_claim.main(["--repo", "example/agent-claim", *command])
+    status = issue_claim.main(["--repo", REPOSITORY, *command])
 
     captured = capsys.readouterr()
     assert status == 2
@@ -6758,7 +6758,7 @@ def test_cli_rescope_from_the_primary_checkout_points_back_at_the_claims_worktre
     )
 
     status = issue_claim.main(
-        ["--repo", "example/agent-claim", "rescope", "72", "--agent", "Ada", "--add", "/repo/x.py"]
+        ["--repo", REPOSITORY, "rescope", "72", "--agent", "Ada", "--add", "/repo/x.py"]
     )
 
     assert status == 2
@@ -6785,7 +6785,7 @@ def test_cli_rescope_from_a_shared_checkout_names_the_known_branch(
     )
 
     status = issue_claim.main(
-        ["--repo", "example/agent-claim", "rescope", "72", "--agent", "Ada", "--add", "/repo/x.py"]
+        ["--repo", REPOSITORY, "rescope", "72", "--agent", "Ada", "--add", "/repo/x.py"]
     )
 
     assert status == 2
@@ -6813,7 +6813,7 @@ def test_cli_claim_from_the_primary_checkout_still_names_the_create_recipe(
     status = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "claim",
             "72",
             "--agent",
@@ -7037,7 +7037,7 @@ def test_cli_claim_omitted_role_posts_default_and_explicit_wins(
     claimed = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "claim",
             "72",
             "--agent",
@@ -7069,7 +7069,7 @@ def test_cli_claim_empty_role_fails_closed_without_posting_builder(
     monkeypatch.setattr(checkout, "_scope_directories", lambda paths, **_kwargs: ())
     argv = [
         "--repo",
-        "example/agent-claim",
+        REPOSITORY,
         "claim",
         "72",
         "--agent",
@@ -7167,7 +7167,7 @@ def test_request_and_cli_claim_fill_agent_from_documented_else_chain(
 
     client = FakeForge()
     monkeypatch.setattr(github, "GitHubForge", lambda repository: client)
-    assert issue_claim.main(["--repo", "example/agent-claim", *command]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, *command]) == 0
     posted = _live_store_claim()
     assert posted.agent == agent
 
@@ -7205,7 +7205,7 @@ def test_invalid_agent_identity_fails_before_git_and_github(
         for argv in releases:
             argv.extend(["--agent", explicit])
     for argv in (command, *releases):
-        assert issue_claim.main(["--repo", "example/agent-claim", *argv]) == 2
+        assert issue_claim.main(["--repo", REPOSITORY, *argv]) == 2
         captured = capsys.readouterr()
         assert captured.out == ""
         assert "ERROR:" in captured.err
@@ -7243,7 +7243,7 @@ def test_missing_agent_identity_fails_closed_without_github(
         ["release", "72", "--abandoned", "stopped"],
         ["release", "72", "--role", "builder", "--abandoned", "stopped"],
     ):
-        assert issue_claim.main(["--repo", "example/agent-claim", *argv]) == 2
+        assert issue_claim.main(["--repo", REPOSITORY, *argv]) == 2
         captured = capsys.readouterr()
         assert captured.out == ""
         assert captured.err.startswith("ERROR:")
@@ -7262,7 +7262,7 @@ def test_cli_same_filled_agent_can_claim_and_release_without_flag(
     claimed = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "claim",
             "72",
             "--role",
@@ -7280,7 +7280,7 @@ def test_cli_same_filled_agent_can_claim_and_release_without_flag(
     released = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "release",
             "72",
             "--role",
@@ -7310,7 +7310,7 @@ def test_cli_two_session_claimants_cannot_release_without_extra_comment(
         issue_claim.main(
             [
                 "--repo",
-                "example/agent-claim",
+                REPOSITORY,
                 "claim",
                 "72",
                 "--role",
@@ -7333,7 +7333,7 @@ def test_cli_two_session_claimants_cannot_release_without_extra_comment(
     released = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "release",
             "72",
             "--role",
@@ -7360,9 +7360,7 @@ def test_cli_release_omitted_flags_posts_the_outcome_using_selected_claim_role(
     client = FakeForge()
     _patch_release_session(monkeypatch, client, standing)
 
-    released = issue_claim.main(
-        ["--repo", "example/agent-claim", "release", "72", "--abandoned", "stopped"]
-    )
+    released = issue_claim.main(["--repo", REPOSITORY, "release", "72", "--abandoned", "stopped"])
 
     assert released == 0
     assert store.fetch_state(worktree=Path("."), remote="origin").claims == {}
@@ -7375,9 +7373,7 @@ def test_cli_release_omitted_claim_id_releases_when_foreign_peer_exists_on_issue
     client = FakeForge()
     _patch_release_session(monkeypatch, client, mine)
 
-    released = issue_claim.main(
-        ["--repo", "example/agent-claim", "release", "72", "--abandoned", "stopped"]
-    )
+    released = issue_claim.main(["--repo", REPOSITORY, "release", "72", "--abandoned", "stopped"])
 
     assert released == 0
     assert store.fetch_state(worktree=Path("."), remote="origin").claims == {}
@@ -7412,9 +7408,7 @@ def test_cli_release_wrong_agent_or_branch_or_two_matches_fails_without_post(
     client = FakeForge()
     _patch_release_session(monkeypatch, client, *standing, agent=agent, branch=branch)
 
-    released = issue_claim.main(
-        ["--repo", "example/agent-claim", "release", "72", "--abandoned", "stopped"]
-    )
+    released = issue_claim.main(["--repo", REPOSITORY, "release", "72", "--abandoned", "stopped"])
     captured = capsys.readouterr()
 
     assert released == 2
@@ -7436,7 +7430,7 @@ def test_cli_release_explicit_claim_id_ignores_checkout_branch(
     released = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "release",
             "72",
             "--claim-id",
@@ -7470,7 +7464,7 @@ def test_cli_release_override_fails_before_git_and_github(
 
     monkeypatch.setattr(checkout, "_git_output", unused)
 
-    released = issue_claim.main(["--repo", "example/agent-claim", "release", "72", *flags])
+    released = issue_claim.main(["--repo", REPOSITORY, "release", "72", *flags])
     captured = capsys.readouterr()
 
     assert released == 2
@@ -7487,9 +7481,7 @@ def test_cli_release_omitted_claim_id_fails_closed_on_detached_head(
     _forbid_github_construction(monkeypatch)
     monkeypatch.setattr(checkout, "_git_output", lambda arguments, **_kwargs: "")
 
-    released = issue_claim.main(
-        ["--repo", "example/agent-claim", "release", "72", "--abandoned", "stopped"]
-    )
+    released = issue_claim.main(["--repo", REPOSITORY, "release", "72", "--abandoned", "stopped"])
     captured = capsys.readouterr()
 
     assert released == 2
@@ -7513,7 +7505,7 @@ def test_cli_claim_omitted_base_and_branch_posts_filled_checkout(
     claimed = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "claim",
             "72",
             "--agent",
@@ -7547,7 +7539,7 @@ def test_cli_claim_and_release_round_trip_exit_codes(
     claimed = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "claim",
             "72",
             "--agent",
@@ -7567,7 +7559,7 @@ def test_cli_claim_and_release_round_trip_exit_codes(
     released = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "release",
             "72",
             "--agent",
@@ -7597,7 +7589,7 @@ def test_cli_dispatch_adapter_error_denies_with_exit_code_two(
         "GitHubForge",
         lambda repository: (_ for _ in ()).throw(ClaimError("adapter failed")),
     )
-    assert issue_claim.main(["--repo", "example/agent-claim", "board", "--json"]) == 2
+    assert issue_claim.main(["--repo", REPOSITORY, "board", "--json"]) == 2
     assert "ERROR: adapter failed" in capsys.readouterr().err
 
 
@@ -7633,7 +7625,7 @@ def _stub_board_config_tracked(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture(autouse=True)
 def _stub_canonical_remote(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every CLI store command refuses a forge-target / canonical-remote
-    mismatch (issue #176 done-when 6). Tests talk to `--repo example/agent-claim`
+    mismatch (issue #176 done-when 6). Tests talk to `--repo example/agent-coordination`
     against a fake; this stub is the matching remote URL so they are not
     refused before the behaviour under test. Tests of `remote_url` itself
     (`tests/test_checkout.py`) rebind `_LIVE_REMOTE_URL`.
@@ -7855,7 +7847,7 @@ def test_cli_status_empty_store_prints_unclaimed_repository(
 ) -> None:
     _patch_status_store(monkeypatch)
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "status"]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, "status"]) == 0
     assert capsys.readouterr().out == "UNCLAIMED repository\n"
 
 
@@ -7870,7 +7862,7 @@ def test_cli_status_before_bootstrap_prints_unclaimed_repository(
     monkeypatch.setattr(store, "fetch_state", lambda *, worktree, remote: protocol.EMPTY_STATE)
     monkeypatch.setattr(issue_claim, "datetime", FixedDateTime)
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "status"]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, "status"]) == 0
     assert capsys.readouterr().out == "UNCLAIMED repository\n"
 
 
@@ -7889,7 +7881,7 @@ def test_cli_status_reports_unavailable_for_a_rewritten_state_ref(
 
     monkeypatch.setattr(store, "fetch_state", raising_fetch_state)
 
-    status = issue_claim.main(["--repo", "example/agent-claim", "status", "--json"])
+    status = issue_claim.main(["--repo", REPOSITORY, "status", "--json"])
 
     captured = capsys.readouterr()
     assert status == 2
@@ -7908,7 +7900,7 @@ def test_cli_status_json_before_bootstrap_reports_a_null_tip(
     monkeypatch.setattr(store, "fetch_state", lambda *, worktree, remote: protocol.EMPTY_STATE)
     monkeypatch.setattr(issue_claim, "datetime", FixedDateTime)
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "status", "--json"]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, "status", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["tip"] is None
 
@@ -7919,7 +7911,7 @@ def test_cli_status_issue_with_no_claim_prints_unclaimed_issue(
 ) -> None:
     _patch_status_store(monkeypatch)
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "status", "72"]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, "status", "72"]) == 0
     assert capsys.readouterr().out == "UNCLAIMED issue #72\n"
 
 
@@ -7932,7 +7924,7 @@ def test_cli_status_shows_a_live_store_claim(
     )
     _patch_status_store(monkeypatch, claimed)
 
-    status = issue_claim.main(["--repo", "example/agent-claim", "status", "72"])
+    status = issue_claim.main(["--repo", REPOSITORY, "status", "72"])
     assert status == 0
     assert capsys.readouterr().out == (
         f"CLAIMED issue #72: Codex Sol (builder) base={BASE} "
@@ -7953,7 +7945,7 @@ def test_cli_status_prints_the_resource_line_for_an_allocated_hold(
     )
     _patch_status_store(monkeypatch, claimed)
 
-    status = issue_claim.main(["--repo", "example/agent-claim", "status", "72"])
+    status = issue_claim.main(["--repo", REPOSITORY, "status", "72"])
 
     assert status == 0
     assert "  resource schema-hop=1\n" in capsys.readouterr().out
@@ -7987,7 +7979,7 @@ def test_cli_lane_claim_and_release_round_trip_without_issue_number(
         issue_claim.main(
             [
                 "--repo",
-                "example/agent-claim",
+                REPOSITORY,
                 "claim",
                 "--role",
                 "builder",
@@ -8005,9 +7997,7 @@ def test_cli_lane_claim_and_release_round_trip_without_issue_number(
     )
     capsys.readouterr()
 
-    released = issue_claim.main(
-        ["--repo", "example/agent-claim", "release", "--abandoned", "stopped"]
-    )
+    released = issue_claim.main(["--repo", REPOSITORY, "release", "--abandoned", "stopped"])
     assert released == 0
     assert store.fetch_state(worktree=Path("."), remote="origin").claims == {}
 
@@ -8025,7 +8015,7 @@ def test_cli_status_shows_a_live_lane_claim(
     )
     _patch_status_store(monkeypatch, claimed)
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "status"]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, "status"]) == 0
     assert capsys.readouterr().out == (
         f"CLAIMED lane docs/lane-cleanup: Codex Sol (builder) base={BASE} "
         "branch=docs/lane-cleanup claim=cli-lane-claim 0h 0m\n"
@@ -8046,7 +8036,7 @@ def test_cli_lane_mode_refuses_a_non_conventional_branch(
         checkout, "_git_output", lambda arguments, **_kwargs: "codex/issue-38-issueless-claims"
     )
 
-    arguments = ["--repo", "example/agent-claim", command]
+    arguments = ["--repo", REPOSITORY, command]
     if command == "claim":
         arguments += [
             "--role",
@@ -8080,9 +8070,7 @@ def test_cli_release_requires_a_non_empty_current_branch_without_an_issue(
     _patch_status_cli(monkeypatch, client)
     monkeypatch.setattr(checkout, "_git_output", lambda arguments, **_kwargs: "")
 
-    status = issue_claim.main(
-        ["--repo", "example/agent-claim", "release", "--abandoned", "stopped"]
-    )
+    status = issue_claim.main(["--repo", REPOSITORY, "release", "--abandoned", "stopped"])
 
     assert status == 2
     assert "lane release requires a non-empty current branch" in capsys.readouterr().err
@@ -8102,7 +8090,7 @@ def test_cli_status_overlapping_store_claims_print_notes(
     )
     _patch_status_store(monkeypatch, first, second)
 
-    status = issue_claim.main(["--repo", "example/agent-claim", "status"])
+    status = issue_claim.main(["--repo", REPOSITORY, "status"])
     assert status == 0
     assert capsys.readouterr().out == (
         f"CLAIMED issue #72: Codex Sol (builder) base={BASE} "
@@ -8133,7 +8121,7 @@ def test_cli_rescope_requires_a_non_empty_current_branch(
     status = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "rescope",
             "72",
             "--agent",
@@ -8160,7 +8148,7 @@ def test_cli_status_json_empty_store_prints_unclaimed_object(
 ) -> None:
     _patch_status_store(monkeypatch)
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "status", "--json"]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, "status", "--json"]) == 0
     assert (
         capsys.readouterr().out
         == json.dumps({"ok": True, "reason": "unclaimed", "issue": None, "tip": BASE, "claims": []})
@@ -8174,7 +8162,7 @@ def test_cli_status_json_issue_with_no_claim_prints_unclaimed_object(
 ) -> None:
     _patch_status_store(monkeypatch)
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "status", "72", "--json"]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, "status", "72", "--json"]) == 0
     assert (
         capsys.readouterr().out
         == json.dumps({"ok": True, "reason": "unclaimed", "issue": 72, "tip": BASE, "claims": []})
@@ -8191,7 +8179,7 @@ def test_cli_status_json_shows_a_live_store_claim(
     )
     _patch_status_store(monkeypatch, claimed)
 
-    status = issue_claim.main(["--repo", "example/agent-claim", "status", "72", "--json"])
+    status = issue_claim.main(["--repo", REPOSITORY, "status", "72", "--json"])
     assert status == 0
     assert (
         capsys.readouterr().out
@@ -8239,7 +8227,7 @@ def test_cli_status_json_overlapping_store_claims_print_claimed_object(
     )
     _patch_status_store(monkeypatch, first, second)
 
-    status = issue_claim.main(["--repo", "example/agent-claim", "status", "--json"])
+    status = issue_claim.main(["--repo", REPOSITORY, "status", "--json"])
     assert status == 0
     assert (
         capsys.readouterr().out
@@ -8317,7 +8305,7 @@ def test_cli_status_json_issue_on_overlap_prints_related_claimed_object(
     )
     _patch_status_store(monkeypatch, first, second)
 
-    status = issue_claim.main(["--repo", "example/agent-claim", "status", "72", "--json"])
+    status = issue_claim.main(["--repo", REPOSITORY, "status", "72", "--json"])
     assert status == 0
     assert (
         capsys.readouterr().out
@@ -8456,7 +8444,7 @@ def _arranged_claim_client(monkeypatch: pytest.MonkeyPatch) -> FakeForge:
 def _claim_argv(*flags: str) -> list[str]:
     return [
         "--repo",
-        "example/agent-claim",
+        REPOSITORY,
         "claim",
         "72",
         "--agent",
@@ -8781,7 +8769,7 @@ def test_cli_claim_replay_without_scope_takes_the_live_claims_own_stored_scope(
     claimed = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "claim",
             "72",
             "--agent",
@@ -8837,7 +8825,7 @@ def test_cli_claim_replay_reports_the_matching_live_claim_after_an_interrupted_r
     monkeypatch.setattr(checkout, "_scope_directories", lambda paths, **_kwargs: ())
     arguments = [
         "--repo",
-        "example/agent-claim",
+        REPOSITORY,
         "claim",
         "72",
         "--agent",
@@ -8900,7 +8888,7 @@ def test_cli_claim_replay_refuses_a_live_claim_with_different_retry_fields(
         issue_claim.main(
             [
                 "--repo",
-                "example/agent-claim",
+                REPOSITORY,
                 "claim",
                 "72",
                 "--agent",
@@ -8945,7 +8933,7 @@ def test_cli_claim_replay_skips_out_of_order_for_the_matching_lower_priority_ite
         issue_claim.main(
             [
                 "--repo",
-                "example/agent-claim",
+                REPOSITORY,
                 "claim",
                 "10",
                 "--agent",
@@ -8993,7 +8981,7 @@ def test_cli_claim_replay_does_not_bypass_out_of_order_for_another_agent(
         issue_claim.main(
             [
                 "--repo",
-                "example/agent-claim",
+                REPOSITORY,
                 "claim",
                 "10",
                 "--agent",
@@ -9029,7 +9017,7 @@ def test_cli_claim_replay_does_not_resurrect_a_released_claim(
         issue_claim.main(
             [
                 "--repo",
-                "example/agent-claim",
+                REPOSITORY,
                 "claim",
                 "72",
                 "--agent",
@@ -9071,7 +9059,7 @@ def test_cli_claim_scope_keeps_a_comma_inside_one_path(
     claimed = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "claim",
             "72",
             "--agent",
@@ -9095,7 +9083,7 @@ def test_cli_claim_scope_keeps_a_comma_inside_one_path(
     second = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "claim",
             "73",
             "--agent",
@@ -9137,7 +9125,7 @@ def test_cli_claim_scope_comma_differs_from_repeated_scope_flags(
     joined = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "claim",
             "72",
             "--agent",
@@ -9157,7 +9145,7 @@ def test_cli_claim_scope_comma_differs_from_repeated_scope_flags(
     repeated = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "claim",
             "73",
             "--agent",
@@ -9200,7 +9188,7 @@ def test_cli_claim_refuses_a_comma_scope_that_matches_nothing_in_the_checkout(
     status = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "claim",
             "72",
             "--agent",
@@ -9238,7 +9226,7 @@ def test_cli_claim_accepts_a_scope_path_without_a_comma_that_does_not_exist_yet(
     status = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "claim",
             "72",
             "--agent",
@@ -9278,7 +9266,7 @@ def test_cli_rescope_adds_a_path_without_matching_head_or_a_clean_tree(
     status = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "rescope",
             "72",
             "--add",
@@ -9316,7 +9304,7 @@ def test_cli_rescope_add_keeps_a_comma_inside_one_path(
     status = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "rescope",
             "72",
             "--add",
@@ -9355,7 +9343,7 @@ def test_cli_rescope_drop_matches_a_comma_path_as_one_whole_path(
     status = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "rescope",
             "72",
             "--drop",
@@ -9390,7 +9378,7 @@ def test_cli_rescope_add_refuses_a_comma_scope_that_matches_nothing_in_the_check
     status = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "rescope",
             "72",
             "--add",
@@ -9431,7 +9419,7 @@ def test_cli_rescope_drop_of_a_value_not_in_scope_refuses_with_the_claims_own_re
     status = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "rescope",
             "72",
             "--drop",
@@ -9472,7 +9460,7 @@ def test_cli_rescope_drop_removes_a_comma_entry_the_claim_holds_though_no_file_m
     status = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "rescope",
             "72",
             "--drop",
@@ -9509,7 +9497,7 @@ def test_cli_rescope_json_prints_updated_scope_and_same_claim_id(
     status = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "rescope",
             "72",
             "--add",
@@ -9558,9 +9546,7 @@ def test_cli_rescope_refuses_a_different_agent_than_the_claimant(
     monkeypatch.setattr(checkout, "_scope_directories", lambda paths, **_kwargs: ())
     _set_agent_identity_env(monkeypatch, {checkout.ACO_AGENT_ENV: "Grok 4.6"})
 
-    status = issue_claim.main(
-        ["--repo", "example/agent-claim", "rescope", "72", "--add", "/repo/src/new.py"]
-    )
+    status = issue_claim.main(["--repo", REPOSITORY, "rescope", "72", "--add", "/repo/src/new.py"])
 
     assert status == 2
     assert capsys.readouterr().err == (
@@ -9587,7 +9573,7 @@ def test_cli_rescope_json_refuses_no_active_claim_with_precondition_failed(
     _set_agent_identity_env(monkeypatch, {checkout.ACO_AGENT_ENV: "Ada"})
 
     status = issue_claim.main(
-        ["--repo", "example/agent-claim", "rescope", "72", "--add", "/repo/src/new.py", "--json"]
+        ["--repo", REPOSITORY, "rescope", "72", "--add", "/repo/src/new.py", "--json"]
     )
 
     captured = capsys.readouterr()
@@ -9614,7 +9600,7 @@ def test_cli_rescope_without_add_or_drop_is_an_error(
     )
     _set_agent_identity_env(monkeypatch, {checkout.ACO_AGENT_ENV: "Codex Sol"})
 
-    status = issue_claim.main(["--repo", "example/agent-claim", "rescope", "72"])
+    status = issue_claim.main(["--repo", REPOSITORY, "rescope", "72"])
     captured = capsys.readouterr()
 
     assert status == 2
@@ -9641,9 +9627,7 @@ def test_cli_rescope_refuses_primary_checkout(
     )
     _set_agent_identity_env(monkeypatch, {checkout.ACO_AGENT_ENV: "Codex Sol"})
 
-    status = issue_claim.main(
-        ["--repo", "example/agent-claim", "rescope", "72", "--add", "/repo/src/new.py"]
-    )
+    status = issue_claim.main(["--repo", REPOSITORY, "rescope", "72", "--add", "/repo/src/new.py"])
     captured = capsys.readouterr()
 
     assert status == 2
@@ -10022,7 +10006,7 @@ def _run_scope_width_command(
             versioned=versioned,
             validate_checkout=False,
         )
-        argv = ["--repo", "example/agent-claim", "rescope", "72", *argv_tail]
+        argv = ["--repo", REPOSITORY, "rescope", "72", *argv_tail]
     elif command == "claim-lane":
         _set_agent_identity_env(monkeypatch, {checkout.ACO_AGENT_ENV: "Ada"})
         git_values = {("branch", "--show-current"): "docs/lane-cleanup"}
@@ -10032,7 +10016,7 @@ def _run_scope_width_command(
         arrange_scope_width(monkeypatch, client, directories=directories, versioned=versioned)
         argv = [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "claim",
             "--base",
             BASE,
@@ -10044,7 +10028,7 @@ def _run_scope_width_command(
         arrange_scope_width(monkeypatch, client, directories=directories, versioned=versioned)
         argv = [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "claim",
             "72",
             "--agent",
@@ -10122,10 +10106,8 @@ def test_cli_status_path_prints_the_claim_holding_a_path(
     )
     _patch_status_store(monkeypatch, claimed_claim)
 
-    claimed = issue_claim.main(
-        ["--repo", "example/agent-claim", "status", "--path", "docs/PRODUCT.md"]
-    )
-    free = issue_claim.main(["--repo", "example/agent-claim", "status", "--path", "README.md"])
+    claimed = issue_claim.main(["--repo", REPOSITORY, "status", "--path", "docs/PRODUCT.md"])
+    free = issue_claim.main(["--repo", REPOSITORY, "status", "--path", "README.md"])
     claimed_out = capsys.readouterr().out
 
     assert claimed == 0
@@ -10142,12 +10124,10 @@ def test_cli_status_path_json_prints_holder_or_unclaimed(
     _patch_status_store(monkeypatch, claimed_claim)
 
     descendant = issue_claim.main(
-        ["--repo", "example/agent-claim", "status", "--path", "docs/decisions/one.md", "--json"]
+        ["--repo", REPOSITORY, "status", "--path", "docs/decisions/one.md", "--json"]
     )
     claimed = json.loads(capsys.readouterr().out)
-    free = issue_claim.main(
-        ["--repo", "example/agent-claim", "status", "--path", "src/widget.py", "--json"]
-    )
+    free = issue_claim.main(["--repo", REPOSITORY, "status", "--path", "src/widget.py", "--json"])
     unclaimed = json.loads(capsys.readouterr().out)
 
     assert descendant == 0
@@ -10182,9 +10162,7 @@ def test_cli_status_path_answers_even_when_a_claim_age_read_would_raise(
 
     monkeypatch.setattr(store, "claim_ages", raising_claim_ages)
 
-    status = issue_claim.main(
-        ["--repo", "example/agent-claim", "status", "--path", "docs/PRODUCT.md"]
-    )
+    status = issue_claim.main(["--repo", REPOSITORY, "status", "--path", "docs/PRODUCT.md"])
 
     assert status == 0
     assert "CLAIMED docs/PRODUCT.md issue #72: Ada (builder) claim=mine" in capsys.readouterr().out
@@ -10204,7 +10182,7 @@ def test_cli_claim_touches_stay_empty_beside_a_disjoint_standing_claim(
     status = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "claim",
             "72",
             "--agent",
@@ -10240,7 +10218,7 @@ def test_cli_claim_json_lists_an_overlapping_standing_claim_as_a_touch(
     status = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "claim",
             "72",
             "--agent",
@@ -10288,7 +10266,7 @@ def test_cli_claim_json_touch_key_set_is_unchanged_by_the_human_overlap_line(
     status = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "claim",
             "1401",
             "--agent",
@@ -10416,7 +10394,7 @@ def test_board_shows_claim_age_from_the_claim_comment(
         ages={"mine": datetime(2026, 8, 20, 23, 30, tzinfo=UTC)},
     )
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "board", "--json"]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, "board", "--json"]) == 0
     item = next(row for row in json.loads(capsys.readouterr().out)["items"] if row["number"] == 72)
     assert item["claim_age"] == "0h 30m"
     assert item["claim_old"] is False
@@ -10439,7 +10417,7 @@ def test_board_marks_a_claim_old_after_sixty_one_minutes(
         ages={"mine": datetime(2026, 8, 20, 22, 59, tzinfo=UTC)},
     )
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "board", "--json"]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, "board", "--json"]) == 0
     item = next(row for row in json.loads(capsys.readouterr().out)["items"] if row["number"] == 72)
     assert item["claim_age"] == "1h 1m"
     assert item["claim_old"] is True
@@ -10459,12 +10437,12 @@ def test_cli_status_shows_claim_age_from_the_opened_commit(
     opened_at = datetime.fromisoformat("2026-08-20T23:30:00+00:00")
     _patch_status_store(monkeypatch, claimed, ages={claimed.claim_id: opened_at})
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "status", "72"]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, "status", "72"]) == 0
     status_out = capsys.readouterr().out
     assert " 0h 30m\n" in status_out
     assert " old" not in status_out.split("CLAIMED", 1)[1]
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "status", "72", "--json"]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, "status", "72", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["claims"][0]["age"] == "0h 30m"
     assert payload["claims"][0]["old"] is False
@@ -10480,10 +10458,10 @@ def test_cli_status_marks_a_claim_old_after_sixty_one_minutes(
     opened_at = datetime.fromisoformat("2026-08-20T22:59:00+00:00")
     _patch_status_store(monkeypatch, claimed, ages={claimed.claim_id: opened_at})
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "status", "72"]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, "status", "72"]) == 0
     assert " 1h 1m old\n" in capsys.readouterr().out
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "status", "72", "--json"]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, "status", "72", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["claims"][0]["age"] == "1h 1m"
     assert payload["claims"][0]["old"] is True
@@ -10504,24 +10482,19 @@ def test_cli_status_and_status_path_show_the_whole_reason(
     )
     _patch_status_store(monkeypatch, claimed)
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "status", "72"]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, "status", "72"]) == 0
     status_out = capsys.readouterr().out
     assert f"  whole: {reason}" in status_out
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "status", "72", "--json"]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, "status", "72", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["claims"][0]["whole"] == reason
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "status", "--path", "new_a.py"]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, "status", "--path", "new_a.py"]) == 0
     who_out = capsys.readouterr().out
     assert f"  whole: {reason}" in who_out
 
-    assert (
-        issue_claim.main(
-            ["--repo", "example/agent-claim", "status", "--path", "new_a.py", "--json"]
-        )
-        == 0
-    )
+    assert issue_claim.main(["--repo", REPOSITORY, "status", "--path", "new_a.py", "--json"]) == 0
     who_payload = json.loads(capsys.readouterr().out)
     assert who_payload["claims"][0]["whole"] == reason
 
@@ -10534,9 +10507,7 @@ def test_cli_release_without_json_prints_the_released_line(
     client = FakeForge()
     _patch_release_session(monkeypatch, client, standing)
 
-    released = issue_claim.main(
-        ["--repo", "example/agent-claim", "release", "72", "--abandoned", "stopped"]
-    )
+    released = issue_claim.main(["--repo", REPOSITORY, "release", "72", "--abandoned", "stopped"])
 
     assert released == 0
     assert capsys.readouterr().out == "RELEASED issue #72: mine\n"
@@ -10565,7 +10536,7 @@ def test_cli_claim_json_prints_acquired_claim_object(
     claimed = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "claim",
             *issue_argument,
             "--agent",
@@ -10713,9 +10684,7 @@ def test_cli_release_json_prints_effective_posted_identity(
         monkeypatch, client, standing, agent=agent, branch=branch, forbid_git=forbid_git
     )
 
-    released = issue_claim.main(
-        ["--repo", "example/agent-claim", "release", *issue_argument, *flags]
-    )
+    released = issue_claim.main(["--repo", REPOSITORY, "release", *issue_argument, *flags])
 
     assert released == 0
     assert (
@@ -10776,7 +10745,7 @@ def test_cli_claim_and_release_json_errors_choose_their_own_shape(
     generic refusal bucket (issue #425) reports `reason: precondition_failed`."""
     _patch_status_cli(monkeypatch, FakeForge())
 
-    assert issue_claim.main(["--repo", "example/agent-claim", *arguments, "--json"]) == 2
+    assert issue_claim.main(["--repo", REPOSITORY, *arguments, "--json"]) == 2
     captured = capsys.readouterr()
     assert_refusal(captured.err, captured.out)
 
@@ -10832,11 +10801,11 @@ def test_cli_refusals_before_the_handler_print_the_shared_envelope(
     they print the shared envelope (OUT-05); the text form keeps the bare
     `ERROR:` sentence it always printed."""
     _prepare_pre_dispatch_refusal(monkeypatch, agent, branch)
-    text_status = issue_claim.main(["--repo", "example/agent-claim", *arguments])
+    text_status = issue_claim.main(["--repo", REPOSITORY, *arguments])
     text = capsys.readouterr()
 
     _prepare_pre_dispatch_refusal(monkeypatch, agent, branch)
-    json_status = issue_claim.main(["--repo", "example/agent-claim", *arguments, "--json"])
+    json_status = issue_claim.main(["--repo", REPOSITORY, *arguments, "--json"])
     envelope = capsys.readouterr()
 
     assert (text_status, json_status) == (2, 2)
@@ -10859,7 +10828,7 @@ def test_cli_claim_json_conflict_prints_the_stdout_error_object_not_a_success_sh
     claimed = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "claim",
             "72",
             "--agent",
@@ -10909,7 +10878,7 @@ def test_cli_claim_json_transport_failure_reports_unavailable_not_conflict(
     claimed = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "claim",
             "72",
             "--agent",
@@ -10952,7 +10921,7 @@ def test_cli_module_entry_point_exits_with_mains_return_code(
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.chdir(work)
     _forbid_protect_git_github_and_identity(monkeypatch)
-    monkeypatch.setattr(sys, "argv", ["aco", "--repo", "example/agent-claim", "protect"])
+    monkeypatch.setattr(sys, "argv", ["aco", "--repo", REPOSITORY, "protect"])
     monkeypatch.setattr(sys, "stdin", io.StringIO("not a hook payload"))
 
     with (
@@ -10979,7 +10948,7 @@ def test_cli_claim_resource_prints_the_allocated_value(
     status = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "claim",
             "72",
             "--agent",
@@ -11021,7 +10990,7 @@ def test_cli_two_claims_of_the_same_directory_are_advisory(
     first = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "claim",
             "72",
             "--agent",
@@ -11042,7 +11011,7 @@ def test_cli_two_claims_of_the_same_directory_are_advisory(
     second = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "claim",
             "73",
             "--agent",
@@ -11085,7 +11054,7 @@ def test_cli_claim_on_a_directory_names_the_file_a_standing_claim_holds_under_it
     first = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "claim",
             "1400",
             "--agent",
@@ -11104,7 +11073,7 @@ def test_cli_claim_on_a_directory_names_the_file_a_standing_claim_holds_under_it
     second = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "claim",
             "1401",
             "--agent",
@@ -11140,7 +11109,7 @@ def test_cli_status_and_status_path_show_two_directory_claims_as_advisory(
     )
     _patch_status_store(monkeypatch, dir_a, dir_b)
 
-    status = issue_claim.main(["--repo", "example/agent-claim", "status"])
+    status = issue_claim.main(["--repo", REPOSITORY, "status"])
     rendered = capsys.readouterr().out
     assert status == 0
     assert "CONFLICT" not in rendered
@@ -11149,7 +11118,7 @@ def test_cli_status_and_status_path_show_two_directory_claims_as_advisory(
     assert "overlaps issue #73 (dir-b)" in rendered
     assert "overlaps issue #72 (dir-a)" in rendered
 
-    who = issue_claim.main(["--repo", "example/agent-claim", "status", "--path", "src"])
+    who = issue_claim.main(["--repo", REPOSITORY, "status", "--path", "src"])
     holders = capsys.readouterr().out
     assert who == 0
     assert "CONFLICT" not in holders
@@ -11169,7 +11138,7 @@ def test_cli_two_claims_of_the_same_file_are_advisory(
     first = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "claim",
             "72",
             "--agent",
@@ -11188,7 +11157,7 @@ def test_cli_two_claims_of_the_same_file_are_advisory(
     second = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "claim",
             "73",
             "--agent",
@@ -11226,14 +11195,14 @@ def test_cli_status_and_status_path_show_two_file_claims_as_advisory(
     )
     _patch_status_store(monkeypatch, file_a, file_b)
 
-    status = issue_claim.main(["--repo", "example/agent-claim", "status"])
+    status = issue_claim.main(["--repo", REPOSITORY, "status"])
     rendered = capsys.readouterr().out
     assert status == 0
     assert "CONFLICT" not in rendered
     assert "CLAIMED issue #72" in rendered
     assert "CLAIMED issue #73" in rendered
 
-    who = issue_claim.main(["--repo", "example/agent-claim", "status", "--path", "src/widget.py"])
+    who = issue_claim.main(["--repo", REPOSITORY, "status", "--path", "src/widget.py"])
     holders = capsys.readouterr().out
     assert who == 0
     assert "CONFLICT" not in holders
@@ -11253,7 +11222,7 @@ def test_cli_two_resource_claims_allocate_one_then_two(
     first = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "claim",
             "72",
             "--agent",
@@ -11275,7 +11244,7 @@ def test_cli_two_resource_claims_allocate_one_then_two(
     second = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "claim",
             "73",
             "--agent",
@@ -11321,7 +11290,7 @@ def test_cli_resource_race_still_yields_unique_live_holds(
     status = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "claim",
             "73",
             "--agent",
@@ -11364,9 +11333,7 @@ def test_status_path_lists_every_holder_without_calling_overlap_an_error(
     )
     _patch_status_store(monkeypatch, mine, theirs)
 
-    status = issue_claim.main(
-        ["--repo", "example/agent-claim", "status", "--path", "src/widget.py"]
-    )
+    status = issue_claim.main(["--repo", REPOSITORY, "status", "--path", "src/widget.py"])
     rendered = capsys.readouterr().out
 
     assert status == 0
@@ -11400,7 +11367,7 @@ def test_next_names_an_old_ruling_when_the_item_is_pulled(
     )
     _patch_store_write(monkeypatch)
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "next"]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, "next"]) == 0
     assert capsys.readouterr().out == (
         "#10 score -10: Work\n"
         "Next: Claim #10.\n"
@@ -11410,7 +11377,7 @@ def test_next_names_an_old_ruling_when_the_item_is_pulled(
         + _PARALLEL_UNKNOWN_TAIL
     )
 
-    assert issue_claim.main(["--repo", "example/agent-claim", "next", "--json"]) == 0
+    assert issue_claim.main(["--repo", REPOSITORY, "next", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["ruling_landings"] == 10
     assert payload["ruling_old"] is True
@@ -11690,13 +11657,13 @@ def test_check_refuses_a_pull_request_proposing_another_repositorys_branch(
         monkeypatch,
         landing_pull_request(
             body=f"Work-Item: #{WORK_ITEM_ISSUE}\n\nCloses #{WORK_ITEM_ISSUE}",
-            head_repository="fork/agent-claim",
+            head_repository="fork/agent-coordination",
         ),
     )
 
     assert run_check() == 2
     assert capsys.readouterr().err == (
-        "REFUSED: pull request #12 proposes a branch of fork/agent-claim; "
+        "REFUSED: pull request #12 proposes a branch of fork/agent-coordination; "
         "cross-repository pull requests are not classified\n"
     )
 
@@ -14920,7 +14887,7 @@ def test_cli_claim_refuses_a_missing_state_ref(
 
     arguments = [
         "--repo",
-        "example/agent-claim",
+        REPOSITORY,
         "claim",
         "72",
         "--agent",
@@ -14965,7 +14932,7 @@ def test_cli_claim_refuses_canonical_remote_mismatch_and_writes_nothing(
     status = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "claim",
             "72",
             "--agent",
@@ -14982,7 +14949,7 @@ def test_cli_claim_refuses_canonical_remote_mismatch_and_writes_nothing(
     )
 
     assert status == 2
-    assert "forge target example/agent-claim does not match canonical remote other/repo" in (
+    assert "forge target example/agent-coordination does not match canonical remote other/repo" in (
         capsys.readouterr().err
     )
     assert fake.transitions == []
@@ -15021,7 +14988,7 @@ def test_cli_bootstrap_ignores_repo_and_a_non_github_remote(
 
     monkeypatch.setattr(github, "discover_repository", unused)
 
-    status = issue_claim.main(["--repo", "example/agent-claim", "bootstrap"])
+    status = issue_claim.main(["--repo", REPOSITORY, "bootstrap"])
 
     captured = capsys.readouterr()
     assert status == 0
@@ -15065,9 +15032,7 @@ def test_cli_rescope_refuses_a_missing_state_ref(
     _set_agent_identity_env(monkeypatch, {checkout.ACO_AGENT_ENV: "Codex Sol"})
     _patch_store_write(monkeypatch, tip=None)
 
-    status = issue_claim.main(
-        ["--repo", "example/agent-claim", "rescope", "72", "--add", "/repo/src/new.py"]
-    )
+    status = issue_claim.main(["--repo", REPOSITORY, "rescope", "72", "--add", "/repo/src/new.py"])
 
     assert status == 2
     assert protocol.MISSING_STATE_REF in capsys.readouterr().err
@@ -15081,9 +15046,7 @@ def test_cli_release_refuses_a_missing_state_ref(
     _patch_release_session(monkeypatch, client, standing)
     _patch_store_write(monkeypatch, tip=None)
 
-    status = issue_claim.main(
-        ["--repo", "example/agent-claim", "release", "72", "--abandoned", "stopped"]
-    )
+    status = issue_claim.main(["--repo", REPOSITORY, "release", "72", "--abandoned", "stopped"])
 
     assert status == 2
     assert protocol.MISSING_STATE_REF in capsys.readouterr().err
@@ -15199,7 +15162,9 @@ def test_cli_board_refuses_a_non_github_canonical_remote_by_host(
     `discover_repository`/`gh` -- never the store-blind path a forge-free
     command like `status` takes for the same remote, and never GitHub's own
     "does not name a GitHub repository" text."""
-    monkeypatch.setattr(checkout, "remote_url", lambda remote: "file:///srv/git/agent-claim.git")
+    monkeypatch.setattr(
+        checkout, "remote_url", lambda remote: "file:///srv/git/agent-coordination.git"
+    )
 
     def unused(*_args: object, **_kwargs: object) -> forge.RepositoryId:
         pytest.fail("board must refuse the host before ever calling discover_repository")
@@ -15295,7 +15260,7 @@ def test_cli_brief_prints_body_claim_lane_tip_and_touched_files(
     _patch_store_write(monkeypatch, claim, ages={claim.claim_id: datetime(2026, 8, 20, tzinfo=UTC)})
     monkeypatch.chdir(repository)
 
-    status = issue_claim.main(["--repo", "example/agent-claim", "brief", "258"])
+    status = issue_claim.main(["--repo", REPOSITORY, "brief", "258"])
 
     assert status == 0
     assert capsys.readouterr().out.splitlines() == [
@@ -15326,7 +15291,7 @@ def test_cli_brief_reports_no_active_claim_with_empty_tip_and_touched_files(
     _patch_store_write(monkeypatch)
     monkeypatch.chdir(repository)
 
-    status = issue_claim.main(["--repo", "example/agent-claim", "brief", "258"])
+    status = issue_claim.main(["--repo", REPOSITORY, "brief", "258"])
 
     assert status == 0
     assert capsys.readouterr().out.splitlines() == [
@@ -15352,7 +15317,7 @@ def test_cli_brief_reports_branch_not_found_when_the_claim_branch_is_gone(
     _patch_store_write(monkeypatch, claim, ages={claim.claim_id: datetime(2026, 8, 20, tzinfo=UTC)})
     monkeypatch.chdir(repository)
 
-    status = issue_claim.main(["--repo", "example/agent-claim", "brief", "258"])
+    status = issue_claim.main(["--repo", REPOSITORY, "brief", "258"])
 
     assert status == 0
     assert capsys.readouterr().out.splitlines() == [
@@ -15394,7 +15359,7 @@ def test_cli_brief_refuses_when_the_lane_tip_read_fails_outright(
         stderr="simulated git failure",
     )
 
-    status = issue_claim.main(["--repo", "example/agent-claim", "brief", "258"])
+    status = issue_claim.main(["--repo", REPOSITORY, "brief", "258"])
 
     assert status == 2
     assert capsys.readouterr().err == "ERROR: simulated git failure\n"
@@ -15414,7 +15379,7 @@ def test_cli_brief_json_names_a_failing_item_read_unavailable(
     _patch_store_write(monkeypatch, claim, ages={claim.claim_id: datetime(2026, 8, 20, tzinfo=UTC)})
     monkeypatch.chdir(repository)
 
-    status = issue_claim.main(["--repo", "example/agent-claim", "brief", "258", "--json"])
+    status = issue_claim.main(["--repo", REPOSITORY, "brief", "258", "--json"])
 
     captured = capsys.readouterr()
     assert status == 2
@@ -15439,7 +15404,7 @@ def test_cli_brief_json_prints_one_object_with_body_claim_tip_and_touched(
     _patch_store_write(monkeypatch, claim, ages={claim.claim_id: datetime(2026, 8, 20, tzinfo=UTC)})
     monkeypatch.chdir(repository)
 
-    status = issue_claim.main(["--repo", "example/agent-claim", "brief", "258", "--json"])
+    status = issue_claim.main(["--repo", REPOSITORY, "brief", "258", "--json"])
 
     assert status == 0
     output = capsys.readouterr().out
@@ -15493,7 +15458,7 @@ def _write_repository_agent_claim_configs(
     (agent_claim / "brief.toml").write_text(brief_content)
     if brief_tracked:
         _real_git(toplevel, "add", board.BRIEF_CONFIG_PATH.as_posix())
-    _real_git(toplevel, "commit", "-q", "-m", "add agent-claim configs")
+    _real_git(toplevel, "commit", "-q", "-m", "add .agent-claim configs")
 
 
 def _brief_step_scenario(
@@ -15590,7 +15555,7 @@ def test_cli_brief_step_prints_this_repository_own_rules_and_checks_by_step(
     name, including one (`[land]`) that names neither rules nor checks at
     all (BRIEF-12, BRIEF-13)."""
     base, tip = _brief_step_scenario(monkeypatch, tmp_path, content=_BRIEF_TOML_ALL_STEPS)
-    arguments = ["--repo", "example/agent-claim", "brief", "258", "--step", step]
+    arguments = ["--repo", REPOSITORY, "brief", "258", "--step", step]
 
     status = issue_claim.main(arguments)
 
@@ -15605,7 +15570,7 @@ def test_cli_brief_without_step_ignores_the_tracked_brief_config(
     content changes nothing: `brief` still prints exactly its own four
     sections (BRIEF-16)."""
     base, tip = _brief_step_scenario(monkeypatch, tmp_path)
-    arguments = ["--repo", "example/agent-claim", "brief", "258"]
+    arguments = ["--repo", REPOSITORY, "brief", "258"]
 
     status = issue_claim.main(arguments)
 
@@ -15617,7 +15582,7 @@ def test_cli_brief_step_json_adds_rules_and_checks_to_the_existing_object(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
     base, tip = _brief_step_scenario(monkeypatch, tmp_path)
-    arguments = ["--repo", "example/agent-claim", "brief", "258", "--step", "build"]
+    arguments = ["--repo", REPOSITORY, "brief", "258", "--step", "build"]
 
     status = issue_claim.main([*arguments, "--json"])
 
@@ -15673,7 +15638,7 @@ def test_cli_brief_step_refuses_with_no_usable_brief_config(
     monkeypatch.setattr(FakeForge, "item_reference", unused)
     monkeypatch.setattr(github, "GitHubForge", lambda _repository: client)
     monkeypatch.chdir(repository)
-    arguments = ["--repo", "example/agent-claim", "brief", "258", "--step", "build", "--json"]
+    arguments = ["--repo", REPOSITORY, "brief", "258", "--step", "build", "--json"]
 
     status = issue_claim.main(arguments)
 
@@ -15690,7 +15655,9 @@ def test_cli_brief_refuses_a_non_github_canonical_remote_by_host(
     uses (issue #245): a canonical remote on any host but GitHub refuses by
     that host's own name, before ever calling `discover_repository`/`gh` --
     the same refusal `board` gives for the same remote."""
-    monkeypatch.setattr(checkout, "remote_url", lambda remote: "file:///srv/git/agent-claim.git")
+    monkeypatch.setattr(
+        checkout, "remote_url", lambda remote: "file:///srv/git/agent-coordination.git"
+    )
 
     def unused(*_args: object, **_kwargs: object) -> forge.RepositoryId:
         pytest.fail("brief must refuse the host before ever calling discover_repository")
@@ -15807,7 +15774,7 @@ def test_item_edit_size_writes_the_top_level_field_under_github_storage(
     )
 
     exit_code = issue_claim.main(
-        ["--repo", "example/agent-claim", "item", "edit", str(RULE_ITEM), "--size", "M"]
+        ["--repo", REPOSITORY, "item", "edit", str(RULE_ITEM), "--size", "M"]
     )
 
     assert exit_code == 0
@@ -15823,7 +15790,7 @@ def test_item_edit_size_json_reports_the_item_and_size(
     exit_code = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "item",
             "edit",
             str(RULE_ITEM),
@@ -15864,7 +15831,7 @@ def test_item_edit_size_refuses_through_the_shared_precondition_failed_envelope(
     client.capability_overrides[forge.ForgeOperation.UPDATE_ITEM_BODY] = forge.Capability.READ_ONLY
 
     exit_code = issue_claim.main(
-        ["--repo", "example/agent-claim", "item", "edit", str(RULE_ITEM), "--size", "M", "--json"]
+        ["--repo", REPOSITORY, "item", "edit", str(RULE_ITEM), "--size", "M", "--json"]
     )
 
     assert exit_code == 2
@@ -15885,7 +15852,7 @@ def test_item_edit_whole_writes_the_top_level_field_under_github_storage(
     )
 
     exit_code = issue_claim.main(
-        ["--repo", "example/agent-claim", "item", "edit", str(RULE_ITEM), "--whole", reason]
+        ["--repo", REPOSITORY, "item", "edit", str(RULE_ITEM), "--whole", reason]
     )
 
     assert exit_code == 0
@@ -15902,7 +15869,7 @@ def test_item_edit_whole_json_reports_the_item_and_reason(
     exit_code = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "item",
             "edit",
             str(RULE_ITEM),
@@ -15935,7 +15902,7 @@ def test_item_edit_whole_refuses_through_the_shared_precondition_failed_envelope
     exit_code = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "item",
             "edit",
             str(RULE_ITEM),

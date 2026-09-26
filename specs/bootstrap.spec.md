@@ -60,7 +60,7 @@ own argument shape, forge-freedom, and refusal sink.
 Setup: bare-remote except `origin` points at `git@gitlab.com:other/repo.git`, no `refs/aco/state` yet
 
 ```console
-$ aco --repo example/agent-claim bootstrap
+$ aco --repo example/agent-coordination bootstrap
 <sha>
 exit 0
 ```

@@ -1299,12 +1299,12 @@ def test_cli_bootstrap_creates_the_empty_state_ref_without_a_ledger(
     monkeypatch.setattr(
         issue_claim.checkout,
         "remote_url",
-        lambda remote: "git@github.com:example/agent-claim.git",
+        lambda remote: "git@github.com:example/agent-coordination.git",
     )
     _git("remote", "add", "origin", str(bare_remote), cwd=worktree)
     monkeypatch.chdir(worktree)
 
-    status = issue_claim.main(["--repo", "example/agent-claim", "bootstrap"])
+    status = issue_claim.main(["--repo", "example/agent-coordination", "bootstrap"])
 
     assert status == 0
     assert capsys.readouterr().out.splitlines() == [_state_ref_oid(bare_remote)]
@@ -1321,14 +1321,14 @@ def test_cli_bootstrap_is_idempotent_on_a_second_run(
     monkeypatch.setattr(
         issue_claim.checkout,
         "remote_url",
-        lambda remote: "git@github.com:example/agent-claim.git",
+        lambda remote: "git@github.com:example/agent-coordination.git",
     )
     _git("remote", "add", "origin", str(bare_remote), cwd=worktree)
     monkeypatch.chdir(worktree)
-    issue_claim.main(["--repo", "example/agent-claim", "bootstrap"])
+    issue_claim.main(["--repo", "example/agent-coordination", "bootstrap"])
     first_output = capsys.readouterr().out
 
-    status = issue_claim.main(["--repo", "example/agent-claim", "bootstrap"])
+    status = issue_claim.main(["--repo", "example/agent-coordination", "bootstrap"])
 
     assert status == 0
     assert capsys.readouterr().out == first_output

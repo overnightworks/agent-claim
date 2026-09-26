@@ -16,7 +16,7 @@ from agent_coordination.body import ItemKind, render_block
 from agent_coordination.protocol import ClaimRequest
 
 BASE = "a" * 40
-REPOSITORY = "example/agent-claim"
+REPOSITORY = "example/agent-coordination"
 
 
 def request(
