@@ -123,6 +123,15 @@ class ItemReference:
 
 
 @dataclass(frozen=True)
+class ClosedIssue:
+    """One issue closed at or after a caller's cutoff: only the number and
+    title `item new`'s and `cut`'s twin search compares (issue #444)."""
+
+    number: int
+    title: str
+
+
+@dataclass(frozen=True)
 class Landing:
     """One pull/merge request read for its own sake, not for the board's stages.
 
@@ -199,7 +208,9 @@ class ForgeOperation(StrEnum):
     LIST_BOARD_DEPENDENCIES = "list_board_dependencies"
     LIST_OPEN_BOARD_PULL_REQUESTS = "list_open_board_pull_requests"
     LIST_RECENT_MERGED_BOARD_PULL_REQUESTS = "list_recent_merged_board_pull_requests"
+    LIST_RECENTLY_CLOSED_ISSUES = "list_recently_closed_issues"
     LINK_CHILD = "link_child"
+    CREATE_ISSUE = "create_issue"
     CREATE_CHILD = "create_child"
     UPDATE_ITEM_BODY = "update_item_body"
 
@@ -279,11 +290,21 @@ class ForgeReader(Protocol):
         self, since: datetime
     ) -> tuple[board.PullRequest, ...]: ...
 
+    def list_recently_closed_issues(self, since: datetime) -> tuple[ClosedIssue, ...]:
+        """Every issue closed at or after `since`, never a pull request --
+        the closed half of the twin search (issue #444)."""
+        ...
+
 
 class ForgeWriter(ForgeReader, Protocol):
     """`ForgeReader` plus every operation that mutates forge state."""
 
     def link_child(self, parent: int, child: int) -> None: ...
+
+    def create_issue(self, *, title: str, body: str, kind: ItemKind) -> int:
+        """A fresh issue of `kind`, linked to no parent (`item new`, issue
+        #444); `create_child` is the same write plus the parent relation."""
+        ...
 
     def create_child(self, *, parent: int, title: str, body: str, kind: ItemKind) -> int: ...
 

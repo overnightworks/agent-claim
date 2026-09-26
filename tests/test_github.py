@@ -35,7 +35,7 @@ def test_forge_operation_exhaustiveness_matches_the_declared_reader_and_writer_m
         if not name.startswith("_") and name not in {"repository", "capability", "requests"}
     }
     assert {operation.value for operation in forge.ForgeOperation} == declared_methods
-    assert len(forge.ForgeOperation) == 13
+    assert len(forge.ForgeOperation) == 15
     assert set(github.GITHUB_CAPABILITIES) == set(forge.ForgeOperation)
     assert forge.Capability.UNSUPPORTED not in github.GITHUB_CAPABILITIES.values()
 
@@ -350,11 +350,9 @@ def test_github_adapter_names_the_created_child_when_the_relation_post_fails() -
 
 
 def test_github_adapter_creates_an_issue_without_linking_it_as_a_child() -> None:
-    """`_create_issue` is `create_child`'s first write on its own (#260): one
-    POST, no sub-issue relation -- `link_child` is the caller's to run,
-    later, against a number it may not have yet. Private (no other caller,
-    #260 Sonnet finding): exercised directly here rather than through the
-    port."""
+    """`create_issue` is `item new`'s own write without `--parent` (#444) and
+    `create_child`'s first write (#260): one POST carrying the issue type by
+    name, no sub-issue relation."""
     observed: list[tuple[list[str], bytes | None]] = []
 
     def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
@@ -363,7 +361,7 @@ def test_github_adapter_creates_an_issue_without_linking_it_as_a_child() -> None
 
     client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
 
-    number = client._create_issue(title="Scheibe 4", body=BLOCK_CHILD_SKELETON, kind=ItemKind.TASK)
+    number = client.create_issue(title="Scheibe 4", body=BLOCK_CHILD_SKELETON, kind=ItemKind.TASK)
 
     assert number == 101
     assert observed == [
@@ -374,6 +372,72 @@ def test_github_adapter_creates_an_issue_without_linking_it_as_a_child() -> None
             ),
         )
     ]
+
+
+def closed_issue_row(
+    number: int, closed_at: str, *, is_pull_request: bool = False
+) -> dict[str, object]:
+    return {
+        "number": number,
+        "title": f"Issue {number}",
+        "closedAt": closed_at,
+        "isPullRequest": is_pull_request,
+    }
+
+
+def test_github_adapter_lists_only_issues_closed_since_the_cutoff() -> None:
+    """The twin search's closed half (#444): GitHub's `since` filters by the
+    last update, so an issue closed before the cutoff but touched after it
+    is dropped here, and a pull request never counts as an issue."""
+    observed: list[list[str]] = []
+    rows = (
+        closed_issue_row(7, "2026-09-20T10:00:00Z"),
+        closed_issue_row(8, "2026-08-01T10:00:00Z"),
+        closed_issue_row(9, "2026-09-21T10:00:00Z", is_pull_request=True),
+    )
+
+    def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
+        observed.append(arguments)
+        return "\n".join(json.dumps(row) for row in rows)
+
+    client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
+    since = datetime(2026, 8, 27, 10, 0, tzinfo=UTC)
+
+    closed = client.list_recently_closed_issues(since)
+
+    assert closed == (forge.ClosedIssue(7, "Issue 7"),)
+    assert observed == [
+        [
+            "api",
+            f"repos/{REPOSITORY}/issues?state=closed&since=2026-08-27T10:00:00Z"
+            "&per_page=100&page=1",
+            "--jq",
+            '.[] | {number,title,closedAt:.closed_at,isPullRequest:has("pull_request")}',
+        ]
+    ]
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        pytest.param([], id="not-an-object"),
+        pytest.param({**closed_issue_row(7, "2026-09-20T10:00:00Z"), "number": 0}, id="number"),
+        pytest.param({**closed_issue_row(7, "2026-09-20T10:00:00Z"), "title": None}, id="title"),
+        pytest.param(closed_issue_row(7, "20.09.2026"), id="closed-at"),
+        pytest.param(
+            {**closed_issue_row(7, "2026-09-20T10:00:00Z"), "isPullRequest": None},
+            id="pull-request-flag",
+        ),
+    ],
+)
+def test_github_adapter_fails_loud_on_a_malformed_closed_issue(row: object) -> None:
+    client = GitHubForge(
+        github._repository_id(REPOSITORY), run=lambda *_arguments, **_options: json.dumps(row)
+    )
+    since = datetime(2026, 8, 27, tzinfo=UTC)
+
+    with pytest.raises(forge.ForgeMalformedResponseError, match="malformed closed issue"):
+        client.list_recently_closed_issues(since)
 
 
 def test_github_adapter_links_an_existing_child_by_reading_its_internal_id() -> None:

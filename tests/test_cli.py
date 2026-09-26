@@ -136,6 +136,7 @@ class FakeForge:
     parents: dict[int, board.ParentIssue] = field(default_factory=dict)
     children: dict[int, tuple[board.ChildItem, ...]] = field(default_factory=dict)
     closed_issues: set[int] = field(default_factory=set)
+    recently_closed_issues: tuple[forge.ClosedIssue, ...] = ()
     landing_comments: dict[int, str] = field(default_factory=dict)
     issue_references: dict[int, forge.ItemReference] = field(default_factory=dict)
     issue_reference_lookups: list[int] = field(default_factory=list)
@@ -170,8 +171,8 @@ class FakeForge:
     def capability(self, operation: forge.ForgeOperation) -> forge.Capability:
         return self.capability_overrides.get(operation, github.GITHUB_CAPABILITIES[operation])
 
-    def _create_issue(self, *, title: str, body: str, kind: body.ItemKind) -> int:
-        """This fake's mirror of `GitHubForge._create_issue`: a fresh issue
+    def create_issue(self, *, title: str, body: str, kind: body.ItemKind) -> int:
+        """This fake's mirror of `GitHubForge.create_issue`: a fresh issue
         with no recorded parent, immediately visible to
         `list_open_board_issues` -- the orphan shape a failed `link_child`
         leaves behind (#260). Carries `kind` (#260 Sonnet finding), since a
@@ -206,7 +207,7 @@ class FakeForge:
         (#260), so a relation failure leaves the same real orphan behind
         for a repeat `cut` to find."""
         self.created_children.append((parent, title, body, kind))
-        number = self._create_issue(title=title, body=body, kind=kind)
+        number = self.create_issue(title=title, body=body, kind=kind)
         try:
             self.link_child(parent, number)
         except ClaimError as error:
@@ -336,6 +337,10 @@ class FakeForge:
         self._run()
         return self.board_merged_pull_requests
 
+    def list_recently_closed_issues(self, since: datetime) -> tuple[forge.ClosedIssue, ...]:
+        self._run()
+        return self.recently_closed_issues
+
 
 class ReaderOnlyForge(FakeForge):
     """A `FakeForge` whose write operations fail the test instead of quietly
@@ -343,7 +348,7 @@ class ReaderOnlyForge(FakeForge):
     independent of the `ForgeReader`/`ForgeWriter` annotations (documentation
     only; nothing type-checks in CI)."""
 
-    def _create_issue(self, *, title: str, body: str, kind: body.ItemKind) -> int:
+    def create_issue(self, *, title: str, body: str, kind: body.ItemKind) -> int:
         pytest.fail("a read-only command must never create an issue")
 
     def link_child(self, parent: int, child: int) -> None:
@@ -414,6 +419,9 @@ class _MinimalForgeReader:
         self, since: datetime
     ) -> tuple[board.PullRequest, ...]:
         self.observed_merged_pull_request_floors.append(since)
+        return ()
+
+    def list_recently_closed_issues(self, since: datetime) -> tuple[forge.ClosedIssue, ...]:
         return ()
 
     def list_children(self, number: int) -> tuple[board.ChildItem, ...]:

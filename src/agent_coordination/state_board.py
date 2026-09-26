@@ -59,7 +59,11 @@ STATE_REF_CAPABILITIES: Mapping[forge.ForgeOperation, forge.Capability] = Mappin
         forge.ForgeOperation.LANDING: forge.Capability.UNSUPPORTED,
         forge.ForgeOperation.LIST_OPEN_BOARD_PULL_REQUESTS: forge.Capability.UNSUPPORTED,
         forge.ForgeOperation.LIST_RECENT_MERGED_BOARD_PULL_REQUESTS: forge.Capability.UNSUPPORTED,
+        forge.ForgeOperation.LIST_RECENTLY_CLOSED_ISSUES: forge.Capability.READ_ONLY,
         forge.ForgeOperation.LINK_CHILD: forge.Capability.READ_WRITE,
+        # `item new` creates a state-ref item through `create_item`, which
+        # mints its id and records its parent and origin in one write.
+        forge.ForgeOperation.CREATE_ISSUE: forge.Capability.UNSUPPORTED,
         forge.ForgeOperation.CREATE_CHILD: forge.Capability.READ_WRITE,
         forge.ForgeOperation.UPDATE_ITEM_BODY: forge.Capability.READ_WRITE,
     }
@@ -331,6 +335,15 @@ class StateRefBoard:
 
     def list_open_board_pull_requests(self) -> tuple[board.PullRequest, ...]:
         return ()
+
+    def list_recently_closed_issues(self, since: datetime) -> tuple[forge.ClosedIssue, ...]:
+        cutoff = since.astimezone(UTC)
+        return tuple(
+            forge.ClosedIssue(decoded.record.number, decoded.record.title)
+            for decoded in self._items.values()
+            if decoded.record.closed_at is not None
+            and datetime.fromisoformat(decoded.record.closed_at) >= cutoff
+        )
 
     def list_recent_merged_board_pull_requests(
         self, since: datetime
