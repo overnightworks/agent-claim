@@ -1360,6 +1360,11 @@ def test_github_adapter_item_references_splits_into_blocks_of_the_batch_size(
             "malformed batched item reference",
             id="body-not-text",
         ),
+        pytest.param(
+            {"__typename": "Issue", "state": "MERGED", "title": "x", "body": ""},
+            "malformed batched item reference",
+            id="issue-cannot-be-merged",
+        ),
     ],
 )
 def test_github_adapter_item_references_fails_loud_on_a_malformed_node(
@@ -1379,6 +1384,7 @@ def test_github_adapter_item_references_fails_loud_on_a_malformed_node(
     [
         pytest.param("not-json", "invalid batched item reference JSON", id="not-json"),
         pytest.param("null", "malformed batched item reference", id="no-repository"),
+        pytest.param(json.dumps({}), "malformed batched item reference", id="omitted-alias"),
     ],
 )
 def test_github_adapter_item_references_fails_loud_on_a_malformed_response(

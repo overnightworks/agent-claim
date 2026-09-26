@@ -43,6 +43,14 @@ _GRAPHQL_ITEM_STATES: dict[str, forge.ItemState] = {
     "MERGED": forge.ItemState.CLOSED,
 }
 _GRAPHQL_ITEM_TYPENAMES = frozenset({"Issue", "PullRequest"})
+# GraphQL's own schema: `Issue.state` is `OPEN`/`CLOSED` only -- `MERGED`
+# exists solely on `PullRequestState`, so an `Issue` node claiming `MERGED`
+# is impossible on the wire and a malformed response, never a state to
+# normalize (issue #440 review).
+_GRAPHQL_ITEM_STATES_BY_TYPENAME: dict[str, frozenset[str]] = {
+    "Issue": frozenset({"OPEN", "CLOSED"}),
+    "PullRequest": frozenset({"OPEN", "CLOSED", "MERGED"}),
+}
 _MALFORMED_BATCHED_ITEM_REFERENCE = "GitHub returned a malformed batched item reference"
 GH_TIMEOUT_SECONDS = 60
 GH_QUIET_ENVIRONMENT = {
@@ -230,6 +238,7 @@ def _parsed_item_reference_node(node: object) -> forge.ItemReference:
     if (
         typename not in _GRAPHQL_ITEM_TYPENAMES
         or state not in _GRAPHQL_ITEM_STATES
+        or state not in _GRAPHQL_ITEM_STATES_BY_TYPENAME.get(typename, frozenset())
         or not isinstance(title, str)
         or (body is not None and not isinstance(body, str))
     ):
@@ -237,6 +246,18 @@ def _parsed_item_reference_node(node: object) -> forge.ItemReference:
     return forge.ItemReference(
         _GRAPHQL_ITEM_STATES[state], title, body or "", typename == "PullRequest"
     )
+
+
+def _aliased_node(nodes: Mapping[str, object], index: int) -> object:
+    """One alias's own raw node out of a batch's `nodes` mapping (issue #440
+    review): an omitted key is a malformed response -- GitHub always answers
+    every alias a query names, `null` included for one it cannot resolve --
+    never silently read the same as that explicit `null` (`_parsed_item_
+    reference_node`'s own `MISSING` case)."""
+    alias = f"n{index}"
+    if alias not in nodes:
+        raise forge.ForgeMalformedResponseError(_MALFORMED_BATCHED_ITEM_REFERENCE)
+    return nodes[alias]
 
 
 def _decoded(result: process.BoundedResult, purpose: str) -> str:
@@ -442,7 +463,7 @@ class GitHubForge:
             raise forge.ForgeMalformedResponseError(_MALFORMED_BATCHED_ITEM_REFERENCE)
         nodes = values[0]
         return {
-            number: _parsed_item_reference_node(nodes.get(f"n{index}"))
+            number: _parsed_item_reference_node(_aliased_node(nodes, index))
             for index, number in enumerate(numbers)
         }
 
