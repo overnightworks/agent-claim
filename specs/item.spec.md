@@ -55,7 +55,7 @@ runner's own git object ids.
 | `item show`/`edit`/`close --json` | — | ITEM-09 | ITEM-15 | ITEM-16 |
 | a malformed piped body | ITEM-27 | — | ITEM-25 | — |
 | another item malformed | ITEM-37 | ITEM-37 | — | PIN-29 |
-| the item itself malformed | — | ITEM-38 | ITEM-39 | ITEM-38 |
+| the item itself malformed | — | ITEM-38 | ITEM-39..ITEM-41 | ITEM-38 |
 | a refusal reached with `--json` | ITEM-17, ITEM-18 | ITEM-17, ITEM-18 | ITEM-17, ITEM-18 | ITEM-17, ITEM-18 |
 
 ## `item new`
@@ -124,6 +124,8 @@ runner's own git object ids.
 - [ ] [ITEM-37] Under `storage = "state-ref"`, an item whose file PIN-14/PIN-15 refuse never stops `item new`, nor `item show` of any other item.
 - [ ] [ITEM-38] Reading that item itself (`item show`, `item close`, `item edit --size`/`--whole`, `cut`) refuses PIN-14/PIN-15's sentence, then the repair clause of E-ITEM-10.
 - [ ] [ITEM-39] `aco item edit <id> < BODY` on that item takes BODY's complete `[record]` as the item's own, `updated_at` moved to now; BODY without a `[record]` refuses as ITEM-38 (see E-ITEM-10).
+- [ ] [ITEM-40] That `[record]`'s `parent` or `blocked_by` naming a missing item refuses PIN-16/PIN-17's sentence, a malformed one or the item itself ITEM-38's, before any write.
+- [ ] [ITEM-41] That `[record]` naming `state = "closed"` refuses `a repair records state = "open"; close <id> afterwards with aco item close <id>`, before any write.
 
 ## `--json` and the shared envelope
 

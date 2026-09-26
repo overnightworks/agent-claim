@@ -591,6 +591,47 @@ class TestMalformedItem:
 
         assert str(refusal.value) == _malformed_item_refusal(problem)
 
+    @pytest.mark.parametrize(
+        ("record", "refusal"),
+        [
+            pytest.param(
+                _record(title="Repaired", state="open", kind="task", parent="aco-ffffff"),
+                "item aco-ffffff is referenced as a parent but does not exist",
+                id="missing-parent",
+            ),
+            pytest.param(
+                _record(title="Repaired", state="open", kind="task", blocked_by=("aco-ffffff",)),
+                "item aco-ffffff is listed as a blocker but does not exist",
+                id="missing-blocker",
+            ),
+            pytest.param(
+                _record(title="Repaired", state="open", kind="task", parent=MALFORMED_ID),
+                _malformed_item_refusal(),
+                id="itself-as-parent",
+            ),
+            pytest.param(
+                _record(
+                    title="Repaired", state="closed", kind="task", closed_at="2026-09-20T00:00:00Z"
+                ),
+                f'a repair records state = "open"; close {MALFORMED_ID} afterwards '
+                f"with aco item close {MALFORMED_ID}",
+                id="closed",
+            ),
+        ],
+    )
+    def test_a_repair_whose_record_does_not_resolve_refuses_before_any_write(
+        self, record: dict[str, object], refusal: str
+    ) -> None:
+        """Issue #447: a repair writes its `[record]` whole, so a relation
+        that would leave the item unreadable, or a close that skips `item
+        close`'s claim guard, refuses; `_UnusedItemWriter` fails any write."""
+        adapter = _state_ref_board(_item_files_with_a_malformed_item(_blank_title_item()))
+
+        with pytest.raises(protocol.ClaimError) as refused:
+            adapter.update_item_body(MALFORMED_NUMBER, _state_ref_body(_CHILD_A_PROJECTION, record))
+
+        assert str(refused.value) == refusal
+
     def test_a_malformed_filename_fails_loud(self) -> None:
         with pytest.raises(MalformedStateTreeError, match="not a valid item file name"):
             _state_ref_board({"not-an-item.md": b"anything"})

@@ -510,8 +510,8 @@ class StateRefBoard:
         re-read -- so a second writer holding the same stale oid refuses
         with issue #279's own sentence rather than merging or overwriting.
         A malformed item (issue #447) has no stored record to merge into:
-        `body`'s own complete `[record]` repairs it, else it refuses by
-        name."""
+        `body`'s own complete `[record]` repairs it once its relations
+        resolve (`_refuse_unresolved_repair`), else it refuses by name."""
         item_id = self._by_number[number]
         now = items.format_record_timestamp(datetime.now(UTC))
         malformed = self._malformed.get(item_id)
@@ -527,6 +527,7 @@ class StateRefBoard:
             if delivered is None:
                 raise _malformed_item_refusal(item_id, malformed)
             updated_record = replace(items.parse_item_record(item_id, delivered), updated_at=now)
+            self._refuse_unresolved_repair(updated_record)
             expected = malformed.oid
         new_body = _with_record(body, updated_record)
         new_oid = self._writer.write_item(
@@ -534,6 +535,23 @@ class StateRefBoard:
         )
         self._malformed.pop(item_id, None)
         self._items[item_id] = _DecodedItem(record=updated_record, body=new_body, oid=new_oid)
+
+    def _refuse_unresolved_repair(self, record: items.ItemRecord) -> None:
+        """A repair's own `[record]` is written whole (issue #447), so its
+        relations must resolve first: its parent and every blocker name a
+        readable item -- never a missing one (PIN-16/PIN-17's sentences), a
+        malformed one, or itself -- and it stays open, since only `item close`
+        guards a close against a live claim."""
+        item_id = items.format_item_id(record.number)
+        if record.state is items.RecordState.CLOSED:
+            raise ClaimUnavailableError(
+                f'a repair records state = "open"; close {item_id} afterwards '
+                f"with aco item close {item_id}"
+            )
+        if record.parent is not None:
+            self._related(record.parent, missing="is referenced as a parent but does not exist")
+        for blocker_id in record.blocked_by:
+            self._related(blocker_id, missing="is listed as a blocker but does not exist")
 
     def _closing_write(self, number: int) -> LandingWrite:
         """`number`'s own close write, composed but not written (issues
