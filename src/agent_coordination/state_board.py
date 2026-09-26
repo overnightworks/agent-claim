@@ -43,6 +43,7 @@ from .body import (
     Storage,
     locate_agent_claim_block,
     parse_body,
+    readable_record_title,
     replace_agent_claim_block,
 )
 from .protocol import ClaimUnavailableError, MalformedStateTreeError, ObjectId
@@ -112,10 +113,12 @@ class _MalformedItem:
     a `[record]` table (issue #447): kept aside rather than refusing the
     whole store, so only a command that must read exactly this item
     refuses. `problem` completes the sentence `item <id> ...`; `oid` is the
-    CAS `expected` a repairing `update_item_body` writes over."""
+    CAS `expected` a repairing `update_item_body` writes over; `title` is
+    the record's title when it alone still reads, for the twin search."""
 
     problem: str
     oid: ObjectId
+    title: str | None = None
 
 
 @dataclass(frozen=True)
@@ -154,7 +157,11 @@ def _decode_item(item_id: str, content: bytes, oid: ObjectId) -> _DecodedItem | 
         return _MalformedItem(problem="is not valid UTF-8", oid=oid)
     record = _valid_record(text)
     if record is None:
-        return _MalformedItem(problem="has a malformed agent-claim block", oid=oid)
+        return _MalformedItem(
+            problem="has a malformed agent-claim block",
+            oid=oid,
+            title=readable_record_title(text),
+        )
     return _DecodedItem(record=items.parse_item_record(item_id, record), body=text, oid=oid)
 
 
@@ -381,11 +388,20 @@ class StateRefBoard:
     def open_item_titles(self) -> tuple[tuple[int, str], ...]:
         """Every open item's number and title, the open half of `item new`'s
         twin search: unlike `list_open_board_issues` it never refuses on a
-        malformed item (issue #447), so `item new` still runs beside one."""
-        return tuple(
-            (decoded.record.number, decoded.record.title)
-            for decoded in self._items.values()
-            if decoded.record.state is items.RecordState.OPEN
+        malformed item (issue #447), so `item new` still runs beside one --
+        and a malformed item whose title still reads counts as open, since
+        its state may not."""
+        return (
+            *(
+                (decoded.record.number, decoded.record.title)
+                for decoded in self._items.values()
+                if decoded.record.state is items.RecordState.OPEN
+            ),
+            *(
+                (items.item_number(item_id), malformed.title)
+                for item_id, malformed in self._malformed.items()
+                if malformed.title is not None
+            ),
         )
 
     def list_board_dependencies(self, number: int) -> tuple[board.IssueDependency, ...]:

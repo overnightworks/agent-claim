@@ -632,6 +632,17 @@ class TestMalformedItem:
 
         assert str(refused.value) == refusal
 
+    def test_a_malformed_item_whose_title_still_reads_stays_a_twin_candidate(self) -> None:
+        """Issue #447: an item malformed only by another field keeps its
+        title in `item new`'s twin search, so no exact duplicate of it can
+        be created unnamed."""
+        content = _state_ref_body(
+            _CHILD_A_PROJECTION, _record(title="Duplicate me", state="unknown", kind="task")
+        ).encode()
+        adapter = _state_ref_board(_item_files_with_a_malformed_item(content))
+
+        assert (MALFORMED_NUMBER, "Duplicate me") in adapter.open_item_titles()
+
     def test_a_malformed_filename_fails_loud(self) -> None:
         with pytest.raises(MalformedStateTreeError, match="not a valid item file name"):
             _state_ref_board({"not-an-item.md": b"anything"})
