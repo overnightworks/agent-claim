@@ -343,7 +343,8 @@ def test_a_repeated_get_serves_the_held_page_with_its_age_until_an_explicit_relo
     )
 
     repeated = served_board.get(token=token).body.decode("utf-8")
-    reloaded = served_board.get(token=token, reload=True).body.decode("utf-8")
+    reload_response = served_board.get(token=token, reload=True)
+    reloaded = served_board.get(token=token).body.decode("utf-8")
 
     stand = "<dt>Stand</dt><dd>vor 0h 0m"
     reload_link = f'<a class="reload" href="/?t={token}&amp;reload=1">neu laden</a>'
@@ -351,7 +352,44 @@ def test_a_repeated_get_serves_the_held_page_with_its_age_until_an_explicit_relo
     assert reload_link in first
     assert "Plain item" in repeated
     assert "Renamed item" not in repeated
+    assert reload_response.status == 303
     assert "Renamed item" in reloaded
+
+
+def test_the_reload_link_redirects_so_a_later_plain_refresh_does_not_rebuild(
+    served_board: ServedBoard, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #440 review, BOARD-50: the reload control is a plain link to
+    `/?t=<token>&reload=1`; before this fix the server answered that request
+    itself with a rebuilt `200` page, so the address bar kept `reload=1` and
+    every later plain browser refresh (F5) of that same address rebuilt
+    again -- the 19-second page this item exists to remove. A reload request
+    must instead rebuild once, then redirect (Post/Redirect/Get, as the
+    ruling `POST` already does with `303`) to the plain URL, so the address
+    bar drops `reload=1` and the redirected `GET` serves the already-held
+    page without rebuilding."""
+    token = served_board.server.token
+    build_count = 0
+    original_board_page = issue_claim._board_page
+
+    def counting_board_page(*args: object, **kwargs: object) -> issue_claim.board_html.BoardPage:
+        nonlocal build_count
+        build_count += 1
+        return original_board_page(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(issue_claim, "_board_page", counting_board_page)
+
+    reload_response = served_board.get(token=token, reload=True)
+
+    assert reload_response.status == 303
+    assert reload_response.location == f"/?t={token}"
+    assert reload_response.body == b""
+    builds_after_reload = build_count
+
+    plain_response = served_board.get(token=token)
+
+    assert plain_response.status == 200
+    assert build_count == builds_after_reload
 
 
 def test_post_rule_with_a_wrong_token_is_forbidden_and_writes_nothing(

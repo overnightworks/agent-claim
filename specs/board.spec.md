@@ -56,7 +56,7 @@ included.
 | an already-ruled `[[expectation]]` line | — | BOARD-36, BOARD-37, BOARD-38 | BOARD-36, BOARD-37, BOARD-38 |
 | `--new-token` given without `--serve` | BOARD-39, BOARD-43 | BOARD-39 | — |
 | the token file's own content, or its directory's mode | — | — | BOARD-40, BOARD-41 |
-| a repeated page request, a ruling click, or the reload link | — | — | BOARD-46, BOARD-47, BOARD-48 |
+| a repeated page request, a ruling click, or the reload link | — | — | BOARD-46, BOARD-47, BOARD-48, BOARD-50 |
 | a client hanging up mid-response | — | — | BOARD-49 |
 
 ## No output mode
@@ -128,6 +128,7 @@ does, before either reads a single issue -- cited there, not restated.
 - [ ] [BOARD-47] Every served page shows its age and a reload link, `Stand` `vor <h>h <m>m` `neu laden`; the `--html` page carries neither (see E-BOARD-18).
 - [ ] [BOARD-48] Every ruling click, written or refused, rebuilds the page, so the page it redirects to shows the line as the forge now holds it.
 - [ ] [BOARD-49] A client that hangs up mid-response leaves stderr empty; any other request error still prints its traceback.
+- [ ] [BOARD-50] The reload link's request rebuilds, then redirects (`303`) to the plain URL, no `reload` field, so a later plain refresh serves the held page without rebuilding (see E-BOARD-18).
 
 ## Never
 
@@ -352,4 +353,6 @@ $ curl -s 'http://127.0.0.1:<port>/?t=<token>'
 <div><dt>Stand</dt><dd>vor 0h 2m <a class="reload" href="/?t=<token>&amp;reload=1">neu laden</a></dd></div>
 ```
 
-A request to the link's URL rebuilds the page and shows `vor 0h 0m` again.
+A request to the link's URL rebuilds the page, then answers `303` with
+`Location: /?t=<token>` -- no `reload` field, so a later plain refresh of
+that address does not rebuild -- and the redirected `GET` shows `vor 0h 0m`.

@@ -78,6 +78,18 @@ def _field(fields: Mapping[str, list[str]], name: str) -> str | None:
     return values[0] if values else None
 
 
+def _plain_location(token: str, refused: str | None) -> str:
+    """The redirect target every `303` (a ruling click or, since issue #440's
+    review, the reload link) sends the browser to: the root path with the
+    token and, when there is one, the refusal sentence -- never a `reload`
+    field, so the address bar the browser lands on always rebuilds nothing
+    on a later plain refresh."""
+    location = f"{_ROOT_PATH}?{TOKEN_FIELD}={token}"
+    if refused is not None:
+        location = f"{location}&{REFUSED_FIELD}={quote(refused)}"
+    return location
+
+
 @dataclass(frozen=True)
 class _RuleRequest:
     item: int
@@ -214,8 +226,18 @@ class _BoardRequestHandler(BaseHTTPRequestHandler):
         if not self._authorized(server, _field(query, TOKEN_FIELD)):
             self._respond(HTTPStatus.FORBIDDEN, _FORBIDDEN_BODY)
             return
-        reload_requested = _field(query, RELOAD_FIELD) is not None
-        page = server.render_page(_field(query, REFUSED_FIELD), reload_requested)
+        refused = _field(query, REFUSED_FIELD)
+        if _field(query, RELOAD_FIELD) is not None:
+            # Post/Redirect/Get (issue #440 review, BOARD-50): rebuild now,
+            # then redirect to the plain URL so the address bar drops
+            # `reload=1` -- otherwise a later plain browser refresh (F5) of
+            # the same address keeps rebuilding, the 19-second page this
+            # item exists to remove.
+            server.render_page(refused, True)
+            location = _plain_location(server.token, refused)
+            self._respond(HTTPStatus.SEE_OTHER, b"", location=location)
+            return
+        page = server.render_page(refused, False)
         self._respond(HTTPStatus.OK, page.encode("utf-8"), content_type=_HTML_CONTENT_TYPE)
 
     def do_POST(self) -> None:
@@ -236,10 +258,9 @@ class _BoardRequestHandler(BaseHTTPRequestHandler):
             self._respond(HTTPStatus.BAD_REQUEST, _BAD_REQUEST_BODY)
             return
         outcome = server.rule_item(parsed.item, parsed.line, parsed.outcome, parsed.note)
-        location = f"{_ROOT_PATH}?{TOKEN_FIELD}={server.token}"
-        if outcome.refusal is not None:
-            location = f"{location}&{REFUSED_FIELD}={quote(outcome.refusal)}"
-        self._respond(HTTPStatus.SEE_OTHER, b"", location=location)
+        self._respond(
+            HTTPStatus.SEE_OTHER, b"", location=_plain_location(server.token, outcome.refusal)
+        )
 
     def log_message(self, format: str, *_args: object) -> None:
         # The stdlib default writes every request line -- including this
