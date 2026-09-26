@@ -88,6 +88,7 @@ including the surviving refusal, is `specs/landing-grammar.spec.md`'s own
 - Under `storage = "state-ref"`, `aco status`, `aco protect`, `aco bootstrap`, `aco rescope`, `aco release`, and a lane or already-observed `aco claim` never resolve the item forge, so PIN-04/PIN-05 never gate them.
 - `--repo` never selects a repository under `storage = "state-ref"`: there is no host-based target to override.
 - `aco item edit`/`close` never overwrite a concurrent writer's change: a stale expected oid refuses by name instead (`specs/ref-store-cas.spec.md`, CAS-20), and the item's stored bytes stay exactly what the last landed write left.
+- A `board --serve` ruling click never lands beside an item that turned malformed after PIN-29's check: its write commits only onto the `items/` it checked, else refuses `items/ was written since this write checked it; re-read and retry`.
 - A replayed `aco claim` (CLM-15) and an `aco start` resuming its live claim (START-06) never read the board — a wide scope naming no `--whole` reads its own item's `whole` alone — so PIN-29 never refuses them.
 - `aco item close` never deletes an item file or any of its other bytes: only `state`, `closed_at`, and `updated_at` move.
 

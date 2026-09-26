@@ -456,9 +456,14 @@ class _UnusedItemWriter:
     name rather than silently succeeding at plumbing nothing asked for."""
 
     def write_item(
-        self, item_id: str, *, expected: protocol.ObjectId | None, content: bytes
+        self,
+        item_id: str,
+        *,
+        expected: protocol.ObjectId | None,
+        content: bytes,
+        store_expected: Mapping[str, protocol.ObjectId] | None,
     ) -> protocol.ObjectId:
-        del expected, content
+        del expected, content, store_expected
         raise AssertionError(f"unexpected write to item {item_id}")
 
 
@@ -1121,6 +1126,33 @@ class TestStateRefBoardWrites:
         assert replace(after_record, updated_at=before_record.updated_at) == before_record
         assert after_record.updated_at != before_record.updated_at
         assert protocol.RFC3339_TIMESTAMP_PATTERN.fullmatch(after_record.updated_at)
+
+    def test_a_write_holding_a_well_formed_store_refuses_once_another_item_went_bad(
+        self, bare_remote: Path, worktree: Path
+    ) -> None:
+        """PIN-29 (issue #447): after `hold_well_formed`, this instance's
+        writes land only onto the store it checked -- its own write still
+        lands, but an item another writer turned malformed since refuses
+        the next one before anything is written."""
+        _push_item_tree(bare_remote, worktree, _item_files())
+        writer = self._writer(bare_remote, worktree)
+        adapter = _fetch_state_ref_board(bare_remote, worktree, writer=writer)
+        adapter.hold_well_formed()
+        body = adapter.item_reference(CHILD_A_NUMBER).body
+        assert body is not None
+        edited = body.replace("Prose.", "Edited prose.", 1)
+        adapter.update_item_body(CHILD_A_NUMBER, edited)
+        landed = adapter.item_reference(CHILD_A_NUMBER).body
+        writer.write_item(
+            MALFORMED_ID, expected=None, content=_blank_title_item(), store_expected=None
+        )
+
+        with pytest.raises(protocol.ClaimUnavailableError) as refusal:
+            adapter.update_item_body(CHILD_A_NUMBER, edited.replace("Edited", "Re-edited", 1))
+
+        assert str(refusal.value) == protocol.ITEMS_WRITTEN_SINCE_CHECKED
+        fresh = _fetch_state_ref_board(bare_remote, worktree)
+        assert fresh.item_reference(CHILD_A_NUMBER).body == landed
 
     def _full_delivered_record_body(self) -> str:
         return _state_ref_body(
@@ -2023,8 +2055,11 @@ class TestCliStateRefForge:
             *,
             expected: protocol.ObjectId | None,
             content: bytes,
+            store_expected: Mapping[str, protocol.ObjectId] | None,
         ) -> protocol.ObjectId:
-            result = original_write_item(self, item_id, expected=expected, content=content)
+            result = original_write_item(
+                self, item_id, expected=expected, content=content, store_expected=store_expected
+            )
             if not competing_write_done["done"]:
                 competing_write_done["done"] = True
                 competing_data = {

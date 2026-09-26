@@ -35,6 +35,12 @@ from test_cli import (
     _patch_store_write,
     _single_item_board_environment,
 )
+from test_state_board import (
+    _blank_title_item,
+    _item_files_with_a_malformed_item,
+    _malformed_item_refusal,
+    _state_ref_board,
+)
 
 from agent_coordination import board, board_serve, checkout, forge, github, protocol, workspace
 from agent_coordination import cli as issue_claim
@@ -433,10 +439,12 @@ def test_post_rule_refuses_a_malformed_item_introduced_after_startup_and_writes_
     """PIN-29 (issue #447): a malformed item that reaches the store while the
     server already runs stops the next ruling click by name before it writes
     -- the click reads the store afresh instead of trusting the snapshot the
-    server started from."""
+    server started from, and holds it well-formed through its write."""
     token = served_board.server.token
     served_board.get(token=token)
-    refusal = "item aco-3e26d9 has a malformed agent-claim block"
+    refusal = _malformed_item_refusal()
+    clicked = _state_ref_board(_item_files_with_a_malformed_item(_blank_title_item()))
+    monkeypatch.setattr(issue_claim._LazyForge, "writer", lambda _self: clicked)
     current_store = _ConsistentForge()
     current_store.board_issues = served_board.client.board_issues
     current_store.issue_references = dict(served_board.client.issue_references)

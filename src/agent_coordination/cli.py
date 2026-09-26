@@ -3087,7 +3087,12 @@ class _StoreItemWriter:
     canonical_remote: str
 
     def write_item(
-        self, item_id: str, *, expected: protocol.ObjectId | None, content: bytes
+        self,
+        item_id: str,
+        *,
+        expected: protocol.ObjectId | None,
+        content: bytes,
+        store_expected: Mapping[str, protocol.ObjectId] | None,
     ) -> protocol.ObjectId:
         new_oid = store.hash_blob(self.worktree, content)
         intent = protocol.ItemWriteIntent(
@@ -3095,6 +3100,7 @@ class _StoreItemWriter:
             expected=expected,
             new_oid=new_oid,
             operation_id=uuid.uuid4().hex,
+            store_expected=store_expected,
         )
         new_state = store.commit_transition(
             worktree=self.worktree,
@@ -6692,12 +6698,14 @@ def _board_server(parsed: argparse.Namespace, session: _WriteSession) -> board_s
         # review) keeps a concurrent GET that races the write from rebuilding
         # and holding a pre-ruling page: discarding first left a window where
         # such a GET restored exactly the staleness this cache exists to
-        # remove. The click writes through a store read afresh and refuses
-        # PIN-29's malformed item first (issue #447): the server's startup
-        # snapshot cannot see an item that went bad while it ran.
+        # remove. The click writes through a store read afresh and holds
+        # PIN-29 through its write (issue #447): the server's startup
+        # snapshot cannot see an item that went bad while it ran, and a
+        # preflight alone could not see one going bad before the write.
         try:
             clicked = _LazyForge(parsed.repo).writer()
-            clicked.list_open_board_issues()
+            if isinstance(clicked, state_board.StateRefBoard):
+                clicked.hold_well_formed()
             rule_item(clicked, item, line, ruling, note)
         except protocol.ClaimError as error:
             return board_serve.RuleOutcome(refusal=str(error))

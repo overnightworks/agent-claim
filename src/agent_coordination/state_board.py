@@ -86,7 +86,12 @@ class ItemWriter(Protocol):
     """
 
     def write_item(
-        self, item_id: str, *, expected: ObjectId | None, content: bytes
+        self,
+        item_id: str,
+        *,
+        expected: ObjectId | None,
+        content: bytes,
+        store_expected: Mapping[str, ObjectId] | None,
     ) -> ObjectId: ...
 
 
@@ -238,6 +243,7 @@ class StateRefBoard:
         self._writer = writer
         self._items: dict[str, _DecodedItem] = {}
         self._malformed: dict[str, _MalformedItem] = {}
+        self._holds_well_formed = False
         for filename, content in item_files.items():
             item_id = items.item_id_from_filename(filename)
             decoded = _decode_item(item_id, content, item_oids[item_id])
@@ -275,6 +281,27 @@ class StateRefBoard:
         if self._malformed:
             item_id = min(self._malformed)
             raise _malformed_item_refusal(item_id, self._malformed[item_id])
+
+    def hold_well_formed(self) -> None:
+        """`require_well_formed` now and through every later write of this
+        instance (issue #447): each write then commits only onto the very
+        `items/` this instance read, so an item going bad after this check
+        refuses the write instead of landing beside it -- the one guard a
+        whole-board command's write (`board --serve`'s ruling click) needs
+        to keep PIN-29 "before any write"."""
+        self.require_well_formed()
+        self._holds_well_formed = True
+
+    def _write_item(self, item_id: str, *, expected: ObjectId | None, content: bytes) -> ObjectId:
+        store_expected = None
+        if self._holds_well_formed:
+            store_expected = {
+                **{held_id: held.oid for held_id, held in self._malformed.items()},
+                **{held_id: held.oid for held_id, held in self._items.items()},
+            }
+        return self._writer.write_item(
+            item_id, expected=expected, content=content, store_expected=store_expected
+        )
 
     def _decoded(self, number: int) -> _DecodedItem | None:
         item_id = self._by_number.get(number)
@@ -496,7 +523,7 @@ class StateRefBoard:
             closed_at=None,
         )
         new_body = _with_record(body, record)
-        new_oid = self._writer.write_item(new_id, expected=None, content=new_body.encode("utf-8"))
+        new_oid = self._write_item(new_id, expected=None, content=new_body.encode("utf-8"))
         self._items[new_id] = _DecodedItem(record=record, body=new_body, oid=new_oid)
         self._by_number[record.number] = new_id
         return new_id
@@ -565,9 +592,7 @@ class StateRefBoard:
             self._refuse_unresolved_repair(updated_record)
             expected = malformed.oid
         new_body = _with_record(body, updated_record)
-        new_oid = self._writer.write_item(
-            item_id, expected=expected, content=new_body.encode("utf-8")
-        )
+        new_oid = self._write_item(item_id, expected=expected, content=new_body.encode("utf-8"))
         self._malformed.pop(item_id, None)
         self._items[item_id] = _DecodedItem(record=updated_record, body=new_body, oid=new_oid)
 
@@ -626,9 +651,7 @@ class StateRefBoard:
         building its own record. Returns the fresh `closed_at` for the
         CLI's own report line."""
         write = self._closing_write(number)
-        new_oid = self._writer.write_item(
-            write.item_id, expected=write.expected, content=write.content
-        )
+        new_oid = self._write_item(write.item_id, expected=write.expected, content=write.content)
         self._items[write.item_id] = _DecodedItem(
             record=write.record, body=write.content.decode("utf-8"), oid=new_oid
         )

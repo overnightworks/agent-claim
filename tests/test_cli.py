@@ -6463,7 +6463,12 @@ class _RefusingItemWriter:
     the test's own defect, not behaviour under test."""
 
     def write_item(
-        self, item_id: str, *, expected: protocol.ObjectId | None, content: bytes
+        self,
+        item_id: str,
+        *,
+        expected: protocol.ObjectId | None,
+        content: bytes,
+        store_expected: Mapping[str, protocol.ObjectId] | None,
     ) -> protocol.ObjectId:
         raise AssertionError(f"unexpected write to item {item_id}")
 
