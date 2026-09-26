@@ -3113,6 +3113,49 @@ class TestCliStateRefForge:
         freed_out = capsys.readouterr().out
         assert f"{EDIT_TARGET_ID}: blocked by" not in freed_out
 
+    @pytest.mark.parametrize(
+        ("blocker_id", "refusal"),
+        [
+            pytest.param(
+                "aco-ffffff",
+                "item aco-ffffff is listed as a blocker but does not exist",
+                id="unknown-blocker",
+            ),
+            pytest.param(
+                EDIT_TARGET_ID, f"item {EDIT_TARGET_ID} is listed as its own blocker", id="itself"
+            ),
+        ],
+    )
+    def test_item_edit_refuses_an_unresolved_blocker_and_the_board_still_reads(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+        blocker_id: str,
+        refusal: str,
+    ) -> None:
+        """Issue #450 proof 1: a piped `blocked_by` naming no item, or the
+        edited item itself, refuses before any write, so `board --json`
+        keeps reading instead of refusing PIN-17 from then on."""
+        self._live_state_ref_checkout(
+            monkeypatch, tmp_path, bare_remote, worktree, _edit_target_item_files()
+        )
+        unresolved_body = _state_ref_body(
+            _EDIT_TARGET_PROJECTION,
+            _record(title="Target", state="open", kind="task", blocked_by=(blocker_id,)),
+        )
+        monkeypatch.setattr(sys, "stdin", io.StringIO(unresolved_body))
+        remote_url = f"file://{bare_remote}"
+        before = store.fetch_state(worktree=worktree, remote=remote_url)
+
+        status = issue_claim.main(["item", "edit", EDIT_TARGET_ID])
+
+        assert (status, capsys.readouterr().err) == (2, f"ERROR: {refusal}\n")
+        assert store.fetch_state(worktree=worktree, remote=remote_url).tip == before.tip
+        assert issue_claim.main(["board", "--json"]) == 0
+
     def test_item_edit_two_processes_from_the_same_snapshot_the_second_refuses(
         self,
         monkeypatch: pytest.MonkeyPatch,

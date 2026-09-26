@@ -52,6 +52,7 @@ runner's own git object ids.
 | an open or recently closed look-alike title, either storage | ITEM-33 | — | — | — |
 | `storage = "github"`, a re-run or an exact duplicate | ITEM-35 | — | — | — |
 | a delivered `[record]`, present or absent | — | — | ITEM-12..ITEM-14 | — |
+| a delivered `blocked_by` naming no item or the item itself | — | — | ITEM-43 | — |
 | `item show`/`edit`/`close --json` | — | ITEM-09 | ITEM-15 | ITEM-16 |
 | a malformed piped body | ITEM-27 | — | ITEM-25 | — |
 | another item malformed | ITEM-37, ITEM-42 | ITEM-37 | — | PIN-29 |
@@ -105,6 +106,7 @@ runner's own git object ids.
 - [ ] [ITEM-12] `aco item edit ITEM < BODY` takes `title`, `labels`, `blocked_by` from a delivered `[record]` when the piped body carries one valid (see E-ITEM-03).
 - [ ] [ITEM-13] `item edit ITEM`'s every other field — `parent`, `state`, `origin`, `kind`, `created_at`, `closed_at` — stays stored, except on a malformed item (ITEM-39); `updated_at` moves to now.
 - [ ] [ITEM-14] A delivered body carrying no `[record]` table at all leaves `title`, `labels`, `blocked_by` unchanged too, exactly `item edit`'s own pre-#287 behaviour, except a malformed item (ITEM-39).
+- [ ] [ITEM-43] A resulting `blocked_by` naming no item refuses PIN-17's sentence, naming the item itself `item <item-id> is listed as its own blocker`, before any write (see E-ITEM-11).
 - [ ] [ITEM-15] `aco item edit ITEM --json` prints the envelope, `reason: "edited"`, then `item`, `number`, `oid` (the freshly written blob's own oid) (see E-ITEM-03).
 - [ ] [ITEM-21] `item edit --size S|M|L` patches only the top-level `size`, reads no stdin, works under both storages; state-ref also bumps `record.updated_at`.
 
@@ -328,4 +330,19 @@ exit 0
 $ aco item edit aco-3e26d9 < repaired.md
 EDITED aco-3e26d9
 exit 0
+```
+
+### E-ITEM-11 — item edit refuses a blocker that does not resolve
+
+Setup: bare-remote, bootstrapped, `storage = "state-ref"` tracked, `<item-id>`
+open, `unknown.md` a body whose `[record]` names `blocked_by = ["aco-ffffff"]`
+and no `items/aco-ffffff.md`, `itself.md` one naming `blocked_by = ["<item-id>"]`
+
+```console
+$ aco item edit <item-id> < unknown.md
+2> ERROR: item aco-ffffff is listed as a blocker but does not exist
+exit 2
+$ aco item edit <item-id> < itself.md
+2> ERROR: item <item-id> is listed as its own blocker
+exit 2
 ```
