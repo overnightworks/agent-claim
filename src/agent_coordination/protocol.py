@@ -968,12 +968,18 @@ class ItemWriteIntent:
     overwriting. Needs no claim: an item write is plumbing straight to
     `refs/aco/state`, never a worktree path, so the `protect` boundary is
     unaffected.
+
+    `store_expected`, when set, is the whole `items/` map a caller checked
+    before writing (PIN-29, issue #447): any item written since refuses the
+    write too, so that check and this write land as one CAS instead of a
+    preflight another writer can slip past.
     """
 
     item_id: str
     expected: ObjectId | None
     new_oid: ObjectId
     operation_id: str
+    store_expected: Mapping[str, ObjectId] | None = None
 
 
 @dataclass(frozen=True)
@@ -1203,6 +1209,9 @@ def _apply_release_intent(state: ClaimState, intent: ReleaseIntent) -> ClaimStat
     return replace(state, claims=MappingProxyType(new_claims))
 
 
+ITEMS_WRITTEN_SINCE_CHECKED = "items/ was written since this write checked it; re-read and retry"
+
+
 def _apply_item_write_intent(state: ClaimState, intent: ItemWriteIntent) -> ClaimState:
     if state.tip is None:
         raise ClaimError(MISSING_STATE_REF)
@@ -1214,6 +1223,8 @@ def _apply_item_write_intent(state: ClaimState, intent: ItemWriteIntent) -> Clai
             f"item {intent.item_id!r} was written since it was read "
             f"(expected {intent.expected}, found {current!r}); re-read and retry"
         )
+    if intent.store_expected is not None and dict(state.items) != dict(intent.store_expected):
+        raise ClaimUnavailableError(ITEMS_WRITTEN_SINCE_CHECKED)
     new_items = {**state.items, intent.item_id: intent.new_oid}
     return replace(state, items=MappingProxyType(new_items))
 

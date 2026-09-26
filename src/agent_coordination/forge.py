@@ -232,6 +232,7 @@ class ForgeOperation(StrEnum):
     ITEM_REFERENCES = "item_references"
     LANDING = "landing"
     PARENT_ISSUE = "parent_issue"
+    PARENT_NUMBER = "parent_number"
     LIST_CHILDREN = "list_children"
     DEFAULT_BRANCH = "default_branch"
     LIST_OPEN_BOARD_ISSUES = "list_open_board_issues"
@@ -305,6 +306,12 @@ class ForgeReader(Protocol):
     def landing(self, number: int) -> Landing: ...
 
     def parent_issue(self, number: int) -> board.ParentIssue | None: ...
+
+    def parent_number(self, number: int) -> int | None:
+        """The number of `number`'s parent without decoding that parent
+        -- all `item show`'s header names, so a parent no other read
+        can decode never stops it (issue #447)."""
+        ...
 
     def list_children(self, number: int) -> tuple[board.ChildItem, ...]: ...
 

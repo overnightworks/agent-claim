@@ -41,6 +41,7 @@ runner's own git object ids.
 | state-ref pin, `--scope` invalid | ITEM-05 | — | — | — |
 | state-ref pin, `--origin` given | ITEM-19 | — | — | — |
 | `--origin` malformed | ITEM-06 | — | — | — |
+| `--title` empty or whitespace only, either storage | ITEM-36 | — | — | — |
 | `--size` given, valid or invalid | ITEM-20 | — | ITEM-21, ITEM-22 | — |
 | `--whole` given, valid or invalid | ITEM-23 | — | ITEM-24 | — |
 | an item, open or closed | — | ITEM-07, ITEM-08 | — | — |
@@ -53,6 +54,8 @@ runner's own git object ids.
 | a delivered `[record]`, present or absent | — | — | ITEM-12..ITEM-14 | — |
 | `item show`/`edit`/`close --json` | — | ITEM-09 | ITEM-15 | ITEM-16 |
 | a malformed piped body | ITEM-27 | — | ITEM-25 | — |
+| another item malformed | ITEM-37, ITEM-42 | ITEM-37 | — | PIN-29 |
+| the item itself malformed | — | ITEM-38 | ITEM-39..ITEM-41 | ITEM-38 |
 | a refusal reached with `--json` | ITEM-17, ITEM-18 | ITEM-17, ITEM-18 | ITEM-17, ITEM-18 | ITEM-17, ITEM-18 |
 
 ## `item new`
@@ -63,6 +66,7 @@ runner's own git object ids.
 - [ ] [ITEM-04] Repeated `--scope` values write a sorted, deduplicated top-level `scope = [...]` ahead of the `[record]` table, CLAIM-19..CLAIM-23's own canonical form (see E-ITEM-01).
 - [ ] [ITEM-05] A `--scope` value that is absolute, `..`, or `~`-prefixed refuses with CLAIM-19's own sentence; a duplicate refuses with CLAIM-21's `claim scope contains duplicate paths`, before any write.
 - [ ] [ITEM-06] `--origin FORGE#N` failing its grammar refuses `'<value>' is not an origin; use forge#n or host/owner/repo#n, e.g. gitlab#514`, exit `2`, before `item new`'s own body ever runs.
+- [ ] [ITEM-36] Under either storage, an empty or whitespace-only `--title` refuses `--title must be a non-empty string`, exit `2`, before anything is read, created, or minted (see E-ITEM-09).
 - [ ] [ITEM-19] `--origin`'s grammar is ASCII-only, case-insensitive `forge#n`/`host/owner/repo#n` tokens; an accepted value is stored in `record.origin` with its original case (PIN-20).
 - [ ] [ITEM-20] `--size S|M|L` writes the item's own top-level `size` (BODY-57..BODY-59); argparse refuses an invalid value first. `id`/`--json` stay ITEM-01's shape; `size` is never printed.
 
@@ -99,8 +103,8 @@ runner's own git object ids.
 ## `item edit`
 
 - [ ] [ITEM-12] `aco item edit ITEM < BODY` takes `title`, `labels`, `blocked_by` from a delivered `[record]` when the piped body carries one valid (see E-ITEM-03).
-- [ ] [ITEM-13] `aco item edit ITEM`'s every other field — `parent`, `state`, `origin`, `kind`, `created_at`, `closed_at` — stays this item's own stored value; `updated_at` always moves to now.
-- [ ] [ITEM-14] A delivered body carrying no `[record]` table at all leaves `title`, `labels`, `blocked_by` unchanged too, exactly `item edit`'s own pre-#287 behaviour.
+- [ ] [ITEM-13] `item edit ITEM`'s every other field — `parent`, `state`, `origin`, `kind`, `created_at`, `closed_at` — stays stored, except on a malformed item (ITEM-39); `updated_at` moves to now.
+- [ ] [ITEM-14] A delivered body carrying no `[record]` table at all leaves `title`, `labels`, `blocked_by` unchanged too, exactly `item edit`'s own pre-#287 behaviour, except a malformed item (ITEM-39).
 - [ ] [ITEM-15] `aco item edit ITEM --json` prints the envelope, `reason: "edited"`, then `item`, `number`, `oid` (the freshly written blob's own oid) (see E-ITEM-03).
 - [ ] [ITEM-21] `item edit --size S|M|L` patches only the top-level `size`, reads no stdin, works under both storages; state-ref also bumps `record.updated_at`.
 
@@ -115,10 +119,19 @@ runner's own git object ids.
 
 - [ ] [ITEM-16] `aco item close ITEM --json` prints `reason: "closed"`, then `item`, `number`, `closed_at`, `parent_closable` (issue #348's parent hint); overlaps ITEM-09's `item`/`number` (see E-ITEM-04).
 
+## One malformed item (issue #447)
+
+- [ ] [ITEM-37] Under `storage = "state-ref"`, an item whose file PIN-14/PIN-15 refuse never stops `item new`, nor `item show` of any other item.
+- [ ] [ITEM-42] That item's `record.title`, while it still reads as a non-empty string, joins ITEM-33's twin search as an open item's title.
+- [ ] [ITEM-38] Reading that item itself (`item show`, `item close`, `item edit --size`/`--whole`) refuses PIN-14/PIN-15's sentence, then the repair clause of E-ITEM-10.
+- [ ] [ITEM-39] `aco item edit <id> < BODY` on that item takes BODY's complete `[record]` as the item's own, `updated_at` moved to now; BODY without a `[record]` refuses as ITEM-38 (see E-ITEM-10).
+- [ ] [ITEM-40] That `[record]`'s `parent` or `blocked_by` naming a missing item refuses PIN-16/PIN-17's sentence, a malformed one or the item itself ITEM-38's, before any write.
+- [ ] [ITEM-41] That `[record]` naming `state = "closed"` refuses `a repair records state = "open"; close <id> afterwards with aco item close <id>`, before any write.
+
 ## `--json` and the shared envelope
 
 - [ ] [ITEM-17] Every other runtime refusal from `item new`/`show`/`edit`/`close`, reached with `--json`, prints `specs/output.spec.md`'s envelope, `reason: "precondition_failed"`, exit `2`.
-- [ ] [ITEM-18] An argparse-level refusal — a malformed `--origin`, or an item argument PIN-08 refuses — prints the `ERROR:` line, exit `2`, and under `--json` OUT-06's envelope.
+- [ ] [ITEM-18] An argparse-level refusal — a malformed `--origin`, a blank `--title`, or an item argument PIN-08 refuses — prints the `ERROR:` line, exit `2`, and under `--json` OUT-06's envelope.
 - [ ] [ITEM-25] A malformed piped body (`item edit`'s PIN-24, `item new`'s ITEM-27) reports `reason: "body_invalid"` instead, `defects` the same list `body --check`'s own `--json` carries, exit `2`.
 
 ## Never
@@ -285,4 +298,34 @@ BODY
 {"ok": false, "reason": "body_invalid", "defects": ["body malformed: agent-claim: no agent-claim block"], "message": "body malformed: agent-claim: no agent-claim block"}
 2> ERROR: body malformed: agent-claim: no agent-claim block
 exit 2
+```
+
+### E-ITEM-09 — a blank title, refused before anything is minted
+
+Setup: bare-remote, bootstrapped, `storage = "state-ref"` tracked
+
+```console
+$ aco item new --title "   "
+2> ERROR: --title must be a non-empty string
+exit 2
+$ aco item new --title "" --json
+{"ok": false, "reason": "invalid_usage", "message": "--title must be a non-empty string"}
+2> ERROR: --title must be a non-empty string
+exit 2
+```
+
+### E-ITEM-10 — one malformed item, refused alone and repaired
+
+Setup: bare-remote, bootstrapped, `storage = "state-ref"` tracked, `items/aco-3e26d9.md` hand-written with `title = ""` in its `[record]`, `<item-id>` another open item, `repaired.md` a body whose block carries a complete `[record]`
+
+```console
+$ aco item show aco-3e26d9
+2> ERROR: item aco-3e26d9 has a malformed agent-claim block; repair it with aco item edit aco-3e26d9 and a body whose agent-claim block carries a valid [record]
+exit 2
+$ aco item new --title "Fresh item"
+<item-id>
+exit 0
+$ aco item edit aco-3e26d9 < repaired.md
+EDITED aco-3e26d9
+exit 0
 ```

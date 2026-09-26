@@ -629,7 +629,9 @@ def _add_rescope_parser(commands: argparse._SubParsersAction) -> None:
 def _add_cut_parser(commands: argparse._SubParsersAction) -> None:
     cut = commands.add_parser("cut", help="create a container's next slice as a fresh child issue")
     cut.add_argument("issue", type=board.parse_item_reference, help="the container to cut")
-    cut.add_argument("--title", required=True, help="the fresh child issue's title")
+    cut.add_argument(
+        "--title", required=True, type=_nonblank_title, help="the fresh child issue's title"
+    )
     cut.add_argument(
         "--row",
         type=int,
@@ -757,6 +759,15 @@ def _add_brief_parser(commands: argparse._SubParsersAction) -> None:
     _add_json_flag(brief)
 
 
+def _nonblank_title(value: str) -> str:
+    """`item new`'s and `cut`'s `--title` argparse `type=` (issue #447):
+    `value` unchanged unless `body.is_valid_title` -- the rule `record.title`
+    is read by -- refuses it, before anything is read, created, or minted."""
+    if not body.is_valid_title(value):
+        raise protocol.ClaimUnavailableError("--title must be a non-empty string")
+    return value
+
+
 def _add_item_parser(commands: argparse._SubParsersAction) -> None:
     item = commands.add_parser("item", help="create, show, edit, or close one work item")
     item_commands = _add_subcommands(item, "item_command")
@@ -767,7 +778,7 @@ def _add_item_parser(commands: argparse._SubParsersAction) -> None:
             "whose body is read from stdin"
         ),
     )
-    new.add_argument("--title", required=True, help="the fresh item's title")
+    new.add_argument("--title", required=True, type=_nonblank_title, help="the fresh item's title")
     new.add_argument(
         "--kind",
         choices=BODY_TEMPLATE_KINDS,
@@ -3076,7 +3087,12 @@ class _StoreItemWriter:
     canonical_remote: str
 
     def write_item(
-        self, item_id: str, *, expected: protocol.ObjectId | None, content: bytes
+        self,
+        item_id: str,
+        *,
+        expected: protocol.ObjectId | None,
+        content: bytes,
+        store_expected: Mapping[str, protocol.ObjectId] | None,
     ) -> protocol.ObjectId:
         new_oid = store.hash_blob(self.worktree, content)
         intent = protocol.ItemWriteIntent(
@@ -3084,6 +3100,7 @@ class _StoreItemWriter:
             expected=expected,
             new_oid=new_oid,
             operation_id=uuid.uuid4().hex,
+            store_expected=store_expected,
         )
         new_state = store.commit_transition(
             worktree=self.worktree,
@@ -3229,7 +3246,9 @@ def _item_new_on_github(parsed: argparse.Namespace, canonical_remote: str) -> in
     if parsed.parent is not None:
         _open_container(open_issues, parsed.parent)
     if not parsed.not_a_twin:
-        _refuse_possible_twin(client, parsed.title, open_issues, parent=parsed.parent)
+        _refuse_possible_twin(
+            client, parsed.title, _numbered_titles(open_issues), parent=parsed.parent
+        )
     kind = body.ItemKind(parsed.kind)
     try:
         number = (
@@ -3273,9 +3292,7 @@ def _item_new_on_state_ref(parsed: argparse.Namespace, canonical_remote: str) ->
     if parent_missing:
         raise protocol.ClaimUnavailableError(f"#{parsed.parent} does not exist")
     if not parsed.not_a_twin:
-        _refuse_possible_twin(
-            client, parsed.title, client.list_open_board_issues(), parent=parsed.parent
-        )
+        _refuse_possible_twin(client, parsed.title, client.open_item_titles(), parent=parsed.parent)
     kind = body.ItemKind(parsed.kind)
     skeleton = (
         body.BLOCK_CONTAINER_SKELETON
@@ -3319,8 +3336,10 @@ def _cmd_item_edit(parsed: argparse.Namespace) -> int:
     values regardless of what the piped body's `[record]` names for them --
     `update_item_body`'s own owner rule; `updated_at` always moves to now;
     `title`, `labels`, `blocked_by` come from the piped record when it
-    carries one. Refuses under `storage = "github"`: forge issues are edited
-    on the forge, never governed by aco. Calls `_state_ref_forge` directly,
+    carries one -- except a malformed item (ITEM-39), which takes the piped
+    record whole and refuses a body without one. Refuses under
+    `storage = "github"`: forge issues are edited on the forge, never
+    governed by aco. Calls `_state_ref_forge` directly,
     as `item new`'s state-ref path does. A malformed piped body reports through
     the shared envelope as `body_invalid`, with `body --check`'s own
     `defects`; every other refusal is `precondition_failed` (issue #425)."""
@@ -3340,7 +3359,7 @@ def _cmd_item_edit(parsed: argparse.Namespace) -> int:
             return _refuse_item_body_invalid(defects, as_json=as_json)
         client = _state_ref_forge(parsed.repo, config.canonical_remote)
         number = parsed.item
-        if client.item_reference(number).state is forge.ItemState.MISSING:
+        if not client.holds(number):
             raise protocol.ClaimUnavailableError(_missing_item_refusal(number, client))
         client.update_item_body(number, new_body)
         _print_item_edit_result(
@@ -3455,7 +3474,9 @@ def _cmd_item_close(parsed: argparse.Namespace) -> int:
     id gets this command's own "does not exist" sentence rather than
     `close_item`'s internal `_by_number` lookup failing with the wrong
     shape; `close_item` itself refuses a second close on an already-closed
-    item, naming its date. Prints one line, `CLOSED aco-xxxxxx` (`--json`:
+    item, naming its date. While any item is malformed (issue #447) it
+    refuses before the write, since the report after it reads the whole
+    store. Prints one line, `CLOSED aco-xxxxxx` (`--json`:
     `{"item", "number", "closed_at", "parent_closable"}`), then `release
     --merged`'s own `freed:` line -- open items whose only open local
     blocker was this one (`_freed_item_numbers`, issue #256; nothing new) --
@@ -3481,6 +3502,7 @@ def _cmd_item_close(parsed: argparse.Namespace) -> int:
         client = _state_ref_forge(parsed.repo, config.canonical_remote)
         if client.item_reference(number).state is forge.ItemState.MISSING:
             raise protocol.ClaimUnavailableError(_missing_item_refusal(number, client))
+        client.require_well_formed()
         closed_at = client.close_item(number)
         result = _ItemCloseResult(
             item_id=items.format_item_id(number),
@@ -3546,13 +3568,11 @@ def _item_state_text(state: forge.ItemState) -> str:
     return "open" if state is forge.ItemState.OPEN else "closed"
 
 
-def _item_parent_id(parent: board.ParentIssue | None) -> str | None:
-    return None if parent is None else items.format_item_id(parent.reference.number)
+def _item_parent_id(parent: int | None) -> str | None:
+    return None if parent is None else items.format_item_id(parent)
 
 
-def _item_header(
-    number: int, reference: forge.ItemReference, parent: board.ParentIssue | None
-) -> str:
+def _item_header(number: int, reference: forge.ItemReference, parent: int | None) -> str:
     """`item show`'s one header line: id, number, state, parent, and origin
     -- the same shape regardless of which forge answered the reads, since an
     id (`items.format_item_id`) is a pure encoding of `number`, never a
@@ -3582,7 +3602,7 @@ def _cmd_item_show(parsed: argparse.Namespace, session: _ReadSession) -> int:
         reference = client.item_reference(number)
         if reference.state is forge.ItemState.MISSING:
             raise protocol.ClaimUnavailableError(_missing_item_refusal(number, client))
-        parent = client.parent_issue(number)
+        parent = client.parent_number(number)
     except protocol.ClaimError as error:
         return _refuse(ItemReason.PRECONDITION_FAILED, error, as_json=as_json)
     body = reference.body or ""
@@ -4757,10 +4777,12 @@ def _whole_from_item_body(
     a lazy resolver `_reject_wide_scope` calls only once the scope actually
     trips the gate and neither call names `--whole` -- so a narrow scope, or
     an explicit `--whole`, never costs this read. Reuses `open_by_number`
-    when the caller already fetched it (a derived scope, or the slice-rule
-    checks); resolves the repository's own storage pin itself, since a
-    trip's resolver runs before `_cmd_claim`'s own branch has necessarily
-    done so."""
+    when the caller already fetched it (a derived scope); otherwise reads
+    the one target item alone, never the whole board, so a replay (CLM-15)
+    or a live-claim resume (START-06) never meets PIN-29's refusal of some
+    other item (issue #447). Resolves the repository's own storage pin
+    itself, since a trip's resolver runs before `_cmd_claim`'s own branch
+    has necessarily done so."""
     if not isinstance(identity, protocol.IssueIdentity):
         return None
     number = identity.issue
@@ -4768,12 +4790,7 @@ def _whole_from_item_body(
     def resolve() -> str | None:
         client = session.forge()
         storage = _board_config(_resolve_toplevel(directory=directory)).storage
-        listing = (
-            open_by_number
-            if open_by_number is not None
-            else {issue.number: issue for issue in client.list_open_board_issues()}
-        )
-        return _item_whole(client, listing, number, storage=storage)
+        return _item_whole(client, open_by_number or {}, number, storage=storage)
 
     return resolve
 
@@ -5864,7 +5881,8 @@ def _landing_report(
     storage: body.Storage,
 ) -> tuple[ReleaseLanding | None, str | None]:
     """The `(landing, hint)` pair `_cmd_release` prints once its release
-    transition already committed (issue #256): a forge hiccup here can only
+    transition already committed (issue #256): a forge hiccup here, or a
+    malformed state-ref item the board read refuses on (issue #447), can only
     ever downgrade the report to `hint`, never undo or fail that release."""
     landed = (
         board.IssueReference(client.repository.path, identity.issue)
@@ -5883,6 +5901,12 @@ def _landing_report(
         hint = (
             f"hint: could not read the board to report what this landing freed ({error}); "
             "run `aco board` once the forge is reachable"
+        )
+        return None, hint
+    except protocol.MalformedStateTreeError as error:
+        hint = (
+            f"hint: could not read the board to report what this landing freed ({error}); "
+            "run `aco board` once it is repaired"
         )
         return None, hint
     return landing, None
@@ -6202,6 +6226,10 @@ def _title_overlap(title: str, other: str) -> float:
     return len(first & second) / len(combined) if combined else 0.0
 
 
+def _numbered_titles(issues: Iterable[board.Issue]) -> tuple[tuple[int, str], ...]:
+    return tuple((issue.number, issue.title) for issue in issues)
+
+
 def _possible_twin(title: str, candidates: Iterable[tuple[int, str]]) -> int | None:
     """The candidate whose title overlaps `title` most, at least
     `TWIN_TITLE_WORD_OVERLAP`, the lower number on a tie; `None` when no
@@ -6217,17 +6245,18 @@ def _possible_twin(title: str, candidates: Iterable[tuple[int, str]]) -> int | N
 def _refuse_possible_twin(
     client: forge.ForgeReader,
     title: str,
-    open_issues: Iterable[board.Issue],
+    open_titles: Iterable[tuple[int, str]],
     *,
     parent: int | None,
 ) -> None:
     """The one twin search `item new` and `cut` run before they create an
-    issue (issue #444): the titles of every open issue and every issue closed
-    within `TWIN_SEARCH_CLOSED_WINDOW`, never the new issue's own `parent`.
-    A hit refuses by number; `--not-a-twin` is the caller's way past it."""
+    issue (issue #444): `open_titles` -- every open issue's number and title
+    -- and the titles of every issue closed within `TWIN_SEARCH_CLOSED_WINDOW`,
+    never the new issue's own `parent`. A hit refuses by number;
+    `--not-a-twin` is the caller's way past it."""
     since = datetime.now(UTC) - TWIN_SEARCH_CLOSED_WINDOW
     candidates = [
-        *((issue.number, issue.title) for issue in open_issues),
+        *open_titles,
         *((issue.number, issue.title) for issue in client.list_recently_closed_issues(since)),
     ]
     twin = _possible_twin(title, (entry for entry in candidates if entry[0] != parent))
@@ -6339,7 +6368,7 @@ def _cut_slice(
     child_scope = _cut_row_scope(link, _requested_body_scope(parsed.scope))
     adopted = _adoptable_child(client, number, parsed.title, config.idea_label, open_issues)
     if adopted is None and not parsed.not_a_twin:
-        _refuse_possible_twin(client, parsed.title, open_issues, parent=number)
+        _refuse_possible_twin(client, parsed.title, _numbered_titles(open_issues), parent=number)
     try:
         child = (
             adopted.number
@@ -6605,26 +6634,40 @@ class _ServedBoardCache:
     instead of paying `_board_page`'s full forge fetch again on every
     request -- the fix for the operator's own report of a 19s-per-load
     board. Every ruling `POST /rule` -- written, refused, or raised (BOARD-48)
-    -- discards `built`, so the next `GET` rebuilds it; an explicit
+    -- marks `built` stale, so the next `GET` rebuilds it; an explicit
     `?reload=1` rebuilds on that very `GET`. `lock` serializes a rebuild
     against a concurrent request: `ThreadingHTTPServer` runs each one on its
-    own thread."""
+    own thread. Every rebuild reads through a fresh `_LazyForge` (issue #447):
+    a state-ref forge is a snapshot of the store at resolution, so one held
+    for the server's lifetime would never show a later write."""
 
-    read_session: _ReadSession
+    repo: str | None
     built: tuple[board_html.BoardPage, datetime] | None = None
+    stale: bool = False
     lock: threading.Lock = field(default_factory=threading.Lock)
 
-    def held(self, *, reload: bool) -> tuple[board_html.BoardPage, datetime]:
-        """The held page and when it was built, rebuilding it first when
-        nothing is held yet or `reload` asks for a fresh one."""
+    def held(self, *, reload: bool) -> tuple[board_html.BoardPage, datetime, str | None]:
+        """The held page, when it was built, and PIN-29's refusal when the
+        rebuild it needed met one (issue #447): rebuilt first when nothing is
+        held yet, it is stale, or `reload` asks. A refused rebuild keeps the
+        last page built, so the served page names the malformed item beside
+        that page's age instead of failing the request; only a first build
+        has no page to keep, and raises."""
         with self.lock:
-            if self.built is None or reload:
-                self.built = (_board_page(self.read_session), datetime.now(UTC))
-            return self.built
+            if self.built is None or self.stale or reload:
+                fresh = _ReadSession(forge=_LazyForge(self.repo))
+                try:
+                    self.built = (_board_page(fresh), datetime.now(UTC))
+                except protocol.MalformedStateTreeError as refusal:
+                    if self.built is None:
+                        raise
+                    return (*self.built, str(refusal))
+                self.stale = False
+            return (*self.built, None)
 
     def discard(self) -> None:
         with self.lock:
-            self.built = None
+            self.stale = True
 
 
 def _board_server(parsed: argparse.Namespace, session: _WriteSession) -> board_serve.BoardServer:
@@ -6642,9 +6685,8 @@ def _board_server(parsed: argparse.Namespace, session: _WriteSession) -> board_s
     `serve_forever` loop so a test can bind a real ephemeral port and drive
     it without blocking."""
     client = session.forge.writer()
-    read_session = _ReadSession(forge=session.forge)
     token_holder: list[str] = []
-    cache = _ServedBoardCache(read_session)
+    cache = _ServedBoardCache(parsed.repo)
 
     def resolve_token() -> str:
         token = workspace.board_token(
@@ -6654,9 +6696,14 @@ def _board_server(parsed: argparse.Namespace, session: _WriteSession) -> board_s
         return token
 
     def render_page(refused: str | None, reload: bool) -> str:
-        page, built_at = cache.held(reload=reload)
+        page, built_at, store_refusal = cache.held(reload=reload)
+        notices = dict.fromkeys(
+            sentence for sentence in (refused, store_refusal) if sentence is not None
+        )
         served = board_html.ServedRuleForm(
-            token=token_holder[0], refused=refused, age=datetime.now(UTC) - built_at
+            token=token_holder[0],
+            refused=" ".join(notices) or None,
+            age=datetime.now(UTC) - built_at,
         )
         return board_html.render(page, served=served)
 
@@ -6667,15 +6714,25 @@ def _board_server(parsed: argparse.Namespace, session: _WriteSession) -> board_s
         # review) keeps a concurrent GET that races the write from rebuilding
         # and holding a pre-ruling page: discarding first left a window where
         # such a GET restored exactly the staleness this cache exists to
-        # remove.
+        # remove. The click writes through a store read afresh and holds
+        # PIN-29 through its write (issue #447): the server's startup
+        # snapshot cannot see an item that went bad while it ran, and a
+        # preflight alone could not see one going bad before the write.
         try:
-            rule_item(client, item, line, ruling, note)
+            clicked = _LazyForge(parsed.repo).writer()
+            if isinstance(clicked, state_board.StateRefBoard):
+                clicked.hold_well_formed()
+            rule_item(clicked, item, line, ruling, note)
         except protocol.ClaimError as error:
             return board_serve.RuleOutcome(refusal=str(error))
         finally:
             cache.discard()
         return board_serve.RuleOutcome(refusal=None)
 
+    # Building the first page before `start` makes a store PIN-29 refuses
+    # (issue #447) stop the server before any token write or ruling click;
+    # the first `GET` then serves this very page instead of building again.
+    cache.held(reload=False)
     return board_serve.start(
         port=parsed.port, resolve_token=resolve_token, render_page=render_page, rule_item=post_rule
     )

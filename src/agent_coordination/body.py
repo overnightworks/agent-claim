@@ -19,7 +19,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from datetime import date
 from enum import StrEnum
-from typing import cast
+from typing import TypeGuard, cast
 
 from . import metrics, protocol
 
@@ -473,13 +473,18 @@ def _record_timestamp_defect(value: object, key_name: str) -> ContractDefect | N
     return None
 
 
+def is_valid_title(title: object) -> TypeGuard[str]:
+    """An item title's one rule, `record.title`'s and `--title`'s alike
+    (issue #447): a string holding more than whitespace."""
+    return isinstance(title, str) and bool(title.strip())
+
+
 def _record_identity_defects(value: dict[str, object]) -> list[ContractDefect]:
     """`[record]`'s own identity fields: `title`, `state`, `kind`, `labels`,
     `blocked_by` -- split from `_block_record_defects` only to stay under
     one function's branch budget; the two together are the whole table."""
     defects: list[ContractDefect] = []
-    title = value.get("title")
-    if not isinstance(title, str) or not title.strip():
+    if not is_valid_title(value.get("title")):
         defects.append(ContractDefect("record.title", "record.title must be a non-empty string"))
     if value.get("state") not in RECORD_STATES:
         defects.append(ContractDefect("record.state", "record.state must be open or closed"))
@@ -959,6 +964,18 @@ def parse_body(body: str, *, storage: Storage = Storage.GITHUB) -> ParsedBody:
     top-level key under `Storage.GITHUB`, the default every existing caller
     keeps reading with.
     """
+    data = _block_data(body)
+    if isinstance(data, ParsedBody):
+        return data
+    defects = _block_schema_defects(data, storage)
+    if defects:
+        return _malformed_parsed_body(defects)
+    return _valid_block_parsed_body(data, storage)
+
+
+def _block_data(body: str) -> dict[str, object] | ParsedBody:
+    """`body`'s one closed `agent-claim` block, decoded as TOML but not yet
+    schema-checked, or the `ParsedBody` that already says why it cannot be."""
     fences = _agent_claim_fence_matches(body)
     if not fences:
         return _NO_BLOCK_PARSED_BODY
@@ -985,10 +1002,18 @@ def parse_body(body: str, *, storage: Storage = Storage.GITHUB) -> ParsedBody:
                 ),
             )
         )
-    defects = _block_schema_defects(data, storage)
-    if defects:
-        return _malformed_parsed_body(defects)
-    return _valid_block_parsed_body(data, storage)
+    return data
+
+
+def readable_record_title(body: str) -> str | None:
+    """`body`'s `[record]` title when it alone still reads -- even when
+    another field leaves the block malformed (issue #447), so `item new`'s
+    twin search still compares a malformed state-ref item's title; `None`
+    when no valid title can be read at all."""
+    data = _block_data(body)
+    record = data.get(RECORD_KEY) if isinstance(data, dict) else None
+    title = record.get("title") if isinstance(record, dict) else None
+    return title.strip() if is_valid_title(title) else None
 
 
 @dataclass(frozen=True)

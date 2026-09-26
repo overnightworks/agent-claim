@@ -19,7 +19,7 @@ reaches `ERROR: <sentence>` on stderr, exit `2`, unless noted otherwise.
 | `storage` unset (default `github`) | PIN-02 | ITEM-26..ITEM-35 | PIN-10, PIN-11 | — | PIN-08 |
 | `storage` names an unrecognized value | PIN-03 | PIN-03 | PIN-03 | PIN-03 | — |
 | `storage = "state-ref"` | PIN-04\*, PIN-05\* | PIN-18..21 | PIN-22..28 | —\*\* | PIN-08 |
-| a state-ref item file itself is malformed | PIN-13..17 | — | — | — | — |
+| a state-ref item file itself is malformed | PIN-13..17, PIN-29 | ITEM-37 | ITEM-39, PIN-29 | LAND-65 | — |
 | a fresh item id, minted | PIN-06, PIN-07 | PIN-06, PIN-07 | — | — | — |
 
 \* PIN-04/PIN-05 gate only a command that resolves this repository's item
@@ -59,10 +59,11 @@ including the surviving refusal, is `specs/landing-grammar.spec.md`'s own
 ## The state-ref item file, one layer above the block
 
 - [ ] [PIN-13] An `items/<id>.md` entry whose filename is not `aco-` plus six lowercase hex characters plus `.md` makes a state-ref read refuse `items/<name> is not a valid item file name`.
-- [ ] [PIN-14] An `items/<id>.md` entry whose bytes are not valid UTF-8 refuses `item <id> is not valid UTF-8`.
-- [ ] [PIN-15] An `items/<id>.md` entry whose text carries no valid `agent-claim` block with a `[record]` table refuses `item <id> has a malformed agent-claim block` (see E-PIN-07).
+- [ ] [PIN-14] A read of an `items/<id>.md` entry whose bytes are not valid UTF-8 refuses `item <id> is not valid UTF-8`, then ITEM-38's repair clause.
+- [ ] [PIN-15] A read of an `items/<id>.md` entry with no valid `agent-claim` block and `[record]` refuses `item <id> has a malformed agent-claim block`, then ITEM-38's repair clause (see E-PIN-07).
 - [ ] [PIN-16] An item whose own `record.parent` names an id no `items/` entry carries refuses `item <parent-id> is referenced as a parent but does not exist`.
 - [ ] [PIN-17] An item whose own `record.blocked_by` names an id no `items/` entry carries refuses `item <blocker-id> is listed as a blocker but does not exist`.
+- [ ] [PIN-29] While PIN-14/PIN-15 refuse an item, `board`, `next`, `rulings`, `cut`, `item close`, a fresh issue-mode `claim`/`start`, and child listings refuse with the lowest such id before any write (E-PIN-07).
 
 ## Writing a fresh state-ref item
 
@@ -87,6 +88,8 @@ including the surviving refusal, is `specs/landing-grammar.spec.md`'s own
 - Under `storage = "state-ref"`, `aco status`, `aco protect`, `aco bootstrap`, `aco rescope`, `aco release`, and a lane or already-observed `aco claim` never resolve the item forge, so PIN-04/PIN-05 never gate them.
 - `--repo` never selects a repository under `storage = "state-ref"`: there is no host-based target to override.
 - `aco item edit`/`close` never overwrite a concurrent writer's change: a stale expected oid refuses by name instead (`specs/ref-store-cas.spec.md`, CAS-20), and the item's stored bytes stay exactly what the last landed write left.
+- A `board --serve` ruling click never lands beside an item that turned malformed after PIN-29's check: its write commits only onto the `items/` it checked, else refuses `items/ was written since this write checked it; re-read and retry`.
+- A replayed `aco claim` (CLM-15) and an `aco start` resuming its live claim (START-06) never read the board — a wide scope naming no `--whole` reads its own item's `whole` alone — so PIN-29 never refuses them.
 - `aco item close` never deletes an item file or any of its other bytes: only `state`, `closed_at`, and `updated_at` move.
 
 ## Examples
@@ -159,8 +162,11 @@ exit 2
 Setup: bare-remote, bootstrapped, `storage = "state-ref"` tracked, `items/aco-000001.md` hand-written with no `agent-claim` block
 
 ```console
-$ aco board
-2> ERROR: item aco-000001 has a malformed agent-claim block
+$ aco item show aco-000001
+2> ERROR: item aco-000001 has a malformed agent-claim block; repair it with aco item edit aco-000001 and a body whose agent-claim block carries a valid [record]
+exit 2
+$ aco next
+2> ERROR: item aco-000001 has a malformed agent-claim block; repair it with aco item edit aco-000001 and a body whose agent-claim block carries a valid [record]
 exit 2
 ```
 

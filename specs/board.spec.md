@@ -18,7 +18,7 @@ that page writes is `specs/rule.spec.md`'s (RULE-01..09);
 `specs/output.spec.md` owns the `--json` envelope itself (OUT-nn: key
 order, `ok`, `message`) that wraps BOARD-11's own top-level keys.
 `--serve`'s own request/response wire contract is not specified here beyond
-the held page, its age, and its rebuilds (BOARD-46..50). `board`'s own ranking, scoring, and per-item
+the held page, its age, and its rebuilds (BOARD-46..51). `board`'s own ranking, scoring, and per-item
 field semantics (`score`, `priority_bucket`, `age_days`, ...) are
 pre-existing, untouched behaviour this lane does not re-derive into
 criteria; each item's own `actionable`/`actionable_reason` fields are the
@@ -56,7 +56,7 @@ included.
 | an already-ruled `[[expectation]]` line | — | BOARD-36, BOARD-37, BOARD-38 | BOARD-36, BOARD-37, BOARD-38 |
 | `--new-token` given without `--serve` | BOARD-39, BOARD-43 | BOARD-39 | — |
 | the token file's own content, or its directory's mode | — | — | BOARD-40, BOARD-41 |
-| a repeated page request, a ruling click, or the reload link | — | — | BOARD-46, BOARD-47, BOARD-48, BOARD-50 |
+| a repeated page request, a ruling click, or the reload link | — | — | BOARD-46, BOARD-47, BOARD-48, BOARD-50, BOARD-51 |
 | a client hanging up mid-response | — | — | BOARD-49 |
 
 ## No output mode
@@ -126,9 +126,10 @@ does, before either reads a single issue -- cited there, not restated.
 - [ ] [BOARD-41] A symlinked or others-writable level of `<token-path>` refuses `board token directory <path> must be private and owned by this user (found mode <mode>)`, exit `2` (see E-BOARD-12).
 - [ ] [BOARD-46] A repeated page request answers from the page the first one built; a forge change shows only after a ruling click or the reload link (see E-BOARD-18).
 - [ ] [BOARD-47] Every served page shows its age and a reload link, `Stand` `vor <h>h <m>m` `neu laden`; the `--html` page carries neither (see E-BOARD-18).
-- [ ] [BOARD-48] Every ruling click, written or refused, rebuilds the page, so the page it redirects to shows the line as the forge now holds it.
+- [ ] [BOARD-48] Every ruling click, written or refused, rebuilds the page, so the page it redirects to shows the line as the forge now holds it, unless BOARD-51 keeps the last page.
 - [ ] [BOARD-49] A client that hangs up mid-response leaves stderr empty; any other request error still prints its traceback.
 - [ ] [BOARD-50] The reload link's request rebuilds, then redirects (`303`) to the plain URL, no `reload` field, so a later plain refresh serves the held page without rebuilding (see E-BOARD-18).
+- [ ] [BOARD-51] A rebuild PIN-29 refuses (`specs/storage-pin.spec.md`) keeps the page last built and shows PIN-29's sentence beside its age.
 
 ## Never
 
@@ -252,7 +253,7 @@ http://127.0.0.1:<port>/?t=<token>
 
 The line above is the whole of this transcript: `--serve` then blocks in
 its request loop, so no further line is printed until it is stopped.
-What a request to that URL returns is BOARD-46..50's (see E-BOARD-18).
+What a request to that URL returns is BOARD-46..51's (see E-BOARD-18).
 
 ### E-BOARD-08 — a ruled line moves into its item's `Themen` entry
 

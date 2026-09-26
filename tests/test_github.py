@@ -35,7 +35,7 @@ def test_forge_operation_exhaustiveness_matches_the_declared_reader_and_writer_m
         if not name.startswith("_") and name not in {"repository", "capability", "requests"}
     }
     assert {operation.value for operation in forge.ForgeOperation} == declared_methods
-    assert len(forge.ForgeOperation) == 15
+    assert len(forge.ForgeOperation) == 16
     assert set(github.GITHUB_CAPABILITIES) == set(forge.ForgeOperation)
     assert forge.Capability.UNSUPPORTED not in github.GITHUB_CAPABILITIES.values()
 
@@ -2665,6 +2665,7 @@ def test_github_adapter_reads_a_recorded_parent_and_its_children() -> None:
     assert client.parent_issue(72) == board.ParentIssue(
         board.IssueReference(REPOSITORY, 79), "## Next\nCut."
     )
+    assert client.parent_number(72) == 79
     assert client.list_children(79) == (
         board.ChildItem(72, board.ChildState.OPEN),
         board.ChildItem(73, board.ChildState.OPEN),
@@ -2720,7 +2721,7 @@ def test_github_adapter_reads_an_issue_without_a_parent_as_parentless() -> None:
 
     client = GitHubForge(github._repository_id(REPOSITORY), run=run)
 
-    assert client.parent_issue(72) is None
+    assert (client.parent_issue(72), client.parent_number(72)) == (None, None)
 
 
 def test_github_adapter_reads_the_parents_native_kind() -> None:

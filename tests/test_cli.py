@@ -331,6 +331,11 @@ class FakeForge:
         self._run()
         return self.parents.get(number)
 
+    def parent_number(self, number: int) -> int | None:
+        self._run()
+        parent = self.parents.get(number)
+        return parent.reference.number if parent else None
+
     def list_children(self, number: int) -> tuple[board.ChildItem, ...]:
         self._run()
         return self.children.get(number, ())
@@ -414,6 +419,9 @@ class _MinimalForgeReader:
         raise NotImplementedError
 
     def parent_issue(self, number: int) -> board.ParentIssue | None:
+        return None
+
+    def parent_number(self, number: int) -> int | None:
         return None
 
     def default_branch(self) -> str:
@@ -3343,17 +3351,30 @@ def test_cut_json_refusal_reports_precondition_failed(
     _assert_json_refusal_object(captured.err, captured.out, reason="precondition_failed")
 
 
-def test_cut_refuses_a_number_that_names_no_open_issue(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+@pytest.mark.parametrize(
+    ("title", "refusal"),
+    [
+        pytest.param("Scheibe 1", f"#{CUT_CONTAINER} is not an open container", id="no-open-issue"),
+        pytest.param(" \t ", "--title must be a non-empty string", id="blank-title"),
+    ],
+)
+def test_cut_refuses_a_number_that_names_no_open_issue_or_a_blank_title(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    title: str,
+    refusal: str,
 ) -> None:
+    """CUT-01, and CUT-33 (issue #447): a blank title refuses before `cut`
+    reads the board at all, so no creation path writes a blank-titled item."""
     _configured_board_client(monkeypatch, tmp_path, open_issues=())
 
     exit_code = issue_claim.main(
-        ["--repo", REPOSITORY, "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
+        ["--repo", REPOSITORY, "cut", str(CUT_CONTAINER), "--title", title]
     )
 
     assert exit_code == 2
-    assert f"ERROR: #{CUT_CONTAINER} is not an open container" in capsys.readouterr().err
+    assert f"ERROR: {refusal}" in capsys.readouterr().err
 
 
 def test_cut_refuses_a_container_that_already_has_a_parent(
@@ -6442,7 +6463,12 @@ class _RefusingItemWriter:
     the test's own defect, not behaviour under test."""
 
     def write_item(
-        self, item_id: str, *, expected: protocol.ObjectId | None, content: bytes
+        self,
+        item_id: str,
+        *,
+        expected: protocol.ObjectId | None,
+        content: bytes,
+        store_expected: Mapping[str, protocol.ObjectId] | None,
     ) -> protocol.ObjectId:
         raise AssertionError(f"unexpected write to item {item_id}")
 
@@ -8968,6 +8994,34 @@ def test_cli_claim_explicit_whole_overrides_the_items_own_body(
 
     assert status == 0
     assert _live_store_claim().whole_reason == cli_reason
+
+
+def test_cli_claim_replay_of_a_wide_scope_without_whole_reads_only_its_own_item(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """PIN-29/CLM-15 (issue #447): a replayed wide claim that names no
+    `--whole` takes its item's own `whole` from that item alone, so another
+    item the whole-board read refuses never stops the replay."""
+    reason = "the four adapters share one lock"
+    wide_scope = ["a.py", "b.py", "c.py", "d.py"]
+    item_body = complete_contract("Ship it.", scope=wide_scope, whole=reason)
+    client = _arranged_claim_client(monkeypatch)
+    client.board_issues = (board_issue(72, "Work", item_body),)
+    client.issue_references[72] = forge.ItemReference(forge.ItemState.OPEN, "Work", item_body)
+    argv = _claim_argv(*(flag for path in wide_scope for flag in ("--scope", path)))
+    assert issue_claim.main(argv) == 0
+    capsys.readouterr()
+
+    def another_item_malformed() -> tuple[board.Issue, ...]:
+        raise protocol.MalformedStateTreeError("item aco-3e26d9 has a malformed agent-claim block")
+
+    monkeypatch.setattr(client, "list_open_board_issues", another_item_malformed)
+
+    status = issue_claim.main(argv)
+
+    assert status == 0
+    assert "CLAIMED issue #72: cli-claim" in capsys.readouterr().out
+    assert _live_store_claim().whole_reason == reason
 
 
 def test_cli_claim_replay_without_scope_takes_the_live_claims_own_stored_scope(
@@ -12321,19 +12375,32 @@ def test_release_merged_fetches_each_candidates_dependencies_only_once(
     assert sorted(observed_dependency_calls) == [80, 81, 82, 83]
 
 
+@pytest.mark.parametrize(
+    "board_error",
+    [
+        pytest.param(forge.ForgeTransientError("gh: connection reset"), id="forge-outage"),
+        pytest.param(
+            protocol.MalformedStateTreeError("item aco-3e26d9 has a malformed agent-claim block"),
+            id="malformed-state-ref-item",
+        ),
+    ],
+)
 def test_release_merged_prints_a_hint_instead_of_failing_when_the_board_is_unreachable(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    board_error: protocol.ClaimError,
 ) -> None:
-    """A forge outage that only starts after the release itself already
+    """A forge outage -- or a malformed state-ref item the board read refuses
+    on (issue #447) -- that only shows after the release itself already
     committed must not undo or fail it (issue #256): the release's own
-    exit code and store effect stay exactly what a reachable forge would
+    exit code and store effect stay exactly what a readable board would
     have produced, with one hint line standing in for `freed`/`next`."""
     client = merged_release_client(monkeypatch, body="Work-Item: #72\n\nCloses #72")
     client.closed_issues.add(WORK_ITEM_ISSUE)
     monkeypatch.setattr(issue_claim, "_fetch_issue_reference", _LIVE_FETCH_ISSUE_REFERENCE)
 
     def unreachable() -> tuple[board.Issue, ...]:
-        raise forge.ForgeTransientError("gh: connection reset")
+        raise board_error
 
     monkeypatch.setattr(client, "list_open_board_issues", unreachable)
 
@@ -16071,6 +16138,16 @@ def test_item_new_creates_a_github_issue_from_the_piped_body(
             'ERROR: --origin needs storage = "state-ref"\n',
             id="origin_under_github",
         ),
+        *(
+            pytest.param(
+                _ITEM_NEW_BODY,
+                ("--title", title),
+                (),
+                "ERROR: --title must be a non-empty string\n",
+                id=case,
+            )
+            for case, title in (("empty_title", ""), ("whitespace_title", "   "))
+        ),
     ],
 )
 def test_item_new_on_github_refuses_before_creating_anything(
@@ -16082,9 +16159,9 @@ def test_item_new_on_github_refuses_before_creating_anything(
     closed: tuple[forge.ClosedIssue, ...],
     err: str,
 ) -> None:
-    """Issue #444 proof 1: an invalid body (the same check `aco check <n>`
-    applies), a possible twin, a parent that is no open container, or
-    `--origin` refuses with exit 2 and creates no issue at all."""
+    """Issue #444 proof 1 / issue #447 proof 2: an invalid body (the same
+    check `aco check <n>` applies), a possible twin, a parent that is no open
+    container, `--origin`, or a blank `--title` refuses with exit 2 and creates no issue at all."""
     client = _item_new_github_client(monkeypatch, tmp_path, piped_body)
     client.recently_closed_issues = closed
 
@@ -16198,6 +16275,7 @@ def test_item_new_json_reports_ok_reason_created(
     client = FakeForge(repository=forge.RepositoryId("file", (), str(tmp_path)))
     item_id = items.format_item_id(42)
     monkeypatch.setattr(client, "create_item", lambda **_kwargs: item_id, raising=False)
+    monkeypatch.setattr(client, "open_item_titles", tuple, raising=False)
     monkeypatch.setattr(
         issue_claim, "_state_ref_forge", lambda _repo, _remote, *, directory=None: client
     )
@@ -16408,6 +16486,7 @@ def test_item_close_prints_json_under_the_state_ref_pin(
         forge.ItemState.OPEN, "Title", "Body text.\n", False
     )
     monkeypatch.setattr(client, "close_item", lambda _number: "2026-09-16T12:00:00Z", raising=False)
+    monkeypatch.setattr(client, "require_well_formed", lambda: None, raising=False)
     monkeypatch.setattr(
         issue_claim, "_state_ref_forge", lambda _repo, _remote, *, directory=None: client
     )
@@ -16499,10 +16578,10 @@ def test_item_show_refuses_when_the_parent_read_fails(
             forge.ItemState.OPEN, "Title", "Body text.\n", False
         )
 
-        def failing_parent_read(_number: int) -> board.ParentIssue | None:
+        def failing_parent_read(_number: int) -> int | None:
             raise forge.ForgeMalformedResponseError(sentence)
 
-        monkeypatch.setattr(client, "parent_issue", failing_parent_read)
+        monkeypatch.setattr(client, "parent_number", failing_parent_read)
         monkeypatch.setattr(github, "GitHubForge", lambda _repository: client)
         return client
 

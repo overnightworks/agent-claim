@@ -413,6 +413,7 @@ _READ_ONLY_OPERATIONS = (
     forge.ForgeOperation.ITEM_REFERENCES,
     forge.ForgeOperation.LANDING,
     forge.ForgeOperation.PARENT_ISSUE,
+    forge.ForgeOperation.PARENT_NUMBER,
     forge.ForgeOperation.LIST_CHILDREN,
     forge.ForgeOperation.DEFAULT_BRANCH,
     forge.ForgeOperation.LIST_OPEN_BOARD_ISSUES,
@@ -1078,6 +1079,10 @@ class GitHubForge:
         return board.ParentIssue(
             self._issue_reference(value, "parent issue"), body, self._issue_kind(kind_raw)
         )
+
+    def parent_number(self, number: int) -> int | None:
+        parent = self.parent_issue(number)
+        return None if parent is None else parent.reference.number
 
     def list_children(self, number: int) -> tuple[board.ChildItem, ...]:
         """Every sub-issue GitHub records under `number`, open or closed.

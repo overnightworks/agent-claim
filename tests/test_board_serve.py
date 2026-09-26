@@ -10,6 +10,7 @@ argument is untouched by this module (proof 8)."""
 from __future__ import annotations
 
 import errno
+import html
 import http.client
 import io
 import os
@@ -35,8 +36,14 @@ from test_cli import (
     _patch_store_write,
     _single_item_board_environment,
 )
+from test_state_board import (
+    _blank_title_item,
+    _item_files_with_a_malformed_item,
+    _malformed_item_refusal,
+    _state_ref_board,
+)
 
-from agent_coordination import board_serve, checkout, forge, github, protocol, workspace
+from agent_coordination import board, board_serve, checkout, forge, github, protocol, workspace
 from agent_coordination import cli as issue_claim
 from agent_coordination.body import expectation_lines, rule_expectation
 
@@ -427,6 +434,47 @@ def test_post_rule_on_an_already_ruled_line_writes_nothing_and_shows_the_refusal
     assert '<div class="cards"><p class="empty">nichts</p></div>' in page
 
 
+def test_post_rule_refuses_a_malformed_item_introduced_after_startup_and_writes_nothing(
+    served_board: ServedBoard, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PIN-29 (issue #447): a malformed item that reaches the store while the
+    server already runs stops the next ruling click by name before it writes
+    -- the click reads the store afresh instead of trusting the snapshot the
+    server started from, and holds it well-formed through its write."""
+    token = served_board.server.token
+    served_board.get(token=token)
+    refusal = _malformed_item_refusal()
+    clicked = _state_ref_board(_item_files_with_a_malformed_item(_blank_title_item()))
+    monkeypatch.setattr(issue_claim._LazyForge, "writer", lambda _self: clicked)
+    current_store = _ConsistentForge()
+    current_store.board_issues = served_board.client.board_issues
+    current_store.issue_references = dict(served_board.client.issue_references)
+
+    def malformed_store() -> tuple[board.Issue, ...]:
+        raise protocol.MalformedStateTreeError(refusal)
+
+    monkeypatch.setattr(current_store, "list_open_board_issues", malformed_store)
+    monkeypatch.setattr(github, "GitHubForge", lambda _repository: current_store)
+
+    response = served_board.post_rule(
+        {"t": token, "item": str(SERVED_ITEM), "line": "1", "outcome": "yes"}
+    )
+
+    assert response.status == 303
+    assert response.location is not None
+    assert parse_qs(urlsplit(response.location).query)["refused"] == [refusal]
+    assert served_board.client.item_bodies == {}
+    assert current_store.item_bodies == {}
+    # BOARD-48, BOARD-51: the redirected page rebuilds, meets the same store,
+    # and still answers -- naming the item beside the page last built.
+    redirected = served_board.get(token=token, refused=refusal)
+    assert redirected.status == 200
+    page = redirected.body.decode("utf-8")
+    assert page.count(html.escape(refusal)) == 1
+    assert OPEN_LINE_TEXT in page
+    assert html.escape(refusal) in served_board.get(token=token).body.decode("utf-8")
+
+
 def test_an_unknown_path_is_not_found(served_board: ServedBoard) -> None:
     response = _request(served_board.server, "GET", "/unknown")
     assert response.status == 404
@@ -639,6 +687,38 @@ def test_new_token_mints_a_different_url(
     second_url = _mint_and_capture_url(capsys, port, "--new-token")
 
     assert first_url != second_url
+
+
+def test_serve_refuses_a_malformed_item_before_minting_a_token(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """PIN-29 (issue #447): while the store holds a malformed item, `board
+    --serve --new-token` refuses with that item's sentence before it writes a
+    token or binds a server a ruling click could write through."""
+    client = _served_board_environment(monkeypatch, tmp_path)
+    refusal = "item aco-3e26d9 has a malformed agent-claim block"
+
+    def malformed_store() -> tuple[board.Issue, ...]:
+        raise protocol.MalformedStateTreeError(refusal)
+
+    monkeypatch.setattr(client, "list_open_board_issues", malformed_store)
+    monkeypatch.setattr(board_serve._BoardHTTPServer, "serve_forever", lambda self: None)
+
+    exit_code = issue_claim.main(
+        [
+            "--repo",
+            REPOSITORY,
+            "board",
+            "--serve",
+            "--new-token",
+            "--port",
+            str(_free_loopback_port()),
+        ]
+    )
+
+    assert exit_code == 2
+    assert capsys.readouterr().err == f"ERROR: {refusal}\n"
+    assert not _token_location().file.exists()
 
 
 def test_a_board_token_file_with_a_permissive_mode_refuses(
