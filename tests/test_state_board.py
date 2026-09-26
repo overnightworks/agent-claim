@@ -691,6 +691,14 @@ class TestStateRefBoardAgainstARealStateTree:
     def test_a_missing_number_is_missing(self, state_ref_board: StateRefBoard) -> None:
         assert state_ref_board.item_reference(999999).state is forge.ItemState.MISSING
 
+    def test_item_references_read_every_number_like_item_reference(
+        self, state_ref_board: StateRefBoard
+    ) -> None:
+        references = state_ref_board.item_references((CHILD_A_NUMBER, 999999))
+
+        assert references[CHILD_A_NUMBER] == state_ref_board.item_reference(CHILD_A_NUMBER)
+        assert references[999999].state is forge.ItemState.MISSING
+
     def test_never_shells_out_to_gh(
         self, bare_remote: Path, worktree: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -283,9 +283,7 @@ class FakeForge:
             raise ClaimError(f"GitHub has no pull request #{number}")
         return detail
 
-    def item_reference(self, number: int) -> forge.ItemReference:
-        self._run()
-        self.issue_reference_lookups.append(number)
+    def _item_reference_value(self, number: int) -> forge.ItemReference:
         served = self.issue_references.get(number)
         if served is not None:
             return served
@@ -293,6 +291,24 @@ class FakeForge:
         # `landings` is this fake's set of pull requests, so the one flag that
         # distributes `check` is derived from it rather than set twice.
         return forge.ItemReference(state, "", "", number in self.landings)
+
+    def item_reference(self, number: int) -> forge.ItemReference:
+        self._run()
+        self.issue_reference_lookups.append(number)
+        return self._item_reference_value(number)
+
+    def item_references(self, numbers: Iterable[int]) -> Mapping[int, forge.ItemReference]:
+        """This fake's mirror of `GitHubForge.item_references` (issue #440):
+        one `_run()` for the whole batch -- never one per number -- so a
+        test can assert `requests` against the same one-round-trip count the
+        real adapter now pays for any closed-item history that fits one
+        GraphQL block."""
+        ordered = tuple(dict.fromkeys(numbers))
+        if not ordered:
+            return {}
+        self._run()
+        self.issue_reference_lookups.extend(ordered)
+        return {number: self._item_reference_value(number) for number in ordered}
 
     def default_branch(self) -> str:
         self._run()
@@ -372,6 +388,9 @@ class _MinimalForgeReader:
 
     def item_reference(self, number: int) -> forge.ItemReference:
         return forge.ItemReference(state=forge.ItemState.MISSING)
+
+    def item_references(self, numbers: Iterable[int]) -> Mapping[int, forge.ItemReference]:
+        return dict.fromkeys(numbers, forge.ItemReference(state=forge.ItemState.MISSING))
 
     def landing(self, number: int) -> forge.Landing:
         raise NotImplementedError
@@ -729,11 +748,16 @@ def test_board_shows_measured_estimates_across_json_and_html(
     assert thirty_two["size"] is None
     assert thirty_two["estimate"] is None
     assert payload["measurements"]["classes"]
+    # Issue #440: both closed items come from one batched read -- open
+    # issues, open PRs, merged PRs, and that one batch, never one per item.
+    assert sorted(client.issue_reference_lookups) == [33, 34]
+    assert payload["requests"] == client.requests == 4
 
     assert issue_claim.main([*board_args, "--html"]) == 0
     html_page = capsys.readouterr().out
     assert "Messungen" in html_page
     assert measured_estimate_cell in html_page
+    assert "<dt>Stand</dt>" not in html_page
 
 
 def test_board_shows_the_empty_measurements_sentence_with_nothing_measured(

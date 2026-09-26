@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import hmac
 import os
+import socket
+import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from errno import EADDRINUSE
@@ -31,6 +33,7 @@ from . import protocol
 LOOPBACK_HOST = "127.0.0.1"
 TOKEN_FIELD = "t"
 REFUSED_FIELD = "refused"
+RELOAD_FIELD = "reload"
 _ROOT_PATH = "/"
 _RULE_PATH = "/rule"
 _NO_STORE = "no-store"
@@ -56,10 +59,13 @@ class RuleOutcome:
     refusal: str | None
 
 
-RenderPage = Callable[[str | None], str]
-"""The one state -> page function `board --serve` calls fresh per `GET`:
-`refused` is the last `POST /rule`'s refusal sentence, when the request
-carries one, else `None`."""
+RenderPage = Callable[[str | None, bool], str]
+"""The one state -> page function `board --serve` calls per `GET` (issue
+#440: no longer necessarily a fresh build -- `cli._board_server`'s own
+closure decides that): `refused` is the last `POST /rule`'s refusal
+sentence, when the request carries one, else `None`; `reload` is whether
+the request carried `?reload=1`, an explicit "rebuild now" the caller must
+honor regardless of how fresh its held page already is."""
 
 RuleItem = Callable[[int, int, str, str | None], RuleOutcome]
 """The one write function `board --serve` calls per `POST /rule`: item
@@ -70,6 +76,18 @@ number, expectation line, outcome, and note -- the same shape `cli.py`'s own
 def _field(fields: Mapping[str, list[str]], name: str) -> str | None:
     values = fields.get(name)
     return values[0] if values else None
+
+
+def _plain_location(token: str, refused: str | None) -> str:
+    """The redirect target every `303` (a ruling click or, since issue #440's
+    review, the reload link) sends the browser to: the root path with the
+    token and, when there is one, the refusal sentence -- never a `reload`
+    field, so the address bar the browser lands on always rebuilds nothing
+    on a later plain refresh."""
+    location = f"{_ROOT_PATH}?{TOKEN_FIELD}={token}"
+    if refused is not None:
+        location = f"{location}&{REFUSED_FIELD}={quote(refused)}"
+    return location
 
 
 @dataclass(frozen=True)
@@ -113,6 +131,15 @@ def _parsed_rule_request(fields: Mapping[str, list[str]]) -> _RuleRequest | None
     return _RuleRequest(int(item), int(line), outcome, _field(fields, "note"))
 
 
+class _ClientDisconnectedError(Exception):
+    """Raised only by `_BoardRequestHandler._respond`'s own socket write
+    (issue #440 review): the one place this handler can honestly call a
+    `BrokenPipeError`/`ConnectionResetError`/`ConnectionAbortedError` a
+    client hanging up rather than a server defect that merely raises the
+    same exception type from somewhere else -- `render_page` or `rule_item`
+    reading a `gh`/`git` subprocess whose own pipe broke, say."""
+
+
 class _BoardHTTPServer(ThreadingHTTPServer):
     """`ThreadingHTTPServer` carrying `board --serve`'s own state: the
     per-start token and the two caller-supplied functions every request
@@ -133,6 +160,27 @@ class _BoardHTTPServer(ThreadingHTTPServer):
         self.render_page = render_page
         self.rule_item = rule_item
 
+    def handle_error(
+        self, request: socket.socket | tuple[bytes, socket.socket], client_address: tuple[str, int]
+    ) -> None:
+        """The stdlib default (`socketserver.BaseServer.handle_error`) prints
+        a full traceback to stderr for any exception a handler thread lets
+        escape -- including the one an operator's browser causes just by
+        navigating away mid-response, once the served page stopped costing
+        19 seconds to build (issue #440): the write side of its socket is
+        already gone, so the next write to it raises `BrokenPipeError`,
+        `ConnectionResetError`, or `ConnectionAbortedError`. Only
+        `_ClientDisconnectedError` -- raised exclusively by
+        `_BoardRequestHandler._respond`'s own socket write, never by
+        `render_page`/`rule_item` building or writing the board itself --
+        stays quiet, so the same exception from anywhere else still gets the
+        stdlib's own traceback instead of being mistaken for a client
+        hang-up."""
+        _, error, _ = sys.exc_info()
+        if isinstance(error, _ClientDisconnectedError):
+            return
+        super().handle_error(request, client_address)
+
 
 class _BoardRequestHandler(BaseHTTPRequestHandler):
     def _board_server(self) -> _BoardHTTPServer:
@@ -151,15 +199,23 @@ class _BoardRequestHandler(BaseHTTPRequestHandler):
         content_type: str = _PLAIN_CONTENT_TYPE,
         location: str | None = None,
     ) -> None:
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", _NO_STORE)
-        if location is not None:
-            self.send_header("Location", location)
-        self.end_headers()
-        if body:
-            self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", _NO_STORE)
+            if location is not None:
+                self.send_header("Location", location)
+            self.end_headers()
+            if body:
+                self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as error:
+            # The only socket write this response makes, so the only place a
+            # client hang-up can honestly originate from (issue #440 review).
+            # `ConnectionAbortedError` is the same hang-up family as the
+            # other two (BOARD-49): a client that closed the connection
+            # before the write, rather than mid-write.
+            raise _ClientDisconnectedError() from error
 
     def _authorized(self, server: _BoardHTTPServer, candidate: str | None) -> bool:
         return candidate is not None and hmac.compare_digest(candidate, server.token)
@@ -174,7 +230,18 @@ class _BoardRequestHandler(BaseHTTPRequestHandler):
         if not self._authorized(server, _field(query, TOKEN_FIELD)):
             self._respond(HTTPStatus.FORBIDDEN, _FORBIDDEN_BODY)
             return
-        page = server.render_page(_field(query, REFUSED_FIELD))
+        refused = _field(query, REFUSED_FIELD)
+        if _field(query, RELOAD_FIELD) is not None:
+            # Post/Redirect/Get (issue #440 review, BOARD-50): rebuild now,
+            # then redirect to the plain URL so the address bar drops
+            # `reload=1` -- otherwise a later plain browser refresh (F5) of
+            # the same address keeps rebuilding, the 19-second page this
+            # item exists to remove.
+            server.render_page(refused, True)
+            location = _plain_location(server.token, refused)
+            self._respond(HTTPStatus.SEE_OTHER, b"", location=location)
+            return
+        page = server.render_page(refused, False)
         self._respond(HTTPStatus.OK, page.encode("utf-8"), content_type=_HTML_CONTENT_TYPE)
 
     def do_POST(self) -> None:
@@ -195,10 +262,9 @@ class _BoardRequestHandler(BaseHTTPRequestHandler):
             self._respond(HTTPStatus.BAD_REQUEST, _BAD_REQUEST_BODY)
             return
         outcome = server.rule_item(parsed.item, parsed.line, parsed.outcome, parsed.note)
-        location = f"{_ROOT_PATH}?{TOKEN_FIELD}={server.token}"
-        if outcome.refusal is not None:
-            location = f"{location}&{REFUSED_FIELD}={quote(outcome.refusal)}"
-        self._respond(HTTPStatus.SEE_OTHER, b"", location=location)
+        self._respond(
+            HTTPStatus.SEE_OTHER, b"", location=_plain_location(server.token, outcome.refusal)
+        )
 
     def log_message(self, format: str, *_args: object) -> None:
         # The stdlib default writes every request line -- including this

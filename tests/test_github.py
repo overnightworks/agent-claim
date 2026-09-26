@@ -35,7 +35,7 @@ def test_forge_operation_exhaustiveness_matches_the_declared_reader_and_writer_m
         if not name.startswith("_") and name not in {"repository", "capability", "requests"}
     }
     assert {operation.value for operation in forge.ForgeOperation} == declared_methods
-    assert len(forge.ForgeOperation) == 12
+    assert len(forge.ForgeOperation) == 13
     assert set(github.GITHUB_CAPABILITIES) == set(forge.ForgeOperation)
     assert forge.Capability.UNSUPPORTED not in github.GITHUB_CAPABILITIES.values()
 
@@ -1253,6 +1253,265 @@ def test_github_adapter_item_reference_fails_loud_on_a_malformed_response(
 
     with pytest.raises(ClaimError, match=match):
         client.item_reference(10)
+
+
+def test_github_adapter_item_references_reads_every_number_from_one_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #440: an open issue, a merged pull request (`state: MERGED`
+    reads as closed, matching `item_reference`'s own REST-issues-endpoint
+    normalization), and a number GitHub resolves to neither -- one `gh api
+    graphql` round trip for all three, never one per number.
+
+    A number resolving to neither an issue nor a pull request makes real
+    `gh api graphql` exit nonzero even though its `data` already answers
+    `null` for that alias: a NOT_FOUND entry in the response's own `errors`,
+    not a clean `"n2": None` result `gh` never actually produces (issue #440
+    review) -- so the fake `run` raises the way `gh` does instead of
+    returning a response shape real `gh` never returns.
+    """
+    observed: list[list[str]] = []
+
+    def run(arguments: list[str]) -> str:
+        observed.append(arguments)
+        raise forge.ForgeError(
+            json.dumps(
+                {
+                    "data": {
+                        "repository": {
+                            "n0": {
+                                "__typename": "Issue",
+                                "state": "OPEN",
+                                "title": "Open one",
+                                "body": "Do it.",
+                            },
+                            "n1": {
+                                "__typename": "PullRequest",
+                                "state": "MERGED",
+                                "title": "Landed",
+                                "body": None,
+                            },
+                            "n2": None,
+                        }
+                    },
+                    "errors": [
+                        {
+                            "type": "NOT_FOUND",
+                            "path": ["repository", "n2"],
+                            "locations": [{"line": 1, "column": 1}],
+                            "message": (
+                                "Could not resolve to an issue or pull request "
+                                "with the number of 30."
+                            ),
+                        }
+                    ],
+                }
+            )
+            + "gh: Could not resolve to an issue or pull request with the number of 30.\n"
+        )
+
+    client = GitHubForge(github._repository_id(REPOSITORY), run=run)
+
+    assert client.item_references((10, 20, 30)) == {
+        10: forge.ItemReference(forge.ItemState.OPEN, "Open one", "Do it."),
+        20: forge.ItemReference(forge.ItemState.CLOSED, "Landed", "", True),
+        30: forge.ItemReference(forge.ItemState.MISSING),
+    }
+    assert len(observed) == 1
+    assert observed[0][:2] == ["api", "graphql"]
+
+
+def test_github_adapter_item_references_of_nothing_costs_no_round_trip() -> None:
+    def _fail(_arguments: list[str]) -> str:
+        raise AssertionError("an empty batch must never call gh")
+
+    client = GitHubForge(github._repository_id(REPOSITORY), run=_fail)
+
+    assert client.item_references(()) == {}
+
+
+def test_github_adapter_item_references_splits_into_blocks_of_the_batch_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #440: a closed-item history larger than one GraphQL block still
+    resolves every number, fetched over more than one round trip rather than
+    one query that keeps growing forever."""
+    numbers = tuple(range(1, github.GRAPHQL_ITEM_REFERENCE_BATCH_SIZE + 11))
+    observed: list[list[str]] = []
+
+    def run(arguments: list[str]) -> str:
+        observed.append(arguments)
+        alias_count = arguments[3].count("issueOrPullRequest(")
+        return json.dumps(
+            {
+                f"n{index}": {
+                    "__typename": "Issue",
+                    "state": "CLOSED",
+                    "title": "Closed",
+                    "body": "",
+                }
+                for index in range(alias_count)
+            }
+        )
+
+    client = GitHubForge(github._repository_id(REPOSITORY), run=run)
+
+    references = client.item_references(numbers)
+
+    assert set(references) == set(numbers)
+    assert len(observed) == 2
+
+
+@pytest.mark.parametrize(
+    ("node", "match"),
+    [
+        pytest.param("not-a-dict", "malformed batched item reference", id="not-a-dict"),
+        pytest.param(
+            {"__typename": "Discussion", "state": "OPEN", "title": "x", "body": ""},
+            "malformed batched item reference",
+            id="unknown-typename",
+        ),
+        pytest.param(
+            {"__typename": "Issue", "state": "unknown", "title": "x", "body": ""},
+            "malformed batched item reference",
+            id="unknown-state",
+        ),
+        pytest.param(
+            {"__typename": "Issue", "state": "OPEN", "title": 5, "body": ""},
+            "malformed batched item reference",
+            id="title-not-text",
+        ),
+        pytest.param(
+            {"__typename": "Issue", "state": "OPEN", "title": "x", "body": 5},
+            "malformed batched item reference",
+            id="body-not-text",
+        ),
+        pytest.param(
+            {"__typename": "Issue", "state": "MERGED", "title": "x", "body": ""},
+            "malformed batched item reference",
+            id="issue-cannot-be-merged",
+        ),
+        pytest.param(
+            {"__typename": ["Issue"], "state": "OPEN", "title": "x", "body": ""},
+            "malformed batched item reference",
+            id="typename-not-text",
+        ),
+        pytest.param(
+            {"__typename": "Issue", "state": ["OPEN"], "title": "x", "body": ""},
+            "malformed batched item reference",
+            id="state-not-text",
+        ),
+    ],
+)
+def test_github_adapter_item_references_fails_loud_on_a_malformed_node(
+    node: object, match: str
+) -> None:
+    client = GitHubForge(
+        github._repository_id(REPOSITORY),
+        run=lambda _arguments: json.dumps({"n0": node}),
+    )
+
+    with pytest.raises(ClaimError, match=match):
+        client.item_references((10,))
+
+
+@pytest.mark.parametrize(
+    ("raw", "match"),
+    [
+        pytest.param("not-json", "invalid batched item reference JSON", id="not-json"),
+        pytest.param("null", "malformed batched item reference", id="no-repository"),
+        pytest.param(json.dumps({}), "malformed batched item reference", id="omitted-alias"),
+    ],
+)
+def test_github_adapter_item_references_fails_loud_on_a_malformed_response(
+    raw: str, match: str
+) -> None:
+    client = GitHubForge(github._repository_id(REPOSITORY), run=lambda _arguments: raw)
+
+    with pytest.raises(ClaimError, match=match):
+        client.item_references((10,))
+
+
+@pytest.mark.parametrize(
+    ("message", "match"),
+    [
+        pytest.param("gh: rate limited\n", "rate limited", id="not-json"),
+        pytest.param(json.dumps(["unexpected"]), "unexpected", id="response-not-an-object"),
+        pytest.param(
+            json.dumps(
+                {
+                    "data": {"repository": None},
+                    "errors": [{"type": "NOT_FOUND", "path": ["repository", "n0"]}],
+                }
+            ),
+            "NOT_FOUND",
+            id="repository-not-a-mapping",
+        ),
+        pytest.param(
+            json.dumps({"data": {"repository": {"n0": None}}, "errors": []}),
+            "errors",
+            id="no-errors",
+        ),
+        pytest.param(
+            json.dumps(
+                {
+                    "data": {"repository": {}},
+                    "errors": [{"type": "NOT_FOUND", "path": ["repository", "n0"]}],
+                }
+            ),
+            "NOT_FOUND",
+            id="alias-missing-from-repository",
+        ),
+        pytest.param(
+            json.dumps(
+                {
+                    "data": {"repository": {"n0": None}},
+                    "errors": [{"type": "NOT_FOUND", "path": ["repository"]}],
+                }
+            ),
+            "NOT_FOUND",
+            id="error-path-wrong-length",
+        ),
+        pytest.param(
+            json.dumps(
+                {
+                    "data": {"repository": {"n0": None}},
+                    "errors": [{"type": "FORBIDDEN", "path": ["repository", "n0"]}],
+                }
+            ),
+            "FORBIDDEN",
+            id="error-not-not-found",
+        ),
+        pytest.param(
+            json.dumps(
+                {
+                    "data": {"repository": {"n0": None}},
+                    "errors": [{"type": "NOT_FOUND", "path": ["repository", []]}],
+                }
+            ),
+            "NOT_FOUND",
+            id="error-path-alias-not-a-string",
+        ),
+    ],
+)
+def test_github_adapter_item_references_reraises_an_unrecovered_graphql_error(
+    message: str, match: str
+) -> None:
+    """Issue #440 review: `_not_found_batch_nodes` only recovers a batch
+    whose response parses as the shape a not-found alias actually produces,
+    every error on it is `NOT_FOUND` on one of this call's own aliases, and
+    `data.repository` already holds every alias asked for. Anything else --
+    unparseable output, an unexpected shape, an unrelated error, a
+    malformed path, or an alias `repository` never answered for -- keeps
+    failing loud with the original error, never guessed at as a not-found."""
+
+    def run(_arguments: list[str]) -> str:
+        raise forge.ForgeError(message)
+
+    client = GitHubForge(github._repository_id(REPOSITORY), run=run)
+
+    with pytest.raises(forge.ForgeError, match=match):
+        client.item_references((10,))
 
 
 def test_github_reads_board_dependencies_local_and_foreign(

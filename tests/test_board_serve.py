@@ -20,8 +20,10 @@ import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from http import HTTPStatus
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 import pytest
@@ -153,12 +155,16 @@ class ServedBoard:
     server: board_serve.BoardServer
     client: FakeForge
 
-    def get(self, *, token: str | None, refused: str | None = None) -> _Response:
+    def get(
+        self, *, token: str | None, refused: str | None = None, reload: bool = False
+    ) -> _Response:
         params = {}
         if token is not None:
             params[board_serve.TOKEN_FIELD] = token
         if refused is not None:
             params[board_serve.REFUSED_FIELD] = refused
+        if reload:
+            params[board_serve.RELOAD_FIELD] = "1"
         query = f"?{urlencode(params)}" if params else ""
         return _request(self.server, "GET", f"/{query}")
 
@@ -271,6 +277,7 @@ def test_post_rule_with_a_valid_token_writes_exactly_one_ruling_and_redirects(
     three buttons -- it shows the ruled state, the note, and the
     `aco ask` hint instead, inside the item's own collapsible history."""
     token = served_board.server.token
+    assert OPEN_LINE_TEXT in served_board.get(token=token).body.decode("utf-8")
     response = served_board.post_rule(
         {"t": token, "item": str(SERVED_ITEM), "line": "1", "outcome": outcome, "note": note}
     )
@@ -292,6 +299,98 @@ def test_post_rule_with_a_valid_token_writes_exactly_one_ruling_and_redirects(
     assert f'<code>aco ask {SERVED_ITEM} --text "…"</code>' in follow_up
 
 
+def test_a_get_that_races_a_rule_write_does_not_leave_the_pre_ruling_page_held(
+    served_board: ServedBoard, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #440 review: `ThreadingHTTPServer` runs every request on its own
+    thread, so a `GET` can build and hold a page while `post_rule`'s write is
+    still in flight. `post_rule`'s `finally: cache.discard()` (`cli.py`) must
+    run only after `rule_item` has returned -- discarding before the write
+    would let such a racing `GET`'s freshly built, pre-ruling page survive
+    the discard, so a later plain `GET` would keep serving the stale page
+    instead of the ruling it raced against."""
+    token = served_board.server.token
+    original_update_item_body = served_board.client.update_item_body
+
+    def racing_update_item_body(number: int, body: str) -> None:
+        # Runs on the `POST /rule` thread, before the write is applied: a
+        # concurrent `GET` on another thread builds and holds the page here,
+        # while the client's body is still the pre-ruling one.
+        served_board.get(token=token)
+        original_update_item_body(number, body)
+
+    monkeypatch.setattr(served_board.client, "update_item_body", racing_update_item_body)
+
+    response = served_board.post_rule(
+        {"t": token, "item": str(SERVED_ITEM), "line": "1", "outcome": "yes"}
+    )
+    assert response.status == 303
+
+    follow_up = served_board.get(token=token).body.decode("utf-8")
+    assert f'<li class="ruled"><span>{OPEN_LINE_TEXT}</span>' in follow_up
+
+
+def test_a_repeated_get_serves_the_held_page_with_its_age_until_an_explicit_reload(
+    served_board: ServedBoard,
+) -> None:
+    """Issue #440: the page is built once and held -- a change on the forge
+    stays invisible to a plain repeated `GET` and appears after the page's
+    own reload link, which every served page shows next to its age."""
+    token = served_board.server.token
+    first = served_board.get(token=token).body.decode("utf-8")
+    served_board.client.board_issues = (
+        replace(served_board.client.board_issues[0], title="Renamed item"),
+    )
+
+    repeated = served_board.get(token=token).body.decode("utf-8")
+    reload_response = served_board.get(token=token, reload=True)
+    reloaded = served_board.get(token=token).body.decode("utf-8")
+
+    stand = "<dt>Stand</dt><dd>vor 0h 0m"
+    reload_link = f'<a class="reload" href="/?t={token}&amp;reload=1">neu laden</a>'
+    assert stand in first
+    assert reload_link in first
+    assert "Plain item" in repeated
+    assert "Renamed item" not in repeated
+    assert reload_response.status == 303
+    assert "Renamed item" in reloaded
+
+
+def test_the_reload_link_redirects_so_a_later_plain_refresh_does_not_rebuild(
+    served_board: ServedBoard,
+) -> None:
+    """Issue #440 review, BOARD-50: the reload control is a plain link to
+    `/?t=<token>&reload=1`; before this fix the server answered that request
+    itself with a rebuilt `200` page, so the address bar kept `reload=1` and
+    every later plain browser refresh (F5) of that same address rebuilt
+    again -- the 19-second page this item exists to remove. A reload request
+    must instead rebuild once, then redirect (Post/Redirect/Get, as the
+    ruling `POST` already does with `303`) to the plain URL, so the address
+    bar drops `reload=1` and the redirected `GET` serves the already-held
+    page without rebuilding."""
+    token = served_board.server.token
+
+    reload_response = served_board.get(token=token, reload=True)
+
+    assert reload_response.status == 303
+    assert reload_response.location == f"/?t={token}"
+    assert reload_response.body == b""
+
+    # A forge rename after the reload is invisible to a plain refresh only if
+    # that refresh serves the page the reload already built and held, rather
+    # than rebuilding from the (now renamed) forge state.
+    served_board.client.board_issues = (
+        replace(served_board.client.board_issues[0], title="Renamed item"),
+    )
+
+    plain_response = served_board.get(token=token)
+    plain_body = plain_response.body.decode("utf-8")
+
+    assert plain_response.status == 200
+    assert "Plain item" in plain_body
+    assert "Renamed item" not in plain_body
+
+
 def test_post_rule_with_a_wrong_token_is_forbidden_and_writes_nothing(
     served_board: ServedBoard,
 ) -> None:
@@ -306,8 +405,11 @@ def test_post_rule_with_a_wrong_token_is_forbidden_and_writes_nothing(
 def test_post_rule_on_an_already_ruled_line_writes_nothing_and_shows_the_refusal(
     served_board: ServedBoard,
 ) -> None:
+    """Issue #440: the line was ruled behind the held page's back, so the
+    refused click rebuilds too and the page shows the line ruled."""
     token = served_board.server.token
-    served_board.post_rule({"t": token, "item": str(SERVED_ITEM), "line": "1", "outcome": "yes"})
+    served_board.get(token=token)
+    issue_claim.rule_item(served_board.client, SERVED_ITEM, 1, "yes", None)
     ruled_body = served_board.client.item_bodies[SERVED_ITEM]
 
     second = served_board.post_rule(
@@ -320,8 +422,9 @@ def test_post_rule_on_an_already_ruled_line_writes_nothing_and_shows_the_refusal
     refused_sentence = parse_qs(urlsplit(second.location).query)["refused"][0]
     assert "already ruled" in refused_sentence
 
-    page = served_board.get(token=token, refused=refused_sentence)
-    assert refused_sentence in page.body.decode("utf-8")
+    page = served_board.get(token=token, refused=refused_sentence).body.decode("utf-8")
+    assert refused_sentence in page
+    assert '<div class="cards"><p class="empty">nichts</p></div>' in page
 
 
 def test_an_unknown_path_is_not_found(served_board: ServedBoard) -> None:
@@ -1019,7 +1122,80 @@ def test_new_token_without_serve_reports_invalid_usage_under_json(
     _assert_json_refusal_object(captured.err, captured.out, reason="invalid_usage")
 
 
-def _noop_render_page(_refused: str | None) -> str:
+class _BrokenWfile:
+    """A response stream that fails exactly the way a client's closed
+    socket does, without opening a real one -- deterministic where a real
+    disconnect's timing is not."""
+
+    def __init__(self, error: OSError) -> None:
+        self._error = error
+
+    def write(self, _data: bytes) -> int:
+        raise self._error
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(BrokenPipeError(32, "Broken pipe"), id="broken-pipe"),
+        pytest.param(ConnectionResetError(104, "Connection reset"), id="connection-reset"),
+        pytest.param(ConnectionAbortedError(103, "Connection aborted"), id="connection-aborted"),
+    ],
+)
+def test_respond_wraps_its_own_socket_write_failure_as_a_client_disconnect(
+    error: OSError,
+) -> None:
+    """`_BoardRequestHandler._respond`'s socket write is the one place this
+    handler can honestly call a `BrokenPipeError`/`ConnectionResetError`/
+    `ConnectionAbortedError` a client hanging up (issue #440 review) --
+    wrapped into `_ClientDisconnectedError` so `handle_error` can later tell
+    this write failure apart from the same exception type raised by
+    `render_page`/`rule_item` doing something else entirely."""
+    handler = cast(
+        board_serve._BoardRequestHandler,
+        SimpleNamespace(
+            send_response=lambda *_args: None,
+            send_header=lambda *_args: None,
+            end_headers=lambda: None,
+            wfile=_BrokenWfile(error),
+        ),
+    )
+
+    with pytest.raises(board_serve._ClientDisconnectedError):
+        board_serve._BoardRequestHandler._respond(handler, HTTPStatus.OK, b"data")
+
+
+@pytest.mark.parametrize(
+    ("error", "traceback_printed"),
+    [
+        pytest.param(board_serve._ClientDisconnectedError(), False, id="client-disconnected"),
+        pytest.param(BrokenPipeError(32, "Broken pipe"), True, id="broken-pipe-elsewhere"),
+        pytest.param(ConnectionResetError(104, "Connection reset"), True, id="reset-elsewhere"),
+        pytest.param(ValueError("handler bug"), True, id="other-error"),
+    ],
+)
+def test_handle_error_stays_quiet_only_for_responds_own_disconnect(
+    capsys: pytest.CaptureFixture[str], error: Exception, traceback_printed: bool
+) -> None:
+    """Issue #440 review: only `_ClientDisconnectedError` -- raised exclusively by
+    `_respond`'s own socket write -- stays quiet. A bare
+    `BrokenPipeError`/`ConnectionResetError` raised anywhere else (a
+    `render_page`/`rule_item` defect that merely shares the type) still
+    prints the stdlib's traceback instead of being mistaken for a client
+    hanging up."""
+    server = board_serve._BoardHTTPServer(
+        ("127.0.0.1", 0), "token", _noop_render_page, _noop_rule_item
+    )
+    with server, socket.socket() as request:
+        try:
+            raise error
+        except Exception:
+            server.handle_error(request, ("127.0.0.1", 1))
+
+    assert ("Traceback" in capsys.readouterr().err) is traceback_printed
+
+
+def _noop_render_page(_refused: str | None, _reload: bool) -> str:
     return ""
 
 
