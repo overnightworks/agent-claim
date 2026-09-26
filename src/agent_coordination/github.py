@@ -413,6 +413,7 @@ _READ_ONLY_OPERATIONS = (
     forge.ForgeOperation.ITEM_REFERENCES,
     forge.ForgeOperation.LANDING,
     forge.ForgeOperation.PARENT_ISSUE,
+    forge.ForgeOperation.PARENT_NUMBER,
     forge.ForgeOperation.LIST_CHILDREN,
     forge.ForgeOperation.DEFAULT_BRANCH,
     forge.ForgeOperation.LIST_OPEN_BOARD_ISSUES,

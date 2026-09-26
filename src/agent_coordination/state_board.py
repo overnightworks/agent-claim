@@ -52,6 +52,7 @@ STATE_REF_CAPABILITIES: Mapping[forge.ForgeOperation, forge.Capability] = Mappin
         forge.ForgeOperation.ITEM_REFERENCE: forge.Capability.READ_ONLY,
         forge.ForgeOperation.ITEM_REFERENCES: forge.Capability.READ_ONLY,
         forge.ForgeOperation.PARENT_ISSUE: forge.Capability.READ_ONLY,
+        forge.ForgeOperation.PARENT_NUMBER: forge.Capability.READ_ONLY,
         forge.ForgeOperation.LIST_CHILDREN: forge.Capability.READ_ONLY,
         forge.ForgeOperation.DEFAULT_BRANCH: forge.Capability.READ_ONLY,
         forge.ForgeOperation.LIST_OPEN_BOARD_ISSUES: forge.Capability.READ_ONLY,

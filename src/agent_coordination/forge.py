@@ -232,6 +232,7 @@ class ForgeOperation(StrEnum):
     ITEM_REFERENCES = "item_references"
     LANDING = "landing"
     PARENT_ISSUE = "parent_issue"
+    PARENT_NUMBER = "parent_number"
     LIST_CHILDREN = "list_children"
     DEFAULT_BRANCH = "default_branch"
     LIST_OPEN_BOARD_ISSUES = "list_open_board_issues"
