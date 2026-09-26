@@ -16228,6 +16228,7 @@ def test_item_new_json_reports_ok_reason_created(
     client = FakeForge(repository=forge.RepositoryId("file", (), str(tmp_path)))
     item_id = items.format_item_id(42)
     monkeypatch.setattr(client, "create_item", lambda **_kwargs: item_id, raising=False)
+    monkeypatch.setattr(client, "open_item_titles", tuple, raising=False)
     monkeypatch.setattr(
         issue_claim, "_state_ref_forge", lambda _repo, _remote, *, directory=None: client
     )
@@ -16438,6 +16439,7 @@ def test_item_close_prints_json_under_the_state_ref_pin(
         forge.ItemState.OPEN, "Title", "Body text.\n", False
     )
     monkeypatch.setattr(client, "close_item", lambda _number: "2026-09-16T12:00:00Z", raising=False)
+    monkeypatch.setattr(client, "require_well_formed", lambda: None, raising=False)
     monkeypatch.setattr(
         issue_claim, "_state_ref_forge", lambda _repo, _remote, *, directory=None: client
     )
