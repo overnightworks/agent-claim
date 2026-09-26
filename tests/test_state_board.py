@@ -2092,10 +2092,9 @@ class TestCliStateRefForge:
         item's `[record]` table is validated once, at read time, by
         `StateRefBoard`'s own decode (issue #283) -- so a container without
         a working `[[slice]]` table (no agent-claim block to hold one) is
-        refused earlier and louder, before `cut` -- before any command --
-        ever reaches it, with the decode's own existing sentence rather than
-        a second, cut-specific one. `next` never recommends `cut` on such a
-        container for the same reason: it cannot exist on a live board.
+        refused by that decode's own sentence and repair (issue #447) the
+        moment `cut` reads it, rather than a second, cut-specific one. `next`
+        never recommends `cut` on such a container: the board leaves it out.
         Nothing reaches the remote."""
         item_files = {**_item_files(), f"{CONTAINER_ID}.md": b"Just prose, no block at all.\n"}
         self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, item_files)
