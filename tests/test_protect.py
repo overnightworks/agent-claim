@@ -210,7 +210,7 @@ def _patch_protect_claim(
 def _protect_main(monkeypatch: pytest.MonkeyPatch, payload: object) -> int:
     raw = payload if isinstance(payload, str) else json.dumps(payload)
     monkeypatch.setattr(sys, "stdin", io.StringIO(raw))
-    return issue_claim.main(["--repo", "example/agent-claim", "protect"])
+    return issue_claim.main(["--repo", "example/agent-coordination", "protect"])
 
 
 def _assert_protect_decision(

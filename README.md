@@ -24,8 +24,8 @@ repository: GitHub today, forges next. Workspace-recovery (`register`, `run`,
 ## Install and maintain
 
 ```bash
-uv tool install git+https://github.com/overnightworks/agent-claim.git@v3.0.0
-# or: pipx install git+https://github.com/overnightworks/agent-claim.git@v3.0.0
+uv tool install git+https://github.com/overnightworks/agent-coordination.git@v3.0.0
+# or: pipx install git+https://github.com/overnightworks/agent-coordination.git@v3.0.0
 uv tool upgrade agent-coordination
 uv tool uninstall agent-coordination
 ```
@@ -296,6 +296,3 @@ by exactly one file below; this table is the map, not a copy.
 | state ref transport | `specs/ref-store-cas.spec.md` | the compare-and-swap `refs/aco/state` every store command reads and writes |
 | landing grammar | `specs/landing-grammar.spec.md` | what counts as a landing, read by `check`, `release --merged`, and `board` |
 | storage pin | `specs/storage-pin.spec.md` | the `storage` key gating GitHub versus state-ref item storage |
-
-`register`/`run`/`login` are documented above as a workflow; their own spec,
-`specs/workspace.spec.md`, is landing separately (issue #358).

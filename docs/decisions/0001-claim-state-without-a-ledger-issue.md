@@ -1,5 +1,7 @@
 # 0001 — Claim state without a ledger issue
 
+Names in this record are those in use when it was decided. The repository was renamed to agent-coordination on 26.09.2026 (issue #439); the configuration directory and the body-block fence keep their old names until issue #441.
+
 Status: accepted as direction, not yet implementable. Each §4 criterion is gated by the §5
 step that resolves it: the state-ref cut (step 5) resolves criteria 1–6 and 10 (criterion 8
 is already tied there to fencing v0.9 clients); port extraction (step 3) resolves criterion 9,

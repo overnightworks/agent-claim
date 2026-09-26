@@ -238,7 +238,7 @@ exit 2
 ### E-REL-08 — a merged release removes its own clean, merged lane worktree
 
 Setup: bare-remote, fake `gh`, its merge commit's trailer naming `Work-Item: #42`, a linked
-worktree `/work/agent-claim-worktrees/issue-42-widget` on `ada/issue-42`, already merged into
+worktree `/work/agent-coordination-worktrees/issue-42-widget` on `ada/issue-42`, already merged into
 `main`, run from the main checkout, issue `#42` claimed
 
 ```console
@@ -250,12 +250,12 @@ worktree: removed
 exit 0
 ```
 
-`/work/agent-claim-worktrees/issue-42-widget` and branch `ada/issue-42` are both gone afterward.
+`/work/agent-coordination-worktrees/issue-42-widget` and branch `ada/issue-42` are both gone afterward.
 
 ### E-REL-09 — `--keep-worktree` skips cleanup outright
 
 Setup: bare-remote, fake `gh`, its merge commit's trailer naming `Work-Item: #42`, a linked
-worktree `/work/agent-claim-worktrees/issue-42-widget` on `ada/issue-42`, already merged into
+worktree `/work/agent-coordination-worktrees/issue-42-widget` on `ada/issue-42`, already merged into
 `main`, run from the main checkout, issue `#42` claimed
 
 ```console
@@ -267,7 +267,7 @@ worktree: kept -- --keep-worktree was given
 exit 0
 ```
 
-`/work/agent-claim-worktrees/issue-42-widget` and branch `ada/issue-42` both remain.
+`/work/agent-coordination-worktrees/issue-42-widget` and branch `ada/issue-42` both remain.
 
 ### E-REL-10 — running from inside the lane worktree keeps it, one line and all
 
