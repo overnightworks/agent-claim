@@ -636,7 +636,23 @@ SUPPORTED_STATE_SCHEMA_VERSION = 2
 
 
 class UnsupportedStateSchemaError(ClaimError):
-    """`schema.toml` names a version this client does not speak."""
+    """`schema.toml` names a version this client does not speak. Carries the
+    version and the tip it was read at, so `reset` (issue #341) can still
+    export and lease-delete a ledger this client cannot parse."""
+
+    def __init__(self, *, version: int, tip: ObjectId) -> None:
+        super().__init__(f"unsupported state schema version {version}")
+        self.version = version
+        self.tip = tip
+
+
+@dataclass(frozen=True)
+class UnreadableState:
+    """A `refs/aco/state` tip whose schema this client does not speak (issue
+    #341): its oid and version are known, its claims are not."""
+
+    tip: ObjectId
+    schema_version: int
 
 
 class MalformedStateTreeError(ClaimError):
@@ -870,7 +886,7 @@ def parse_schema_toml(content: str, *, tip: ObjectId) -> ClaimState:
     if isinstance(version, bool) or not isinstance(version, int):
         raise MalformedStateTreeError(f"schema.toml version must be an integer, got {version!r}")
     if version != SUPPORTED_STATE_SCHEMA_VERSION:
-        raise UnsupportedStateSchemaError(f"unsupported state schema version {version}")
+        raise UnsupportedStateSchemaError(version=version, tip=tip)
     return ClaimState(tip=tip)
 
 

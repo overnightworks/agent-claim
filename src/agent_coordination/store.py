@@ -59,6 +59,8 @@ from .protocol import (
     RescopeIntent,
     ResourceRecord,
     StateLineageError,
+    UnreadableState,
+    UnsupportedStateSchemaError,
     apply,
     parse_claim_toml,
     parse_resource_toml,
@@ -940,13 +942,16 @@ def _parse_state_tree(worktree: Path, tip: ObjectId) -> ClaimState:
     tree_oid = _tree_oid(worktree, tip)
     entries = _list_tree(worktree, tree_oid, tip=tip, context="state")
     top_level = {name: value for name, value in entries.items() if "/" not in name}
-    unknown = set(top_level) - _STATE_TOP_LEVEL_NAMES
-    if unknown:
-        raise MalformedStateTreeError(f"state tree at {tip} has unknown entries: {sorted(unknown)}")
     archive = _read_state_archive(
         worktree, tree_oid, tip=tip, paths=sorted(top_level.keys() - {ITEMS_DIRECTORY})
     )
+    # The schema version decides which top-level names are legal, so a
+    # version this client does not speak is reported as such (issue #341),
+    # never as a malformed layout it has no grounds to judge.
     parse_schema_toml(_read_schema_toml(top_level, archive, tip=tip), tip=tip)
+    unknown = set(top_level) - _STATE_TOP_LEVEL_NAMES
+    if unknown:
+        raise MalformedStateTreeError(f"state tree at {tip} has unknown entries: {sorted(unknown)}")
     return ClaimState(
         tip=tip,
         claims=_parse_claims_subtree(
@@ -1065,6 +1070,19 @@ def peek_state(*, worktree: Path, remote: str = DEFAULT_CANONICAL_REMOTE) -> Cla
         return EMPTY_STATE
     _fetch_ref_objects(worktree, remote)
     return _parse_state_tree(worktree, probed)
+
+
+def peek_state_for_reset(
+    *, worktree: Path, remote: str = DEFAULT_CANONICAL_REMOTE
+) -> ClaimState | UnreadableState:
+    """`peek_state` for `reset` alone (issue #341): a tip whose schema this
+    client does not speak comes back as its oid and version -- all the
+    export and the lease need -- instead of failing the one command built
+    to replace exactly such a ledger. Any other defect still fails loud."""
+    try:
+        return peek_state(worktree=worktree, remote=remote)
+    except UnsupportedStateSchemaError as error:
+        return UnreadableState(tip=error.tip, schema_version=error.version)
 
 
 def _commit_tree(
