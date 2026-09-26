@@ -2869,6 +2869,34 @@ class TestCliStateRefForge:
         after = store.fetch_state(worktree=worktree, remote=remote_url)
         assert after.tip == before.tip
 
+    def test_item_new_refuses_a_title_twinning_a_just_closed_item(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        bare_remote: Path,
+        worktree: Path,
+    ) -> None:
+        """Issue #444: the twin search reads state-ref items too -- an item
+        closed a moment ago still twins a fresh `item new` of its title,
+        leaving the remote's tip untouched; `--not-a-twin` creates anyway."""
+        self._live_state_ref_checkout(
+            monkeypatch, tmp_path, bare_remote, worktree, _close_scenario_item_files()
+        )
+        assert issue_claim.main(["item", "close", str(CLOSE_BLOCKER_NUMBER)]) == 0
+        capsys.readouterr()
+        remote_url = f"file://{bare_remote}"
+        before = store.fetch_state(worktree=worktree, remote=remote_url)
+
+        refused = issue_claim.main(["item", "new", "--title", "blocker"])
+
+        assert (refused, capsys.readouterr().err) == (
+            2,
+            f"ERROR: possible twin #{CLOSE_BLOCKER_NUMBER}; pass --not-a-twin\n",
+        )
+        assert store.fetch_state(worktree=worktree, remote=remote_url).tip == before.tip
+        assert issue_claim.main(["item", "new", "--title", "blocker", "--not-a-twin"]) == 0
+
     def test_item_close_sets_state_and_closed_at_leaves_board_and_next_and_names_the_freed_item(
         self,
         monkeypatch: pytest.MonkeyPatch,

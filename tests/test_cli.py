@@ -15850,14 +15850,168 @@ def test_main_refuses_a_malformed_item_reference_before_ever_dispatching(
     assert "is not an item reference" in capsys.readouterr().err
 
 
-def test_item_new_refuses_under_github_storage(capsys: pytest.CaptureFixture[str]) -> None:
-    """Issue #285 proof 6: under `storage = "github"` (the default, and
-    what an unconfigured toplevel reads), `item new` refuses by name rather
-    than opening a GitHub issue on the repository's behalf."""
-    status = issue_claim.main(["item", "new", "--title", "X"])
+_ITEM_NEW_BODY = complete_contract("Ship it.")
 
-    assert status == 2
-    assert capsys.readouterr().err == "ERROR: items live on the forge; open the issue there\n"
+
+def _item_new_github_client(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, piped_body: str
+) -> FakeForge:
+    """A `storage = "github"` checkout whose forge holds container `#79`
+    and a plain open issue `#951` titled `Ship it now`, with `piped_body` on
+    stdin -- the arrangement every `item new` GitHub scenario shares."""
+    look_alike = board_issue(951, "Ship it now", complete_contract("Ship it."))
+    container = _cut_container_issue(MINIMAL_BLOCK_TOML)
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container, look_alike))
+    monkeypatch.setattr(sys, "stdin", io.StringIO(piped_body))
+    return client
+
+
+@pytest.mark.parametrize(
+    ("arguments", "out", "created", "linked"),
+    [
+        pytest.param(
+            ["item", "new", "--title", "Write the docs", "--kind", "feature"],
+            "#900\n",
+            [("Write the docs", _ITEM_NEW_BODY, body.ItemKind.FEATURE)],
+            [],
+            id="typed_issue_without_parent",
+        ),
+        pytest.param(
+            ["item", "new", "--title", "Write the docs", "--parent", "79", "--scope", "src/a.py"],
+            "#900\n",
+            [
+                (
+                    "Write the docs",
+                    complete_contract("Ship it.", scope=["src/a.py"]),
+                    body.ItemKind.TASK,
+                )
+            ],
+            [(CUT_CONTAINER, 900)],
+            id="sub_issue_of_an_open_container_with_scope",
+        ),
+        pytest.param(
+            ["item", "new", "--title", "Ship it", "--not-a-twin", "--json"],
+            '{"ok": true, "reason": "created", "item": "#900", "number": 900}\n',
+            [("Ship it", _ITEM_NEW_BODY, body.ItemKind.TASK)],
+            [],
+            id="not_a_twin_creates_past_a_look_alike",
+        ),
+    ],
+)
+def test_item_new_creates_a_github_issue_from_the_piped_body(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    arguments: list[str],
+    out: str,
+    created: list[tuple[str, str, body.ItemKind]],
+    linked: list[tuple[int, int]],
+) -> None:
+    """Issue #444 proof 1: under `storage = "github"`, `item new` opens one
+    issue of the organization's type for `--kind`, its body the piped one
+    (plus `--scope`), recorded under `--parent` when given, and prints the
+    issue number the way the state-ref path prints its id."""
+    client = _item_new_github_client(monkeypatch, tmp_path, _ITEM_NEW_BODY)
+
+    status = issue_claim.main(arguments)
+
+    assert (status, capsys.readouterr().out) == (0, out)
+    assert (client.created_issues, client.linked_children) == (created, linked)
+
+
+@pytest.mark.parametrize(
+    ("piped_body", "flags", "closed", "err"),
+    [
+        pytest.param(
+            "no block\n",
+            ("--title", "Write the docs"),
+            (),
+            "ERROR: body malformed: agent-claim: no agent-claim block\n",
+            id="invalid_body",
+        ),
+        pytest.param(
+            _ITEM_NEW_BODY,
+            ("--title", "Ship it"),
+            (),
+            "ERROR: possible twin #951; pass --not-a-twin\n",
+            id="open_twin",
+        ),
+        pytest.param(
+            _ITEM_NEW_BODY,
+            ("--title", "Write docs"),
+            (forge.ClosedIssue(952, "write the docs"),),
+            "ERROR: possible twin #952; pass --not-a-twin\n",
+            id="recently_closed_twin",
+        ),
+        pytest.param(
+            _ITEM_NEW_BODY,
+            ("--title", "Write the docs", "--parent", "951"),
+            (),
+            "ERROR: #951 is not a container\n",
+            id="parent_is_not_a_container",
+        ),
+        pytest.param(
+            _ITEM_NEW_BODY,
+            ("--title", "Write the docs", "--parent", "81"),
+            (),
+            "ERROR: #81 is not an open container\n",
+            id="parent_is_not_open",
+        ),
+        pytest.param(
+            _ITEM_NEW_BODY,
+            ("--title", "Write the docs", "--origin", "gitlab#5"),
+            (),
+            'ERROR: --origin needs storage = "state-ref"\n',
+            id="origin_under_github",
+        ),
+    ],
+)
+def test_item_new_on_github_refuses_before_creating_anything(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    piped_body: str,
+    flags: tuple[str, ...],
+    closed: tuple[forge.ClosedIssue, ...],
+    err: str,
+) -> None:
+    """Issue #444 proof 1: an invalid body (the same check `aco check <n>`
+    applies), a possible twin, a parent that is no open container, or
+    `--origin` refuses with exit 2 and creates no issue at all."""
+    client = _item_new_github_client(monkeypatch, tmp_path, piped_body)
+    client.recently_closed_issues = closed
+
+    status = issue_claim.main(["item", "new", *flags])
+
+    assert (status, capsys.readouterr().err, client.created_issues) == (2, err, [])
+
+
+def test_item_new_json_reports_a_created_issue_its_parent_relation_failed(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Issue #444: the issue exists once its create returns, so a failed
+    sub-issue relation reports `partial_write` naming it, never a plain
+    refusal that would read as "nothing created"."""
+    client = _item_new_github_client(monkeypatch, tmp_path, _ITEM_NEW_BODY)
+    client.fail_create_child_relation = True
+    command = ["item", "new", "--title", "Write the docs", "--parent", "79", "--json"]
+
+    status = issue_claim.main(command)
+
+    message = (
+        "created #900 but failed to record #900 as a sub-issue of #79: "
+        "relation POST failed (simulated); record that sub-issue relation on the forge by hand"
+    )
+    assert (status, json.loads(capsys.readouterr().out)) == (
+        2,
+        {
+            "ok": False,
+            "reason": "partial_write",
+            "written": 900,
+            "failed": "record #900 as a sub-issue of #79",
+            "message": message,
+        },
+    )
 
 
 def test_item_new_json_reports_ok_reason_created(
@@ -16194,7 +16348,7 @@ def test_item_show_refuses_when_the_parent_read_fails(
 def _item_new_github_storage_refusal(
     _monkeypatch: pytest.MonkeyPatch, _tmp_path: Path
 ) -> list[str]:
-    return ["item", "new", "--title", "X", "--json"]
+    return ["item", "new", "--title", "X", "--origin", "gitlab#5", "--json"]
 
 
 def _item_edit_github_storage_refusal(

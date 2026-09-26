@@ -758,12 +758,14 @@ def _add_brief_parser(commands: argparse._SubParsersAction) -> None:
 
 
 def _add_item_parser(commands: argparse._SubParsersAction) -> None:
-    item = commands.add_parser(
-        "item", help="create or show one work item straight in refs/aco/state"
-    )
+    item = commands.add_parser("item", help="create, show, edit, or close one work item")
     item_commands = _add_subcommands(item, "item_command")
     new = item_commands.add_parser(
-        "new", help="create a fresh item in refs/aco/state and print its id"
+        "new",
+        help=(
+            "create a fresh item and print its id; under storage = github, a GitHub issue "
+            "whose body is read from stdin"
+        ),
     )
     new.add_argument("--title", required=True, help="the fresh item's title")
     new.add_argument(
@@ -795,6 +797,7 @@ def _add_item_parser(commands: argparse._SubParsersAction) -> None:
         help="this item's size class, for the board's own measured estimate; default none",
     )
     new.add_argument("--whole", metavar="REASON", help=ITEM_WHOLE_HELP)
+    new.add_argument("--not-a-twin", action="store_true", help=NOT_A_TWIN_HELP)
     _add_json_flag(new)
     show = item_commands.add_parser(
         "show", help="print one item's header and its stored body byte-exact"
@@ -3135,19 +3138,22 @@ def _state_ref_forge(
     )
 
 
-ITEM_NEW_GITHUB_REFUSAL = "items live on the forge; open the issue there"
+ITEM_NEW_ORIGIN_ON_GITHUB_REFUSAL = '--origin needs storage = "state-ref"'
 
 
 class ItemReason(StrEnum):
     """`aco item`'s own `--json` `reason` vocabulary, shared across its four
     subcommands (issue #425, `specs/item.spec.md`): `created`/`edited`/
     `closed`/`shown` name each subcommand's own success. `body_invalid`
-    covers only `item edit`'s own piped-body shape check (`_body_shape_defects`,
-    the same check `body --check` runs), carrying `defects` the same way
-    (`BodyCheckReason`, issue #404). Every other refusal -- a `storage =
-    "github"` command, a missing item or parent, a pull request target, a
-    forge write capability, or a live claim still on the item -- is
-    `precondition_failed`, this command family's single generic bucket."""
+    covers only `item new`'s and `item edit`'s own piped-body shape check
+    (`_body_shape_defects`, the same check `body --check` runs), carrying
+    `defects` the same way (`BodyCheckReason`, issue #404); `partial_write`
+    only a GitHub issue `item new` created but could not record under its
+    `--parent` (issue #444), `cut`'s own shape. Every other refusal -- a
+    `storage = "github"` command, a missing item or parent, a possible twin,
+    a pull request target, a forge write capability, or a live claim still
+    on the item -- is `precondition_failed`, this command family's single
+    generic bucket."""
 
     CREATED = "created"
     EDITED = "edited"
@@ -3155,6 +3161,7 @@ class ItemReason(StrEnum):
     SHOWN = "shown"
     PRECONDITION_FAILED = "precondition_failed"
     BODY_INVALID = "body_invalid"
+    PARTIAL_WRITE = "partial_write"
 
 
 def _refuse_item_body_invalid(defects: tuple[str, ...], *, as_json: bool) -> int:
@@ -3165,48 +3172,108 @@ def _refuse_item_body_invalid(defects: tuple[str, ...], *, as_json: bool) -> int
 
 
 def _cmd_item_new(parsed: argparse.Namespace) -> int:
-    """`aco item new` (issues #285, #316): the one write path for a fresh
-    state-ref item -- `StateRefBoard.create_item`, the same CAS write
-    `cut`'s own `create_child` performs, generalized to an optional
-    parent and origin -- so this module never grows a second way to
-    create one. `--origin` binds the fresh item to a foreign forge issue
-    (`items.parse_origin`'s own grammar, refused by `argparse` before this
-    ever runs) without aco governing that forge at all. Refuses under
-    `storage = "github"`: the forge is pulled, never governed, so aco
-    never opens a GitHub issue on a repository's behalf. Never resolves
-    the generic `_LazyForge` (issue #248) -- it calls `_state_ref_forge`
-    directly, since `create_item` is not part of the generic `ForgeWriter`
-    port every other write command narrows to. Every refusal reports
-    through the shared envelope as `precondition_failed` (issue #425)."""
+    """`aco item new` (issues #285, #316, #444): one fresh item under
+    either storage pin, each through its own adapter's write
+    (`_item_new_on_github`, `_item_new_on_state_ref`), both behind the same
+    twin search `cut` runs (`_refuse_possible_twin`). Every refusal but a
+    malformed piped body or a partial GitHub write reports through the
+    shared envelope as `precondition_failed` (issue #425)."""
     as_json = parsed.json
     try:
-        toplevel = _resolve_toplevel()
-        config = _board_config(toplevel)
-        if config.storage is not body.Storage.STATE_REF:
-            raise protocol.ClaimUnavailableError(ITEM_NEW_GITHUB_REFUSAL)
-        client = _state_ref_forge(parsed.repo, config.canonical_remote)
-        parent_missing = (
-            parsed.parent is not None
-            and client.item_reference(parsed.parent).state is forge.ItemState.MISSING
-        )
-        if parent_missing:
-            raise protocol.ClaimUnavailableError(f"#{parsed.parent} does not exist")
-        kind = body.ItemKind(parsed.kind)
-        skeleton = (
-            body.BLOCK_CONTAINER_SKELETON
-            if kind is body.ItemKind.CONTAINER
-            else body.BLOCK_CHILD_SKELETON
-        )
-        new_body = _block_body_with_scope(skeleton, _requested_body_scope(parsed.scope))
-        new_body = _block_body_with_size(new_body, parsed.size)
-        new_body = _block_body_with_whole(new_body, _requested_whole_reason(parsed.whole))
-        item_id = client.create_item(
-            title=parsed.title, body=new_body, kind=kind, parent=parsed.parent, origin=parsed.origin
-        )
-        _print_item_new_result(item_id, items.item_number(item_id), as_json=as_json)
-        return 0
+        config = _board_config(_resolve_toplevel())
+        if config.storage is body.Storage.GITHUB:
+            return _item_new_on_github(parsed)
+        return _item_new_on_state_ref(parsed, config.canonical_remote)
+    except _PartialWriteError as error:
+        return _refuse_partial_write(error, ItemReason.PARTIAL_WRITE, as_json=as_json)
     except protocol.ClaimError as error:
         return _refuse(ItemReason.PRECONDITION_FAILED, error, as_json=as_json)
+
+
+def _item_new_body(parsed: argparse.Namespace, raw_body: str) -> str:
+    """`raw_body` with `item new`'s own `--scope`, `--size`, and `--whole`
+    written into its `agent-claim` block, each only when given."""
+    new_body = _block_body_with_scope(raw_body, _requested_body_scope(parsed.scope))
+    new_body = _block_body_with_size(new_body, parsed.size)
+    return _block_body_with_whole(new_body, _requested_whole_reason(parsed.whole))
+
+
+def _item_new_on_github(parsed: argparse.Namespace) -> int:
+    """`item new` under `storage = "github"` (issue #444): the body piped on
+    stdin passes the same shape check `aco check <n>` applies before
+    anything else is read or written, so an invalid body creates nothing;
+    `--parent` must name an open container; then the twin search, then one
+    issue of the organization's type for `--kind`, recorded under
+    `--parent` when given (`create_child`, else `create_issue`). `--origin`
+    binds a state-ref item only: a GitHub issue binds to no foreign one."""
+    if parsed.origin is not None:
+        raise protocol.ClaimUnavailableError(ITEM_NEW_ORIGIN_ON_GITHUB_REFUSAL)
+    raw_body = _read_body_check_input()
+    defects = _body_shape_defects(raw_body)
+    if defects:
+        return _refuse_item_body_invalid(defects, as_json=parsed.json)
+    new_body = _item_new_body(parsed, raw_body)
+    client = _LazyForge(parsed.repo).writer()
+    open_issues = client.list_open_board_issues()
+    if parsed.parent is not None:
+        _open_container(open_issues, parsed.parent)
+    if not parsed.not_a_twin:
+        _refuse_possible_twin(client, parsed.title, open_issues, parent=parsed.parent)
+    kind = body.ItemKind(parsed.kind)
+    if parsed.parent is None:
+        number = client.create_issue(title=parsed.title, body=new_body, kind=kind)
+    else:
+        try:
+            number = client.create_child(
+                parent=parsed.parent, title=parsed.title, body=new_body, kind=kind
+            )
+        except forge.ForgePartialChildCreationError as error:
+            raise _PartialWriteError(
+                error, recovery="record that sub-issue relation on the forge by hand"
+            ) from error
+    _print_item_new_result(
+        board.item_label(number, body.Storage.GITHUB), number, as_json=parsed.json
+    )
+    return 0
+
+
+def _item_new_on_state_ref(parsed: argparse.Namespace, canonical_remote: str) -> int:
+    """`item new` under `storage = "state-ref"` (issues #285, #316): the one
+    write path for a fresh state-ref item -- `StateRefBoard.create_item`,
+    the same CAS write `cut`'s own `create_child` performs, generalized to
+    an optional parent and origin -- so this module never grows a second
+    way to create one. `--origin` binds the fresh item to a foreign forge
+    issue (`items.parse_origin`'s own grammar, refused by `argparse` before
+    this ever runs) without aco governing that forge at all. Never resolves
+    the generic `_LazyForge` (issue #248) -- it calls `_state_ref_forge`
+    directly, since `create_item` is not part of the generic `ForgeWriter`
+    port every other write command narrows to."""
+    client = _state_ref_forge(parsed.repo, canonical_remote)
+    parent_missing = (
+        parsed.parent is not None
+        and client.item_reference(parsed.parent).state is forge.ItemState.MISSING
+    )
+    if parent_missing:
+        raise protocol.ClaimUnavailableError(f"#{parsed.parent} does not exist")
+    if not parsed.not_a_twin:
+        _refuse_possible_twin(
+            client, parsed.title, client.list_open_board_issues(), parent=parsed.parent
+        )
+    kind = body.ItemKind(parsed.kind)
+    skeleton = (
+        body.BLOCK_CONTAINER_SKELETON
+        if kind is body.ItemKind.CONTAINER
+        else body.BLOCK_CHILD_SKELETON
+    )
+    item_id = client.create_item(
+        title=parsed.title,
+        body=_item_new_body(parsed, skeleton),
+        kind=kind,
+        parent=parsed.parent,
+        origin=parsed.origin,
+    )
+    _print_item_new_result(item_id, items.item_number(item_id), as_json=parsed.json)
+    return 0
 
 
 def _print_item_new_result(item_id: str, number: int, *, as_json: bool) -> None:
@@ -5850,14 +5917,20 @@ def _print_release_result(report: ReleaseReport, *, as_json: bool) -> None:
         print(f"worktree: {worktree_cleanup_outcome_text(report.worktree)}")
 
 
-def _cut_target(client: forge.ForgeWriter, number: int) -> board.Issue:
-    """The open container `cut` targets, or why it refuses before any write."""
-    open_issues = client.list_open_board_issues()
+def _open_container(open_issues: Iterable[board.Issue], number: int) -> board.Issue:
+    """`number`'s open issue when its type is a container -- `cut`'s own
+    target and `item new --parent` (issue #444) -- or why it is not."""
     target = next((issue for issue in open_issues if issue.number == number), None)
     if target is None:
         raise protocol.ClaimUnavailableError(f"#{number} is not an open container")
     if target.kind is not body.ItemKind.CONTAINER:
         raise protocol.ClaimUnavailableError(f"#{number} is not a container")
+    return target
+
+
+def _cut_target(client: forge.ForgeWriter, number: int) -> board.Issue:
+    """The open container `cut` targets, or why it refuses before any write."""
+    target = _open_container(client.list_open_board_issues(), number)
     parent = client.parent_issue(number)
     if parent is not None:
         raise protocol.ClaimUnavailableError(
@@ -5926,16 +5999,17 @@ def _print_cut_result(
     print(f"{verb} #{number}{suffix} -> #{child}")
 
 
-class _CutPartialWriteError(protocol.ClaimError):
-    """Wraps `forge.ForgePartialChildCreationError` so `_cmd_cut` can choose
-    `partial_write`'s own structured `--json` shape (`written`, `failed`)
-    without parsing the wrapped error's prose (mirrors `ask`/`rule`'s own
-    `_TargetUnavailableError`/`_InvalidTargetError`, issue #396)."""
+class _PartialWriteError(protocol.ClaimError):
+    """Wraps `forge.ForgePartialChildCreationError` so `cut` and `item new`
+    can choose `partial_write`'s own structured `--json` shape (`written`,
+    `failed`) without parsing the wrapped error's prose (mirrors `ask`/
+    `rule`'s own `_TargetUnavailableError`/`_InvalidTargetError`, issue
+    #396); `recovery` is the caller's own way to finish the write."""
 
-    def __init__(self, error: forge.ForgePartialChildCreationError) -> None:
+    def __init__(self, error: forge.ForgePartialChildCreationError, *, recovery: str) -> None:
         self.written = error.child
         self.failed = error.step
-        super().__init__(f"{error}; re-run the same cut -- it adopts the child")
+        super().__init__(f"{error}; {recovery}")
 
 
 def _body_with_parent(skeleton: str, parent: int | None) -> str:
@@ -6256,7 +6330,9 @@ def _cut_slice(
             step = f"remove row {link.index} from #{number}'s agent-claim block"
             _link_created_child(client, number, new_body, child, step)
     except forge.ForgePartialChildCreationError as error:
-        raise _CutPartialWriteError(error) from error
+        raise _PartialWriteError(
+            error, recovery="re-run the same cut -- it adopts the child"
+        ) from error
     _print_cut_result(
         number,
         None if link is None else link.index,
@@ -6267,12 +6343,14 @@ def _cut_slice(
     return 0
 
 
-def _refuse_cut_partial_write(error: _CutPartialWriteError, *, as_json: bool) -> int:
+def _refuse_partial_write(
+    error: _PartialWriteError, reason: CutReason | ItemReason, *, as_json: bool
+) -> int:
     print(f"{CLI_ERROR_PREFIX}{error}", file=sys.stderr)
     if as_json:
         _emit_json(
             False,
-            CutReason.PARTIAL_WRITE,
+            reason,
             written=error.written,
             failed=error.failed,
             message=str(error),
@@ -6282,7 +6360,7 @@ def _refuse_cut_partial_write(error: _CutPartialWriteError, *, as_json: bool) ->
 
 def _cmd_cut(parsed: argparse.Namespace, session: _WriteSession) -> int:
     """`cut`'s own `--json` envelope (issue #425): a partial write reports
-    through `_refuse_cut_partial_write`'s own structured shape; every other
+    through `_refuse_partial_write`'s own structured shape; every other
     refusal past the parser is `precondition_failed`, matching this
     command's single generic refusal bucket."""
     as_json = parsed.json
@@ -6302,8 +6380,8 @@ def _cmd_cut(parsed: argparse.Namespace, session: _WriteSession) -> int:
         return _cut_slice(
             client, _cut_target(client, number), parsed, config.idea_label, config.storage
         )
-    except _CutPartialWriteError as error:
-        return _refuse_cut_partial_write(error, as_json=as_json)
+    except _PartialWriteError as error:
+        return _refuse_partial_write(error, CutReason.PARTIAL_WRITE, as_json=as_json)
     except protocol.ClaimError as error:
         return _refuse(CutReason.PRECONDITION_FAILED, error, as_json=as_json)
 
