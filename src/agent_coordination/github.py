@@ -1416,6 +1416,8 @@ class GitHubForge:
         naming the child that already exists; safe to retry the same `cut`,
         since it then finds this child orphaned -- open, no recorded parent
         -- and adopts it with `link_child` rather than creating a second one.
+        `item new --parent` gets the same error but reports a by-hand
+        recovery (ITEM-32), never a re-run.
         """
         child = self.create_issue(title=title, body=body, kind=kind)
         try:
