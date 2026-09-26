@@ -10,6 +10,7 @@ argument is untouched by this module (proof 8)."""
 from __future__ import annotations
 
 import errno
+import html
 import http.client
 import io
 import os
@@ -464,6 +465,14 @@ def test_post_rule_refuses_a_malformed_item_introduced_after_startup_and_writes_
     assert parse_qs(urlsplit(response.location).query)["refused"] == [refusal]
     assert served_board.client.item_bodies == {}
     assert current_store.item_bodies == {}
+    # BOARD-48, BOARD-51: the redirected page rebuilds, meets the same store,
+    # and still answers -- naming the item beside the page last built.
+    redirected = served_board.get(token=token, refused=refusal)
+    assert redirected.status == 200
+    page = redirected.body.decode("utf-8")
+    assert page.count(html.escape(refusal)) == 1
+    assert OPEN_LINE_TEXT in page
+    assert html.escape(refusal) in served_board.get(token=token).body.decode("utf-8")
 
 
 def test_an_unknown_path_is_not_found(served_board: ServedBoard) -> None:

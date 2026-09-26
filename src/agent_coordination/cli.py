@@ -6634,7 +6634,7 @@ class _ServedBoardCache:
     instead of paying `_board_page`'s full forge fetch again on every
     request -- the fix for the operator's own report of a 19s-per-load
     board. Every ruling `POST /rule` -- written, refused, or raised (BOARD-48)
-    -- discards `built`, so the next `GET` rebuilds it; an explicit
+    -- marks `built` stale, so the next `GET` rebuilds it; an explicit
     `?reload=1` rebuilds on that very `GET`. `lock` serializes a rebuild
     against a concurrent request: `ThreadingHTTPServer` runs each one on its
     own thread. Every rebuild reads through a fresh `_LazyForge` (issue #447):
@@ -6643,20 +6643,31 @@ class _ServedBoardCache:
 
     repo: str | None
     built: tuple[board_html.BoardPage, datetime] | None = None
+    stale: bool = False
     lock: threading.Lock = field(default_factory=threading.Lock)
 
-    def held(self, *, reload: bool) -> tuple[board_html.BoardPage, datetime]:
-        """The held page and when it was built, rebuilding it first when
-        nothing is held yet or `reload` asks for a fresh one."""
+    def held(self, *, reload: bool) -> tuple[board_html.BoardPage, datetime, str | None]:
+        """The held page, when it was built, and PIN-29's refusal when the
+        rebuild it needed met one (issue #447): rebuilt first when nothing is
+        held yet, it is stale, or `reload` asks. A refused rebuild keeps the
+        last page built, so the served page names the malformed item beside
+        that page's age instead of failing the request; only a first build
+        has no page to keep, and raises."""
         with self.lock:
-            if self.built is None or reload:
+            if self.built is None or self.stale or reload:
                 fresh = _ReadSession(forge=_LazyForge(self.repo))
-                self.built = (_board_page(fresh), datetime.now(UTC))
-            return self.built
+                try:
+                    self.built = (_board_page(fresh), datetime.now(UTC))
+                except protocol.MalformedStateTreeError as refusal:
+                    if self.built is None:
+                        raise
+                    return (*self.built, str(refusal))
+                self.stale = False
+            return (*self.built, None)
 
     def discard(self) -> None:
         with self.lock:
-            self.built = None
+            self.stale = True
 
 
 def _board_server(parsed: argparse.Namespace, session: _WriteSession) -> board_serve.BoardServer:
@@ -6685,9 +6696,14 @@ def _board_server(parsed: argparse.Namespace, session: _WriteSession) -> board_s
         return token
 
     def render_page(refused: str | None, reload: bool) -> str:
-        page, built_at = cache.held(reload=reload)
+        page, built_at, store_refusal = cache.held(reload=reload)
+        notices = dict.fromkeys(
+            sentence for sentence in (refused, store_refusal) if sentence is not None
+        )
         served = board_html.ServedRuleForm(
-            token=token_holder[0], refused=refused, age=datetime.now(UTC) - built_at
+            token=token_holder[0],
+            refused=" ".join(notices) or None,
+            age=datetime.now(UTC) - built_at,
         )
         return board_html.render(page, served=served)
 
