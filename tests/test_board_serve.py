@@ -299,6 +299,37 @@ def test_post_rule_with_a_valid_token_writes_exactly_one_ruling_and_redirects(
     assert f'<code>aco ask {SERVED_ITEM} --text "…"</code>' in follow_up
 
 
+def test_a_get_that_races_a_rule_write_does_not_leave_the_pre_ruling_page_held(
+    served_board: ServedBoard, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #440 review: `ThreadingHTTPServer` runs every request on its own
+    thread, so a `GET` can build and hold a page while `post_rule`'s write is
+    still in flight. `post_rule`'s `finally: cache.discard()` (`cli.py`) must
+    run only after `rule_item` has returned -- discarding before the write
+    would let such a racing `GET`'s freshly built, pre-ruling page survive
+    the discard, so a later plain `GET` would keep serving the stale page
+    instead of the ruling it raced against."""
+    token = served_board.server.token
+    original_update_item_body = served_board.client.update_item_body
+
+    def racing_update_item_body(number: int, body: str) -> None:
+        # Runs on the `POST /rule` thread, before the write is applied: a
+        # concurrent `GET` on another thread builds and holds the page here,
+        # while the client's body is still the pre-ruling one.
+        served_board.get(token=token)
+        original_update_item_body(number, body)
+
+    monkeypatch.setattr(served_board.client, "update_item_body", racing_update_item_body)
+
+    response = served_board.post_rule(
+        {"t": token, "item": str(SERVED_ITEM), "line": "1", "outcome": "yes"}
+    )
+    assert response.status == 303
+
+    follow_up = served_board.get(token=token).body.decode("utf-8")
+    assert f'<li class="ruled"><span>{OPEN_LINE_TEXT}</span>' in follow_up
+
+
 def test_a_repeated_get_serves_the_held_page_with_its_age_until_an_explicit_reload(
     served_board: ServedBoard,
 ) -> None:
