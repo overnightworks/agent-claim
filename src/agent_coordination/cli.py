@@ -3348,10 +3348,8 @@ def _cmd_item_edit(parsed: argparse.Namespace) -> int:
     `update_item_body`'s own owner rule; `updated_at` always moves to now;
     `title`, `labels`, `blocked_by` come from the piped record when it
     carries one. Refuses under `storage = "github"`: forge issues are edited
-    on the forge, never governed by aco -- mirrors `item new`'s own refusal,
-    and calls `_state_ref_forge` directly for the same reason (`create_item`/
-    `update_item_body` are not part of the generic `ForgeWriter` port every
-    other write command narrows to). A malformed piped body reports through
+    on the forge, never governed by aco. Calls `_state_ref_forge` directly,
+    as `item new`'s state-ref path does. A malformed piped body reports through
     the shared envelope as `body_invalid`, with `body --check`'s own
     `defects`; every other refusal is `precondition_failed` (issue #425)."""
     if parsed.size is not None:
