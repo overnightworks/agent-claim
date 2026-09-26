@@ -314,8 +314,10 @@ def test_a_repeated_get_serves_the_held_page_with_its_age_until_an_explicit_relo
 
     stand = "<dt>Stand</dt><dd>vor 0h 0m"
     reload_link = f'<a class="reload" href="/?t={token}&amp;reload=1">neu laden</a>'
-    assert stand in first and reload_link in first
-    assert "Plain item" in repeated and "Renamed item" not in repeated
+    assert stand in first
+    assert reload_link in first
+    assert "Plain item" in repeated
+    assert "Renamed item" not in repeated
     assert "Renamed item" in reloaded
 
 
