@@ -1343,11 +1343,10 @@ class GitHubForge:
         write. GitHub's REST issue create takes the organization's issue type
         by its name (`_ITEM_KIND_TYPE_NAMES`), so no type id is ever looked up.
 
-        Validates the same response shape `create_child` depends on --
-        `id` alongside `number` -- even though only the number is returned
-        here: GitHub always sends both, and a caller that later runs
-        `link_child` against this issue needs that id to already be
-        trustworthy rather than fail out of place.
+        That create drops the type silently when the caller lacks push
+        access, so the response's own `type` is read back: an issue created
+        without it raises `forge.ForgeIssueTypeNotSetError` naming the
+        issue, never a plain success.
         """
         raw = self._run(
             ["api", "--method", "POST", f"repos/{self.repository}/issues", "--input", "-"],
@@ -1372,6 +1371,10 @@ class GitHubForge:
             or number < 1
         ):
             raise forge.ForgeMalformedResponseError("GitHub did not return a created issue")
+        type_name = _ITEM_KIND_TYPE_NAMES[kind]
+        issue_type = created.get("type")
+        if not isinstance(issue_type, dict) or issue_type.get("name") != type_name:
+            raise forge.ForgeIssueTypeNotSetError(created=number, type_name=type_name)
         return number
 
     def _issue_identifier(self, number: int) -> int:

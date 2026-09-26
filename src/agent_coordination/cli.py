@@ -3148,8 +3148,8 @@ class ItemReason(StrEnum):
     covers only `item new`'s and `item edit`'s own piped-body shape check
     (`_body_shape_defects`, the same check `body --check` runs), carrying
     `defects` the same way (`BodyCheckReason`, issue #404); `partial_write`
-    only a GitHub issue `item new` created but could not record under its
-    `--parent` (issue #444), `cut`'s own shape. Every other refusal -- a
+    only a GitHub issue `item new` created but could not type or record under
+    its `--parent` (issue #444), `cut`'s own shape. Every other refusal -- a
     `storage = "github"` command, a missing item or parent, a possible twin,
     a pull request target, a forge write capability, or a live claim still
     on the item -- is `precondition_failed`, this command family's single
@@ -3220,17 +3220,23 @@ def _item_new_on_github(parsed: argparse.Namespace) -> int:
     if not parsed.not_a_twin:
         _refuse_possible_twin(client, parsed.title, open_issues, parent=parsed.parent)
     kind = body.ItemKind(parsed.kind)
-    if parsed.parent is None:
-        number = client.create_issue(title=parsed.title, body=new_body, kind=kind)
-    else:
-        try:
-            number = client.create_child(
+    try:
+        number = (
+            client.create_issue(title=parsed.title, body=new_body, kind=kind)
+            if parsed.parent is None
+            else client.create_child(
                 parent=parsed.parent, title=parsed.title, body=new_body, kind=kind
             )
-        except forge.ForgePartialChildCreationError as error:
-            raise _PartialWriteError(
-                error, recovery="record that sub-issue relation on the forge by hand"
-            ) from error
+        )
+    except forge.ForgeIssueTypeNotSetError as error:
+        relation = "" if parsed.parent is None else f" and record it under #{parsed.parent}"
+        raise _PartialWriteError(
+            error, recovery=f"set that type{relation} on the forge by hand"
+        ) from error
+    except forge.ForgePartialChildCreationError as error:
+        raise _PartialWriteError(
+            error, recovery="record that sub-issue relation on the forge by hand"
+        ) from error
     _print_item_new_result(
         board.item_label(number, body.Storage.GITHUB), number, as_json=parsed.json
     )
@@ -6000,14 +6006,14 @@ def _print_cut_result(
 
 
 class _PartialWriteError(protocol.ClaimError):
-    """Wraps `forge.ForgePartialChildCreationError` so `cut` and `item new`
+    """Wraps `forge.ForgePartialCreationError` so `cut` and `item new`
     can choose `partial_write`'s own structured `--json` shape (`written`,
     `failed`) without parsing the wrapped error's prose (mirrors `ask`/
     `rule`'s own `_TargetUnavailableError`/`_InvalidTargetError`, issue
     #396); `recovery` is the caller's own way to finish the write."""
 
-    def __init__(self, error: forge.ForgePartialChildCreationError, *, recovery: str) -> None:
-        self.written = error.child
+    def __init__(self, error: forge.ForgePartialCreationError, *, recovery: str) -> None:
+        self.written = error.created
         self.failed = error.step
         super().__init__(f"{error}; {recovery}")
 
@@ -6292,6 +6298,9 @@ def _cut_row_scope(
     return requested
 
 
+CUT_RERUN_RECOVERY = "re-run the same cut -- it adopts the child"
+
+
 def _cut_slice(
     client: forge.ForgeWriter,
     target: board.Issue,
@@ -6329,10 +6338,12 @@ def _cut_slice(
             new_body = body.replace_agent_claim_block(target.body, located, new_data)
             step = f"remove row {link.index} from #{number}'s agent-claim block"
             _link_created_child(client, number, new_body, child, step)
-    except forge.ForgePartialChildCreationError as error:
+    except forge.ForgeIssueTypeNotSetError as error:
         raise _PartialWriteError(
-            error, recovery="re-run the same cut -- it adopts the child"
+            error, recovery=f"set that type on the forge by hand, then {CUT_RERUN_RECOVERY}"
         ) from error
+    except forge.ForgePartialChildCreationError as error:
+        raise _PartialWriteError(error, recovery=CUT_RERUN_RECOVERY) from error
     _print_cut_result(
         number,
         None if link is None else link.index,

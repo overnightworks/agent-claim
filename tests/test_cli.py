@@ -147,6 +147,7 @@ class FakeForge:
     item_bodies: dict[int, str] = field(default_factory=dict)
     fail_update_item_body: bool = False
     fail_create_child_relation: bool = False
+    drop_created_issue_type: bool = False
     capability_overrides: dict[forge.ForgeOperation, forge.Capability] = field(default_factory=dict)
     readiness_by_number: dict[int, forge.LandingReadiness] = field(default_factory=dict)
     merge_calls: list[tuple[int, str, str, str]] = field(default_factory=list)
@@ -176,11 +177,21 @@ class FakeForge:
         with no recorded parent, immediately visible to
         `list_open_board_issues` -- the orphan shape a failed `link_child`
         leaves behind (#260). Carries `kind` (#260 Sonnet finding), since a
-        repeat `cut`'s orphan scan refuses to adopt anything but a `TASK`."""
+        repeat `cut`'s orphan scan refuses to adopt anything but a `TASK`.
+        `drop_created_issue_type` simulates GitHub silently dropping that
+        type (#444): the issue exists untyped and the create raises."""
         number = self.next_created_child_number
         self.next_created_child_number += 1
         self.created_issues.append((title, body, kind))
-        self.board_issues = (*self.board_issues, board_issue(number, title, body, kind=kind))
+        stored_kind = None if self.drop_created_issue_type else kind
+        self.board_issues = (
+            *self.board_issues,
+            board_issue(number, title, body, kind=stored_kind),
+        )
+        if self.drop_created_issue_type:
+            raise forge.ForgeIssueTypeNotSetError(
+                created=number, type_name=github._ITEM_KIND_TYPE_NAMES[kind]
+            )
         return number
 
     def link_child(self, parent: int, child: int) -> None:
@@ -3421,14 +3432,39 @@ def test_cut_names_the_created_child_when_the_relation_post_fails(
     assert "re-run the same cut -- it adopts the child" in err
 
 
+@pytest.mark.parametrize(
+    ("failure", "failed", "message"),
+    [
+        pytest.param(
+            "fail_create_child_relation",
+            f"record #900 as a sub-issue of #{CUT_CONTAINER}",
+            f"created #900 but failed to record #900 as a sub-issue of #{CUT_CONTAINER}: "
+            "relation POST failed (simulated); re-run the same cut -- it adopts the child",
+            id="parent_relation",
+        ),
+        pytest.param(
+            "drop_created_issue_type",
+            "set #900's type Task",
+            "created #900 but GitHub did not set its type Task; set that type on the forge "
+            "by hand, then re-run the same cut -- it adopts the child",
+            id="issue_type",
+        ),
+    ],
+)
 def test_cut_json_reports_partial_write_with_written_and_failed(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    failure: str,
+    failed: str,
+    message: str,
 ) -> None:
     """Issue #425: a partial write's own `--json` shape carries `written`/
     `failed` as structured siblings next to `reason: "partial_write"`,
-    never only the prose sentence stderr already printed."""
+    never only the prose sentence stderr already printed -- a failed
+    relation write, or an issue type GitHub dropped (#444)."""
     client = _configured_board_client(monkeypatch, tmp_path, open_issues=(_one_slice_container(),))
-    client.fail_create_child_relation = True
+    setattr(client, failure, True)
 
     exit_code = issue_claim.main(
         [
@@ -3443,18 +3479,13 @@ def test_cut_json_reports_partial_write_with_written_and_failed(
     )
 
     assert exit_code == 2
-    child = client.next_created_child_number - 1
     captured = capsys.readouterr()
-    message = (
-        f"created #{child} but failed to record #{child} as a sub-issue of #{CUT_CONTAINER}: "
-        "relation POST failed (simulated); re-run the same cut -- it adopts the child"
-    )
     assert captured.err == f"ERROR: {message}\n"
     expected = {
         "ok": False,
         "reason": "partial_write",
-        "written": child,
-        "failed": f"record #{child} as a sub-issue of #{CUT_CONTAINER}",
+        "written": 900,
+        "failed": failed,
         "message": message,
     }
     assert captured.out == json.dumps(expected) + "\n"
@@ -15986,29 +16017,60 @@ def test_item_new_on_github_refuses_before_creating_anything(
     assert (status, capsys.readouterr().err, client.created_issues) == (2, err, [])
 
 
-def test_item_new_json_reports_a_created_issue_its_parent_relation_failed(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+@pytest.mark.parametrize(
+    ("failure", "flags", "failed", "message"),
+    [
+        pytest.param(
+            "fail_create_child_relation",
+            ("--parent", "79"),
+            "record #900 as a sub-issue of #79",
+            "created #900 but failed to record #900 as a sub-issue of #79: "
+            "relation POST failed (simulated); record that sub-issue relation on the forge by hand",
+            id="parent_relation",
+        ),
+        pytest.param(
+            "drop_created_issue_type",
+            (),
+            "set #900's type Task",
+            "created #900 but GitHub did not set its type Task; set that type on the forge by hand",
+            id="issue_type",
+        ),
+        pytest.param(
+            "drop_created_issue_type",
+            ("--parent", "79"),
+            "set #900's type Task",
+            "created #900 but GitHub did not set its type Task; "
+            "set that type and record it under #79 on the forge by hand",
+            id="issue_type_under_a_parent",
+        ),
+    ],
+)
+def test_item_new_json_reports_a_created_issue_it_could_not_finish(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    failure: str,
+    flags: tuple[str, ...],
+    failed: str,
+    message: str,
 ) -> None:
     """Issue #444: the issue exists once its create returns, so a failed
-    sub-issue relation reports `partial_write` naming it, never a plain
-    refusal that would read as "nothing created"."""
+    sub-issue relation or an issue type GitHub dropped reports
+    `partial_write` naming it and what is left, never a plain refusal that
+    would read as "nothing created" nor a success."""
     client = _item_new_github_client(monkeypatch, tmp_path, _ITEM_NEW_BODY)
-    client.fail_create_child_relation = True
-    command = ["item", "new", "--title", "Write the docs", "--parent", "79", "--json"]
+    setattr(client, failure, True)
+    command = ["item", "new", "--title", "Write the docs", *flags, "--json"]
 
     status = issue_claim.main(command)
 
-    message = (
-        "created #900 but failed to record #900 as a sub-issue of #79: "
-        "relation POST failed (simulated); record that sub-issue relation on the forge by hand"
-    )
     assert (status, json.loads(capsys.readouterr().out)) == (
         2,
         {
             "ok": False,
             "reason": "partial_write",
             "written": 900,
-            "failed": "record #900 as a sub-issue of #79",
+            "failed": failed,
             "message": message,
         },
     )

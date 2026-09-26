@@ -287,7 +287,7 @@ def test_github_adapter_creates_a_child_and_links_it_as_a_sub_issue() -> None:
     def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
         observed.append((arguments, input_data))
         if arguments[2] == "POST" and arguments[3].endswith("/issues"):
-            return json.dumps({"id": 555444, "number": 101})
+            return json.dumps({"id": 555444, "number": 101, "type": {"name": "Task"}})
         if arguments[1] == f"repos/{REPOSITORY}/issues/101":
             return "555444"
         return ""
@@ -337,7 +337,7 @@ def test_github_adapter_names_the_created_child_when_the_relation_post_fails() -
 
     def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
         if arguments[2] == "POST" and arguments[3].endswith("/issues"):
-            return json.dumps({"id": 555444, "number": 101})
+            return json.dumps({"id": 555444, "number": 101, "type": {"name": "Task"}})
         raise forge.ForgeError("HTTP 422 could not create sub-issue relation")
 
     client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
@@ -345,7 +345,7 @@ def test_github_adapter_names_the_created_child_when_the_relation_post_fails() -
     with pytest.raises(forge.ForgePartialChildCreationError) as excinfo:
         client.create_child(parent=79, title="Scheibe 4", body="", kind=ItemKind.TASK)
 
-    assert excinfo.value.child == 101
+    assert excinfo.value.created == 101
     assert excinfo.value.parent == 79
 
 
@@ -357,7 +357,7 @@ def test_github_adapter_creates_an_issue_without_linking_it_as_a_child() -> None
 
     def fake_run(arguments: list[str], *, input_data: bytes | None = None) -> str:
         observed.append((arguments, input_data))
-        return json.dumps({"id": 555444, "number": 101})
+        return json.dumps({"id": 555444, "number": 101, "type": {"name": "Task"}})
 
     client = GitHubForge(github._repository_id(REPOSITORY), run=fake_run)
 
@@ -372,6 +372,31 @@ def test_github_adapter_creates_an_issue_without_linking_it_as_a_child() -> None
             ),
         )
     ]
+
+
+@pytest.mark.parametrize(
+    "issue_type",
+    [
+        pytest.param(None, id="type-null"),
+        pytest.param({"id": 7, "name": "Bug"}, id="another-type"),
+    ],
+)
+def test_github_adapter_names_the_created_issue_github_left_without_its_type(
+    issue_type: dict[str, object] | None,
+) -> None:
+    """GitHub's REST create drops `type` silently without push access
+    (#444): the issue exists anyway, so the refusal names it and the type
+    still to set, never a plain success."""
+    payload = json.dumps({"id": 555444, "number": 101, "type": issue_type})
+    client = GitHubForge(github._repository_id(REPOSITORY), run=lambda *_a, **_k: payload)
+
+    with pytest.raises(forge.ForgeIssueTypeNotSetError) as excinfo:
+        client.create_issue(title="Scheibe 4", body="", kind=ItemKind.CONTAINER)
+
+    assert (excinfo.value.created, str(excinfo.value)) == (
+        101,
+        "created #101 but GitHub did not set its type Container",
+    )
 
 
 def closed_issue_row(

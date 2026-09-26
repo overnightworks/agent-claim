@@ -47,6 +47,7 @@ runner's own git object ids.
 | an unknown id | PIN-18 | ITEM-10 | PIN-23 | PIN-28 |
 | `storage = "github"` | ITEM-26..ITEM-31 | ITEM-11 | PIN-10 | PIN-11 |
 | `storage = "github"`, the `--parent` relation write fails | ITEM-32 | — | — | — |
+| `storage = "github"`, GitHub drops the issue type | ITEM-34 | — | — | — |
 | an open or recently closed look-alike title, either storage | ITEM-33 | — | — | — |
 | a delivered `[record]`, present or absent | — | — | ITEM-12..ITEM-14 | — |
 | `item show`/`edit`/`close --json` | — | ITEM-09 | ITEM-15 | ITEM-16 |
@@ -79,6 +80,7 @@ runner's own git object ids.
 - [ ] [ITEM-30] Success prints `#<n>`, exit `0`; `--json` prints the envelope, `reason: "created"`, then `item` (`#<n>`) and `number`, the state-ref shape (see E-ITEM-07).
 - [ ] [ITEM-31] `--origin` under `storage = "github"` refuses `--origin needs storage = "state-ref"`, exit `2`, before stdin is read.
 - [ ] [ITEM-32] A failed `--parent` relation write refuses CUT-17's `created` sentence ending `; record that sub-issue relation on the forge by hand`, `--json` shaped as CUT-28.
+- [ ] [ITEM-34] An issue GitHub creates untyped refuses `created #<n> but GitHub did not set its type <Type>; set that type[ and record it under #<N>] on the forge by hand`, `--json` as CUT-28.
 
 ## The twin search
 

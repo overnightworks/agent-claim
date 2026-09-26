@@ -44,6 +44,7 @@ with `--json` also `specs/output.spec.md`'s envelope, `reason`
 | `--not-a-twin` given | CUT-31 | CUT-31 | CUT-31 | CUT-31 |
 | GitHub's own relation write fails | CUT-17 | — | — | CUT-28 |
 | the row-removal write fails, either storage | CUT-18 | — | — | CUT-28 |
+| GitHub creates the child without its issue type | CUT-32 | — | — | CUT-28 |
 | an identical re-run after either failure | CUT-19 | — | — | CUT-19 |
 | a linked row's own `scope` is empty | — | — | CUT-20, CUT-22 | — |
 | a linked row already names a `scope` | — | — | CUT-21 | — |
@@ -96,7 +97,8 @@ with `--json` also `specs/output.spec.md`'s envelope, `reason`
 - [ ] [CUT-17] GitHub's own failed sub-issue relation write refuses `created #<child> but failed to record #<child> as a sub-issue of #<n>: <cause>; re-run the same cut`, exit `2`.
 - [ ] [CUT-18] A failed row-removal write, either storage, refuses `created #<child> but failed to remove row <idx> from #<n>'s agent-claim block: <cause>; re-run the same cut`, exit `2`.
 - [ ] [CUT-19] An identical re-run after CUT-17 or CUT-18 prints `ADOPTED` (CUT-13) instead of minting a second child, then finishes the row removal when a row was linked (see E-CUT-06).
-- [ ] [CUT-28] CUT-17/CUT-18's partial write reports `reason: "partial_write"`, `written` (`<child>`) and `failed` (the step) as siblings, exit `2` (see E-CUT-08).
+- [ ] [CUT-32] A child GitHub creates without its `Task` type refuses `created #<child> but GitHub did not set its type Task; set that type on the forge by hand, then re-run the same cut`, exit `2`.
+- [ ] [CUT-28] CUT-17/CUT-18/CUT-32's partial write reports `reason: "partial_write"`, `written` (`<child>`) and `failed` (the step) as siblings, exit `2` (see E-CUT-08).
 
 ## `--scope` (issue #337)
 

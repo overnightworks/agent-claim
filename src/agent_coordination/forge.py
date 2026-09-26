@@ -54,14 +54,42 @@ class ForgeMergeConflictError(ForgeError):
     and re-runs rather than merging a commit it never actually validated."""
 
 
-class ForgePartialChildCreationError(ForgeError):
-    """`cut` created `child` under `parent`, but `step` failed to finish
+class ForgePartialCreationError(ForgeError):
+    """The forge created issue `created`, but `step` did not finish it.
+
+    The issue already exists, so a caller's refusal must name it and what is
+    left (issue #444) rather than read as "nothing created". `step` is the
+    failed step as a verb phrase, `partial_write`'s own `failed` value.
+    """
+
+    def __init__(self, message: str, *, created: int, step: str) -> None:
+        self.created = created
+        self.step = step
+        super().__init__(message)
+
+
+class ForgeIssueTypeNotSetError(ForgePartialCreationError):
+    """GitHub created issue `created` without the organization's issue type
+    `type_name` it was asked for: its REST create drops the type silently
+    when the caller lacks push access (issue #444)."""
+
+    def __init__(self, *, created: int, type_name: str) -> None:
+        self.type_name = type_name
+        super().__init__(
+            f"created #{created} but GitHub did not set its type {type_name}",
+            created=created,
+            step=f"set #{created}'s type {type_name}",
+        )
+
+
+class ForgePartialChildCreationError(ForgePartialCreationError):
+    """`cut` created `created` under `parent`, but `step` failed to finish
     recording it there.
 
     Not atomic across `create_child`'s own two writes (the issue and its
     sub-issue relation), nor across `create_child` and the later block
     rewrite -- but a repeat is safe (#260): re-run the same cut and it
-    adopts `child` -- an orphan open issue with no recorded parent, exactly
+    adopts the child -- an orphan open issue with no recorded parent, exactly
     what a failed relation write leaves behind -- instead of risking a
     second one, finishing whichever `step` failed. Raised by the GitHub
     adapter when its own relation write fails, and reused by
@@ -70,11 +98,11 @@ class ForgePartialChildCreationError(ForgeError):
     """
 
     def __init__(self, *, child: int, parent: int, step: str, cause: Exception) -> None:
-        self.child = child
         self.parent = parent
-        self.step = step
         self.cause = cause
-        super().__init__(f"created #{child} but failed to {step}: {cause}")
+        super().__init__(
+            f"created #{child} but failed to {step}: {cause}", created=child, step=step
+        )
 
 
 @dataclass(frozen=True)
