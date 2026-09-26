@@ -46,7 +46,7 @@ with `--json` also `specs/output.spec.md`'s envelope, `reason`
 | the row-removal write fails, either storage | CUT-18 | — | — | CUT-28 |
 | GitHub creates the child without its issue type | CUT-32 | — | — | CUT-28 |
 | an identical re-run after any of those failures | CUT-19 | — | — | CUT-19 |
-| a re-run while the CUT-32 child is still untyped | CUT-33 | — | — | CUT-33 |
+| a re-run while the CUT-32 child is still untyped | CUT-30 | — | — | CUT-30 |
 | a linked row's own `scope` is empty | — | — | CUT-20, CUT-22 | — |
 | a linked row already names a `scope` | — | — | CUT-21 | — |
 | every successful cut's own child body | CUT-25 | CUT-25 | CUT-25 | — |
@@ -91,7 +91,7 @@ with `--json` also `specs/output.spec.md`'s envelope, `reason`
 
 - [ ] [CUT-29] Before a fresh child exists, `aco cut` compares `--title` with the titles of every open issue and every issue closed within the last 30 days, the container itself excepted.
 - [ ] [CUT-30] Titles sharing at least 60 % of their combined distinct casefolded words (3 of 5 twin, 2 of 4 not) refuse `possible twin #<n>; pass --not-a-twin`, exit `2`, before any write (see E-CUT-05, E-CUT-09).
-- [ ] [CUT-31] The refusal names the closest title, the lower number on a tie; `--not-a-twin` skips the search and creates; an adoption (CUT-13) creates nothing, so it never searches.
+- [ ] [CUT-31] An identical title always twins, even without a word; the refusal names the closest title, the lower number on a tie; `--not-a-twin` skips the search and creates; an adoption (CUT-13) never searches.
 
 ## Partial failure and recovery
 
@@ -99,7 +99,6 @@ with `--json` also `specs/output.spec.md`'s envelope, `reason`
 - [ ] [CUT-18] A failed row-removal write, either storage, refuses `created #<child> but failed to remove row <idx> from #<n>'s agent-claim block: <cause>; re-run the same cut -- it adopts the child`, exit `2`.
 - [ ] [CUT-19] An identical re-run after CUT-17, CUT-18, or -- once its type is set -- CUT-32 prints `ADOPTED` (CUT-13) instead of a second child, then finishes the row removal (see E-CUT-06).
 - [ ] [CUT-32] A child created without its `Task` type refuses `created #<child> but GitHub did not set its type Task; set that type on the forge by hand, then re-run the same cut -- it adopts the child`, exit `2`.
-- [ ] [CUT-33] Until that type is set, a re-run after CUT-32, `--not-a-twin` included, refuses `#<child> is this cut's own child, still without its type Task; <recovery>`, CUT-32's recovery.
 - [ ] [CUT-28] CUT-17/CUT-18/CUT-32's partial write reports `reason: "partial_write"`, `written` (`<child>`) and `failed` (the step) as siblings, exit `2` (see E-CUT-08).
 
 ## `--scope` (issue #337)

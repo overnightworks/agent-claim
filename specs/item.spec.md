@@ -49,7 +49,7 @@ runner's own git object ids.
 | `storage = "github"`, the `--parent` relation write fails | ITEM-32 | — | — | — |
 | `storage = "github"`, GitHub drops the issue type | ITEM-34 | — | — | — |
 | an open or recently closed look-alike title, either storage | ITEM-33 | — | — | — |
-| `storage = "github"`, an earlier run's own issue is open | ITEM-35..ITEM-37 | — | — | — |
+| `storage = "github"`, a re-run or an exact duplicate | ITEM-35 | — | — | — |
 | a delivered `[record]`, present or absent | — | — | ITEM-12..ITEM-14 | — |
 | `item show`/`edit`/`close --json` | — | ITEM-09 | ITEM-15 | ITEM-16 |
 | a malformed piped body | ITEM-27 | — | ITEM-25 | — |
@@ -86,10 +86,7 @@ runner's own git object ids.
 ## The twin search
 
 - [ ] [ITEM-33] Under either storage, `item new` runs `cut`'s twin search (CUT-29..CUT-31) before it creates, `--parent` excepted as `cut` excepts its container (see E-ITEM-07).
-
-- [ ] [ITEM-35] Under `storage = "github"`, an open issue with the same title and final body refuses `#<n> already carries this title and body, an earlier item new's own issue; <left>`, even with `--not-a-twin`.
-- [ ] [ITEM-36] ITEM-35's `<left>` joins `set its type <Type>` (ITEM-34's) and `record it under #<N>` with ` and `, then ` on the forge by hand`; with neither left, `nothing is left to do`.
-- [ ] [ITEM-37] ITEM-35 holds only for an issue untyped or of `--kind`, under no parent or `--parent`'s; another kind or parent is a copy `--not-a-twin` creates beside.
+- [ ] [ITEM-35] A re-run of the same GitHub `item new`, after a success, ITEM-32, or ITEM-34, meets its own issue as `possible twin #<n>`; `--not-a-twin` creates anyway, even an exact duplicate.
 
 ## `item show`
 

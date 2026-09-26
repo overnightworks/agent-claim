@@ -3209,11 +3209,14 @@ def _item_new_on_github(parsed: argparse.Namespace, canonical_remote: str) -> in
     """`item new` under `storage = "github"` (issue #444): the body piped on
     stdin passes the same shape check `aco check <n>` applies before
     anything else is read or written, so an invalid body creates nothing;
-    `--parent` must name an open container; then the retry identity
-    (`_refuse_earlier_creation`) and the twin search, then one
-    issue of the organization's type for `--kind`, recorded under
-    `--parent` when given (`create_child`, else `create_issue`). `--origin`
-    binds a state-ref item only: a GitHub issue binds to no foreign one."""
+    `--parent` must name an open container; then the twin search, the only
+    guard against a second run: the issue an earlier run created carries
+    the same title, so the search names it. Then one issue of the
+    organization's type for `--kind`, recorded under `--parent` when given
+    (`create_child`, else `create_issue`); a type or relation write that
+    fails after the create refuses naming the issue and what is left to do
+    by hand, never a re-run. `--origin` binds a state-ref item only: a
+    GitHub issue binds to no foreign one."""
     if parsed.origin is not None:
         raise protocol.ClaimUnavailableError(ITEM_NEW_ORIGIN_ON_GITHUB_REFUSAL)
     raw_body = _read_body_check_input()
@@ -3225,7 +3228,6 @@ def _item_new_on_github(parsed: argparse.Namespace, canonical_remote: str) -> in
     open_issues = client.list_open_board_issues()
     if parsed.parent is not None:
         _open_container(open_issues, parsed.parent)
-    _refuse_earlier_creation(client, open_issues, parsed, new_body)
     if not parsed.not_a_twin:
         _refuse_possible_twin(client, parsed.title, open_issues, parent=parsed.parent)
     kind = body.ItemKind(parsed.kind)
@@ -3250,47 +3252,6 @@ def _item_new_on_github(parsed: argparse.Namespace, canonical_remote: str) -> in
         board.item_label(number, body.Storage.GITHUB), number, as_json=parsed.json
     )
     return 0
-
-
-def _refuse_earlier_creation(
-    client: forge.ForgeReader,
-    open_issues: Iterable[board.Issue],
-    parsed: argparse.Namespace,
-    new_body: str,
-) -> None:
-    """`item new`'s own retry identity on GitHub (issue #444): an open issue
-    carrying exactly `--title` and the final `new_body` -- line endings aside,
-    since a GitHub GET returns CRLF -- is an earlier run's own creation whose
-    relation write, type, or response failed when this run could have
-    written it: untyped or of `--kind`, recorded under no parent or under
-    `--parent`. It refuses by number with what is left, whatever
-    `--not-a-twin` says, so a retry never creates a second issue. Another
-    kind or another parent marks a deliberate copy no run of this command
-    wrote, which the twin search and `--not-a-twin` decide on instead."""
-    kind = body.ItemKind(parsed.kind)
-    parent = parsed.parent
-    for issue in open_issues:
-        same_content = (
-            issue.title == parsed.title and issue.body.splitlines() == new_body.splitlines()
-        )
-        if not same_content or issue.kind not in (kind, None):
-            continue
-        recorded = client.parent_issue(issue.number)
-        recorded_parent = None if recorded is None else recorded.reference.number
-        if recorded_parent not in (None, parent):
-            continue
-        left = []
-        if issue.kind is None:
-            left.append(f"set its type {github.ITEM_KIND_TYPE_NAMES[kind]}")
-        if recorded_parent != parent:
-            left.append(f"record it under #{parent}")
-        remaining = (
-            f"{' and '.join(left)} on the forge by hand" if left else "nothing is left to do"
-        )
-        raise protocol.ClaimUnavailableError(
-            f"#{issue.number} already carries this title and body, an earlier item new's own "
-            f"issue; {remaining}"
-        )
 
 
 def _item_new_on_state_ref(parsed: argparse.Namespace, canonical_remote: str) -> int:
@@ -6169,13 +6130,10 @@ def _adoptable_child(
     is adoptable only when it is also a `TASK` (never the container itself,
     never an idea-labelled item) and its body still names `container` as the
     parent `_cut_child_body` wrote for it; a recovery orphan is always
-    exactly that shape, and nothing else can fake it. An orphan GitHub
-    created without any type (`forge.ForgeIssueTypeNotSetError`, issue #444)
-    is this cut's own child too, but adopting it would leave it untyped: it
-    refuses by number until its type is set by hand, and the caller runs
-    this before `--not-a-twin` is read, so a retry never mints a second
-    child beside it. An orphan match is linked under `container` right here
-    before it is returned, so the caller's remaining steps treat it exactly
+    exactly that shape, and nothing else can fake it. An untyped orphan
+    (`forge.ForgeIssueTypeNotSetError`, issue #444) is never adopted: the
+    twin search names it instead. An orphan match is linked under
+    `container` right here before it is returned, so the caller's remaining steps treat it exactly
     like an already-linked child; the container's own issue is never created
     twice for it. More than one open match refuses by name rather than guess
     which one the failed cut actually created. A closed linked child with
@@ -6189,17 +6147,17 @@ def _adoptable_child(
         if client.item_reference(child.number).title == title
     ]
     open_linked = [child.number for child in linked if child.state is board.ChildState.OPEN]
-    orphans = {
-        issue.number: issue.kind
+    orphans = [
+        issue.number
         for issue in open_issues
         if issue.title == title
         and issue.number != container
-        and issue.kind in (body.ItemKind.TASK, None)
+        and issue.kind is body.ItemKind.TASK
         and not board.has_label(issue.labels, idea_label)
         and _orphan_names_container(issue.body, container)
         and client.parent_issue(issue.number) is None
-    }
-    open_matches = [*open_linked, *orphans]
+    ]
+    open_matches = open_linked + orphans
     if len(open_matches) > 1:
         named = ", ".join(f"#{number}" for number in open_matches)
         raise protocol.ClaimUnavailableError(
@@ -6208,11 +6166,6 @@ def _adoptable_child(
         )
     if open_matches:
         [number] = open_matches
-        if number in orphans and orphans[number] is None:
-            raise protocol.ClaimUnavailableError(
-                f"#{number} is this cut's own child, still without its type "
-                f"{github.ITEM_KIND_TYPE_NAMES[body.ItemKind.TASK]}; {CUT_TYPE_RECOVERY}"
-            )
         if number in orphans:
             client.link_child(container, number)
         return board.ChildItem(number, board.ChildState.OPEN)
@@ -6238,7 +6191,13 @@ def _title_words(title: str) -> frozenset[str]:
     return frozenset(_TITLE_WORD.findall(title.casefold()))
 
 
-def _title_word_overlap(first: frozenset[str], second: frozenset[str]) -> float:
+def _title_overlap(title: str, other: str) -> float:
+    """The share of both titles' combined distinct words they have in
+    common; an identical title overlaps fully even without a single word,
+    so a re-run is always named as its own earlier run's twin."""
+    if other == title:
+        return 1.0
+    first, second = _title_words(title), _title_words(other)
     combined = first | second
     return len(first & second) / len(combined) if combined else 0.0
 
@@ -6247,11 +6206,10 @@ def _possible_twin(title: str, candidates: Iterable[tuple[int, str]]) -> int | N
     """The candidate whose title overlaps `title` most, at least
     `TWIN_TITLE_WORD_OVERLAP`, the lower number on a tie; `None` when no
     candidate reaches it."""
-    words = _title_words(title)
     hits = [
         (overlap, number)
         for number, other in candidates
-        if (overlap := _title_word_overlap(words, _title_words(other))) >= TWIN_TITLE_WORD_OVERLAP
+        if (overlap := _title_overlap(title, other)) >= TWIN_TITLE_WORD_OVERLAP
     ]
     return min(hits, key=lambda hit: (-hit[0], hit[1]))[1] if hits else None
 
