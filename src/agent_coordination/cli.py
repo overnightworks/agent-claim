@@ -6702,6 +6702,10 @@ def _board_server(parsed: argparse.Namespace, session: _WriteSession) -> board_s
             cache.discard()
         return board_serve.RuleOutcome(refusal=None)
 
+    # Building the first page before `start` makes a store PIN-29 refuses
+    # (issue #447) stop the server before any token write or ruling click;
+    # the first `GET` then serves this very page instead of building again.
+    cache.held(reload=False)
     return board_serve.start(
         port=parsed.port, resolve_token=resolve_token, render_page=render_page, rule_item=post_rule
     )

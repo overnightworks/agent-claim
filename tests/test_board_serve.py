@@ -36,7 +36,7 @@ from test_cli import (
     _single_item_board_environment,
 )
 
-from agent_coordination import board_serve, checkout, forge, github, protocol, workspace
+from agent_coordination import board, board_serve, checkout, forge, github, protocol, workspace
 from agent_coordination import cli as issue_claim
 from agent_coordination.body import expectation_lines, rule_expectation
 
@@ -639,6 +639,38 @@ def test_new_token_mints_a_different_url(
     second_url = _mint_and_capture_url(capsys, port, "--new-token")
 
     assert first_url != second_url
+
+
+def test_serve_refuses_a_malformed_item_before_minting_a_token(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """PIN-29 (issue #447): while the store holds a malformed item, `board
+    --serve --new-token` refuses with that item's sentence before it writes a
+    token or binds a server a ruling click could write through."""
+    client = _served_board_environment(monkeypatch, tmp_path)
+    refusal = "item aco-3e26d9 has a malformed agent-claim block"
+
+    def malformed_store() -> tuple[board.Issue, ...]:
+        raise protocol.MalformedStateTreeError(refusal)
+
+    monkeypatch.setattr(client, "list_open_board_issues", malformed_store)
+    monkeypatch.setattr(board_serve._BoardHTTPServer, "serve_forever", lambda self: None)
+
+    exit_code = issue_claim.main(
+        [
+            "--repo",
+            REPOSITORY,
+            "board",
+            "--serve",
+            "--new-token",
+            "--port",
+            str(_free_loopback_port()),
+        ]
+    )
+
+    assert exit_code == 2
+    assert capsys.readouterr().err == f"ERROR: {refusal}\n"
+    assert not _token_location().file.exists()
 
 
 def test_a_board_token_file_with_a_permissive_mode_refuses(
