@@ -1,8 +1,0 @@
-claim_id = "c5264f6b06e441d8a24a38f2718239c9"
-agent = "Claude head (coordinator)"
-role = "builder"
-base = "eee897d39ca9d73695af8ed36974c9125cd5a3a8"
-branch = "claude/issue-444-item-new-github"
-scope = ["specs/cut.spec.md", "specs/item.spec.md", "src/agent_coordination/cli.py", "src/agent_coordination/forge.py", "src/agent_coordination/github.py", "src/agent_coordination/items.py", "tests/test_cli.py", "tests/test_github.py"]
-opened_commit = "f5b412d19e4cf2b023c96c6c8f475419e0c0783e"
-whole_reason = "ein Befehl bekommt seinen zweiten Speicher: Anlegen, Typ, Elternteil und Zwillingssuche gehören zusammen"
