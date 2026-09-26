@@ -646,6 +646,28 @@ class TestStateRefBoardMethods:
         assert dependencies[0].state is board.BlockerState.CLOSED
         assert dependencies[0].closed_at == datetime(2026, 9, 14, tzinfo=UTC)
 
+    def test_list_recently_closed_issues_keeps_only_items_closed_at_or_after_the_cutoff(
+        self,
+    ) -> None:
+        """Issue #444's twin search: an item closed before `since` is past the
+        window and never listed; one closed exactly at it is."""
+        closed_in_window = _record(
+            title="In window", state="closed", kind="task", closed_at="2026-09-01T00:00:00Z"
+        )
+        closed_before = _record(
+            title="Before", state="closed", kind="task", closed_at="2026-08-31T23:59:59Z"
+        )
+        adapter = _state_ref_board(
+            {
+                f"{CHILD_A_ID}.md": _state_ref_body(_CHILD_A_PROJECTION, closed_in_window).encode(),
+                f"{CHILD_B_ID}.md": _state_ref_body(_CHILD_B_PROJECTION, closed_before).encode(),
+            }
+        )
+
+        closed = adapter.list_recently_closed_issues(datetime(2026, 9, 1, tzinfo=UTC))
+
+        assert closed == (forge.ClosedIssue(CHILD_A_NUMBER, "In window"),)
+
     def test_pull_request_listings_are_always_empty(self, state_ref_board: StateRefBoard) -> None:
         assert state_ref_board.list_open_board_pull_requests() == ()
         assert state_ref_board.list_recent_merged_board_pull_requests(OBSERVED_AT) == ()

@@ -12,7 +12,7 @@ import sys
 import threading
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import MappingProxyType
 
@@ -137,6 +137,7 @@ class FakeForge:
     children: dict[int, tuple[board.ChildItem, ...]] = field(default_factory=dict)
     closed_issues: set[int] = field(default_factory=set)
     recently_closed_issues: tuple[forge.ClosedIssue, ...] = ()
+    closed_issue_cutoffs: list[datetime] = field(default_factory=list)
     landing_comments: dict[int, str] = field(default_factory=dict)
     issue_references: dict[int, forge.ItemReference] = field(default_factory=dict)
     issue_reference_lookups: list[int] = field(default_factory=list)
@@ -350,6 +351,7 @@ class FakeForge:
 
     def list_recently_closed_issues(self, since: datetime) -> tuple[forge.ClosedIssue, ...]:
         self._run()
+        self.closed_issue_cutoffs.append(since)
         return self.recently_closed_issues
 
 
@@ -4031,6 +4033,26 @@ _CUT_TWIN_REFUSAL = "ERROR: possible twin #{twin}; pass --not-a-twin\n"
             id="one_shared_word_of_three_is_no_twin",
         ),
         pytest.param(
+            "Scheibe 1 bauen",
+            {951: "Scheibe 1 bauen und testen"},
+            {},
+            (),
+            2,
+            "",
+            _CUT_TWIN_REFUSAL.format(twin=951),
+            id="three_shared_words_of_five_is_a_twin",
+        ),
+        pytest.param(
+            "Scheibe 1 bauen",
+            {951: "Scheibe 1 testen"},
+            {},
+            (),
+            0,
+            f"CUT #{CUT_CONTAINER} -> #900\n",
+            "",
+            id="two_shared_words_of_four_is_no_twin",
+        ),
+        pytest.param(
             "!!!",
             {951: "???"},
             {},
@@ -4078,12 +4100,16 @@ def test_cut_searches_open_and_recently_closed_titles_for_a_twin_before_creating
     )
     _write_block_pin(tmp_path)
     command = ["--repo", REPOSITORY, "cut", str(CUT_CONTAINER), "--title", title, *flags]
+    searched_since = (
+        [] if "--not-a-twin" in flags else [FixedDateTime.now(UTC) - timedelta(days=30)]
+    )
 
     observed_exit_code = issue_claim.main(command)
 
     captured = capsys.readouterr()
     assert (observed_exit_code, captured.out, captured.err) == (exit_code, out, err)
     assert len(client.created_issues) == (exit_code == 0)
+    assert client.closed_issue_cutoffs == searched_since
 
 
 @pytest.mark.parametrize("line_ending", ["\n", "\r\n"], ids=["orphan_body_lf", "orphan_body_crlf"])
