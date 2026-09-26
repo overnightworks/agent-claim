@@ -759,11 +759,9 @@ def _add_brief_parser(commands: argparse._SubParsersAction) -> None:
 
 def _nonblank_title(value: str) -> str:
     """`item new --title`'s argparse `type=` (issue #447): `value` unchanged
-    unless it is empty or whitespace only, which refuses before anything is
-    read, created, or minted -- under `storage = "state-ref"` such a title
-    would write an item whose `[record]` fails the body check's own
-    `record.title must be a non-empty string`."""
-    if not value.strip():
+    unless `body.is_valid_title` -- the rule `record.title` is read by --
+    refuses it, before anything is read, created, or minted."""
+    if not body.is_valid_title(value):
         raise protocol.ClaimUnavailableError("--title must be a non-empty string")
     return value
 

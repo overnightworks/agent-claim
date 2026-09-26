@@ -473,13 +473,18 @@ def _record_timestamp_defect(value: object, key_name: str) -> ContractDefect | N
     return None
 
 
+def is_valid_title(title: object) -> bool:
+    """An item title's one rule, `record.title`'s and `--title`'s alike
+    (issue #447): a string holding more than whitespace."""
+    return isinstance(title, str) and bool(title.strip())
+
+
 def _record_identity_defects(value: dict[str, object]) -> list[ContractDefect]:
     """`[record]`'s own identity fields: `title`, `state`, `kind`, `labels`,
     `blocked_by` -- split from `_block_record_defects` only to stay under
     one function's branch budget; the two together are the whole table."""
     defects: list[ContractDefect] = []
-    title = value.get("title")
-    if not isinstance(title, str) or not title.strip():
+    if not is_valid_title(value.get("title")):
         defects.append(ContractDefect("record.title", "record.title must be a non-empty string"))
     if value.get("state") not in RECORD_STATES:
         defects.append(ContractDefect("record.state", "record.state must be open or closed"))
