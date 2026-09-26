@@ -5,14 +5,15 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import threading
 import tomllib
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field, replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal, NoReturn, cast
@@ -59,6 +60,7 @@ ITEM_WHOLE_HELP = (
     "one sentence justifying this item's own wide scope, stored in its body; "
     "claim/start read it as --whole's own fallback when the call itself names none"
 )
+NOT_A_TWIN_HELP = "create even though an open or recently closed issue carries a similar title"
 START_DESCRIPTION = (
     "Creates the item's linked worktree and branch from the canonical remote's own trunk "
     "when neither exists yet, then claims it exactly as aco claim would; a second call "
@@ -642,6 +644,7 @@ def _add_cut_parser(commands: argparse._SubParsersAction) -> None:
             "cut slice's own row scope when it has none, and becomes the child's scope"
         ),
     )
+    cut.add_argument("--not-a-twin", action="store_true", help=NOT_A_TWIN_HELP)
     _add_json_flag(cut)
 
 
@@ -6078,6 +6081,58 @@ def _adoptable_child(
     )
 
 
+# How far back a closed issue still counts for the twin search (issue #444):
+# a duplicate usually repeats an item closed weeks, not months, ago.
+TWIN_SEARCH_CLOSED_WINDOW = timedelta(days=30)
+# Two titles are possible twins when at least this share of their combined
+# distinct casefolded words appears in both (issue #444).
+TWIN_TITLE_WORD_OVERLAP = 0.6
+_TITLE_WORD = re.compile(r"\w+")
+
+
+def _title_words(title: str) -> frozenset[str]:
+    return frozenset(_TITLE_WORD.findall(title.casefold()))
+
+
+def _title_word_overlap(first: frozenset[str], second: frozenset[str]) -> float:
+    combined = first | second
+    return len(first & second) / len(combined) if combined else 0.0
+
+
+def _possible_twin(title: str, candidates: Iterable[tuple[int, str]]) -> int | None:
+    """The candidate whose title overlaps `title` most, at least
+    `TWIN_TITLE_WORD_OVERLAP`, the lower number on a tie; `None` when no
+    candidate reaches it."""
+    words = _title_words(title)
+    hits = [
+        (overlap, number)
+        for number, other in candidates
+        if (overlap := _title_word_overlap(words, _title_words(other))) >= TWIN_TITLE_WORD_OVERLAP
+    ]
+    return min(hits, key=lambda hit: (-hit[0], hit[1]))[1] if hits else None
+
+
+def _refuse_possible_twin(
+    client: forge.ForgeReader,
+    title: str,
+    open_issues: Iterable[board.Issue],
+    *,
+    parent: int | None,
+) -> None:
+    """The one twin search `item new` and `cut` run before they create an
+    issue (issue #444): the titles of every open issue and every issue closed
+    within `TWIN_SEARCH_CLOSED_WINDOW`, never the new issue's own `parent`.
+    A hit refuses by number; `--not-a-twin` is the caller's way past it."""
+    since = datetime.now(UTC) - TWIN_SEARCH_CLOSED_WINDOW
+    candidates = [
+        *((issue.number, issue.title) for issue in open_issues),
+        *((issue.number, issue.title) for issue in client.list_recently_closed_issues(since)),
+    ]
+    twin = _possible_twin(title, (entry for entry in candidates if entry[0] != parent))
+    if twin is not None:
+        raise protocol.ClaimUnavailableError(f"possible twin #{twin}; pass --not-a-twin")
+
+
 def _block_slice_entries(data: Mapping[str, object]) -> list[dict[str, object]]:
     value = data.get("slice")
     if not isinstance(value, list):
@@ -6177,6 +6232,8 @@ def _cut_slice(
         _require_matching_title(number, link, parsed.title)
     child_scope = _cut_row_scope(link, _requested_body_scope(parsed.scope))
     adopted = _adoptable_child(client, number, parsed.title, idea_label)
+    if adopted is None and not parsed.not_a_twin:
+        _refuse_possible_twin(client, parsed.title, client.list_open_board_issues(), parent=number)
     try:
         child = (
             adopted.number

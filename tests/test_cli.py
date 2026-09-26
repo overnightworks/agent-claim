@@ -3925,7 +3925,8 @@ def test_cut_never_adopts_an_orphan_that_is_not_this_containers_recovery_shape(
     human-filed issue, an idea, the container's own issue, or another
     container's own failed-cut orphan can all share the row's exact title
     without being this container's recovery shape, so `cut` creates a fresh
-    child instead of silently re-parenting any of them."""
+    child instead of silently re-parenting any of them -- once the caller
+    has said the look-alike is no twin (issue #444)."""
     client = _configured_board_client(monkeypatch, tmp_path, open_issues=(_one_slice_container(),))
     _write_block_pin(tmp_path)
     if idea_label is not None:
@@ -3935,7 +3936,7 @@ def test_cut_never_adopts_an_orphan_that_is_not_this_containers_recovery_shape(
     monkeypatch.setattr(client, "list_open_board_issues", lambda: (_one_slice_container(), orphan))
 
     exit_code = issue_claim.main(
-        ["--repo", REPOSITORY, "cut", str(CUT_CONTAINER), "--title", "Scheibe 1"]
+        ["--repo", REPOSITORY, "cut", str(CUT_CONTAINER), "--title", "Scheibe 1", "--not-a-twin"]
     )
 
     assert exit_code == 0
@@ -3950,6 +3951,108 @@ def test_cut_never_adopts_an_orphan_that_is_not_this_containers_recovery_shape(
         )
     ]
     assert capsys.readouterr().out == f"CUT #{CUT_CONTAINER} row 1 -> #{child}\n"
+
+
+_CUT_TWIN_REFUSAL = "ERROR: possible twin #{twin}; pass --not-a-twin\n"
+
+
+@pytest.mark.parametrize(
+    ("title", "open_titles", "closed_titles", "flags", "exit_code", "out", "err"),
+    [
+        pytest.param(
+            "Scheibe 1",
+            {951: "Scheibe 1 bauen"},
+            {},
+            (),
+            2,
+            "",
+            _CUT_TWIN_REFUSAL.format(twin=951),
+            id="open_issue_sharing_two_of_three_words",
+        ),
+        pytest.param(
+            "Scheibe 1",
+            {},
+            {952: "scheibe 1"},
+            (),
+            2,
+            "",
+            _CUT_TWIN_REFUSAL.format(twin=952),
+            id="recently_closed_issue_in_any_case",
+        ),
+        pytest.param(
+            "Scheibe 1",
+            {951: "Scheibe 1 bauen", 953: "Scheibe 1"},
+            {952: "Scheibe 1"},
+            (),
+            2,
+            "",
+            _CUT_TWIN_REFUSAL.format(twin=952),
+            id="closest_title_then_lower_number_wins",
+        ),
+        pytest.param(
+            "Scheibe 1",
+            {951: "Scheibe 2"},
+            {},
+            (),
+            0,
+            f"CUT #{CUT_CONTAINER} -> #900\n",
+            "",
+            id="one_shared_word_of_three_is_no_twin",
+        ),
+        pytest.param(
+            "!!!",
+            {951: "???"},
+            {},
+            (),
+            0,
+            f"CUT #{CUT_CONTAINER} -> #900\n",
+            "",
+            id="wordless_titles_never_match",
+        ),
+        pytest.param(
+            "Scheibe 1",
+            {951: "Scheibe 1"},
+            {},
+            ("--not-a-twin",),
+            0,
+            f"CUT #{CUT_CONTAINER} -> #900\n",
+            "",
+            id="not_a_twin_creates_anyway",
+        ),
+    ],
+)
+def test_cut_searches_open_and_recently_closed_titles_for_a_twin_before_creating(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    title: str,
+    open_titles: dict[int, str],
+    closed_titles: dict[int, str],
+    flags: tuple[str, ...],
+    exit_code: int,
+    out: str,
+    err: str,
+) -> None:
+    """Issue #444: before a fresh child exists, `cut` refuses a title that
+    shares most of its words with an open or recently closed issue, naming
+    the closest one; `--not-a-twin` creates anyway."""
+    look_alikes = tuple(
+        board_issue(number, other, complete_contract("Ship it."))
+        for number, other in open_titles.items()
+    )
+    container = _cut_container_issue(MINIMAL_BLOCK_TOML)
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(container, *look_alikes))
+    client.recently_closed_issues = tuple(
+        forge.ClosedIssue(number, other) for number, other in closed_titles.items()
+    )
+    _write_block_pin(tmp_path)
+    command = ["--repo", REPOSITORY, "cut", str(CUT_CONTAINER), "--title", title, *flags]
+
+    observed_exit_code = issue_claim.main(command)
+
+    captured = capsys.readouterr()
+    assert (observed_exit_code, captured.out, captured.err) == (exit_code, out, err)
+    assert len(client.created_issues) == (exit_code == 0)
 
 
 @pytest.mark.parametrize("line_ending", ["\n", "\r\n"], ids=["orphan_body_lf", "orphan_body_crlf"])
