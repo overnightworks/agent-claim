@@ -716,10 +716,12 @@ def _fetch_into_anchor(worktree: Path, remote: str) -> ObjectId:
 def _fetch_ref_objects(worktree: Path, remote: str) -> None:
     """Fetch `STATE_REF`'s objects into this worktree's local object store
     without creating any local ref for it -- production never creates the
-    shared `refs/aco/state` locally. `peek_state`, this function's only
-    caller, already knows the tip from `_ls_remote_state`'s own answer, so
-    no destination ref is needed here. `--no-write-fetch-head` keeps this
-    from even landing the tip in `FETCH_HEAD` (`peek_state` never reads it
+    shared `refs/aco/state` locally. `_peek_tip`, this function's only
+    caller and the shared read behind `peek_state` and
+    `peek_state_for_reset`, already knows the tip from `_ls_remote_state`'s
+    own answer, so no destination ref is needed here.
+    `--no-write-fetch-head` keeps this from even landing the tip in
+    `FETCH_HEAD` (neither peek reads it
     either way, but a dry run, live-claim refusal, or failed export must
     write nothing at all, not merely nothing this worktree reads back);
     `--no-tags` keeps a reachable tag on `STATE_REF`'s own history from
@@ -1034,7 +1036,8 @@ def fetch_state(*, worktree: Path, remote: str = DEFAULT_CANONICAL_REMOTE) -> Cl
 def peek_state(*, worktree: Path, remote: str = DEFAULT_CANONICAL_REMOTE) -> ClaimState:
     """Read `STATE_REF` on `remote` for a caller that must not write (issue
     #298, 19.09.2026 gate finding 1; issue #405 review/gate finding, `land`'s
-    read-only preflight): the one read in this module that skips
+    read-only preflight): one of the two peeks in this module, with
+    `peek_state_for_reset`, that read through `_peek_tip` and so skip
     `fetch_state`'s own lineage guard, anchor, and stamp.
 
     The tip is `_ls_remote_state`'s own answer (issue #310 finding 48): the
@@ -1048,19 +1051,20 @@ def peek_state(*, worktree: Path, remote: str = DEFAULT_CANONICAL_REMOTE) -> Cla
     reachable tag on `STATE_REF`'s own history from auto-following into the
     shared local `refs/tags/*` namespace during this read.
 
-    `reset` uses this to recover from exactly what `_check_lineage` refuses
-    -- a rewritten or deleted ref this worktree's own stamp disagrees with --
-    so it reads and acts on whatever tip is on `remote` right now, never
-    against this worktree's history. `land`'s preflight uses it to observe a
-    live claim before its first write: a pull request this preflight goes on
-    to refuse must never have anchored a ref or stamped a lineage the merge
-    itself never happens. Both callers share the same requirement -- a dry
-    run, a live-claim refusal, a failed export, or a refused merge must
-    change nothing durable -- so this performs no per-worktree write at all:
-    no anchor write, no `_write_lineage_stamp`, no local tag, no
-    `FETCH_HEAD`. `fetch_state` stays the write-capable read every live
-    transition (`claim`, `release`, ...) still needs, since those callers go
-    on to write and must keep this worktree's own lineage current.
+    `reset` reads this way, through `peek_state_for_reset`, to recover from
+    exactly what `_check_lineage` refuses -- a rewritten or deleted ref this
+    worktree's own stamp disagrees with -- so it reads and acts on whatever
+    tip is on `remote` right now, never against this worktree's history.
+    `land`'s preflight uses it to observe a live claim before its first
+    write: a pull request this preflight goes on to refuse must never have
+    anchored a ref or stamped a lineage the merge itself never happens. Both
+    callers share the same requirement -- a dry run, a live-claim refusal, a
+    failed export, or a refused merge must change nothing durable -- so this
+    performs no per-worktree write at all: no anchor write, no
+    `_write_lineage_stamp`, no local tag, no `FETCH_HEAD`. `fetch_state`
+    stays the write-capable read every live transition (`claim`, `release`,
+    ...) still needs, since those callers go on to write and must keep this
+    worktree's own lineage current.
     """
     probed = _peek_tip(worktree, remote)
     if probed is None:
