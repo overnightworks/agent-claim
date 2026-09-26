@@ -123,7 +123,7 @@ runner's own git object ids.
 
 - [ ] [ITEM-37] Under `storage = "state-ref"`, an item whose file PIN-14/PIN-15 refuse never stops `item new`, nor `item show` of any other item.
 - [ ] [ITEM-42] That item's `record.title`, while it still reads as a non-empty string, joins ITEM-33's twin search as an open item's title.
-- [ ] [ITEM-38] Reading that item itself (`item show`, `item close`, `item edit --size`/`--whole`, `cut`) refuses PIN-14/PIN-15's sentence, then the repair clause of E-ITEM-10.
+- [ ] [ITEM-38] Reading that item itself (`item show`, `item close`, `item edit --size`/`--whole`) refuses PIN-14/PIN-15's sentence, then the repair clause of E-ITEM-10.
 - [ ] [ITEM-39] `aco item edit <id> < BODY` on that item takes BODY's complete `[record]` as the item's own, `updated_at` moved to now; BODY without a `[record]` refuses as ITEM-38 (see E-ITEM-10).
 - [ ] [ITEM-40] That `[record]`'s `parent` or `blocked_by` naming a missing item refuses PIN-16/PIN-17's sentence, a malformed one or the item itself ITEM-38's, before any write.
 - [ ] [ITEM-41] That `[record]` naming `state = "closed"` refuses `a repair records state = "open"; close <id> afterwards with aco item close <id>`, before any write.

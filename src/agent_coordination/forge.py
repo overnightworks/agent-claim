@@ -308,8 +308,8 @@ class ForgeReader(Protocol):
     def parent_issue(self, number: int) -> board.ParentIssue | None: ...
 
     def parent_number(self, number: int) -> int | None:
-        """The number of `number`'s parent without reading that parent's
-        body -- all `item show`'s header names, so a parent no other read
+        """The number of `number`'s parent without decoding that parent
+        -- all `item show`'s header names, so a parent no other read
         can decode never stops it (issue #447)."""
         ...
 

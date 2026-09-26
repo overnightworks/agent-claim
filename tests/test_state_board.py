@@ -558,8 +558,8 @@ _MALFORMED_CONTENTS = pytest.mark.parametrize(
 
 
 class TestMalformedItem:
-    """Issue #447: one malformed item file is corrupt state only for the
-    reads that need exactly that item, never for the rest of the store."""
+    """Issue #447: one malformed item file refuses its own read and every
+    whole-store read (PIN-29), never a read of another single item."""
 
     @_MALFORMED_CONTENTS
     def test_every_other_item_still_reads(self, content: bytes, problem: str) -> None:
@@ -2159,9 +2159,9 @@ class TestCliStateRefForge:
         `StateRefBoard`'s own decode (issue #283) -- so a container without
         a working `[[slice]]` table (no agent-claim block to hold one) is
         refused by that decode's own sentence and repair (issue #447) the
-        moment `cut` reads it, rather than a second, cut-specific one. `next`
-        never recommends `cut` on such a container: the board leaves it out.
-        Nothing reaches the remote."""
+        moment `cut` reads the store, rather than a second, cut-specific one.
+        `next` refuses the same sentence (PIN-29) instead of recommending
+        `cut` on such a container. Nothing reaches the remote."""
         item_files = {**_item_files(), f"{CONTAINER_ID}.md": b"Just prose, no block at all.\n"}
         self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, item_files)
         remote_url = f"file://{bare_remote}"

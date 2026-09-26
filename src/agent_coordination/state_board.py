@@ -111,8 +111,9 @@ class _DecodedItem:
 class _MalformedItem:
     """An item file whose bytes decode to no valid `agent-claim` block with
     a `[record]` table (issue #447): kept aside rather than refusing the
-    whole store, so only a command that must read exactly this item
-    refuses. `problem` completes the sentence `item <id> ...`; `oid` is the
+    store at decode, so a read of any other single item still answers while
+    this item's own read and every whole-store read (PIN-29) refuse.
+    `problem` completes the sentence `item <id> ...`; `oid` is the
     CAS `expected` a repairing `update_item_body` writes over; `title` is
     the record's title when it alone still reads, for the twin search."""
 
@@ -283,13 +284,17 @@ class StateRefBoard:
         """`item_id`'s decoded item, or a refusal by name: a malformed one
         names its repair (issue #447), an unknown one completes `item <id>`
         with `missing`."""
+        if not self._carries(item_id):
+            raise MalformedStateTreeError(f"item {item_id} {missing}")
         malformed = self._malformed.get(item_id)
         if malformed is not None:
             raise _malformed_item_refusal(item_id, malformed)
-        decoded = self._items.get(item_id)
-        if decoded is None:
-            raise MalformedStateTreeError(f"item {item_id} {missing}")
-        return decoded
+        return self._items[item_id]
+
+    def _carries(self, item_id: str) -> bool:
+        """Whether `items/` holds `item_id` at all, malformed or not: the one
+        existence test behind PIN-16/PIN-17's "does not exist"."""
+        return item_id in self._items or item_id in self._malformed
 
     def _issue(self, item_id: str) -> board.Issue:
         decoded = self._items[item_id]
@@ -348,7 +353,7 @@ class StateRefBoard:
         if decoded is None or decoded.record.parent is None:
             return None
         parent_id = decoded.record.parent
-        if parent_id not in self._items and parent_id not in self._malformed:
+        if not self._carries(parent_id):
             raise MalformedStateTreeError(f"item {parent_id} {_PARENT_MISSING}")
         return items.item_number(parent_id)
 
