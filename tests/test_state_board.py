@@ -632,8 +632,10 @@ class TestMalformedItem:
         close`'s claim guard, refuses; `_UnusedItemWriter` fails any write."""
         adapter = _state_ref_board(_item_files_with_a_malformed_item(_blank_title_item()))
 
+        repair = _state_ref_body(_CHILD_A_PROJECTION, record)
+
         with pytest.raises(protocol.ClaimError) as refused:
-            adapter.update_item_body(MALFORMED_NUMBER, _state_ref_body(_CHILD_A_PROJECTION, record))
+            adapter.update_item_body(MALFORMED_NUMBER, repair)
 
         assert str(refused.value) == refusal
 
