@@ -1261,27 +1261,53 @@ def test_github_adapter_item_references_reads_every_number_from_one_batch(
     """Issue #440: an open issue, a merged pull request (`state: MERGED`
     reads as closed, matching `item_reference`'s own REST-issues-endpoint
     normalization), and a number GitHub resolves to neither -- one `gh api
-    graphql` round trip for all three, never one per number."""
+    graphql` round trip for all three, never one per number.
+
+    A number resolving to neither an issue nor a pull request makes real
+    `gh api graphql` exit nonzero even though its `data` already answers
+    `null` for that alias: a NOT_FOUND entry in the response's own `errors`,
+    not a clean `"n2": None` result `gh` never actually produces (issue #440
+    review) -- so the fake `run` raises the way `gh` does instead of
+    returning a response shape real `gh` never returns.
+    """
     observed: list[list[str]] = []
 
     def run(arguments: list[str]) -> str:
         observed.append(arguments)
-        return json.dumps(
-            {
-                "n0": {
-                    "__typename": "Issue",
-                    "state": "OPEN",
-                    "title": "Open one",
-                    "body": "Do it.",
-                },
-                "n1": {
-                    "__typename": "PullRequest",
-                    "state": "MERGED",
-                    "title": "Landed",
-                    "body": None,
-                },
-                "n2": None,
-            }
+        raise forge.ForgeError(
+            json.dumps(
+                {
+                    "data": {
+                        "repository": {
+                            "n0": {
+                                "__typename": "Issue",
+                                "state": "OPEN",
+                                "title": "Open one",
+                                "body": "Do it.",
+                            },
+                            "n1": {
+                                "__typename": "PullRequest",
+                                "state": "MERGED",
+                                "title": "Landed",
+                                "body": None,
+                            },
+                            "n2": None,
+                        }
+                    },
+                    "errors": [
+                        {
+                            "type": "NOT_FOUND",
+                            "path": ["repository", "n2"],
+                            "locations": [{"line": 1, "column": 1}],
+                            "message": (
+                                "Could not resolve to an issue or pull request "
+                                "with the number of 30."
+                            ),
+                        }
+                    ],
+                }
+            )
+            + "gh: Could not resolve to an issue or pull request with the number of 30.\n"
         )
 
     client = GitHubForge(github._repository_id(REPOSITORY), run=run)
@@ -1393,6 +1419,30 @@ def test_github_adapter_item_references_fails_loud_on_a_malformed_response(
     client = GitHubForge(github._repository_id(REPOSITORY), run=lambda _arguments: raw)
 
     with pytest.raises(ClaimError, match=match):
+        client.item_references((10,))
+
+
+def test_github_adapter_item_references_reraises_an_unrecovered_graphql_error() -> None:
+    """Issue #440 review: `_not_found_batch_nodes` only recovers a batch
+    whose every error is `NOT_FOUND` on one of its own aliases. A batch that
+    also fails for an unrelated reason -- a permission error here -- keeps
+    failing loud with its original error, never guessed at as a not-found."""
+    message = (
+        json.dumps(
+            {
+                "data": {"repository": {"n0": None}},
+                "errors": [{"type": "FORBIDDEN", "path": ["repository", "n0"]}],
+            }
+        )
+        + "gh: Resource not accessible by integration\n"
+    )
+
+    def run(_arguments: list[str]) -> str:
+        raise forge.ForgeError(message)
+
+    client = GitHubForge(github._repository_id(REPOSITORY), run=run)
+
+    with pytest.raises(forge.ForgeError, match="FORBIDDEN"):
         client.item_references((10,))
 
 

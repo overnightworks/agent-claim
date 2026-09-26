@@ -209,9 +209,11 @@ def _item_reference_query(numbers: Sequence[int]) -> str:
     """One GraphQL query reading every one of `numbers` through its own
     alias (issue #440): `issueOrPullRequest` -- unlike the narrower `issue`
     field -- answers for a pull request number too, matching `item_reference`'s
-    own REST read of a single number, and returns `null` for a number that
-    exists in neither space rather than a query-ending error, so a missing
-    item costs nothing beyond its own alias key coming back empty."""
+    own REST read of a single number. GraphQL's own schema answers `null` in
+    `data` for a number that exists in neither space, but `gh api graphql`
+    still exits nonzero whenever any alias produced a `NOT_FOUND` entry in
+    `errors` -- `_item_reference_block`/`_not_found_batch_nodes` read that
+    exit back as the partial success it actually carries."""
     aliases = "\n".join(
         f"n{index}: issueOrPullRequest(number: {number}) {{ {_ITEM_REFERENCE_FIELDS} }}"
         for index, number in enumerate(numbers)
@@ -258,6 +260,78 @@ def _aliased_node(nodes: Mapping[str, object], index: int) -> object:
     if alias not in nodes:
         raise forge.ForgeMalformedResponseError(_MALFORMED_BATCHED_ITEM_REFERENCE)
     return nodes[alias]
+
+
+def _item_references_from_nodes(
+    nodes: Mapping[str, object], numbers: Sequence[int]
+) -> dict[int, forge.ItemReference]:
+    """`_item_reference_block`'s own mapping from a batch response's raw
+    `nodes` to every requested number's parsed reference -- the one shape
+    both a clean response and a recovered `_not_found_batch_nodes` response
+    are read through."""
+    return {
+        number: _parsed_item_reference_node(_aliased_node(nodes, index))
+        for index, number in enumerate(numbers)
+    }
+
+
+# A NOT_FOUND error's own `path` (issue #440 review): `["repository", "nN"]`,
+# the field GraphQL walked to reach the alias it could not resolve.
+_ITEM_REFERENCE_ERROR_PATH_LENGTH = 2
+
+
+def _is_recovered_not_found_error(
+    error: object, aliases: frozenset[str], repository: Mapping[str, object]
+) -> bool:
+    """Whether `error` is one `_not_found_batch_nodes` can recover: `NOT_
+    FOUND` on one of this call's own aliases, at the alias `repository`
+    already answers `null` for."""
+    if not isinstance(error, dict) or error.get("type") != "NOT_FOUND":
+        return False
+    path = error.get("path")
+    if not isinstance(path, list) or len(path) != _ITEM_REFERENCE_ERROR_PATH_LENGTH:
+        return False
+    section, alias = path
+    return section == "repository" and alias in aliases and repository.get(alias) is None
+
+
+def _not_found_batch_nodes(
+    message: str, numbers: Sequence[int]
+) -> Mapping[str, object] | None:
+    """`_item_reference_block`'s own recovery (issue #440 review): `gh api
+    graphql` exits nonzero whenever any alias in `_item_reference_query`
+    resolved to neither an issue nor a pull request, even though GraphQL's
+    own response already answers `null` for it in `data` rather than ending
+    the query. `_bounded_command` has no way to tell that apart from a real
+    failure, so it folds `message` through as an unclassified `ForgeError`;
+    this reads `message` back as the GraphQL response it actually is.
+
+    Returns the batch's `nodes` mapping -- ready for `_item_references_from_
+    nodes`, `null` exactly at every not-found alias -- only when `message`
+    parses as JSON carrying that response shape, every one of `errors` is a
+    `NOT_FOUND` on one of this call's own aliases (`_is_recovered_not_found_
+    error`), and `data.repository` already holds every alias this call asked
+    for. Any other shape returns `None` so the caller re-raises its original
+    error instead of guessing at recovery.
+    """
+    try:
+        decoded, _ = json.JSONDecoder().raw_decode(message)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(decoded, dict):
+        return None
+    data = decoded.get("data")
+    repository = data.get("repository") if isinstance(data, dict) else None
+    errors = decoded.get("errors")
+    if not isinstance(repository, dict) or not isinstance(errors, list) or not errors:
+        return None
+    aliases = frozenset(f"n{index}" for index in range(len(numbers)))
+    if not aliases.issubset(repository):
+        return None
+    recovered = all(
+        _is_recovered_not_found_error(error, aliases, repository) for error in errors
+    )
+    return repository if recovered else None
 
 
 def _decoded(result: process.BoundedResult, purpose: str) -> str:
@@ -443,29 +517,35 @@ class GitHubForge:
     def _item_reference_block(self, numbers: tuple[int, ...]) -> dict[int, forge.ItemReference]:
         """One `numbers`-sized GraphQL round trip (issue #440): `item_
         references`' own block, never called with more than `GRAPHQL_ITEM_
-        REFERENCE_BATCH_SIZE` numbers."""
-        raw = self._run(
-            [
-                "api",
-                "graphql",
-                "-f",
-                f"query={_item_reference_query(numbers)}",
-                "-f",
-                f"owner={self.repository.namespace[0]}",
-                "-f",
-                f"name={self.repository.name}",
-                "--jq",
-                ".data.repository",
-            ]
-        )
+        REFERENCE_BATCH_SIZE` numbers. A number that resolves to neither an
+        issue nor a pull request makes `gh` exit nonzero even though GraphQL
+        itself already answered the rest -- `_not_found_batch_nodes` reads
+        that failure back as the partial success it is (issue #440 review)
+        rather than this call failing the whole block loud."""
+        try:
+            raw = self._run(
+                [
+                    "api",
+                    "graphql",
+                    "-f",
+                    f"query={_item_reference_query(numbers)}",
+                    "-f",
+                    f"owner={self.repository.namespace[0]}",
+                    "-f",
+                    f"name={self.repository.name}",
+                    "--jq",
+                    ".data.repository",
+                ]
+            )
+        except forge.ForgeError as error:
+            nodes = _not_found_batch_nodes(str(error), numbers)
+            if nodes is None:
+                raise
+            return _item_references_from_nodes(nodes, numbers)
         values = self._json_lines(raw, "batched item reference")
         if len(values) != 1 or not isinstance(values[0], dict):
             raise forge.ForgeMalformedResponseError(_MALFORMED_BATCHED_ITEM_REFERENCE)
-        nodes = values[0]
-        return {
-            number: _parsed_item_reference_node(_aliased_node(nodes, index))
-            for index, number in enumerate(numbers)
-        }
+        return _item_references_from_nodes(values[0], numbers)
 
     def item_references(self, numbers: Iterable[int]) -> Mapping[int, forge.ItemReference]:
         """Every one of `numbers`, batched into GraphQL blocks of
