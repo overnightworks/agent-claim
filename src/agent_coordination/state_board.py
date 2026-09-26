@@ -253,6 +253,17 @@ class StateRefBoard:
         repair path for a malformed item every other read refuses."""
         return number in self._by_number
 
+    def require_well_formed(self) -> None:
+        """Refuses with the lowest malformed item's own sentence and repair
+        while `items/` holds any (issue #447): a malformed item's parent,
+        state, and blockers are unknown, so every answer that enumerates the
+        whole store -- the board `board`/`next`/`rulings`/`cut` project, a
+        container's children, what `item close` freed -- would guess past
+        it."""
+        if self._malformed:
+            item_id = min(self._malformed)
+            raise _malformed_item_refusal(item_id, self._malformed[item_id])
+
     def _decoded(self, number: int) -> _DecodedItem | None:
         item_id = self._by_number.get(number)
         return None if item_id is None else self._related(item_id, missing="does not exist")
@@ -332,6 +343,7 @@ class StateRefBoard:
         )
 
     def list_children(self, number: int) -> tuple[board.ChildItem, ...]:
+        self.require_well_formed()
         item_id = self._by_number.get(number)
         if item_id is None:
             return ()
@@ -345,9 +357,20 @@ class StateRefBoard:
         return self._default_branch
 
     def list_open_board_issues(self) -> tuple[board.Issue, ...]:
+        self.require_well_formed()
         return tuple(
             self._issue(item_id)
             for item_id, decoded in self._items.items()
+            if decoded.record.state is items.RecordState.OPEN
+        )
+
+    def open_item_titles(self) -> tuple[tuple[int, str], ...]:
+        """Every open item's number and title, the open half of `item new`'s
+        twin search: unlike `list_open_board_issues` it never refuses on a
+        malformed item (issue #447), so `item new` still runs beside one."""
+        return tuple(
+            (decoded.record.number, decoded.record.title)
+            for decoded in self._items.values()
             if decoded.record.state is items.RecordState.OPEN
         )
 

@@ -3240,7 +3240,9 @@ def _item_new_on_github(parsed: argparse.Namespace, canonical_remote: str) -> in
     if parsed.parent is not None:
         _open_container(open_issues, parsed.parent)
     if not parsed.not_a_twin:
-        _refuse_possible_twin(client, parsed.title, open_issues, parent=parsed.parent)
+        _refuse_possible_twin(
+            client, parsed.title, _numbered_titles(open_issues), parent=parsed.parent
+        )
     kind = body.ItemKind(parsed.kind)
     try:
         number = (
@@ -3284,9 +3286,7 @@ def _item_new_on_state_ref(parsed: argparse.Namespace, canonical_remote: str) ->
     if parent_missing:
         raise protocol.ClaimUnavailableError(f"#{parsed.parent} does not exist")
     if not parsed.not_a_twin:
-        _refuse_possible_twin(
-            client, parsed.title, client.list_open_board_issues(), parent=parsed.parent
-        )
+        _refuse_possible_twin(client, parsed.title, client.open_item_titles(), parent=parsed.parent)
     kind = body.ItemKind(parsed.kind)
     skeleton = (
         body.BLOCK_CONTAINER_SKELETON
@@ -3466,7 +3466,9 @@ def _cmd_item_close(parsed: argparse.Namespace) -> int:
     id gets this command's own "does not exist" sentence rather than
     `close_item`'s internal `_by_number` lookup failing with the wrong
     shape; `close_item` itself refuses a second close on an already-closed
-    item, naming its date. Prints one line, `CLOSED aco-xxxxxx` (`--json`:
+    item, naming its date. While any item is malformed (issue #447) it
+    refuses before the write, since the report after it reads the whole
+    store. Prints one line, `CLOSED aco-xxxxxx` (`--json`:
     `{"item", "number", "closed_at", "parent_closable"}`), then `release
     --merged`'s own `freed:` line -- open items whose only open local
     blocker was this one (`_freed_item_numbers`, issue #256; nothing new) --
@@ -3492,6 +3494,7 @@ def _cmd_item_close(parsed: argparse.Namespace) -> int:
         client = _state_ref_forge(parsed.repo, config.canonical_remote)
         if client.item_reference(number).state is forge.ItemState.MISSING:
             raise protocol.ClaimUnavailableError(_missing_item_refusal(number, client))
+        client.require_well_formed()
         closed_at = client.close_item(number)
         result = _ItemCloseResult(
             item_id=items.format_item_id(number),
@@ -5875,7 +5878,8 @@ def _landing_report(
     storage: body.Storage,
 ) -> tuple[ReleaseLanding | None, str | None]:
     """The `(landing, hint)` pair `_cmd_release` prints once its release
-    transition already committed (issue #256): a forge hiccup here can only
+    transition already committed (issue #256): a forge hiccup here, or a
+    malformed state-ref item the board read refuses on (issue #447), can only
     ever downgrade the report to `hint`, never undo or fail that release."""
     landed = (
         board.IssueReference(client.repository.path, identity.issue)
@@ -5894,6 +5898,12 @@ def _landing_report(
         hint = (
             f"hint: could not read the board to report what this landing freed ({error}); "
             "run `aco board` once the forge is reachable"
+        )
+        return None, hint
+    except protocol.MalformedStateTreeError as error:
+        hint = (
+            f"hint: could not read the board to report what this landing freed ({error}); "
+            "run `aco board` once it is repaired"
         )
         return None, hint
     return landing, None
@@ -5955,14 +5965,9 @@ def _open_container(open_issues: Iterable[board.Issue], number: int) -> board.Is
 
 
 def _cut_target(
-    client: forge.ForgeWriter, open_issues: Sequence[board.Issue], number: int
+    client: forge.ForgeWriter, open_issues: Iterable[board.Issue], number: int
 ) -> board.Issue:
     """The open container `cut` targets, or why it refuses before any write."""
-    if all(issue.number != number for issue in open_issues):
-        # A state-ref item with a malformed block is absent from
-        # `open_issues`; reading it refuses by its id and repair (issue
-        # #447) instead of calling it no open container.
-        client.item_reference(number)
     target = _open_container(open_issues, number)
     parent = client.parent_issue(number)
     if parent is not None:
@@ -6218,6 +6223,10 @@ def _title_overlap(title: str, other: str) -> float:
     return len(first & second) / len(combined) if combined else 0.0
 
 
+def _numbered_titles(issues: Iterable[board.Issue]) -> tuple[tuple[int, str], ...]:
+    return tuple((issue.number, issue.title) for issue in issues)
+
+
 def _possible_twin(title: str, candidates: Iterable[tuple[int, str]]) -> int | None:
     """The candidate whose title overlaps `title` most, at least
     `TWIN_TITLE_WORD_OVERLAP`, the lower number on a tie; `None` when no
@@ -6233,17 +6242,18 @@ def _possible_twin(title: str, candidates: Iterable[tuple[int, str]]) -> int | N
 def _refuse_possible_twin(
     client: forge.ForgeReader,
     title: str,
-    open_issues: Iterable[board.Issue],
+    open_titles: Iterable[tuple[int, str]],
     *,
     parent: int | None,
 ) -> None:
     """The one twin search `item new` and `cut` run before they create an
-    issue (issue #444): the titles of every open issue and every issue closed
-    within `TWIN_SEARCH_CLOSED_WINDOW`, never the new issue's own `parent`.
-    A hit refuses by number; `--not-a-twin` is the caller's way past it."""
+    issue (issue #444): `open_titles` -- every open issue's number and title
+    -- and the titles of every issue closed within `TWIN_SEARCH_CLOSED_WINDOW`,
+    never the new issue's own `parent`. A hit refuses by number;
+    `--not-a-twin` is the caller's way past it."""
     since = datetime.now(UTC) - TWIN_SEARCH_CLOSED_WINDOW
     candidates = [
-        *((issue.number, issue.title) for issue in open_issues),
+        *open_titles,
         *((issue.number, issue.title) for issue in client.list_recently_closed_issues(since)),
     ]
     twin = _possible_twin(title, (entry for entry in candidates if entry[0] != parent))
@@ -6355,7 +6365,7 @@ def _cut_slice(
     child_scope = _cut_row_scope(link, _requested_body_scope(parsed.scope))
     adopted = _adoptable_child(client, number, parsed.title, config.idea_label, open_issues)
     if adopted is None and not parsed.not_a_twin:
-        _refuse_possible_twin(client, parsed.title, open_issues, parent=number)
+        _refuse_possible_twin(client, parsed.title, _numbered_titles(open_issues), parent=number)
     try:
         child = (
             adopted.number

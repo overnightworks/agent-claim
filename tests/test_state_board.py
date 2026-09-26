@@ -298,17 +298,21 @@ MALFORMED_ID = "aco-3e26d9"
 MALFORMED_NUMBER = items.item_number(MALFORMED_ID)
 
 
-def _malformed_item_refusal(problem: str = "has a malformed agent-claim block") -> str:
+def _malformed_item_refusal(
+    problem: str = "has a malformed agent-claim block", item_id: str = MALFORMED_ID
+) -> str:
     return (
-        f"item {MALFORMED_ID} {problem}; repair it with aco item edit {MALFORMED_ID} "
+        f"item {item_id} {problem}; repair it with aco item edit {item_id} "
         "and a body whose agent-claim block carries a valid [record]"
     )
 
 
-def _item_files_with_a_malformed_item(content: bytes) -> dict[str, bytes]:
-    """`_item_files()` plus `MALFORMED_ID`'s own file planted by hand with
+def _item_files_with_a_malformed_item(
+    content: bytes, item_id: str = MALFORMED_ID
+) -> dict[str, bytes]:
+    """`_item_files()` plus `item_id`'s own file planted by hand with
     `content` -- the store issue #447's reproduction left behind."""
-    return {**_item_files(), f"{MALFORMED_ID}.md": content}
+    return {**_item_files(), f"{item_id}.md": content}
 
 
 def _blank_title_item() -> bytes:
@@ -562,18 +566,28 @@ class TestMalformedItem:
         del problem
         adapter = _state_ref_board(_item_files_with_a_malformed_item(content))
 
-        numbers = {issue.number for issue in adapter.list_open_board_issues()}
+        reference = adapter.item_reference(CHILD_A_NUMBER)
 
-        assert numbers == {CONTAINER_NUMBER, CHILD_A_NUMBER, CHILD_B_NUMBER}
+        assert (reference.state, reference.title) == (forge.ItemState.OPEN, "Slice A")
 
     @_MALFORMED_CONTENTS
-    def test_reading_that_item_refuses_naming_its_repair(
-        self, content: bytes, problem: str
+    @pytest.mark.parametrize(
+        "read",
+        [
+            pytest.param(lambda adapter: adapter.item_reference(MALFORMED_NUMBER), id="that-item"),
+            pytest.param(lambda adapter: adapter.list_open_board_issues(), id="the-open-board"),
+            pytest.param(lambda adapter: adapter.list_children(CONTAINER_NUMBER), id="children"),
+        ],
+    )
+    def test_reading_that_item_or_enumerating_the_store_refuses_naming_its_repair(
+        self, content: bytes, problem: str, read: Callable[[StateRefBoard], object]
     ) -> None:
+        """A malformed item's parent and state are unknown, so an enumeration
+        of the whole store refuses rather than guess past it (issue #447)."""
         adapter = _state_ref_board(_item_files_with_a_malformed_item(content))
 
         with pytest.raises(MalformedStateTreeError) as refusal:
-            adapter.item_reference(MALFORMED_NUMBER)
+            read(adapter)
 
         assert str(refusal.value) == _malformed_item_refusal(problem)
 
@@ -2638,13 +2652,28 @@ class TestCliStateRefForge:
         assert issue_claim.main(arguments) == 0
 
     @pytest.mark.parametrize(
-        ("arguments", "piped_body"),
+        ("arguments", "piped_body", "planted"),
         [
-            pytest.param(["item", "show", MALFORMED_ID], None, id="item-show"),
-            pytest.param(["item", "close", MALFORMED_ID], None, id="item-close"),
-            pytest.param(["item", "edit", MALFORMED_ID, "--size", "S"], None, id="edit-size"),
+            pytest.param(["item", "show", MALFORMED_ID], None, MALFORMED_ID, id="item-show"),
+            pytest.param(["item", "close", MALFORMED_ID], None, MALFORMED_ID, id="item-close"),
             pytest.param(
-                ["item", "edit", MALFORMED_ID], CONTAINER_BODY, id="edit-without-a-record"
+                ["item", "edit", MALFORMED_ID, "--size", "S"], None, MALFORMED_ID, id="edit-size"
+            ),
+            pytest.param(
+                ["item", "edit", MALFORMED_ID],
+                CONTAINER_BODY,
+                MALFORMED_ID,
+                id="edit-without-a-record",
+            ),
+            pytest.param(
+                ["item", "close", CHILD_A_ID],
+                None,
+                CONTAINER_ID,
+                id="item-close-of-a-child-under-a-malformed-parent",
+            ),
+            *(
+                pytest.param(command, None, MALFORMED_ID, id=command[0])
+                for command in (["board", "--json"], ["next"], ["rulings"])
             ),
         ],
     )
@@ -2657,11 +2686,13 @@ class TestCliStateRefForge:
         worktree: Path,
         arguments: list[str],
         piped_body: str | None,
+        planted: str,
     ) -> None:
         """Issue #447 proof 1: every command that must read exactly the
-        malformed item refuses by its id, naming `item edit` with a valid
-        `[record]` as the repair, and nothing reaches the remote."""
-        item_files = _item_files_with_a_malformed_item(_blank_title_item())
+        malformed item, or enumerate the whole store around it, refuses by
+        its id, naming `item edit` with a valid `[record]` as the repair,
+        and nothing reaches the remote."""
+        item_files = _item_files_with_a_malformed_item(_blank_title_item(), planted)
         self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, item_files)
         monkeypatch.setattr(sys, "stdin", io.StringIO(piped_body or ""))
         remote_url = f"file://{bare_remote}"
@@ -2669,7 +2700,8 @@ class TestCliStateRefForge:
 
         status = issue_claim.main(arguments)
 
-        assert (status, capsys.readouterr().err) == (2, f"ERROR: {_malformed_item_refusal()}\n")
+        refusal = _malformed_item_refusal(item_id=planted)
+        assert (status, capsys.readouterr().err) == (2, f"ERROR: {refusal}\n")
         assert store.fetch_state(worktree=worktree, remote=remote_url).tip == before.tip
 
     def test_item_edit_with_a_valid_record_repairs_a_malformed_item(

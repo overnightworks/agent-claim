@@ -12321,19 +12321,32 @@ def test_release_merged_fetches_each_candidates_dependencies_only_once(
     assert sorted(observed_dependency_calls) == [80, 81, 82, 83]
 
 
+@pytest.mark.parametrize(
+    "board_error",
+    [
+        pytest.param(forge.ForgeTransientError("gh: connection reset"), id="forge-outage"),
+        pytest.param(
+            protocol.MalformedStateTreeError("item aco-3e26d9 has a malformed agent-claim block"),
+            id="malformed-state-ref-item",
+        ),
+    ],
+)
 def test_release_merged_prints_a_hint_instead_of_failing_when_the_board_is_unreachable(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    board_error: protocol.ClaimError,
 ) -> None:
-    """A forge outage that only starts after the release itself already
+    """A forge outage -- or a malformed state-ref item the board read refuses
+    on (issue #447) -- that only shows after the release itself already
     committed must not undo or fail it (issue #256): the release's own
-    exit code and store effect stay exactly what a reachable forge would
+    exit code and store effect stay exactly what a readable board would
     have produced, with one hint line standing in for `freed`/`next`."""
     client = merged_release_client(monkeypatch, body="Work-Item: #72\n\nCloses #72")
     client.closed_issues.add(WORK_ITEM_ISSUE)
     monkeypatch.setattr(issue_claim, "_fetch_issue_reference", _LIVE_FETCH_ISSUE_REFERENCE)
 
     def unreachable() -> tuple[board.Issue, ...]:
-        raise forge.ForgeTransientError("gh: connection reset")
+        raise board_error
 
     monkeypatch.setattr(client, "list_open_board_issues", unreachable)
 

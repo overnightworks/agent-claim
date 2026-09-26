@@ -54,7 +54,7 @@ runner's own git object ids.
 | a delivered `[record]`, present or absent | — | — | ITEM-12..ITEM-14 | — |
 | `item show`/`edit`/`close --json` | — | ITEM-09 | ITEM-15 | ITEM-16 |
 | a malformed piped body | ITEM-27 | — | ITEM-25 | — |
-| another item malformed | ITEM-37 | ITEM-37 | — | — |
+| another item malformed | ITEM-37 | ITEM-37 | — | PIN-29 |
 | the item itself malformed | — | ITEM-38 | ITEM-39 | ITEM-38 |
 | a refusal reached with `--json` | ITEM-17, ITEM-18 | ITEM-17, ITEM-18 | ITEM-17, ITEM-18 | ITEM-17, ITEM-18 |
 

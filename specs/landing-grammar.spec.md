@@ -66,6 +66,7 @@ matching line.
 | PR names a different item / kind mismatch | — | — | LAND-62, LAND-64 | — |
 | work item still open | — | — | LAND-55, LAND-63 | — |
 | forge unreachable right after the release commits | — | — | LAND-38, LAND-50 | — |
+| a malformed state-ref item after the release commits | — | — | LAND-65, LAND-50 | — |
 | `--abandoned` outcome | — | — | LAND-39 | — |
 | issue-less lane, `storage = "state-ref"` | — | — | LAND-56 | — |
 | still-open item a merged PR already declared | — | — | — | LAND-43, LAND-51, LAND-53 |
@@ -147,7 +148,8 @@ sentence>`, not restated.
 - LAND-36 (retired 19.09.2026, issue #359): "work item #<n> is open, not closed" no longer exists; a still-open item is closed instead (LAND-55).
 - [ ] [LAND-37] `release --merged <pr>` for a lane, against a merge commit trailer carrying only `No-Item: docs`, releases the claim without reading any closing reference or pull request body.
 - [ ] [LAND-38] A forge outage after the release committed prints `hint: could not read the board to report what this landing freed (<error>); run \`aco board\` once the forge is reachable`.
-- [ ] [LAND-50] The release LAND-38 reports on never undoes or fails on that hiccup: its claim stays released and its exit code stays `0`, exactly as a reachable forge would have produced.
+- [ ] [LAND-65] A malformed state-ref item (PIN-29) after the release committed prints `hint: could not read the board to report what this landing freed (<refusal>); run \`aco board\` once it is repaired`.
+- [ ] [LAND-50] The release LAND-38 or LAND-65 reports on never undoes or fails on that hiccup: its claim stays released and its exit code stays `0`, exactly as a reachable forge would have produced.
 - [ ] [LAND-39] `--abandoned "<reason>"` never verifies a pull request or reads the board: it prints `RELEASED ...` alone, with no `freed`/`next` line and no `hint` line, ever.
 - [ ] [LAND-47] Under `storage = "state-ref"`, `release --merged <sha|empty>` reads the trunk walk (LAND-01/LAND-02); empty picks the newest commit naming this claim's item.
 - [ ] [LAND-52] That commit must sit on the walked trunk and carry a `Work-Item:` trailer naming this item, or the release refuses by name, exit `2`, before any write.
