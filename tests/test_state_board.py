@@ -2670,10 +2670,11 @@ class TestCliStateRefForge:
         assert out == f"{header_line}\n{closed_body}"
 
     @pytest.mark.parametrize(
-        "arguments",
+        ("arguments", "planted"),
         [
-            pytest.param(["item", "new", "--title", "Fresh Item"], id="item-new"),
-            pytest.param(["item", "show", CHILD_A_ID], id="item-show-of-another-item"),
+            pytest.param(["item", "new", "--title", "Fresh Item"], MALFORMED_ID, id="item-new"),
+            pytest.param(["item", "show", CHILD_B_ID], MALFORMED_ID, id="item-show-of-another"),
+            pytest.param(["item", "show", CHILD_A_ID], CONTAINER_ID, id="item-show-of-a-child"),
         ],
     )
     def test_a_malformed_item_leaves_every_other_item_working(
@@ -2683,11 +2684,13 @@ class TestCliStateRefForge:
         bare_remote: Path,
         worktree: Path,
         arguments: list[str],
+        planted: str,
     ) -> None:
         """Issue #447 proof 1: an item `item new --title ""` once wrote,
         planted by hand, no longer stops `item new` or `item show` of any
-        other item."""
-        item_files = _item_files_with_a_malformed_item(_blank_title_item())
+        other item -- its own child included, whose header needs only the
+        parent's id."""
+        item_files = _item_files_with_a_malformed_item(_blank_title_item(), planted)
         self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, item_files)
 
         assert issue_claim.main(arguments) == 0

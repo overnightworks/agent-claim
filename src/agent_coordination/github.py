@@ -1079,6 +1079,10 @@ class GitHubForge:
             self._issue_reference(value, "parent issue"), body, self._issue_kind(kind_raw)
         )
 
+    def parent_number(self, number: int) -> int | None:
+        parent = self.parent_issue(number)
+        return None if parent is None else parent.reference.number
+
     def list_children(self, number: int) -> tuple[board.ChildItem, ...]:
         """Every sub-issue GitHub records under `number`, open or closed.
 

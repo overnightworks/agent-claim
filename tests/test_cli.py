@@ -331,6 +331,10 @@ class FakeForge:
         self._run()
         return self.parents.get(number)
 
+    def parent_number(self, number: int) -> int | None:
+        parent = self.parent_issue(number)
+        return None if parent is None else parent.reference.number
+
     def list_children(self, number: int) -> tuple[board.ChildItem, ...]:
         self._run()
         return self.children.get(number, ())
@@ -414,6 +418,9 @@ class _MinimalForgeReader:
         raise NotImplementedError
 
     def parent_issue(self, number: int) -> board.ParentIssue | None:
+        return None
+
+    def parent_number(self, number: int) -> int | None:
         return None
 
     def default_branch(self) -> str:

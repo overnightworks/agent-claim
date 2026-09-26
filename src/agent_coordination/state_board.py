@@ -93,6 +93,9 @@ NO_LANDINGS_YET = (
     "#230 slice 6 adds merge-commit-derived landings"
 )
 NO_BARE_ISSUE = "a state-ref item is created by aco item new, never as a bare forge issue"
+# PIN-16/PIN-17's sentences, completing `item <id> ...`.
+_PARENT_MISSING = "is referenced as a parent but does not exist"
+_BLOCKER_MISSING = "is listed as a blocker but does not exist"
 
 
 @dataclass(frozen=True)
@@ -329,13 +332,23 @@ class StateRefBoard:
     def landing(self, number: int) -> forge.Landing:
         raise forge.ForgeUnsupportedError(NO_LANDINGS_YET)
 
-    def parent_issue(self, number: int) -> board.ParentIssue | None:
+    def parent_number(self, number: int) -> int | None:
+        """`number`'s recorded parent, off its own record alone: never
+        decoding that parent, so `item show` still names a malformed one
+        (issue #447), while PIN-16 still refuses one `items/` lacks."""
         decoded = self._decoded(number)
         if decoded is None or decoded.record.parent is None:
             return None
-        parent = self._related(
-            decoded.record.parent, missing="is referenced as a parent but does not exist"
-        )
+        parent_id = decoded.record.parent
+        if parent_id not in self._items and parent_id not in self._malformed:
+            raise MalformedStateTreeError(f"item {parent_id} {_PARENT_MISSING}")
+        return items.item_number(parent_id)
+
+    def parent_issue(self, number: int) -> board.ParentIssue | None:
+        parent_number = self.parent_number(number)
+        if parent_number is None:
+            return None
+        parent = self._related(self._by_number[parent_number], missing=_PARENT_MISSING)
         return board.ParentIssue(
             board.IssueReference(self.repository.path, parent.record.number),
             parent.body,
@@ -380,7 +393,7 @@ class StateRefBoard:
             return ()
         dependencies: list[board.IssueDependency] = []
         for blocker_id in decoded.record.blocked_by:
-            blocker = self._related(blocker_id, missing="is listed as a blocker but does not exist")
+            blocker = self._related(blocker_id, missing=_BLOCKER_MISSING)
             closed_at = None
             if blocker.record.closed_at is not None:
                 closed_at = datetime.fromisoformat(blocker.record.closed_at).astimezone(UTC)
@@ -549,9 +562,9 @@ class StateRefBoard:
                 f"with aco item close {item_id}"
             )
         if record.parent is not None:
-            self._related(record.parent, missing="is referenced as a parent but does not exist")
+            self._related(record.parent, missing=_PARENT_MISSING)
         for blocker_id in record.blocked_by:
-            self._related(blocker_id, missing="is listed as a blocker but does not exist")
+            self._related(blocker_id, missing=_BLOCKER_MISSING)
 
     def _closing_write(self, number: int) -> LandingWrite:
         """`number`'s own close write, composed but not written (issues

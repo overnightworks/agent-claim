@@ -3560,13 +3560,11 @@ def _item_state_text(state: forge.ItemState) -> str:
     return "open" if state is forge.ItemState.OPEN else "closed"
 
 
-def _item_parent_id(parent: board.ParentIssue | None) -> str | None:
-    return None if parent is None else items.format_item_id(parent.reference.number)
+def _item_parent_id(parent: int | None) -> str | None:
+    return None if parent is None else items.format_item_id(parent)
 
 
-def _item_header(
-    number: int, reference: forge.ItemReference, parent: board.ParentIssue | None
-) -> str:
+def _item_header(number: int, reference: forge.ItemReference, parent: int | None) -> str:
     """`item show`'s one header line: id, number, state, parent, and origin
     -- the same shape regardless of which forge answered the reads, since an
     id (`items.format_item_id`) is a pure encoding of `number`, never a
@@ -3596,7 +3594,7 @@ def _cmd_item_show(parsed: argparse.Namespace, session: _ReadSession) -> int:
         reference = client.item_reference(number)
         if reference.state is forge.ItemState.MISSING:
             raise protocol.ClaimUnavailableError(_missing_item_refusal(number, client))
-        parent = client.parent_issue(number)
+        parent = client.parent_number(number)
     except protocol.ClaimError as error:
         return _refuse(ItemReason.PRECONDITION_FAILED, error, as_json=as_json)
     body = reference.body or ""
