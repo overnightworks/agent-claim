@@ -6155,11 +6155,16 @@ def _adoptable_child(
     also a `TASK` (never the container itself, never an idea-labelled item)
     and its body still names `container` as the parent `_cut_child_body`
     wrote for it; a recovery orphan is always exactly that shape, and
-    nothing else can fake it. An orphan match is linked under `container`
-    right here before it is returned, so the caller's remaining steps treat
-    it exactly like an already-linked child; the container's own issue is
-    never created twice for it. More than one open match refuses by name
-    rather than guess which one the failed cut actually created. A closed
+    nothing else can fake it. An orphan GitHub created without any type
+    (`forge.ForgeIssueTypeNotSetError`, issue #444) is this cut's own child
+    too, but adopting it would leave it untyped: it refuses by number until
+    its type is set by hand, and the caller runs this before `--not-a-twin`
+    is read, so a retry never mints a second child beside it. An orphan
+    match is linked under `container` right here before it is returned, so
+    the caller's remaining steps treat it exactly like an already-linked
+    child; the container's own issue is never created twice for it. More
+    than one open match refuses by name rather than guess which one the
+    failed cut actually created. A closed
     linked child with that title refuses too -- adoption finishes an
     interrupted cut, it does not reopen a closed one. `None` when nothing
     matches, so the caller falls through to `create_child`.
@@ -6170,17 +6175,17 @@ def _adoptable_child(
         if client.item_reference(child.number).title == title
     ]
     open_linked = [child.number for child in linked if child.state is board.ChildState.OPEN]
-    orphans = [
-        issue.number
+    orphans = {
+        issue.number: issue.kind
         for issue in client.list_open_board_issues()
         if issue.title == title
         and issue.number != container
-        and issue.kind is body.ItemKind.TASK
+        and issue.kind in (body.ItemKind.TASK, None)
         and not board.has_label(issue.labels, idea_label)
         and _orphan_names_container(issue.body, container)
         and client.parent_issue(issue.number) is None
-    ]
-    open_matches = open_linked + orphans
+    }
+    open_matches = [*open_linked, *orphans]
     if len(open_matches) > 1:
         named = ", ".join(f"#{number}" for number in open_matches)
         raise protocol.ClaimUnavailableError(
@@ -6189,6 +6194,11 @@ def _adoptable_child(
         )
     if open_matches:
         [number] = open_matches
+        if number in orphans and orphans[number] is None:
+            raise protocol.ClaimUnavailableError(
+                f"#{number} is this cut's own child, still without its type "
+                f"{github.ITEM_KIND_TYPE_NAMES[body.ItemKind.TASK]}; {CUT_TYPE_RECOVERY}"
+            )
         if number in orphans:
             client.link_child(container, number)
         return board.ChildItem(number, board.ChildState.OPEN)
@@ -6339,6 +6349,7 @@ def _cut_row_scope(
 
 
 CUT_RERUN_RECOVERY = "re-run the same cut -- it adopts the child"
+CUT_TYPE_RECOVERY = f"set that type on the forge by hand, then {CUT_RERUN_RECOVERY}"
 
 
 def _cut_slice(
@@ -6379,9 +6390,7 @@ def _cut_slice(
             step = f"remove row {link.index} from #{number}'s agent-claim block"
             _link_created_child(client, number, new_body, child, step)
     except forge.ForgeIssueTypeNotSetError as error:
-        raise _PartialWriteError(
-            error, recovery=f"set that type on the forge by hand, then {CUT_RERUN_RECOVERY}"
-        ) from error
+        raise _PartialWriteError(error, recovery=CUT_TYPE_RECOVERY) from error
     except forge.ForgePartialChildCreationError as error:
         raise _PartialWriteError(error, recovery=CUT_RERUN_RECOVERY) from error
     _print_cut_result(

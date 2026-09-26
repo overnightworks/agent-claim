@@ -191,7 +191,7 @@ class FakeForge:
         )
         if self.drop_created_issue_type:
             raise forge.ForgeIssueTypeNotSetError(
-                created=number, type_name=github._ITEM_KIND_TYPE_NAMES[kind]
+                created=number, type_name=github.ITEM_KIND_TYPE_NAMES[kind]
             )
         return number
 
@@ -4162,6 +4162,45 @@ def test_cut_adopts_the_orphan_after_a_relation_partial_failure(
     remaining = body.locate_agent_claim_block(client.item_bodies[CUT_CONTAINER]).data
     assert remaining["slice"] == []
     assert capsys.readouterr().out == f"ADOPTED #{CUT_CONTAINER} row 1 -> #{child}\n"
+
+
+@pytest.mark.parametrize("flags", [(), ("--not-a-twin",)], ids=["plain", "not_a_twin"])
+def test_cut_retry_names_its_untyped_child_until_its_type_is_set_then_adopts_it(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    flags: tuple[str, ...],
+) -> None:
+    """Issue #444 data safety (CUT-19, CUT-33): GitHub drops the type when
+    the caller lacks push access, so the first cut leaves an untyped,
+    unlinked orphan. Re-running the same command -- `--not-a-twin` included
+    -- refuses by that orphan's number and never mints a second child; once
+    the type is set by hand, the same re-run adopts it."""
+    client = _configured_board_client(monkeypatch, tmp_path, open_issues=(_one_slice_container(),))
+    _write_block_pin(tmp_path)
+    client.board_issues = (_one_slice_container(),)
+    monkeypatch.setattr(client, "list_open_board_issues", lambda: client.board_issues)
+    client.drop_created_issue_type = True
+    command = ["--repo", REPOSITORY, "cut", str(CUT_CONTAINER), "--title", "Scheibe 1", *flags]
+
+    assert issue_claim.main(command) == 2
+    child = client.next_created_child_number - 1
+    capsys.readouterr()
+    client.drop_created_issue_type = False
+
+    assert issue_claim.main(command) == 2
+    assert capsys.readouterr().err == (
+        f"ERROR: #{child} is this cut's own child, still without its type Task; "
+        "set that type on the forge by hand, then re-run the same cut -- it adopts the child\n"
+    )
+    client.board_issues = tuple(
+        replace(issue, kind=body.ItemKind.TASK) if issue.number == child else issue
+        for issue in client.board_issues
+    )
+
+    assert issue_claim.main(command) == 0
+    assert capsys.readouterr().out == f"ADOPTED #{CUT_CONTAINER} row 1 -> #{child}\n"
+    assert len(client.created_issues) == 1
 
 
 RULE_ITEM = 90

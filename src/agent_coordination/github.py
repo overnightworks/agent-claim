@@ -72,9 +72,10 @@ _ISSUE_TYPE_KINDS: dict[str, ItemKind] = {
     "feature": ItemKind.FEATURE,
 }
 # The write-side names GitHub's issue-type API expects (`cut`'s
-# `create_child`) -- derived from the one read-side mapping above so the
-# type name has a single owner, capitalized the way GitHub itself names them.
-_ITEM_KIND_TYPE_NAMES: dict[ItemKind, str] = {
+# `create_child`), also the names a refusal tells a person to set -- derived
+# from the one read-side mapping above so the type name has a single owner,
+# capitalized the way GitHub itself names them.
+ITEM_KIND_TYPE_NAMES: dict[ItemKind, str] = {
     kind: name.capitalize() for name, kind in _ISSUE_TYPE_KINDS.items()
 }
 # GitHub's issues-list pagination fills every page but the last, so a result
@@ -1341,7 +1342,7 @@ class GitHubForge:
         """Create a fresh issue of `kind`, linked to no parent -- `item new`'s
         own write without `--parent` (issue #444), and `create_child`'s first
         write. GitHub's REST issue create takes the organization's issue type
-        by its name (`_ITEM_KIND_TYPE_NAMES`), so no type id is ever looked up.
+        by its name (`ITEM_KIND_TYPE_NAMES`), so no type id is ever looked up.
 
         That create drops the type silently when the caller lacks push
         access, so the response's own `type` is read back: an issue created
@@ -1353,7 +1354,7 @@ class GitHubForge:
         raw = self._run(
             ["api", "--method", "POST", f"repos/{self.repository}/issues", "--input", "-"],
             input_data=json.dumps(
-                {"title": title, "body": body, "type": _ITEM_KIND_TYPE_NAMES[kind]}
+                {"title": title, "body": body, "type": ITEM_KIND_TYPE_NAMES[kind]}
             ).encode("utf-8"),
         )
         try:
@@ -1365,7 +1366,7 @@ class GitHubForge:
         number = created.get("number") if isinstance(created, dict) else None
         if isinstance(number, bool) or not isinstance(number, int) or number < 1:
             raise forge.ForgeMalformedResponseError("GitHub did not return a created issue")
-        type_name = _ITEM_KIND_TYPE_NAMES[kind]
+        type_name = ITEM_KIND_TYPE_NAMES[kind]
         issue_type = created.get("type")
         if not isinstance(issue_type, dict) or issue_type.get("name") != type_name:
             raise forge.ForgeIssueTypeNotSetError(created=number, type_name=type_name)
