@@ -16447,7 +16447,7 @@ def test_cli_reset_confirm_over_an_unreadable_schema_refuses_without_the_flag(
     assert _lineage_observation(repository) == (None, None)
 
 
-def test_cli_reset_force_unreadable_exports_deletes_and_bootstraps_a_readable_state(
+def test_cli_reset_force_unreadable_exports_deletes_and_bootstraps_a_fresh_state(
     capsys: pytest.CaptureFixture[str], unreadable_reset: tuple[Path, Path, str, Path]
 ) -> None:
     repository, bare_remote, tip, export_dir = unreadable_reset
