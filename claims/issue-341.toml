@@ -1,0 +1,8 @@
+claim_id = "febb3625f219498c821ea5a0114b9954"
+agent = "Claude head (coordinator)"
+role = "builder"
+base = "3a017a59e198392fd9314d4ac888e64a14c6f83a"
+branch = "claude/issue-341-reset-unreadable-schema"
+scope = ["specs/ref-store-cas.spec.md", "specs/reset.spec.md", "src/agent_coordination/cli.py", "src/agent_coordination/protocol.py", "src/agent_coordination/store.py", "tests/test_cli.py", "tests/test_store.py"]
+opened_commit = "03d07c1eca29c969565e8e79c42febb50a8e15fc"
+whole_reason = "ein Löschpfad: Lesen, Export, Verweigerung und Ausführung bei unlesbarem Schema gehören zusammen"
