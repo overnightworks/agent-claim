@@ -119,6 +119,15 @@ def _parsed_rule_request(fields: Mapping[str, list[str]]) -> _RuleRequest | None
     return _RuleRequest(int(item), int(line), outcome, _field(fields, "note"))
 
 
+class _ClientDisconnectedError(Exception):
+    """Raised only by `_BoardRequestHandler._respond`'s own socket write
+    (issue #440 review): the one place this handler can honestly call a
+    `BrokenPipeError`/`ConnectionResetError` a client hanging up rather than
+    a server defect that merely raises the same exception type from
+    somewhere else -- `render_page` or `rule_item` reading a `gh`/`git`
+    subprocess whose own pipe broke, say."""
+
+
 class _BoardHTTPServer(ThreadingHTTPServer):
     """`ThreadingHTTPServer` carrying `board --serve`'s own state: the
     per-start token and the two caller-supplied functions every request
@@ -147,12 +156,15 @@ class _BoardHTTPServer(ThreadingHTTPServer):
         escape -- including the one an operator's browser causes just by
         navigating away mid-response, once the served page stopped costing
         19 seconds to build (issue #440): the write side of its socket is
-        already gone, so the next `wfile.write` raises `BrokenPipeError` or
-        `ConnectionResetError`. Both are a client hanging up, not a served
-        page bug, so only those two stay quiet; anything else still gets the
-        stdlib's own traceback."""
+        already gone, so the next write to it raises `BrokenPipeError` or
+        `ConnectionResetError`. Only `_ClientDisconnectedError` -- raised
+        exclusively by `_BoardRequestHandler._respond`'s own socket write,
+        never by `render_page`/`rule_item` building or writing the board
+        itself -- stays quiet, so a `BrokenPipeError`/`ConnectionResetError`
+        from anywhere else still gets the stdlib's own traceback instead of
+        being mistaken for the same client hang-up."""
         _, error, _ = sys.exc_info()
-        if isinstance(error, BrokenPipeError | ConnectionResetError):
+        if isinstance(error, _ClientDisconnectedError):
             return
         super().handle_error(request, client_address)
 
@@ -174,15 +186,20 @@ class _BoardRequestHandler(BaseHTTPRequestHandler):
         content_type: str = _PLAIN_CONTENT_TYPE,
         location: str | None = None,
     ) -> None:
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", _NO_STORE)
-        if location is not None:
-            self.send_header("Location", location)
-        self.end_headers()
-        if body:
-            self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", _NO_STORE)
+            if location is not None:
+                self.send_header("Location", location)
+            self.end_headers()
+            if body:
+                self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError) as error:
+            # The only socket write this response makes, so the only place a
+            # client hang-up can honestly originate from (issue #440 review).
+            raise _ClientDisconnectedError() from error
 
     def _authorized(self, server: _BoardHTTPServer, candidate: str | None) -> bool:
         return candidate is not None and hmac.compare_digest(candidate, server.token)

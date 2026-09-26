@@ -20,8 +20,10 @@ import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from http import HTTPStatus
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 import pytest
@@ -1052,20 +1054,54 @@ def test_new_token_without_serve_reports_invalid_usage_under_json(
     _assert_json_refusal_object(captured.err, captured.out, reason="invalid_usage")
 
 
+class _BrokenWfile:
+    """A response stream that fails exactly the way a client's closed
+    socket does, without opening a real one -- deterministic where a real
+    disconnect's timing is not."""
+
+    def write(self, _data: bytes) -> int:
+        raise BrokenPipeError(32, "Broken pipe")
+
+
+def test_respond_wraps_its_own_socket_write_failure_as_a_client_disconnect() -> None:
+    """`_BoardRequestHandler._respond`'s socket write is the one place this
+    handler can honestly call a `BrokenPipeError`/`ConnectionResetError` a
+    client hanging up (issue #440 review) -- wrapped into
+    `_ClientDisconnectedError` so `handle_error` can later tell this write
+    failure apart from the same exception type raised by
+    `render_page`/`rule_item` doing something else entirely."""
+    handler = cast(
+        board_serve._BoardRequestHandler,
+        SimpleNamespace(
+            send_response=lambda *_args: None,
+            send_header=lambda *_args: None,
+            end_headers=lambda: None,
+            wfile=_BrokenWfile(),
+        ),
+    )
+
+    with pytest.raises(board_serve._ClientDisconnectedError):
+        board_serve._BoardRequestHandler._respond(handler, HTTPStatus.OK, b"data")
+
+
 @pytest.mark.parametrize(
     ("error", "traceback_printed"),
     [
-        pytest.param(BrokenPipeError(32, "Broken pipe"), False, id="broken-pipe"),
-        pytest.param(ConnectionResetError(104, "Connection reset"), False, id="reset"),
+        pytest.param(board_serve._ClientDisconnectedError(), False, id="client-disconnected"),
+        pytest.param(BrokenPipeError(32, "Broken pipe"), True, id="broken-pipe-elsewhere"),
+        pytest.param(ConnectionResetError(104, "Connection reset"), True, id="reset-elsewhere"),
         pytest.param(ValueError("handler bug"), True, id="other-error"),
     ],
 )
-def test_a_client_hanging_up_mid_response_leaves_no_traceback(
+def test_handle_error_stays_quiet_only_for_responds_own_disconnect(
     capsys: pytest.CaptureFixture[str], error: Exception, traceback_printed: bool
 ) -> None:
-    """Issue #440: a browser that navigates away while the page is still
-    being written is a client hanging up, not a server defect -- only any
-    other handler error keeps the stdlib's own traceback on stderr."""
+    """Issue #440 review: only `_ClientDisconnectedError` -- raised exclusively by
+    `_respond`'s own socket write -- stays quiet. A bare
+    `BrokenPipeError`/`ConnectionResetError` raised anywhere else (a
+    `render_page`/`rule_item` defect that merely shares the type) still
+    prints the stdlib's traceback instead of being mistaken for a client
+    hanging up."""
     server = board_serve._BoardHTTPServer(
         ("127.0.0.1", 0), "token", _noop_render_page, _noop_rule_item
     )
