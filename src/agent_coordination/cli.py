@@ -6431,14 +6431,26 @@ class _ServedBoardCache:
     `GET` (or the first after a rebuild) and reused by every one after it,
     instead of paying `_board_page`'s full forge fetch again on every
     request -- the fix for the operator's own report of a 19s-per-load
-    board. A successful `POST /rule` or an explicit `?reload=1` clears
-    `page`, so the next `GET` rebuilds it. `lock` serializes a rebuild
+    board. A successful `POST /rule` discards `built`, so the next `GET`
+    rebuilds it; an explicit `?reload=1` rebuilds on that very `GET`. `lock` serializes a rebuild
     against a concurrent request: `ThreadingHTTPServer` runs each one on its
     own thread."""
 
-    page: board_html.BoardPage | None = None
-    built_at: datetime = field(default_factory=lambda: datetime.min.replace(tzinfo=UTC))
+    read_session: _ReadSession
+    built: tuple[board_html.BoardPage, datetime] | None = None
     lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def held(self, *, reload: bool) -> tuple[board_html.BoardPage, datetime]:
+        """The held page and when it was built, rebuilding it first when
+        nothing is held yet or `reload` asks for a fresh one."""
+        with self.lock:
+            if self.built is None or reload:
+                self.built = (_board_page(self.read_session), datetime.now(UTC))
+            return self.built
+
+    def discard(self) -> None:
+        with self.lock:
+            self.built = None
 
 
 def _board_server(parsed: argparse.Namespace, session: _WriteSession) -> board_serve.BoardServer:
@@ -6458,7 +6470,7 @@ def _board_server(parsed: argparse.Namespace, session: _WriteSession) -> board_s
     client = session.forge.writer()
     read_session = _ReadSession(forge=session.forge)
     token_holder: list[str] = []
-    cache = _ServedBoardCache()
+    cache = _ServedBoardCache(read_session)
 
     def resolve_token() -> str:
         token = workspace.board_token(
@@ -6468,23 +6480,20 @@ def _board_server(parsed: argparse.Namespace, session: _WriteSession) -> board_s
         return token
 
     def render_page(refused: str | None, reload: bool) -> str:
-        with cache.lock:
-            if cache.page is None or reload:
-                cache.page = _board_page(read_session)
-                cache.built_at = datetime.now(UTC)
-            page, built_at = cache.page, cache.built_at
+        page, built_at = cache.held(reload=reload)
         served = board_html.ServedRuleForm(
             token=token_holder[0], refused=refused, age=datetime.now(UTC) - built_at
         )
         return board_html.render(page, served=served)
 
     def post_rule(item: int, line: int, ruling: str, note: str | None) -> board_serve.RuleOutcome:
+        # A refused click (a line already ruled elsewhere) means the held
+        # page is stale too, so every click rebuilds, not only a write.
+        cache.discard()
         try:
             rule_item(client, item, line, ruling, note)
         except protocol.ClaimError as error:
             return board_serve.RuleOutcome(refusal=str(error))
-        with cache.lock:
-            cache.page = None
         return board_serve.RuleOutcome(refusal=None)
 
     return board_serve.start(

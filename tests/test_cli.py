@@ -390,7 +390,7 @@ class _MinimalForgeReader:
         return forge.ItemReference(state=forge.ItemState.MISSING)
 
     def item_references(self, numbers: Iterable[int]) -> Mapping[int, forge.ItemReference]:
-        return {number: self.item_reference(number) for number in numbers}
+        return dict.fromkeys(numbers, forge.ItemReference(state=forge.ItemState.MISSING))
 
     def landing(self, number: int) -> forge.Landing:
         raise NotImplementedError
@@ -748,11 +748,16 @@ def test_board_shows_measured_estimates_across_json_and_html(
     assert thirty_two["size"] is None
     assert thirty_two["estimate"] is None
     assert payload["measurements"]["classes"]
+    # Issue #440: both closed items come from one batched read -- open
+    # issues, open PRs, merged PRs, and that one batch, never one per item.
+    assert sorted(client.issue_reference_lookups) == [33, 34]
+    assert payload["requests"] == client.requests == 4
 
     assert issue_claim.main([*board_args, "--html"]) == 0
     html_page = capsys.readouterr().out
     assert "Messungen" in html_page
     assert measured_estimate_cell in html_page
+    assert "<dt>Stand</dt>" not in html_page
 
 
 def test_board_shows_the_empty_measurements_sentence_with_nothing_measured(

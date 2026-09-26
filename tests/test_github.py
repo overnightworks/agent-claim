@@ -1284,7 +1284,7 @@ def test_github_adapter_item_references_reads_every_number_from_one_batch(
             }
         )
 
-    client = GitHubForge(github._repository_id("example/agent-claim"), run=run)
+    client = GitHubForge(github._repository_id(REPOSITORY), run=run)
 
     assert client.item_references((10, 20, 30)) == {
         10: forge.ItemReference(forge.ItemState.OPEN, "Open one", "Do it."),
@@ -1299,7 +1299,7 @@ def test_github_adapter_item_references_of_nothing_costs_no_round_trip() -> None
     def _fail(_arguments: list[str]) -> str:
         raise AssertionError("an empty batch must never call gh")
 
-    client = GitHubForge(github._repository_id("example/agent-claim"), run=_fail)
+    client = GitHubForge(github._repository_id(REPOSITORY), run=_fail)
 
     assert client.item_references(()) == {}
 
@@ -1328,7 +1328,7 @@ def test_github_adapter_item_references_splits_into_blocks_of_the_batch_size(
             }
         )
 
-    client = GitHubForge(github._repository_id("example/agent-claim"), run=run)
+    client = GitHubForge(github._repository_id(REPOSITORY), run=run)
 
     references = client.item_references(numbers)
 
@@ -1366,7 +1366,7 @@ def test_github_adapter_item_references_fails_loud_on_a_malformed_node(
     node: object, match: str
 ) -> None:
     client = GitHubForge(
-        github._repository_id("example/agent-claim"),
+        github._repository_id(REPOSITORY),
         run=lambda _arguments: json.dumps({"n0": node}),
     )
 
@@ -1374,12 +1374,19 @@ def test_github_adapter_item_references_fails_loud_on_a_malformed_node(
         client.item_references((10,))
 
 
-def test_github_adapter_item_references_fails_loud_on_an_unparseable_response() -> None:
-    client = GitHubForge(
-        github._repository_id("example/agent-claim"), run=lambda _arguments: "not-json"
-    )
+@pytest.mark.parametrize(
+    ("raw", "match"),
+    [
+        pytest.param("not-json", "invalid batched item reference JSON", id="not-json"),
+        pytest.param("null", "malformed batched item reference", id="no-repository"),
+    ],
+)
+def test_github_adapter_item_references_fails_loud_on_a_malformed_response(
+    raw: str, match: str
+) -> None:
+    client = GitHubForge(github._repository_id(REPOSITORY), run=lambda _arguments: raw)
 
-    with pytest.raises(ClaimError, match="invalid batched item reference JSON"):
+    with pytest.raises(ClaimError, match=match):
         client.item_references((10,))
 
 

@@ -17,8 +17,8 @@ refusal is `specs/storage-pin.spec.md`'s (PIN-01); the ruling a click on
 that page writes is `specs/rule.spec.md`'s (RULE-01..09);
 `specs/output.spec.md` owns the `--json` envelope itself (OUT-nn: key
 order, `ok`, `message`) that wraps BOARD-11's own top-level keys.
-`--serve`'s own request/response wire contract is not this lane's to invent
-and is not specified here. `board`'s own ranking, scoring, and per-item
+`--serve`'s own request/response wire contract is not specified here beyond
+the held page, its age, and its rebuilds (BOARD-46..49). `board`'s own ranking, scoring, and per-item
 field semantics (`score`, `priority_bucket`, `age_days`, ...) are
 pre-existing, untouched behaviour this lane does not re-derive into
 criteria; each item's own `actionable`/`actionable_reason` fields are the
@@ -56,6 +56,8 @@ included.
 | an already-ruled `[[expectation]]` line | — | BOARD-36, BOARD-37, BOARD-38 | BOARD-36, BOARD-37, BOARD-38 |
 | `--new-token` given without `--serve` | BOARD-39, BOARD-43 | BOARD-39 | — |
 | the token file's own content, or its directory's mode | — | — | BOARD-40, BOARD-41 |
+| a repeated page request, a ruling click, or the reload link | — | — | BOARD-46, BOARD-47, BOARD-48 |
+| a client hanging up mid-response | — | — | BOARD-49 |
 
 ## No output mode
 
@@ -122,6 +124,10 @@ does, before either reads a single issue -- cited there, not restated.
 - [ ] [BOARD-39] `--new-token` without `--serve` refuses `--new-token requires --serve`, exit `2`, before any read (see E-BOARD-14).
 - [ ] [BOARD-40] A token file's content that is not one `secrets.token_urlsafe(32)` value refuses `board token at <path> is not a valid token; pass --new-token`, exit `2` (see E-BOARD-13).
 - [ ] [BOARD-41] A symlinked or others-writable level of `<token-path>` refuses `board token directory <path> must be private and owned by this user (found mode <mode>)`, exit `2` (see E-BOARD-12).
+- [ ] [BOARD-46] A repeated page request answers from the page the first one built; a forge change shows only after a ruling click or the reload link (see E-BOARD-18).
+- [ ] [BOARD-47] Every served page shows its age and a reload link, `Stand` `vor <h>h <m>m` `neu laden`; the `--html` page carries neither (see E-BOARD-18).
+- [ ] [BOARD-48] Every ruling click, written or refused, rebuilds the page, so the page it redirects to shows the line as the forge now holds it.
+- [ ] [BOARD-49] A client that hangs up mid-response leaves stderr empty; any other request error still prints its traceback.
 
 ## Never
 
@@ -245,9 +251,7 @@ http://127.0.0.1:<port>/?t=<token>
 
 The line above is the whole of this transcript: `--serve` then blocks in
 its request loop, so no further line is printed until it is stopped.
-`--serve`'s own request handling beyond that one line is untouched,
-pre-existing behaviour outside this file's scope; `tests/test_board_serve.py`
-proves it directly.
+What a request to that URL returns is BOARD-46..49's (see E-BOARD-18).
 
 ### E-BOARD-08 — a ruled line moves into its item's `Themen` entry
 
@@ -337,3 +341,15 @@ $ aco board
 2> ERROR: aco board requires --json, --html, or --serve
 exit 2
 ```
+
+### E-BOARD-18 — the served page shows its age and a reload link
+
+Setup: bare-remote, fake `gh`, a running `aco board --serve`; the page's
+facts list, two minutes after the first request built it
+
+```console
+$ curl -s 'http://127.0.0.1:<port>/?t=<token>'
+<div><dt>Stand</dt><dd>vor 0h 2m <a class="reload" href="/?t=<token>&amp;reload=1">neu laden</a></dd></div>
+```
+
+A request to the link's URL rebuilds the page and shows `vor 0h 0m` again.

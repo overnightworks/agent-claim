@@ -153,12 +153,16 @@ class ServedBoard:
     server: board_serve.BoardServer
     client: FakeForge
 
-    def get(self, *, token: str | None, refused: str | None = None) -> _Response:
+    def get(
+        self, *, token: str | None, refused: str | None = None, reload: bool = False
+    ) -> _Response:
         params = {}
         if token is not None:
             params[board_serve.TOKEN_FIELD] = token
         if refused is not None:
             params[board_serve.REFUSED_FIELD] = refused
+        if reload:
+            params[board_serve.RELOAD_FIELD] = "1"
         query = f"?{urlencode(params)}" if params else ""
         return _request(self.server, "GET", f"/{query}")
 
@@ -271,6 +275,7 @@ def test_post_rule_with_a_valid_token_writes_exactly_one_ruling_and_redirects(
     three buttons -- it shows the ruled state, the note, and the
     `aco ask` hint instead, inside the item's own collapsible history."""
     token = served_board.server.token
+    assert OPEN_LINE_TEXT in served_board.get(token=token).body.decode("utf-8")
     response = served_board.post_rule(
         {"t": token, "item": str(SERVED_ITEM), "line": "1", "outcome": outcome, "note": note}
     )
@@ -292,6 +297,28 @@ def test_post_rule_with_a_valid_token_writes_exactly_one_ruling_and_redirects(
     assert f'<code>aco ask {SERVED_ITEM} --text "…"</code>' in follow_up
 
 
+def test_a_repeated_get_serves_the_held_page_with_its_age_until_an_explicit_reload(
+    served_board: ServedBoard,
+) -> None:
+    """Issue #440: the page is built once and held -- a change on the forge
+    stays invisible to a plain repeated `GET` and appears after the page's
+    own reload link, which every served page shows next to its age."""
+    token = served_board.server.token
+    first = served_board.get(token=token).body.decode("utf-8")
+    served_board.client.board_issues = (
+        replace(served_board.client.board_issues[0], title="Renamed item"),
+    )
+
+    repeated = served_board.get(token=token).body.decode("utf-8")
+    reloaded = served_board.get(token=token, reload=True).body.decode("utf-8")
+
+    stand = "<dt>Stand</dt><dd>vor 0h 0m"
+    reload_link = f'<a class="reload" href="/?t={token}&amp;reload=1">neu laden</a>'
+    assert stand in first and reload_link in first
+    assert "Plain item" in repeated and "Renamed item" not in repeated
+    assert "Renamed item" in reloaded
+
+
 def test_post_rule_with_a_wrong_token_is_forbidden_and_writes_nothing(
     served_board: ServedBoard,
 ) -> None:
@@ -306,8 +333,11 @@ def test_post_rule_with_a_wrong_token_is_forbidden_and_writes_nothing(
 def test_post_rule_on_an_already_ruled_line_writes_nothing_and_shows_the_refusal(
     served_board: ServedBoard,
 ) -> None:
+    """Issue #440: the line was ruled behind the held page's back, so the
+    refused click rebuilds too and the page shows the line ruled."""
     token = served_board.server.token
-    served_board.post_rule({"t": token, "item": str(SERVED_ITEM), "line": "1", "outcome": "yes"})
+    served_board.get(token=token)
+    issue_claim.rule_item(served_board.client, SERVED_ITEM, 1, "yes", None)
     ruled_body = served_board.client.item_bodies[SERVED_ITEM]
 
     second = served_board.post_rule(
@@ -320,8 +350,9 @@ def test_post_rule_on_an_already_ruled_line_writes_nothing_and_shows_the_refusal
     refused_sentence = parse_qs(urlsplit(second.location).query)["refused"][0]
     assert "already ruled" in refused_sentence
 
-    page = served_board.get(token=token, refused=refused_sentence)
-    assert refused_sentence in page.body.decode("utf-8")
+    page = served_board.get(token=token, refused=refused_sentence).body.decode("utf-8")
+    assert refused_sentence in page
+    assert '<div class="cards"><p class="empty">nichts</p></div>' in page
 
 
 def test_an_unknown_path_is_not_found(served_board: ServedBoard) -> None:
@@ -1017,6 +1048,32 @@ def test_new_token_without_serve_reports_invalid_usage_under_json(
     assert exit_code == 2
     assert captured.err == "ERROR: --new-token requires --serve\n"
     _assert_json_refusal_object(captured.err, captured.out, reason="invalid_usage")
+
+
+@pytest.mark.parametrize(
+    ("error", "traceback_printed"),
+    [
+        pytest.param(BrokenPipeError(32, "Broken pipe"), False, id="broken-pipe"),
+        pytest.param(ConnectionResetError(104, "Connection reset"), False, id="reset"),
+        pytest.param(ValueError("handler bug"), True, id="other-error"),
+    ],
+)
+def test_a_client_hanging_up_mid_response_leaves_no_traceback(
+    capsys: pytest.CaptureFixture[str], error: Exception, traceback_printed: bool
+) -> None:
+    """Issue #440: a browser that navigates away while the page is still
+    being written is a client hanging up, not a server defect -- only any
+    other handler error keeps the stdlib's own traceback on stderr."""
+    server = board_serve._BoardHTTPServer(
+        ("127.0.0.1", 0), "token", _noop_render_page, _noop_rule_item
+    )
+    with server, socket.socket() as request:
+        try:
+            raise error
+        except Exception:
+            server.handle_error(request, ("127.0.0.1", 1))
+
+    assert ("Traceback" in capsys.readouterr().err) is traceback_printed
 
 
 def _noop_render_page(_refused: str | None, _reload: bool) -> str:

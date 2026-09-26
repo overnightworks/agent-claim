@@ -60,8 +60,8 @@ class ServedRuleForm:
     switches a card's affordance from a copyable command to a live form."""
 
     token: str
+    age: timedelta
     refused: str | None = None
-    age: timedelta | None = None
 
 
 @dataclass(frozen=True)
@@ -645,10 +645,9 @@ def _origin_line(page: BoardPage) -> str:
 
 def _render_stand(served: ServedRuleForm | None) -> str:
     """`board --serve`'s own held-page age, next to an explicit reload
-    control (issue #440): empty for `board --html`'s static page and for a
-    served page's very first render, before `cli._board_server` has built
-    anything to hold an age for."""
-    if served is None or served.age is None:
+    control (issue #440): empty for `board --html`'s static page, which is
+    built fresh on every call and so has no age to show."""
+    if served is None:
         return ""
     token = html.escape(served.token)
     return (
