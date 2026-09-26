@@ -16217,6 +16217,43 @@ def test_item_new_retry_on_github_never_creates_a_second_issue(
     assert (status, capsys.readouterr().err, len(client.created_issues)) == (2, err, 1)
 
 
+@pytest.mark.parametrize(
+    ("copy_kind", "copy_parent", "flags"),
+    [
+        pytest.param(body.ItemKind.FEATURE, None, (), id="another_kind"),
+        pytest.param(None, 80, (), id="under_another_parent"),
+        pytest.param(None, 80, ("--parent", "79"), id="under_another_parent_than_requested"),
+        pytest.param(None, 79, (), id="under_a_parent_this_run_never_names"),
+    ],
+)
+def test_item_new_not_a_twin_creates_beside_an_identical_issue_no_earlier_run_wrote(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    copy_kind: body.ItemKind | None,
+    copy_parent: int | None,
+    flags: tuple[str, ...],
+) -> None:
+    """Issue #444: `--not-a-twin` creates anyway. An open issue with the same
+    title and body is an earlier run's own creation only when this run could
+    have written it -- untyped or of `--kind`, under no parent or
+    `--parent`'s; another kind or another parent makes it a deliberate copy,
+    and the flag creates beside it."""
+    client = _item_new_github_client(monkeypatch, tmp_path, _ITEM_NEW_BODY)
+    client.board_issues = (
+        *client.board_issues,
+        board_issue(952, "Write the docs", _ITEM_NEW_BODY, kind=copy_kind),
+    )
+    if copy_parent is not None:
+        client.parents[952] = board.ParentIssue(
+            board.IssueReference(client.repository.path, copy_parent), ""
+        )
+
+    status = issue_claim.main(["item", "new", "--title", "Write the docs", "--not-a-twin", *flags])
+
+    assert (status, capsys.readouterr().out, len(client.created_issues)) == (0, "#900\n", 1)
+
+
 def test_item_new_json_reports_ok_reason_created(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:

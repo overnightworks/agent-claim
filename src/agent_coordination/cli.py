@@ -3254,32 +3254,36 @@ def _refuse_earlier_creation(
     """`item new`'s own retry identity on GitHub (issue #444): an open issue
     carrying exactly `--title` and the final `new_body` -- line endings aside,
     since a GitHub GET returns CRLF -- is an earlier run's own creation whose
-    relation write, type, or response failed, never a look-alike. It refuses
-    by number with what is left, whatever `--not-a-twin` says, so a retry
-    never creates a second issue."""
-    earlier = next(
-        (
-            issue
-            for issue in open_issues
-            if issue.title == parsed.title and issue.body.splitlines() == new_body.splitlines()
-        ),
-        None,
-    )
-    if earlier is None:
-        return
+    relation write, type, or response failed when this run could have
+    written it: untyped or of `--kind`, recorded under no parent or under
+    `--parent`. It refuses by number with what is left, whatever
+    `--not-a-twin` says, so a retry never creates a second issue. Another
+    kind or another parent marks a deliberate copy no run of this command
+    wrote, which the twin search and `--not-a-twin` decide on instead."""
     kind = body.ItemKind(parsed.kind)
     parent = parsed.parent
-    left = []
-    if earlier.kind is not kind:
-        left.append(f"set its type {github.ITEM_KIND_TYPE_NAMES[kind]}")
-    recorded = None if parent is None else client.parent_issue(earlier.number)
-    if parent is not None and (recorded is None or recorded.reference.number != parent):
-        left.append(f"record it under #{parent}")
-    remaining = f"{' and '.join(left)} on the forge by hand" if left else "nothing is left to do"
-    raise protocol.ClaimUnavailableError(
-        f"#{earlier.number} already carries this title and body, an earlier item new's own "
-        f"issue; {remaining}"
-    )
+    for issue in open_issues:
+        same_content = (
+            issue.title == parsed.title and issue.body.splitlines() == new_body.splitlines()
+        )
+        if not same_content or issue.kind not in (kind, None):
+            continue
+        recorded = client.parent_issue(issue.number)
+        recorded_parent = None if recorded is None else recorded.reference.number
+        if recorded_parent not in (None, parent):
+            continue
+        left = []
+        if issue.kind is None:
+            left.append(f"set its type {github.ITEM_KIND_TYPE_NAMES[kind]}")
+        if recorded_parent != parent:
+            left.append(f"record it under #{parent}")
+        remaining = (
+            f"{' and '.join(left)} on the forge by hand" if left else "nothing is left to do"
+        )
+        raise protocol.ClaimUnavailableError(
+            f"#{issue.number} already carries this title and body, an earlier item new's own "
+            f"issue; {remaining}"
+        )
 
 
 def _item_new_on_state_ref(parsed: argparse.Namespace, canonical_remote: str) -> int:
