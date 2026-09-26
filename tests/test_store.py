@@ -604,6 +604,15 @@ def test_fetch_state_ignores_a_foreign_fetch_that_wins_the_fetch_head_race(
             id="extra-file",
         ),
         pytest.param(
+            {
+                "schema.toml": protocol.serialize_empty_schema_toml().encode(),
+                ":!schema.toml": b"pathspec magic\n",
+            },
+            protocol.MalformedStateTreeError,
+            "unknown entries",
+            id="pathspec-magic-name",
+        ),
+        pytest.param(
             {"schema.toml": b'name = "wrong-key"\n'},
             protocol.MalformedStateTreeError,
             "must contain exactly 'version'",
