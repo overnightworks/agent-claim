@@ -353,6 +353,11 @@ def _add_reset_parser(commands: argparse._SubParsersAction) -> None:
         metavar="DIR",
         help="directory for the export bundle (default: the repository's parent directory)",
     )
+    reset.add_argument(
+        "--force-unreadable",
+        action="store_true",
+        help="with --confirm, also reset a state whose schema this aco cannot read",
+    )
 
 
 def _add_json_flag(container: argparse._ActionsContainer) -> None:
@@ -6727,6 +6732,7 @@ class ResetPlan:
     export_target: ResetExportTarget | None
     local_ref_present: bool
     worktree_count: int
+    unreadable_schema_version: int | None
 
 
 def _reset_bundle_name(repository: str, today: date, tip: protocol.ObjectId) -> str:
@@ -6762,7 +6768,7 @@ def _build_reset_plan(
     *,
     worktree: Path,
     remote: str,
-    state: protocol.ClaimState,
+    state: protocol.ClaimState | protocol.UnreadableState,
     export: ResetExportConfig,
     today: date,
 ) -> ResetPlan:
@@ -6776,6 +6782,16 @@ def _build_reset_plan(
         export_target=export_target,
         local_ref_present=store.local_state_ref_exists(worktree),
         worktree_count=len(store.list_worktrees(worktree)),
+        unreadable_schema_version=(
+            state.schema_version if isinstance(state, protocol.UnreadableState) else None
+        ),
+    )
+
+
+def _reset_unreadable_line(schema_version: int) -> str:
+    return (
+        f"schema {schema_version} not readable by this aco; live claims unknown "
+        "(--confirm needs --force-unreadable)"
     )
 
 
@@ -6830,6 +6846,8 @@ def _print_reset_dry_run(plan: ResetPlan) -> None:
         ),
         ResetStep.BOOTSTRAP: _reset_bootstrap_line(tip=None),
     }
+    if plan.unreadable_schema_version is not None:
+        print(_reset_unreadable_line(plan.unreadable_schema_version))
     for step in RESET_STEP_ORDER:
         print(f"would: {lines[step]}")
 
@@ -6858,16 +6876,16 @@ def _execute_reset(*, worktree: Path, remote: str, plan: ResetPlan) -> None:
     print(_reset_bootstrap_line(tip=fresh_tip))
 
 
-def _reset_observation() -> tuple[Path, str, protocol.ClaimState]:
+def _reset_observation() -> tuple[Path, str, protocol.ClaimState | protocol.UnreadableState]:
     """`reset`'s own state read (issue #298, 19.09.2026 gate finding 1):
-    `store.peek_state` instead of `_store_observation`'s ordinary
+    `store.peek_state_for_reset` instead of `_store_observation`'s ordinary
     `fetch_state`, so a broken lineage -- exactly what `reset` exists to
     recover from -- never blocks it, and so a dry run, a live-claim
     refusal, or a failed export writes no per-worktree stamp or anchor
     (finding 2)."""
     canonical_remote = _canonical_remote_name(_resolve_toplevel())
     worktree = Path.cwd()
-    state = store.peek_state(worktree=worktree, remote=canonical_remote)
+    state = store.peek_state_for_reset(worktree=worktree, remote=canonical_remote)
     return worktree, canonical_remote, state
 
 
@@ -6877,10 +6895,12 @@ def _reset_state(parsed: argparse.Namespace) -> int:
     stamp and fetch anchor, and bootstraps a fresh empty state. Forge-free,
     like `bootstrap`. A live claim always refuses -- `--confirm` or not --
     printing its claim lines instead of touching anything: a reset over live
-    work is data loss with no owner.
+    work is data loss with no owner. A state whose schema this aco cannot
+    read has unknown live claims, so executing over it additionally needs
+    `--force-unreadable` (issue #341); its bundle is still exported.
     """
     worktree, remote, state = _reset_observation()
-    if state.claims:
+    if isinstance(state, protocol.ClaimState) and state.claims:
         storage = board.load_config(_resolve_toplevel() / board.CONFIG_PATH).storage
         ages = _claim_ages(worktree, state)
         _status(tuple(state.claims.values()), None, ages, storage)
@@ -6896,6 +6916,8 @@ def _reset_state(parsed: argparse.Namespace) -> int:
     if not parsed.confirm:
         _print_reset_dry_run(plan)
         return 0
+    if plan.unreadable_schema_version is not None and not parsed.force_unreadable:
+        raise protocol.ClaimError(_reset_unreadable_line(plan.unreadable_schema_version))
     _execute_reset(worktree=worktree, remote=remote, plan=plan)
     return 0
 
