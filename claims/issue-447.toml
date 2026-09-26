@@ -1,8 +1,0 @@
-claim_id = "f0d7554456bb466d99643297059fc230"
-agent = "Claude head (coordinator)"
-role = "builder"
-base = "bc931e1eeae021259f2943fa85c8841509ae43dc"
-branch = "claude/issue-447-blank-title"
-scope = ["specs/item.spec.md", "src/agent_coordination/cli.py", "src/agent_coordination/items.py", "src/agent_coordination/state_board.py", "tests/test_cli.py", "tests/test_items.py", "tests/test_state_board.py"]
-opened_commit = "93e3bb47f617d088f27742d9b398d960e03c8d08"
-whole_reason = "ein Titel-Wächter und die Eindämmung eines kaputten Items gehören zusammen: beides schützt denselben Speicher"
