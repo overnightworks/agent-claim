@@ -1,0 +1,8 @@
+claim_id = "ad147cda83aa4ceb9b2cc792b9316d4b"
+agent = "Claude head (coordinator)"
+role = "builder"
+base = "e51d131e471ca266fe53490d3628e777691eb779"
+branch = "claude/issue-448-protect-today"
+scope = ["README.md", "specs/protect.spec.md", "src/agent_coordination/cli.py", "src/agent_coordination/hook_input.py", "src/agent_coordination/protect.py", "tests/test_hook_input.py", "tests/test_protect.py"]
+opened_commit = "c4ae628496c08931cf585d0e29382cca44a2390f"
+whole_reason = "ein Wächter, der heute jede Session lahmlegen würde: Werkzeugliste, Pfade außerhalb von Repositorys, Identität und Ausweg gehören zusammen"
