@@ -332,8 +332,9 @@ class FakeForge:
         return self.parents.get(number)
 
     def parent_number(self, number: int) -> int | None:
-        parent = self.parent_issue(number)
-        return None if parent is None else parent.reference.number
+        self._run()
+        parent = self.parents.get(number)
+        return parent.reference.number if parent else None
 
     def list_children(self, number: int) -> tuple[board.ChildItem, ...]:
         self._run()
@@ -16544,10 +16545,10 @@ def test_item_show_refuses_when_the_parent_read_fails(
             forge.ItemState.OPEN, "Title", "Body text.\n", False
         )
 
-        def failing_parent_read(_number: int) -> board.ParentIssue | None:
+        def failing_parent_read(_number: int) -> int | None:
             raise forge.ForgeMalformedResponseError(sentence)
 
-        monkeypatch.setattr(client, "parent_issue", failing_parent_read)
+        monkeypatch.setattr(client, "parent_number", failing_parent_read)
         monkeypatch.setattr(github, "GitHubForge", lambda _repository: client)
         return client
 
