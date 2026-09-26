@@ -6634,9 +6634,11 @@ class _ServedBoardCache:
     -- discards `built`, so the next `GET` rebuilds it; an explicit
     `?reload=1` rebuilds on that very `GET`. `lock` serializes a rebuild
     against a concurrent request: `ThreadingHTTPServer` runs each one on its
-    own thread."""
+    own thread. Every rebuild reads through a fresh `_LazyForge` (issue #447):
+    a state-ref forge is a snapshot of the store at resolution, so one held
+    for the server's lifetime would never show a later write."""
 
-    read_session: _ReadSession
+    repo: str | None
     built: tuple[board_html.BoardPage, datetime] | None = None
     lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -6645,7 +6647,8 @@ class _ServedBoardCache:
         nothing is held yet or `reload` asks for a fresh one."""
         with self.lock:
             if self.built is None or reload:
-                self.built = (_board_page(self.read_session), datetime.now(UTC))
+                fresh = _ReadSession(forge=_LazyForge(self.repo))
+                self.built = (_board_page(fresh), datetime.now(UTC))
             return self.built
 
     def discard(self) -> None:
@@ -6668,9 +6671,8 @@ def _board_server(parsed: argparse.Namespace, session: _WriteSession) -> board_s
     `serve_forever` loop so a test can bind a real ephemeral port and drive
     it without blocking."""
     client = session.forge.writer()
-    read_session = _ReadSession(forge=session.forge)
     token_holder: list[str] = []
-    cache = _ServedBoardCache(read_session)
+    cache = _ServedBoardCache(parsed.repo)
 
     def resolve_token() -> str:
         token = workspace.board_token(
@@ -6693,9 +6695,13 @@ def _board_server(parsed: argparse.Namespace, session: _WriteSession) -> board_s
         # review) keeps a concurrent GET that races the write from rebuilding
         # and holding a pre-ruling page: discarding first left a window where
         # such a GET restored exactly the staleness this cache exists to
-        # remove.
+        # remove. The click writes through a store read afresh and refuses
+        # PIN-29's malformed item first (issue #447): the server's startup
+        # snapshot cannot see an item that went bad while it ran.
         try:
-            rule_item(client, item, line, ruling, note)
+            clicked = _LazyForge(parsed.repo).writer()
+            clicked.list_open_board_issues()
+            rule_item(clicked, item, line, ruling, note)
         except protocol.ClaimError as error:
             return board_serve.RuleOutcome(refusal=str(error))
         finally:

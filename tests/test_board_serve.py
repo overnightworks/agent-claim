@@ -427,6 +427,37 @@ def test_post_rule_on_an_already_ruled_line_writes_nothing_and_shows_the_refusal
     assert '<div class="cards"><p class="empty">nichts</p></div>' in page
 
 
+def test_post_rule_refuses_a_malformed_item_introduced_after_startup_and_writes_nothing(
+    served_board: ServedBoard, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PIN-29 (issue #447): a malformed item that reaches the store while the
+    server already runs stops the next ruling click by name before it writes
+    -- the click reads the store afresh instead of trusting the snapshot the
+    server started from."""
+    token = served_board.server.token
+    served_board.get(token=token)
+    refusal = "item aco-3e26d9 has a malformed agent-claim block"
+    current_store = _ConsistentForge()
+    current_store.board_issues = served_board.client.board_issues
+    current_store.issue_references = dict(served_board.client.issue_references)
+
+    def malformed_store() -> tuple[board.Issue, ...]:
+        raise protocol.MalformedStateTreeError(refusal)
+
+    monkeypatch.setattr(current_store, "list_open_board_issues", malformed_store)
+    monkeypatch.setattr(github, "GitHubForge", lambda _repository: current_store)
+
+    response = served_board.post_rule(
+        {"t": token, "item": str(SERVED_ITEM), "line": "1", "outcome": "yes"}
+    )
+
+    assert response.status == 303
+    assert response.location is not None
+    assert parse_qs(urlsplit(response.location).query)["refused"] == [refusal]
+    assert served_board.client.item_bodies == {}
+    assert current_store.item_bodies == {}
+
+
 def test_an_unknown_path_is_not_found(served_board: ServedBoard) -> None:
     response = _request(served_board.server, "GET", "/unknown")
     assert response.status == 404
