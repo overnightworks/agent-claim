@@ -103,8 +103,8 @@ runner's own git object ids.
 ## `item edit`
 
 - [ ] [ITEM-12] `aco item edit ITEM < BODY` takes `title`, `labels`, `blocked_by` from a delivered `[record]` when the piped body carries one valid (see E-ITEM-03).
-- [ ] [ITEM-13] `aco item edit ITEM`'s every other field — `parent`, `state`, `origin`, `kind`, `created_at`, `closed_at` — stays this item's own stored value; `updated_at` always moves to now.
-- [ ] [ITEM-14] A delivered body carrying no `[record]` table at all leaves `title`, `labels`, `blocked_by` unchanged too, exactly `item edit`'s own pre-#287 behaviour.
+- [ ] [ITEM-13] `item edit ITEM`'s every other field — `parent`, `state`, `origin`, `kind`, `created_at`, `closed_at` — stays stored, except on a malformed item (ITEM-39); `updated_at` moves to now.
+- [ ] [ITEM-14] A delivered body carrying no `[record]` table at all leaves `title`, `labels`, `blocked_by` unchanged too, exactly `item edit`'s own pre-#287 behaviour, except a malformed item (ITEM-39).
 - [ ] [ITEM-15] `aco item edit ITEM --json` prints the envelope, `reason: "edited"`, then `item`, `number`, `oid` (the freshly written blob's own oid) (see E-ITEM-03).
 - [ ] [ITEM-21] `item edit --size S|M|L` patches only the top-level `size`, reads no stdin, works under both storages; state-ref also bumps `record.updated_at`.
 

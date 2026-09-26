@@ -289,11 +289,6 @@ def _item_files_with_one_scoped_slice(
     return {**_item_files(), f"{CONTAINER_ID}.md": container_body.encode()}
 
 
-# A second open expectation line beside `EXPECTATION_TEXT` (issue #283): one
-# CLI-level `aco rule` proof needs a line still open after the ruled one, so
-# `aco rulings` still has something to print for this item -- a fully-ruled
-# item drops out of `rulings` entirely (it only lists open lines), which
-# would otherwise hide the very ruling this proof exists to show.
 MALFORMED_ID = "aco-3e26d9"
 MALFORMED_NUMBER = items.item_number(MALFORMED_ID)
 
@@ -323,6 +318,11 @@ def _blank_title_item() -> bytes:
     ).encode()
 
 
+# A second open expectation line beside `EXPECTATION_TEXT` (issue #283): one
+# CLI-level `aco rule` proof needs a line still open after the ruled one, so
+# `aco rulings` still has something to print for this item -- a fully-ruled
+# item drops out of `rulings` entirely (it only lists open lines), which
+# would otherwise hide the very ruling this proof exists to show.
 RULABLE_ID = "aco-000004"
 RULABLE_NUMBER = items.item_number(RULABLE_ID)
 _RULABLE_PROJECTION = _Projection(
