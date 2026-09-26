@@ -1127,7 +1127,7 @@ def test_recent_merged_pull_requests_refuses_a_window_that_ends_before_it_starts
     window could cross UTC midnight between this line and the production
     code's own `datetime.now(UTC)` call, sometimes closing the window and
     falling through to a real, unfaked `gh` call instead of raising."""
-    client = GitHubForge(github._repository_id("example/agent-claim"))
+    client = GitHubForge(github._repository_id("example/agent-coordination"))
     raised_argument_1 = datetime(2099, 1, 1, tzinfo=UTC)
     with pytest.raises(ClaimError, match="merged pull request window ends before it starts"):
         client.list_recent_merged_board_pull_requests(raised_argument_1)
@@ -1155,14 +1155,16 @@ def test_github_adapter_runs_gh_when_no_fake_run_is_given(monkeypatch: pytest.Mo
         return original_popen(substituted, stdin=stdin, stdout=stdout, stderr=stderr, env=env)
 
     monkeypatch.setattr(subprocess, "Popen", start)
-    client = GitHubForge(github._repository_id("example/agent-claim"))
+    client = GitHubForge(github._repository_id("example/agent-coordination"))
 
     assert client.default_branch() == "main"
-    assert observed == [["gh", "api", "repos/example/agent-claim", "--jq", ".default_branch"]]
+    assert observed == [
+        ["gh", "api", "repos/example/agent-coordination", "--jq", ".default_branch"]
+    ]
 
 
 def test_github_adapter_capability_reads_the_declared_table() -> None:
-    client = GitHubForge(github._repository_id("example/agent-claim"))
+    client = GitHubForge(github._repository_id("example/agent-coordination"))
 
     assert client.capability(forge.ForgeOperation.ITEM_REFERENCE) is forge.Capability.READ_ONLY
     assert client.capability(forge.ForgeOperation.CREATE_CHILD) is forge.Capability.READ_WRITE
@@ -1170,7 +1172,7 @@ def test_github_adapter_capability_reads_the_declared_table() -> None:
 
 def test_github_adapter_item_reference_reads_state_title_and_body() -> None:
     client = GitHubForge(
-        github._repository_id("example/agent-claim"),
+        github._repository_id("example/agent-coordination"),
         run=lambda _arguments: json.dumps(
             {"state": "open", "title": "Work", "body": "Do it.", "is_landing": False}
         ),
@@ -1183,7 +1185,7 @@ def test_github_adapter_item_reference_reports_a_pull_request_as_a_landing() -> 
     """The one read `check` distributes on: GitHub answers for a pull request
     at the issues endpoint too, and only this flag tells the two apart."""
     client = GitHubForge(
-        github._repository_id("example/agent-claim"),
+        github._repository_id("example/agent-coordination"),
         run=lambda _arguments: json.dumps(
             {"state": "open", "title": "Land it", "body": "Work-Item: #7", "is_landing": True}
         ),
@@ -1196,7 +1198,7 @@ def test_github_adapter_item_reference_reports_a_pull_request_as_a_landing() -> 
 
 def test_github_adapter_item_reference_reads_a_closed_issue_with_no_body() -> None:
     client = GitHubForge(
-        github._repository_id("example/agent-claim"),
+        github._repository_id("example/agent-coordination"),
         run=lambda _arguments: json.dumps(
             {"state": "closed", "title": "Work", "body": None, "is_landing": False}
         ),
@@ -1207,7 +1209,7 @@ def test_github_adapter_item_reference_reads_a_closed_issue_with_no_body() -> No
 
 def test_github_adapter_item_reference_is_missing_after_a_404() -> None:
     client = GitHubForge(
-        github._repository_id("example/agent-claim"),
+        github._repository_id("example/agent-coordination"),
         run=lambda _arguments: (_ for _ in ()).throw(
             forge.ForgeNotFoundError("GitHub API failed: HTTP 404")
         ),
@@ -1245,7 +1247,9 @@ def test_github_adapter_item_reference_is_missing_after_a_404() -> None:
 def test_github_adapter_item_reference_fails_loud_on_a_malformed_response(
     raw: str, match: str
 ) -> None:
-    client = GitHubForge(github._repository_id("example/agent-claim"), run=lambda _arguments: raw)
+    client = GitHubForge(
+        github._repository_id("example/agent-coordination"), run=lambda _arguments: raw
+    )
 
     with pytest.raises(ClaimError, match=match):
         client.item_reference(10)
@@ -1391,7 +1395,7 @@ def test_github_reads_board_dependencies_local_and_foreign(
                 "number": 151,
                 "state": "closed",
                 "closedAt": "2026-09-05T00:00:00Z",
-                "repository": "example/agent-claim",
+                "repository": "example/agent-coordination",
                 "isPullRequest": False,
             },
             {
@@ -1404,11 +1408,11 @@ def test_github_reads_board_dependencies_local_and_foreign(
         ]
         return "\n".join(json.dumps(row) for row in rows)
 
-    client = GitHubForge(github._repository_id("example/agent-claim"), run=run)
+    client = GitHubForge(github._repository_id("example/agent-coordination"), run=run)
 
     assert client.list_board_dependencies(150) == (
         board.IssueDependency(
-            board.IssueReference("example/agent-claim", 151),
+            board.IssueReference("example/agent-coordination", 151),
             board.BlockerState.CLOSED,
             False,
             datetime(2026, 9, 5, tzinfo=UTC),
@@ -1424,7 +1428,7 @@ def test_github_reads_board_dependencies_local_and_foreign(
         [
             "api",
             "--paginate",
-            "repos/example/agent-claim/issues/150/dependencies/blocked_by?per_page=100",
+            "repos/example/agent-coordination/issues/150/dependencies/blocked_by?per_page=100",
             "--jq",
             ".[] | {number,state,closedAt:.closed_at,repository:.repository.full_name,"
             'isPullRequest:has("pull_request")}',
@@ -1454,7 +1458,7 @@ def test_github_reads_board_dependencies_local_and_foreign(
                     "number": 151,
                     "state": "closed",
                     "closedAt": None,
-                    "repository": "example/agent-claim",
+                    "repository": "example/agent-coordination",
                     "isPullRequest": False,
                 }
             ),
@@ -1463,7 +1467,9 @@ def test_github_reads_board_dependencies_local_and_foreign(
     ],
 )
 def test_github_board_dependency_fails_loud_on_a_malformed_shape(raw: str) -> None:
-    client = GitHubForge(github._repository_id("example/agent-claim"), run=lambda _arguments: raw)
+    client = GitHubForge(
+        github._repository_id("example/agent-coordination"), run=lambda _arguments: raw
+    )
 
     with pytest.raises(ClaimError, match="malformed board blocked-by dependency"):
         client.list_board_dependencies(150)
@@ -1474,13 +1480,13 @@ def test_github_board_dependency_fails_loud_on_an_uncalendared_closed_timestamp(
     places) while still naming no real calendar date; `datetime.fromisoformat`
     itself is the second, calendar-aware check that catches that."""
     client = GitHubForge(
-        github._repository_id("example/agent-claim"),
+        github._repository_id("example/agent-coordination"),
         run=lambda _arguments: json.dumps(
             {
                 "number": 151,
                 "state": "closed",
                 "closedAt": "9999-99-99T00:00:00Z",
-                "repository": "example/agent-claim",
+                "repository": "example/agent-coordination",
                 "isPullRequest": False,
             }
         ),
@@ -1563,7 +1569,7 @@ def test_merged_pull_request_history_warns_when_it_reaches_the_result_cap(
         for index in range(1, github.MAX_RECENT_MERGED_PULL_REQUESTS + 1)
     ]
     client = GitHubForge(
-        github._repository_id("example/agent-claim"),
+        github._repository_id("example/agent-coordination"),
         run=lambda arguments: "\n".join(json.dumps(row) for row in saturated_rows),
     )
 
@@ -1595,7 +1601,7 @@ def test_merged_pull_request_history_below_the_cap_warns_of_nothing(
         "mergedAt": "2026-08-01T00:00:00Z",
     }
     client = GitHubForge(
-        github._repository_id("example/agent-claim"), run=lambda arguments: json.dumps(row)
+        github._repository_id("example/agent-coordination"), run=lambda arguments: json.dumps(row)
     )
 
     client.list_recent_merged_board_pull_requests(since)
@@ -1626,7 +1632,7 @@ def test_recent_merged_pull_requests_skips_an_entry_with_no_merge_time(
         "mergedAt": None,
     }
     client = GitHubForge(
-        github._repository_id("example/agent-claim"), run=lambda arguments: json.dumps(row)
+        github._repository_id("example/agent-coordination"), run=lambda arguments: json.dumps(row)
     )
 
     assert client.list_recent_merged_board_pull_requests(since) == ()
@@ -1651,7 +1657,7 @@ def test_recent_merged_pull_requests_fails_loud_on_an_uncalendared_merge_time(
         "mergedAt": "9999-99-99T00:00:00Z",
     }
     client = GitHubForge(
-        github._repository_id("example/agent-claim"), run=lambda arguments: json.dumps(row)
+        github._repository_id("example/agent-coordination"), run=lambda arguments: json.dumps(row)
     )
 
     with pytest.raises(ClaimError, match="malformed merged board pull request"):
@@ -2200,7 +2206,7 @@ def test_bounded_command_classifies_every_forge_failure_signal(
         return outcome
 
     monkeypatch.setattr(process, "run_bounded", fake_run_bounded)
-    client = GitHubForge(github._repository_id("example/agent-claim"))
+    client = GitHubForge(github._repository_id("example/agent-coordination"))
 
     with pytest.raises(expected_type) as excinfo:
         client.default_branch()
@@ -2226,7 +2232,7 @@ def test_bounded_command_refuses_a_process_error_type_it_does_not_classify(
         raise _UnknownProcessError
 
     monkeypatch.setattr(process, "run_bounded", fake_run_bounded)
-    client = GitHubForge(github._repository_id("example/agent-claim"))
+    client = GitHubForge(github._repository_id("example/agent-coordination"))
 
     with pytest.raises(AssertionError, match="unhandled process failure type"):
         client.default_branch()
@@ -2284,13 +2290,13 @@ def test_github_adapter_reads_a_fork_branch_as_its_own_repository() -> None:
         github._repository_id(REPOSITORY),
         run=lambda arguments, input_data=None: json.dumps(
             api_pull_request(
-                headRepository={"name": "agent-claim"},
+                headRepository={"name": "agent-coordination"},
                 headRepositoryOwner={"login": "fork"},
             )
         ),
     )
 
-    assert client.landing(12).source_repository == github._repository_id("fork/agent-claim")
+    assert client.landing(12).source_repository == github._repository_id("fork/agent-coordination")
 
 
 def test_github_adapter_fails_loud_when_github_answers_for_another_pull_request() -> None:

@@ -133,7 +133,7 @@ $ aco cut 91 --title "Slice A"
 2> ERROR: #91 is not a container
 exit 2
 $ aco cut 92 --title "Slice A"
-2> ERROR: #92 is itself a child of example/agent-claim#80; nested containers are not supported
+2> ERROR: #92 is itself a child of example/agent-coordination#80; nested containers are not supported
 exit 2
 ```
 

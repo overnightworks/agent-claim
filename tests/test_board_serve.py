@@ -169,7 +169,7 @@ class ServedBoard:
 @pytest.fixture
 def served_board(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[ServedBoard]:
     client = _served_board_environment(monkeypatch, tmp_path)
-    parsed = issue_claim._parser().parse_args(["--repo", "example/agent-claim", "board", "--serve"])
+    parsed = issue_claim._parser().parse_args(["--repo", REPOSITORY, "board", "--serve"])
     session = issue_claim._WriteSession(
         forge=issue_claim._LazyForge(parsed.repo), release_branch=None
     )
@@ -398,7 +398,7 @@ def test_serve_refuses_together_with_html(monkeypatch: pytest.MonkeyPatch, tmp_p
     _single_item_board_environment(monkeypatch, tmp_path)
 
     with pytest.raises(SystemExit):
-        issue_claim.main(["--repo", "example/agent-claim", "board", "--serve", "--html"])
+        issue_claim.main(["--repo", REPOSITORY, "board", "--serve", "--html"])
 
 
 def _refuse_to_bind(*arguments: object, **keywords: object) -> None:
@@ -414,7 +414,7 @@ def test_serve_refuses_together_with_json_before_binding_a_port(
     _single_item_board_environment(monkeypatch, tmp_path)
     monkeypatch.setattr(board_serve._BoardHTTPServer, "__init__", _refuse_to_bind)
 
-    exit_code = issue_claim.main(["--repo", "example/agent-claim", "board", "--serve", "--json"])
+    exit_code = issue_claim.main(["--repo", REPOSITORY, "board", "--serve", "--json"])
 
     captured = capsys.readouterr()
     assert exit_code == 2
@@ -434,7 +434,7 @@ def test_board_serve_dispatches_through_the_write_session_and_prints_the_url(
     _served_board_environment(monkeypatch, tmp_path)
     monkeypatch.setattr(board_serve._BoardHTTPServer, "serve_forever", lambda self: None)
 
-    exit_code = issue_claim.main(["--repo", "example/agent-claim", "board", "--serve"])
+    exit_code = issue_claim.main(["--repo", REPOSITORY, "board", "--serve"])
 
     assert exit_code == 0
     printed = capsys.readouterr().out.strip()
@@ -461,7 +461,7 @@ def test_board_serve_flushes_the_url_line_before_blocking(
 
     monkeypatch.setattr(board_serve._BoardHTTPServer, "serve_forever", record_before_blocking)
 
-    exit_code = issue_claim.main(["--repo", "example/agent-claim", "board", "--serve"])
+    exit_code = issue_claim.main(["--repo", REPOSITORY, "board", "--serve"])
 
     assert exit_code == 0
     assert written_before_serve.decode().strip().startswith("http://127.0.0.1:")
@@ -481,7 +481,7 @@ def test_board_serve_exits_cleanly_on_keyboard_interrupt(
     _served_board_environment(monkeypatch, tmp_path)
     monkeypatch.setattr(board_serve._BoardHTTPServer, "serve_forever", _raise_keyboard_interrupt)
 
-    exit_code = issue_claim.main(["--repo", "example/agent-claim", "board", "--serve"])
+    exit_code = issue_claim.main(["--repo", REPOSITORY, "board", "--serve"])
 
     assert exit_code == 0
     captured = capsys.readouterr()
@@ -500,7 +500,7 @@ def _mint_and_capture_url(
     capsys: pytest.CaptureFixture[str], port: int, *extra_arguments: str
 ) -> str:
     issue_claim.main(
-        ["--repo", "example/agent-claim", "board", "--serve", "--port", str(port), *extra_arguments]
+        ["--repo", REPOSITORY, "board", "--serve", "--port", str(port), *extra_arguments]
     )
     return capsys.readouterr().out.strip()
 
@@ -551,7 +551,7 @@ def test_a_board_token_file_with_a_permissive_mode_refuses(
     token_path.chmod(0o644)
 
     exit_code = issue_claim.main(
-        ["--repo", "example/agent-claim", "board", "--serve", "--port", str(_free_loopback_port())]
+        ["--repo", REPOSITORY, "board", "--serve", "--port", str(_free_loopback_port())]
     )
 
     assert exit_code == 2
@@ -572,7 +572,7 @@ def test_a_board_token_file_with_invalid_content_refuses(
     token_path.chmod(0o600)
 
     exit_code = issue_claim.main(
-        ["--repo", "example/agent-claim", "board", "--serve", "--port", str(_free_loopback_port())]
+        ["--repo", REPOSITORY, "board", "--serve", "--port", str(_free_loopback_port())]
     )
 
     assert exit_code == 2
@@ -598,7 +598,7 @@ def test_a_symlinked_board_token_file_refuses(
     token_path.symlink_to(real_token)
 
     exit_code = issue_claim.main(
-        ["--repo", "example/agent-claim", "board", "--serve", "--port", str(_free_loopback_port())]
+        ["--repo", REPOSITORY, "board", "--serve", "--port", str(_free_loopback_port())]
     )
 
     assert exit_code == 2
@@ -619,7 +619,7 @@ def test_a_group_writable_board_token_directory_refuses(
     token_directory.chmod(0o770)
 
     exit_code = issue_claim.main(
-        ["--repo", "example/agent-claim", "board", "--serve", "--port", str(_free_loopback_port())]
+        ["--repo", REPOSITORY, "board", "--serve", "--port", str(_free_loopback_port())]
     )
 
     assert exit_code == 2
@@ -641,7 +641,7 @@ def test_a_read_only_group_and_world_board_token_directory_is_accepted(
     monkeypatch.setattr(board_serve._BoardHTTPServer, "serve_forever", lambda self: None)
 
     exit_code = issue_claim.main(
-        ["--repo", "example/agent-claim", "board", "--serve", "--port", str(_free_loopback_port())]
+        ["--repo", REPOSITORY, "board", "--serve", "--port", str(_free_loopback_port())]
     )
 
     assert exit_code == 0
@@ -658,7 +658,7 @@ def test_a_group_writable_0775_board_token_directory_refuses(
     token_directory.chmod(0o775)
 
     exit_code = issue_claim.main(
-        ["--repo", "example/agent-claim", "board", "--serve", "--port", str(_free_loopback_port())]
+        ["--repo", REPOSITORY, "board", "--serve", "--port", str(_free_loopback_port())]
     )
 
     assert exit_code == 2
@@ -678,7 +678,7 @@ def test_serve_refuses_when_the_token_directory_is_owner_unwritable(
     _existing_token_directory().chmod(0o500)
 
     exit_code = issue_claim.main(
-        ["--repo", "example/agent-claim", "board", "--serve", "--port", str(_free_loopback_port())]
+        ["--repo", REPOSITORY, "board", "--serve", "--port", str(_free_loopback_port())]
     )
 
     assert exit_code == 2
@@ -702,7 +702,7 @@ def test_new_token_refuses_when_the_token_directory_is_owner_unwritable(
     exit_code = issue_claim.main(
         [
             "--repo",
-            "example/agent-claim",
+            REPOSITORY,
             "board",
             "--serve",
             "--new-token",
@@ -728,7 +728,7 @@ def test_a_symlinked_board_token_directory_refuses(
     (config_home / "aco").symlink_to(real_directory)
 
     exit_code = issue_claim.main(
-        ["--repo", "example/agent-claim", "board", "--serve", "--port", str(_free_loopback_port())]
+        ["--repo", REPOSITORY, "board", "--serve", "--port", str(_free_loopback_port())]
     )
 
     assert exit_code == 2
@@ -998,7 +998,7 @@ def test_ensure_board_token_directory_refuses_when_mkdir_fails(
 def test_new_token_without_serve_refuses(capsys: pytest.CaptureFixture[str]) -> None:
     """Issue #388: `--new-token` outside `--serve` refuses instead of
     silently doing nothing -- there is no writer session to mint through."""
-    exit_code = issue_claim.main(["--repo", "example/agent-claim", "board", "--new-token"])
+    exit_code = issue_claim.main(["--repo", REPOSITORY, "board", "--new-token"])
     captured = capsys.readouterr()
 
     assert exit_code == 2
@@ -1011,9 +1011,7 @@ def test_new_token_without_serve_reports_invalid_usage_under_json(
     """BOARD-39 (issue #412): the same refusal, now through the emitter --
     `invalid_usage`, never the broad `unavailable` every other `board`
     refusal falls to."""
-    exit_code = issue_claim.main(
-        ["--repo", "example/agent-claim", "board", "--new-token", "--json"]
-    )
+    exit_code = issue_claim.main(["--repo", REPOSITORY, "board", "--new-token", "--json"])
     captured = capsys.readouterr()
 
     assert exit_code == 2
@@ -1112,7 +1110,7 @@ def test_busy_port_refusal_names_no_pid_when_proc_is_unreadable(
         exit_code = issue_claim.main(
             [
                 "--repo",
-                "example/agent-claim",
+                REPOSITORY,
                 "board",
                 "--serve",
                 "--port",

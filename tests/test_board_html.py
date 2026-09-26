@@ -25,7 +25,7 @@ from agent_coordination import board, board_html, cli, items, metrics
 from agent_coordination.body import ItemKind, Storage
 
 GOLDEN_PATH = Path(__file__).parent / "board_html_golden.html"
-FIXTURE_CHECKOUT = Path("/home/ada/git/agent-claim")
+FIXTURE_CHECKOUT = Path("/home/ada/git/agent-coordination")
 
 
 def _fixture_page(
@@ -382,7 +382,7 @@ def test_a_trailer_landed_item_shows_regardless_of_pull_request_capability() -> 
             recent_merged_pull_requests=(),
             claims=(),
             config=board.BoardConfig(storage=Storage.STATE_REF),
-            repository="example/agent-claim",
+            repository="example/agent-coordination",
             now=datetime(2026, 8, 30, tzinfo=UTC),
             trunk_landing_items=(
                 board.TrunkLandingItem(9, "cafefeedcafefeed", datetime(2026, 8, 30, tzinfo=UTC)),
@@ -426,7 +426,7 @@ def test_a_trunk_landed_item_with_no_pull_request_shows_beside_pr_rows() -> None
             recent_merged_pull_requests=recent_merged_pull_requests,
             claims=(),
             config=board.BoardConfig(),
-            repository="example/agent-claim",
+            repository="example/agent-coordination",
             now=datetime(2026, 8, 21, tzinfo=UTC),
             trunk_landing_items=(
                 board.TrunkLandingItem(105, "1234567890abcdef", datetime(2026, 8, 20, tzinfo=UTC)),

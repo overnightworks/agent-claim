@@ -93,7 +93,7 @@ Setup: bare-remote, bootstrapped, fake `gh`, issue `#314` open, title `Fresh Slu
 
 ```console
 $ aco start 314
-worktree: /work/agent-claim-worktrees/issue-314-fresh-slug
+worktree: /work/agent-coordination-worktrees/issue-314-fresh-slug
 branch: ada/issue-314-fresh-slug
 CLAIMED issue #314: <claim-id>
 1 of 6 versioned files (17%); overlaps no other open claims
@@ -106,7 +106,7 @@ Setup: bare-remote, bootstrapped, fake `gh`, issue `#314` as above, already `aco
 
 ```console
 $ aco start 314
-worktree: /work/agent-claim-worktrees/issue-314-fresh-slug
+worktree: /work/agent-coordination-worktrees/issue-314-fresh-slug
 branch: ada/issue-314-fresh-slug
 CLAIMED issue #314: <claim-id>
 1 of 6 versioned files (17%); overlaps no other open claims
@@ -137,12 +137,12 @@ exit 2
 
 ### E-START-05 -- a worktree at the computed path belongs to a different repository
 
-Setup: bare-remote, bootstrapped, fake `gh`, issue `#314` open, `/work/agent-claim-worktrees/issue-314-fresh-slug`
+Setup: bare-remote, bootstrapped, fake `gh`, issue `#314` open, `/work/agent-coordination-worktrees/issue-314-fresh-slug`
 already a linked worktree of an unrelated repository, on branch `ada/issue-314-fresh-slug`
 
 ```console
 $ aco start 314
-2> ERROR: worktree /work/agent-claim-worktrees/issue-314-fresh-slug belongs to a different repository; remove it, or pass --slug to choose a different worktree
+2> ERROR: worktree /work/agent-coordination-worktrees/issue-314-fresh-slug belongs to a different repository; remove it, or pass --slug to choose a different worktree
 exit 2
 ```
 
@@ -154,7 +154,7 @@ live claim on it
 
 ```console
 $ aco start 314
-worktree: /work/agent-claim-worktrees/issue-314-fresh-slug
+worktree: /work/agent-coordination-worktrees/issue-314-fresh-slug
 branch: ada/issue-314-fresh-slug
 CLAIMED issue #314: <fresh-claim-id>
 1 of 6 versioned files (17%); overlaps no other open claims
@@ -176,7 +176,7 @@ exit 2
 ### E-START-08 -- something other than a worktree already sits at the computed path
 
 Setup: bare-remote, bootstrapped, fake `gh`, issue `#314` open, title `Fresh Slug`,
-`/work/agent-claim-worktrees/issue-314-fresh-slug` already a plain directory, not a git worktree
+`/work/agent-coordination-worktrees/issue-314-fresh-slug` already a plain directory, not a git worktree
 
 ```console
 $ aco start 314

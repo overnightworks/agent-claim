@@ -147,7 +147,7 @@ uses).
 
 ### E-BOARD-01 — an unsupported canonical remote refuses before any read
 
-Setup: bare-remote, `origin` repointed at `file:///srv/git/agent-claim.git`
+Setup: bare-remote, `origin` repointed at `file:///srv/git/agent-coordination.git`
 
 ```console
 $ aco board --json
@@ -206,16 +206,16 @@ exit 0
 
 ### E-BOARD-17 — the page names the repository and the checkout it came from
 
-Setup: bare-remote, fake `gh`, the checkout at `/home/ada/git/agent-claim`
+Setup: bare-remote, fake `gh`, the checkout at `/home/ada/git/agent-coordination`
 
 ```console
 $ aco board --html board.html
 exit 0
 $ head -1 board.html
-<title>acme/agent-claim &middot; /home/ada/git/agent-claim &middot; Board</title>
+<title>acme/agent-coordination &middot; /home/ada/git/agent-coordination &middot; Board</title>
 exit 0
 $ grep -o '<p class="eyebrow">[^<]*</p>' board.html
-<p class="eyebrow">acme/agent-claim &middot; /home/ada/git/agent-claim</p>
+<p class="eyebrow">acme/agent-coordination &middot; /home/ada/git/agent-coordination</p>
 exit 0
 ```
 
