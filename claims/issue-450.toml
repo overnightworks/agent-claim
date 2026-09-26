@@ -1,0 +1,8 @@
+claim_id = "a59314a6c17649c7953a3a0bded9fac6"
+agent = "Claude head (coordinator)"
+role = "builder"
+base = "e51d131e471ca266fe53490d3628e777691eb779"
+branch = "claude/issue-450-dangling-blocker"
+scope = ["specs/item.spec.md", "specs/storage-pin.spec.md", "src/agent_coordination/cli.py", "src/agent_coordination/forge.py", "src/agent_coordination/state_board.py", "tests/test_cli.py", "tests/test_state_board.py"]
+opened_commit = "c3552942616800678e430c09100cc1f8da2376fb"
+whole_reason = "Nacharbeit aus einer Lane: ein Datenpfad-Fehler derselben Klasse und die Sätze, die sie ungenau zurückgelassen hat"
