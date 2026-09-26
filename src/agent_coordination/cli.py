@@ -757,6 +757,17 @@ def _add_brief_parser(commands: argparse._SubParsersAction) -> None:
     _add_json_flag(brief)
 
 
+def _nonblank_title(value: str) -> str:
+    """`item new --title`'s argparse `type=` (issue #447): `value` unchanged
+    unless it is empty or whitespace only, which refuses before anything is
+    read, created, or minted -- under `storage = "state-ref"` such a title
+    would write an item whose `[record]` fails the body check's own
+    `record.title must be a non-empty string`."""
+    if not value.strip():
+        raise protocol.ClaimUnavailableError("--title must be a non-empty string")
+    return value
+
+
 def _add_item_parser(commands: argparse._SubParsersAction) -> None:
     item = commands.add_parser("item", help="create, show, edit, or close one work item")
     item_commands = _add_subcommands(item, "item_command")
@@ -767,7 +778,7 @@ def _add_item_parser(commands: argparse._SubParsersAction) -> None:
             "whose body is read from stdin"
         ),
     )
-    new.add_argument("--title", required=True, help="the fresh item's title")
+    new.add_argument("--title", required=True, type=_nonblank_title, help="the fresh item's title")
     new.add_argument(
         "--kind",
         choices=BODY_TEMPLATE_KINDS,

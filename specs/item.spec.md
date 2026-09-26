@@ -41,6 +41,7 @@ runner's own git object ids.
 | state-ref pin, `--scope` invalid | ITEM-05 | — | — | — |
 | state-ref pin, `--origin` given | ITEM-19 | — | — | — |
 | `--origin` malformed | ITEM-06 | — | — | — |
+| `--title` empty or whitespace only, either storage | ITEM-36 | — | — | — |
 | `--size` given, valid or invalid | ITEM-20 | — | ITEM-21, ITEM-22 | — |
 | `--whole` given, valid or invalid | ITEM-23 | — | ITEM-24 | — |
 | an item, open or closed | — | ITEM-07, ITEM-08 | — | — |
@@ -63,6 +64,7 @@ runner's own git object ids.
 - [ ] [ITEM-04] Repeated `--scope` values write a sorted, deduplicated top-level `scope = [...]` ahead of the `[record]` table, CLAIM-19..CLAIM-23's own canonical form (see E-ITEM-01).
 - [ ] [ITEM-05] A `--scope` value that is absolute, `..`, or `~`-prefixed refuses with CLAIM-19's own sentence; a duplicate refuses with CLAIM-21's `claim scope contains duplicate paths`, before any write.
 - [ ] [ITEM-06] `--origin FORGE#N` failing its grammar refuses `'<value>' is not an origin; use forge#n or host/owner/repo#n, e.g. gitlab#514`, exit `2`, before `item new`'s own body ever runs.
+- [ ] [ITEM-36] Under either storage, an empty or whitespace-only `--title` refuses `--title must be a non-empty string`, exit `2`, before anything is read, created, or minted (see E-ITEM-09).
 - [ ] [ITEM-19] `--origin`'s grammar is ASCII-only, case-insensitive `forge#n`/`host/owner/repo#n` tokens; an accepted value is stored in `record.origin` with its original case (PIN-20).
 - [ ] [ITEM-20] `--size S|M|L` writes the item's own top-level `size` (BODY-57..BODY-59); argparse refuses an invalid value first. `id`/`--json` stay ITEM-01's shape; `size` is never printed.
 
@@ -118,7 +120,7 @@ runner's own git object ids.
 ## `--json` and the shared envelope
 
 - [ ] [ITEM-17] Every other runtime refusal from `item new`/`show`/`edit`/`close`, reached with `--json`, prints `specs/output.spec.md`'s envelope, `reason: "precondition_failed"`, exit `2`.
-- [ ] [ITEM-18] An argparse-level refusal — a malformed `--origin`, or an item argument PIN-08 refuses — prints the `ERROR:` line, exit `2`, and under `--json` OUT-06's envelope.
+- [ ] [ITEM-18] An argparse-level refusal — a malformed `--origin`, a blank `--title`, or an item argument PIN-08 refuses — prints the `ERROR:` line, exit `2`, and under `--json` OUT-06's envelope.
 - [ ] [ITEM-25] A malformed piped body (`item edit`'s PIN-24, `item new`'s ITEM-27) reports `reason: "body_invalid"` instead, `defects` the same list `body --check`'s own `--json` carries, exit `2`.
 
 ## Never
@@ -284,5 +286,19 @@ no block
 BODY
 {"ok": false, "reason": "body_invalid", "defects": ["body malformed: agent-claim: no agent-claim block"], "message": "body malformed: agent-claim: no agent-claim block"}
 2> ERROR: body malformed: agent-claim: no agent-claim block
+exit 2
+```
+
+### E-ITEM-09 — a blank title, refused before anything is minted
+
+Setup: bare-remote, bootstrapped, `storage = "state-ref"` tracked
+
+```console
+$ aco item new --title "   "
+2> ERROR: --title must be a non-empty string
+exit 2
+$ aco item new --title "" --json
+{"ok": false, "reason": "invalid_usage", "message": "--title must be a non-empty string"}
+2> ERROR: --title must be a non-empty string
 exit 2
 ```

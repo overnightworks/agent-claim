@@ -2417,6 +2417,15 @@ class TestCliStateRefForge:
                 False,
                 id="scope-escapes-the-repository",
             ),
+            *(
+                pytest.param(
+                    ["item", "new", "--title", title, "--not-a-twin"],
+                    "--title must be a non-empty string",
+                    False,
+                    id=case,
+                )
+                for case, title in (("empty-title", ""), ("whitespace-title", " \t "))
+            ),
         ],
     )
     def test_item_new_refuses_and_writes_nothing(
@@ -2433,10 +2442,10 @@ class TestCliStateRefForge:
         """Issue #285 proof 3 / issue #316 proof 2 / issue #337 proof 1:
         `item new` refuses -- on an injected minting collision against every
         already-known id after three attempts, on an `--origin` that does
-        not match `FORGE#N` (refused before `argparse` even reaches `item
-        new`'s own body), or on a `--scope` value `protocol.valid_scope`
-        refuses -- with a diagnostic naming the cause, and nothing reaches
-        the remote."""
+        not match `FORGE#N` or a blank `--title` (issue #447; both refused
+        before `argparse` even reaches `item new`'s own body), or on a
+        `--scope` value `protocol.valid_scope` refuses -- with a diagnostic
+        naming the cause, and nothing reaches the remote."""
         self._live_state_ref_checkout(monkeypatch, tmp_path, bare_remote, worktree, _item_files())
         if patch_minting_collision:
             monkeypatch.setattr(items.secrets, "token_hex", lambda _size: "000001")

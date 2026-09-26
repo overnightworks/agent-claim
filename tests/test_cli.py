@@ -16071,6 +16071,16 @@ def test_item_new_creates_a_github_issue_from_the_piped_body(
             'ERROR: --origin needs storage = "state-ref"\n',
             id="origin_under_github",
         ),
+        *(
+            pytest.param(
+                _ITEM_NEW_BODY,
+                ("--title", title),
+                (),
+                "ERROR: --title must be a non-empty string\n",
+                id=case,
+            )
+            for case, title in (("empty_title", ""), ("whitespace_title", "   "))
+        ),
     ],
 )
 def test_item_new_on_github_refuses_before_creating_anything(
@@ -16082,9 +16092,9 @@ def test_item_new_on_github_refuses_before_creating_anything(
     closed: tuple[forge.ClosedIssue, ...],
     err: str,
 ) -> None:
-    """Issue #444 proof 1: an invalid body (the same check `aco check <n>`
-    applies), a possible twin, a parent that is no open container, or
-    `--origin` refuses with exit 2 and creates no issue at all."""
+    """Issue #444 proof 1 / issue #447 proof 2: an invalid body (the same
+    check `aco check <n>` applies), a possible twin, a parent that is no open
+    container, `--origin`, or a blank `--title` refuses with exit 2 and creates no issue at all."""
     client = _item_new_github_client(monkeypatch, tmp_path, piped_body)
     client.recently_closed_issues = closed
 
