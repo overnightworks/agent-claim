@@ -6489,11 +6489,17 @@ def _board_server(parsed: argparse.Namespace, session: _WriteSession) -> board_s
     def post_rule(item: int, line: int, ruling: str, note: str | None) -> board_serve.RuleOutcome:
         # A refused click (a line already ruled elsewhere) means the held
         # page is stale too, so every click rebuilds, not only a write.
-        cache.discard()
+        # Discarding only after `rule_item` returns or raises (issue #440
+        # review) keeps a concurrent GET that races the write from rebuilding
+        # and holding a pre-ruling page: discarding first left a window where
+        # such a GET restored exactly the staleness this cache exists to
+        # remove.
         try:
             rule_item(client, item, line, ruling, note)
         except protocol.ClaimError as error:
             return board_serve.RuleOutcome(refusal=str(error))
+        finally:
+            cache.discard()
         return board_serve.RuleOutcome(refusal=None)
 
     return board_serve.start(
