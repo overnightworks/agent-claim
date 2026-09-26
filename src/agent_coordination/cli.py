@@ -6431,8 +6431,9 @@ class _ServedBoardCache:
     `GET` (or the first after a rebuild) and reused by every one after it,
     instead of paying `_board_page`'s full forge fetch again on every
     request -- the fix for the operator's own report of a 19s-per-load
-    board. A successful `POST /rule` discards `built`, so the next `GET`
-    rebuilds it; an explicit `?reload=1` rebuilds on that very `GET`. `lock` serializes a rebuild
+    board. Every ruling `POST /rule` -- written, refused, or raised (BOARD-48)
+    -- discards `built`, so the next `GET` rebuilds it; an explicit
+    `?reload=1` rebuilds on that very `GET`. `lock` serializes a rebuild
     against a concurrent request: `ThreadingHTTPServer` runs each one on its
     own thread."""
 

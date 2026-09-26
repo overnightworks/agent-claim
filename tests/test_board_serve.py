@@ -1128,16 +1128,29 @@ class _BrokenWfile:
     socket does, without opening a real one -- deterministic where a real
     disconnect's timing is not."""
 
+    def __init__(self, error: OSError) -> None:
+        self._error = error
+
     def write(self, _data: bytes) -> int:
-        raise BrokenPipeError(32, "Broken pipe")
+        raise self._error
 
 
-def test_respond_wraps_its_own_socket_write_failure_as_a_client_disconnect() -> None:
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(BrokenPipeError(32, "Broken pipe"), id="broken-pipe"),
+        pytest.param(ConnectionResetError(104, "Connection reset"), id="connection-reset"),
+        pytest.param(ConnectionAbortedError(103, "Connection aborted"), id="connection-aborted"),
+    ],
+)
+def test_respond_wraps_its_own_socket_write_failure_as_a_client_disconnect(
+    error: OSError,
+) -> None:
     """`_BoardRequestHandler._respond`'s socket write is the one place this
-    handler can honestly call a `BrokenPipeError`/`ConnectionResetError` a
-    client hanging up (issue #440 review) -- wrapped into
-    `_ClientDisconnectedError` so `handle_error` can later tell this write
-    failure apart from the same exception type raised by
+    handler can honestly call a `BrokenPipeError`/`ConnectionResetError`/
+    `ConnectionAbortedError` a client hanging up (issue #440 review) --
+    wrapped into `_ClientDisconnectedError` so `handle_error` can later tell
+    this write failure apart from the same exception type raised by
     `render_page`/`rule_item` doing something else entirely."""
     handler = cast(
         board_serve._BoardRequestHandler,
@@ -1145,7 +1158,7 @@ def test_respond_wraps_its_own_socket_write_failure_as_a_client_disconnect() -> 
             send_response=lambda *_args: None,
             send_header=lambda *_args: None,
             end_headers=lambda: None,
-            wfile=_BrokenWfile(),
+            wfile=_BrokenWfile(error),
         ),
     )
 

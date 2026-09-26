@@ -134,10 +134,10 @@ def _parsed_rule_request(fields: Mapping[str, list[str]]) -> _RuleRequest | None
 class _ClientDisconnectedError(Exception):
     """Raised only by `_BoardRequestHandler._respond`'s own socket write
     (issue #440 review): the one place this handler can honestly call a
-    `BrokenPipeError`/`ConnectionResetError` a client hanging up rather than
-    a server defect that merely raises the same exception type from
-    somewhere else -- `render_page` or `rule_item` reading a `gh`/`git`
-    subprocess whose own pipe broke, say."""
+    `BrokenPipeError`/`ConnectionResetError`/`ConnectionAbortedError` a
+    client hanging up rather than a server defect that merely raises the
+    same exception type from somewhere else -- `render_page` or `rule_item`
+    reading a `gh`/`git` subprocess whose own pipe broke, say."""
 
 
 class _BoardHTTPServer(ThreadingHTTPServer):
@@ -168,13 +168,14 @@ class _BoardHTTPServer(ThreadingHTTPServer):
         escape -- including the one an operator's browser causes just by
         navigating away mid-response, once the served page stopped costing
         19 seconds to build (issue #440): the write side of its socket is
-        already gone, so the next write to it raises `BrokenPipeError` or
-        `ConnectionResetError`. Only `_ClientDisconnectedError` -- raised
-        exclusively by `_BoardRequestHandler._respond`'s own socket write,
-        never by `render_page`/`rule_item` building or writing the board
-        itself -- stays quiet, so a `BrokenPipeError`/`ConnectionResetError`
-        from anywhere else still gets the stdlib's own traceback instead of
-        being mistaken for the same client hang-up."""
+        already gone, so the next write to it raises `BrokenPipeError`,
+        `ConnectionResetError`, or `ConnectionAbortedError`. Only
+        `_ClientDisconnectedError` -- raised exclusively by
+        `_BoardRequestHandler._respond`'s own socket write, never by
+        `render_page`/`rule_item` building or writing the board itself --
+        stays quiet, so the same exception from anywhere else still gets the
+        stdlib's own traceback instead of being mistaken for a client
+        hang-up."""
         _, error, _ = sys.exc_info()
         if isinstance(error, _ClientDisconnectedError):
             return
@@ -208,9 +209,12 @@ class _BoardRequestHandler(BaseHTTPRequestHandler):
             self.end_headers()
             if body:
                 self.wfile.write(body)
-        except (BrokenPipeError, ConnectionResetError) as error:
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as error:
             # The only socket write this response makes, so the only place a
             # client hang-up can honestly originate from (issue #440 review).
+            # `ConnectionAbortedError` is the same hang-up family as the
+            # other two (BOARD-49): a client that closed the connection
+            # before the write, rather than mid-write.
             raise _ClientDisconnectedError() from error
 
     def _authorized(self, server: _BoardHTTPServer, candidate: str | None) -> bool:

@@ -42,7 +42,6 @@ _GRAPHQL_ITEM_STATES: dict[str, forge.ItemState] = {
     "CLOSED": forge.ItemState.CLOSED,
     "MERGED": forge.ItemState.CLOSED,
 }
-_GRAPHQL_ITEM_TYPENAMES = frozenset({"Issue", "PullRequest"})
 # GraphQL's own schema: `Issue.state` is `OPEN`/`CLOSED` only -- `MERGED`
 # exists solely on `PullRequestState`, so an `Issue` node claiming `MERGED`
 # is impossible on the wire and a malformed response, never a state to
@@ -238,8 +237,7 @@ def _parsed_item_reference_node(node: object) -> forge.ItemReference:
     title = node.get("title")
     body = node.get("body")
     if (
-        typename not in _GRAPHQL_ITEM_TYPENAMES
-        or state not in _GRAPHQL_ITEM_STATES
+        state not in _GRAPHQL_ITEM_STATES
         or state not in _GRAPHQL_ITEM_STATES_BY_TYPENAME.get(typename, frozenset())
         or not isinstance(title, str)
         or (body is not None and not isinstance(body, str))
